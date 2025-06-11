@@ -1,0 +1,225 @@
+groups:
+  - name: robot_catalog_alerts
+    rules:
+      # Scraper Health Alerts
+      - alert: ScraperHealthCritical
+        expr: scraper_health_score < 0.5
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Scraper health is critical for {{ $labels.manufacturer }}"
+          description: "Health score is {{ $value }} for {{ $labels.manufacturer }}. Immediate attention required."
+
+      - alert: ScraperHealthLow
+        expr: scraper_health_score < 0.7
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Scraper health is low for {{ $labels.manufacturer }}"
+          description: "Health score is {{ $value }} for {{ $labels.manufacturer }}"
+
+      # Error Rate Alerts
+      - alert: HighErrorRate
+        expr: scraper_error_rate > 0.3
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High error rate for {{ $labels.manufacturer }}"
+          description: "Error rate is {{ $value }} for {{ $labels.manufacturer }}"
+
+      - alert: CriticalErrorRate
+        expr: scraper_error_rate > 0.8
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Critical error rate for {{ $labels.manufacturer }}"
+          description: "Error rate is {{ $value }} for {{ $labels.manufacturer }}. Crawling should be stopped."
+
+      # Success Rate Alerts
+      - alert: LowSuccessRate
+        expr: scraper_success_rate < 0.5
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Low success rate for {{ $labels.manufacturer }}"
+          description: "Success rate is {{ $value }} for {{ $labels.manufacturer }}"
+
+      # Response Time Alerts
+      - alert: SlowResponseTimes
+        expr: avg_response_time_seconds > 10
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Slow response times for {{ $labels.manufacturer }}"
+          description: "Average response time is {{ $value }}s for {{ $labels.manufacturer }}"
+
+      # Crawl Session Alerts
+      - alert: CrawlSessionStuck
+        expr: active_crawl_sessions > 0 and increase(robots_processed_total[30m]) == 0
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Crawl session appears stuck for {{ $labels.manufacturer }}"
+          description: "No robots processed in 30 minutes but session is active"
+
+      - alert: CrawlSessionFailed
+        expr: increase(crawl_sessions_failed_total[5m]) > 0
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Crawl session failed for {{ $labels.manufacturer }}"
+          description: "A crawl session has failed for {{ $labels.manufacturer }}"
+
+      # WordPress Sync Alerts
+      - alert: WordPressSyncFailing
+        expr: rate(wordpress_sync_errors_total[5m]) > 0.1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "WordPress sync failing for {{ $labels.manufacturer }}"
+          description: "High rate of WordPress sync errors for {{ $labels.manufacturer }}"
+
+      - alert: WordPressSyncStopped
+        expr: increase(wordpress_products_created_total[1h]) == 0 and increase(wordpress_products_updated_total[1h]) == 0
+        for: 2h
+        labels:
+          severity: warning
+        annotations:
+          summary: "WordPress sync appears stopped"
+          description: "No WordPress products created or updated in the last 2 hours"
+
+      # Performance Alerts
+      - alert: LowRobotProcessingRate
+        expr: robots_per_hour < 5
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Low robot processing rate for {{ $labels.manufacturer }}"
+          description: "Processing only {{ $value }} robots per hour for {{ $labels.manufacturer }}"
+
+      # System Resource Alerts
+      - alert: HighMemoryUsage
+        expr: memory_usage_bytes > 2000000000  # 2GB
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High memory usage"
+          description: "Memory usage is {{ $value | humanize }}B"
+
+      - alert: TooManyMongoDBConnections
+        expr: mongodb_connections > 50
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Too many MongoDB connections"
+          description: "{{ $value }} MongoDB connections are active"
+
+  - name: system_alerts
+    rules:
+      # System Health
+      - alert: HighCPUUsage
+        expr: 100 - (avg(rate(node_cpu_seconds_total{mode="idle"}[5m])) * 100) > 80
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High CPU usage"
+          description: "CPU usage is above 80% for more than 10 minutes"
+
+      - alert: HighMemoryUsage
+        expr: (1 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)) * 100 > 90
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "High memory usage"
+          description: "Memory usage is above 90%"
+
+      - alert: DiskSpaceLow
+        expr: (1 - (node_filesystem_avail_bytes / node_filesystem_size_bytes)) * 100 > 85
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Disk space low"
+          description: "Disk usage is above 85% on {{ $labels.mountpoint }}"
+
+      - alert: DiskSpaceCritical
+        expr: (1 - (node_filesystem_avail_bytes / node_filesystem_size_bytes)) * 100 > 95
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Disk space critical"
+          description: "Disk usage is above 95% on {{ $labels.mountpoint }}"
+
+  - name: application_alerts
+    rules:
+      # Application Availability
+      - alert: ApplicationDown
+        expr: up{job="robot-catalog-crawler"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Robot catalog application is down"
+          description: "The robot catalog crawler application is not responding"
+
+      - alert: PrometheusMetricsDown
+        expr: up{job="robot-catalog-crawler"} == 0
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Prometheus metrics endpoint is down"
+          description: "Cannot scrape metrics from the robot catalog application"
+
+      # Database Connectivity
+      - alert: MongoDBConnectionFailed
+        expr: increase(scraper_errors_total{error_type="MongoDBConnectionError"}[5m]) > 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "MongoDB connection failed"
+          description: "Cannot connect to MongoDB database"
+
+      # Specific Error Patterns
+      - alert: FrequentTimeouts
+        expr: increase(scraper_errors_total{error_type="TimeoutException"}[5m]) > 10
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Frequent timeout errors for {{ $labels.manufacturer }}"
+          description: "More than 10 timeout errors in 5 minutes for {{ $labels.manufacturer }}"
+
+      - alert: SelectorNotFound
+        expr: increase(scraper_errors_total{error_type="NoSuchElementException"}[5m]) > 5
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Website structure may have changed for {{ $labels.manufacturer }}"
+          description: "Multiple NoSuchElementException errors detected - selectors may need updating"
+
+      - alert: AntiScrapingDetected
+        expr: increase(robots_failed_total{error_type="CloudflareProtection"}[5m]) > 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Anti-scraping protection detected for {{ $labels.manufacturer }}"
+          description: "Cloudflare or similar protection is blocking the scraper" 
