@@ -32,10 +32,11 @@ def generate_fernet_key():
     return base64.urlsafe_b64encode(key).decode('utf-8')
 
 
-def setup_environment():
+def setup_environment(non_interactive=False):
     """Setup environment configuration file."""
-    print("🔧 FuzeInfra Platform Environment Setup")
-    print("=" * 50)
+    if not non_interactive:
+        print("🔧 FuzeInfra Platform Environment Setup")
+        print("=" * 50)
     
     project_root = Path(__file__).parent.parent
     template_file = project_root / "environment.template"
@@ -47,7 +48,7 @@ def setup_environment():
         return False
     
     # Check if .env already exists
-    if env_file.exists():
+    if env_file.exists() and not non_interactive:
         response = input("⚠️  .env file already exists. Overwrite? (y/N): ")
         if response.lower() != 'y':
             print("✅ Setup cancelled. Existing .env file preserved.")
@@ -56,16 +57,23 @@ def setup_environment():
     try:
         # Copy template to .env
         shutil.copy2(template_file, env_file)
-        print(f"✅ Created .env file from template")
+        if not non_interactive:
+            print(f"✅ Created .env file from template")
         
         # Read the content
         with open(env_file, 'r') as f:
             content = f.read()
         
-        # Ask user if they want to generate secure passwords
-        generate_passwords = input("\n🔐 Generate secure passwords for services? (Y/n): ")
-        if generate_passwords.lower() != 'n':
-            print("🔄 Generating secure passwords...")
+        # Ask user if they want to generate secure passwords (or auto-generate in non-interactive mode)
+        if non_interactive:
+            generate_passwords_flag = True
+        else:
+            generate_passwords = input("\n🔐 Generate secure passwords for services? (Y/n): ")
+            generate_passwords_flag = generate_passwords.lower() != 'n'
+            
+        if generate_passwords_flag:
+            if not non_interactive:
+                print("🔄 Generating secure passwords...")
             
             # Replace default passwords with secure ones
             replacements = {
@@ -85,31 +93,33 @@ def setup_environment():
             for old_value, new_value in replacements.items():
                 content = content.replace(old_value, new_value)
         
-        # Ask for project customization
-        print("\n📝 Project Customization")
-        project_name = input("Enter project name (default: fuzeinfra): ").strip()
-        if project_name:
-            content = content.replace('COMPOSE_PROJECT_NAME=fuzeinfra', f'COMPOSE_PROJECT_NAME={project_name}')
-        
-        # Ask for database name
-        db_name = input("Enter database name (default: fuzeinfra_db): ").strip()
-        if db_name:
-            content = content.replace('POSTGRES_DB=fuzeinfra_db', f'POSTGRES_DB={db_name}')
+        # Project customization (use defaults in non-interactive mode)
+        if not non_interactive:
+            print("\n📝 Project Customization")
+            project_name = input("Enter project name (default: fuzeinfra): ").strip()
+            if project_name:
+                content = content.replace('COMPOSE_PROJECT_NAME=fuzeinfra', f'COMPOSE_PROJECT_NAME={project_name}')
+            
+            # Ask for database name
+            db_name = input("Enter database name (default: fuzeinfra_db): ").strip()
+            if db_name:
+                content = content.replace('POSTGRES_DB=fuzeinfra_db', f'POSTGRES_DB={db_name}')
         
         # Write the updated content back
         with open(env_file, 'w') as f:
             f.write(content)
         
-        print(f"\n✅ Environment file created successfully: {env_file}")
-        print("\n📋 Next Steps:")
-        print("1. Review and customize the .env file as needed")
-        print("2. Start the infrastructure: ./infra-up.sh (Linux/Mac) or ./infra-up.bat (Windows)")
-        print("3. Access services using the URLs in the .env file")
-        
-        print("\n⚠️  SECURITY REMINDER:")
-        print("- Never commit the .env file to version control")
-        print("- Keep your passwords secure")
-        print("- Change default passwords in production")
+        if not non_interactive:
+            print(f"\n✅ Environment file created successfully: {env_file}")
+            print("\n📋 Next Steps:")
+            print("1. Review and customize the .env file as needed")
+            print("2. Start the infrastructure: ./infra-up.sh (Linux/Mac) or ./infra-up.bat (Windows)")
+            print("3. Access services using the URLs in the .env file")
+            
+            print("\n⚠️  SECURITY REMINDER:")
+            print("- Never commit the .env file to version control")
+            print("- Keep your passwords secure")
+            print("- Change default passwords in production")
         
         return True
         
@@ -140,7 +150,10 @@ def main():
         show_help()
         return
     
-    success = setup_environment()
+    # Check for non-interactive flag
+    non_interactive = '--non-interactive' in sys.argv
+    
+    success = setup_environment(non_interactive=non_interactive)
     sys.exit(0 if success else 1)
 
 
