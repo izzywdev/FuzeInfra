@@ -25,31 +25,141 @@ jobs:
       with:
         python-version: '3.11'
 
+    - name: Cache Python dependencies
+      uses: actions/cache@v3
+      with:
+        path: ~/.cache/pip
+        key: ${{ runner.os }}-pip-${{ hashFiles('tests/requirements.txt') }}
+        restore-keys: |
+          ${{ runner.os }}-pip-
+
     - name: Install test dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install pytest requests
+        pip install -r tests/requirements.txt
+
+    - name: Install Docker Compose
+      run: |
+        sudo curl -L "https://github.com/docker/compose/releases/download/v2.24.0/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
+        sudo chmod +x /usr/local/bin/docker-compose
+        docker-compose --version
+
+    - name: Create Docker network
+      run: docker network create FuzeInfra
 
     - name: Create environment file
       run: |
         cp environment.template .env
-        sed -i 's/your_secure_postgres_password/testpass123/g' .env
-        sed -i 's/your_secure_mongodb_password/testpass123/g' .env
-        sed -i 's/your_secure_admin_ui_password/testpass123/g' .env
-        sed -i 's/your_secure_redis_password/testpass123/g' .env
-        sed -i 's/your_secure_neo4j_password/testpass123/g' .env
-        sed -i 's/your_secure_rabbitmq_password/testpass123/g' .env
-        sed -i 's/your_secure_grafana_password/testpass123/g' .env
-        sed -i 's/your_secure_airflow_password/testpass123/g' .env
-        sed -i 's/your_secure_fernet_key_here/dGVzdGtleWZvcmNpdGVzdGluZ29ubHkxMjM0NTY3ODkw/g' .env
-        sed -i 's/your_jwt_secret_key_here_change_in_production/testjwtsecret123/g' .env
-        sed -i 's/your_encryption_key_here_change_in_production/testencryptionkey123/g' .env
-        echo "✅ Environment file configured for CI"
+        python scripts-tools/setup_environment_ci.py
 
-    - name: Run basic tests
+    - name: Start infrastructure services
       run: |
-        echo "✅ Basic workflow test passed"
-        echo "Environment file created successfully"
-        ls -la .env
-        echo "First few lines of .env:"
-        head -5 .env 
+        docker-compose -f docker-compose.FuzeInfra.yml up -d
+
+    - name: Wait for services to be ready
+      run: |
+        echo "Waiting for services to start..."
+        sleep 90
+        echo "Checking service status..."
+        docker-compose -f docker-compose.FuzeInfra.yml ps
+
+    - name: Test PostgreSQL
+      run: |
+        echo "Testing PostgreSQL connection..."
+        docker exec fuzeinfra-postgres-1 pg_isready -U postgres
+        echo "✅ PostgreSQL is ready"
+
+    - name: Test Redis
+      run: |
+        echo "Testing Redis connection..."
+        docker exec fuzeinfra-redis-1 redis-cli ping
+        echo "✅ Redis is working"
+
+    - name: Test MongoDB
+      run: |
+        echo "Testing MongoDB connection..."
+        docker exec fuzeinfra-mongodb-1 mongosh --eval "db.adminCommand('ping')"
+        echo "✅ MongoDB is working"
+
+    - name: Test Neo4j
+      run: |
+        echo "Testing Neo4j connection..."
+        timeout 30 bash -c 'until curl -f http://localhost:7474; do sleep 2; done'
+        echo "✅ Neo4j is accessible"
+
+    - name: Test Elasticsearch
+      run: |
+        echo "Testing Elasticsearch connection..."
+        timeout 30 bash -c 'until curl -f http://localhost:9200; do sleep 2; done'
+        curl -X GET "localhost:9200/_cluster/health"
+        echo "✅ Elasticsearch is working"
+
+    - name: Test Kafka
+      run: |
+        echo "Testing Kafka connection..."
+        timeout 30 bash -c 'until curl -f http://localhost:8080; do sleep 2; done'
+        echo "✅ Kafka UI is accessible"
+
+    - name: Test RabbitMQ
+      run: |
+        echo "Testing RabbitMQ connection..."
+        timeout 30 bash -c 'until curl -f http://localhost:15672; do sleep 2; done'
+        echo "✅ RabbitMQ Management UI is accessible"
+
+    - name: Test Prometheus
+      run: |
+        echo "Testing Prometheus connection..."
+        timeout 30 bash -c 'until curl -f http://localhost:9090; do sleep 2; done'
+        curl -X GET "http://localhost:9090/api/v1/query?query=up"
+        echo "✅ Prometheus is working"
+
+    - name: Test Grafana
+      run: |
+        echo "Testing Grafana connection..."
+        timeout 30 bash -c 'until curl -f http://localhost:3000; do sleep 2; done'
+        echo "✅ Grafana is accessible"
+
+    - name: Test Airflow
+      run: |
+        echo "Testing Airflow connection..."
+        timeout 60 bash -c 'until curl -f http://localhost:8081; do sleep 5; done'
+        echo "✅ Airflow webserver is accessible"
+
+    - name: Run comprehensive infrastructure tests
+      run: |
+        pytest tests/test_infrastructure_health.py -v --junitxml=test-results.xml
+      continue-on-error: true
+
+    - name: Run Airflow workflow tests
+      run: |
+        pytest tests/test_airflow_workflows.py -v --junitxml=airflow-test-results.xml
+      continue-on-error: true
+
+    - name: Collect service logs on failure
+      if: failure()
+      run: |
+        echo "=== Docker Compose Services ==="
+        docker-compose -f docker-compose.FuzeInfra.yml ps
+        
+        echo "=== Service Logs ==="
+        docker-compose -f docker-compose.FuzeInfra.yml logs --tail=50
+        
+        echo "=== Container Health ==="
+        docker ps -a
+
+    - name: Stop infrastructure services
+      if: always()
+      run: |
+        docker-compose -f docker-compose.FuzeInfra.yml down -v
+        docker network rm FuzeInfra || true
+
+    - name: Publish Test Results
+      uses: EnricoMi/publish-unit-test-result-action@v2
+      if: always()
+      with:
+        files: |
+          test-results.xml
+          airflow-test-results.xml
+        comment_mode: off
+        check_name: Infrastructure Test Results
+        github_token: ${{ secrets.GITHUB_TOKEN }} 
