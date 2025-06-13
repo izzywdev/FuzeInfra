@@ -3,7 +3,7 @@
 Environment Setup Script for FuzeInfra Platform
 
 This script helps users create and configure their .env file
-from the environment.template file.
+from the environment.template file and sets up required databases.
 """
 
 import os
@@ -11,6 +11,8 @@ import shutil
 import secrets
 import string
 import base64
+import subprocess
+import time
 from pathlib import Path
 
 
@@ -30,6 +32,118 @@ def generate_fernet_key():
     # Generate 32 random bytes and encode as base64
     key = secrets.token_bytes(32)
     return base64.urlsafe_b64encode(key).decode('utf-8')
+
+
+def run_docker_command(command, description=""):
+    """Run a Docker command and return success status."""
+    try:
+        result = subprocess.run(command, shell=True, capture_output=True, text=True, check=True)
+        return True, result.stdout
+    except subprocess.CalledProcessError as e:
+        return False, e.stderr
+
+
+def check_postgres_container():
+    """Check if PostgreSQL container is running."""
+    success, output = run_docker_command("docker ps --filter name=fuzeinfra-postgres --format '{{.Names}}'")
+    return success and "fuzeinfra-postgres" in output
+
+
+def setup_databases(non_interactive=False):
+    """Setup required databases in PostgreSQL."""
+    if not non_interactive:
+        print("\n🗄️  Setting up databases...")
+    
+    # Check if PostgreSQL container is running
+    if not check_postgres_container():
+        if not non_interactive:
+            print("⚠️  PostgreSQL container not running. Please start the infrastructure first.")
+            print("   Run: docker-compose -f docker-compose.FuzeInfra.yml up -d postgres")
+        return False
+    
+    # Wait a moment for PostgreSQL to be ready
+    time.sleep(2)
+    
+    # Read environment variables to get database configuration
+    env_file = Path(__file__).parent.parent / ".env"
+    if not env_file.exists():
+        if not non_interactive:
+            print("❌ .env file not found. Please run environment setup first.")
+        return False
+    
+    # Parse .env file to get database settings
+    env_vars = {}
+    with open(env_file, 'r') as f:
+        for line in f:
+            line = line.strip()
+            if line and not line.startswith('#') and '=' in line:
+                key, value = line.split('=', 1)
+                env_vars[key] = value
+    
+    postgres_user = env_vars.get('POSTGRES_USER', 'fuzeinfra')
+    postgres_password = env_vars.get('POSTGRES_PASSWORD', 'fuzeinfra_secure_password')
+    postgres_db = env_vars.get('POSTGRES_DB', 'fuzeinfra_db')
+    
+    databases_to_create = [
+        {
+            'name': postgres_db,
+            'purpose': 'Main application database for FuzeInfra platform'
+        },
+        {
+            'name': 'airflow',
+            'purpose': 'Apache Airflow workflow orchestration database'
+        }
+    ]
+    
+    if not non_interactive:
+        print(f"📋 Creating databases for user: {postgres_user}")
+    
+    # Create user if it doesn't exist
+    create_user_cmd = f'docker exec fuzeinfra-postgres psql -U postgres -c "CREATE USER {postgres_user} WITH PASSWORD \'{postgres_password}\';" 2>/dev/null || true'
+    run_docker_command(create_user_cmd)
+    
+    # Create databases
+    for db_info in databases_to_create:
+        db_name = db_info['name']
+        purpose = db_info['purpose']
+        
+        if not non_interactive:
+            print(f"   📦 Creating database: {db_name}")
+            print(f"      Purpose: {purpose}")
+        
+        # Check if database exists using PostgreSQL query
+        check_db_cmd = f'docker exec fuzeinfra-postgres psql -U postgres -tc "SELECT 1 FROM pg_database WHERE datname = \'{db_name}\'"'
+        success, output = run_docker_command(check_db_cmd)
+        db_exists = success and output.strip() == '1'
+        
+        if db_exists:
+            if not non_interactive:
+                print(f"      ✅ Database {db_name} already exists")
+        else:
+            # Create database
+            create_db_cmd = f'docker exec fuzeinfra-postgres psql -U postgres -c "CREATE DATABASE {db_name} OWNER {postgres_user};"'
+            success, output = run_docker_command(create_db_cmd)
+            
+            if success:
+                # Grant privileges
+                grant_cmd = f'docker exec fuzeinfra-postgres psql -U postgres -c "GRANT ALL PRIVILEGES ON DATABASE {db_name} TO {postgres_user};"'
+                run_docker_command(grant_cmd)
+                
+                if not non_interactive:
+                    print(f"      ✅ Database {db_name} created successfully")
+            else:
+                if not non_interactive:
+                    print(f"      ❌ Failed to create database {db_name}: {output}")
+                return False
+    
+    if not non_interactive:
+        print("✅ Database setup completed!")
+        print("\n📊 Database Summary:")
+        print(f"   • {postgres_db}: Main application database")
+        print(f"   • airflow: Workflow orchestration database")
+        print(f"   • Owner: {postgres_user}")
+    
+    return True
 
 
 def setup_environment(non_interactive=False):
@@ -113,8 +227,9 @@ def setup_environment(non_interactive=False):
             print(f"\n✅ Environment file created successfully: {env_file}")
             print("\n📋 Next Steps:")
             print("1. Review and customize the .env file as needed")
-            print("2. Start the infrastructure: ./infra-up.sh (Linux/Mac) or ./infra-up.bat (Windows)")
-            print("3. Access services using the URLs in the .env file")
+            print("2. Start the infrastructure: docker-compose -f docker-compose.FuzeInfra.yml up -d")
+            print("3. Run database setup: python scripts-tools/setup_environment.py --setup-databases")
+            print("4. Access services using the URLs in the .env file")
             
             print("\n⚠️  SECURITY REMINDER:")
             print("- Never commit the .env file to version control")
@@ -133,12 +248,23 @@ def show_help():
     print("Environment Setup Script for FuzeInfra Platform")
     print("")
     print("Usage:")
-    print("  python setup_environment.py")
+    print("  python setup_environment.py [options]")
+    print("")
+    print("Options:")
+    print("  --help, -h              Show this help message")
+    print("  --non-interactive       Run without user prompts")
+    print("  --setup-databases       Setup required databases in PostgreSQL")
+    print("  --setup-only-databases  Only setup databases (skip environment file)")
     print("")
     print("This script will:")
     print("1. Copy environment.template to .env")
     print("2. Generate secure passwords for services")
     print("3. Allow customization of project settings")
+    print("4. Setup required databases in PostgreSQL")
+    print("")
+    print("Database Information:")
+    print("• fuzeinfra_db: Main application database for your platform")
+    print("• airflow: Apache Airflow workflow orchestration database")
     print("")
 
 
@@ -150,11 +276,27 @@ def main():
         show_help()
         return
     
-    # Check for non-interactive flag
+    # Check for flags
     non_interactive = '--non-interactive' in sys.argv
+    setup_databases_only = '--setup-only-databases' in sys.argv
+    setup_databases_flag = '--setup-databases' in sys.argv or setup_databases_only
     
+    if setup_databases_only:
+        # Only setup databases
+        success = setup_databases(non_interactive=non_interactive)
+        sys.exit(0 if success else 1)
+    
+    # Setup environment file
     success = setup_environment(non_interactive=non_interactive)
-    sys.exit(0 if success else 1)
+    if not success:
+        sys.exit(1)
+    
+    # Setup databases if requested
+    if setup_databases_flag:
+        success = setup_databases(non_interactive=non_interactive)
+        sys.exit(0 if success else 1)
+    
+    sys.exit(0)
 
 
 if __name__ == "__main__":
