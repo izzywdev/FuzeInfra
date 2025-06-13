@@ -163,11 +163,11 @@ jobs:
         wait_for_port "Prometheus" 9090 || exit 1
         wait_for_port "Grafana" 3001 || exit 1
         
-        # Wait for Airflow (takes longer to start)
-        echo "📋 Phase 4: Airflow services"
-        wait_for_port "Airflow" 8082 || exit 1
+        # Note: Airflow is tested separately in its own step due to longer startup time
+        echo "📋 Phase 4: Core services ready!"
+        echo "ℹ️  Airflow will be tested separately (requires longer startup time)"
         
-        echo "🎉 All services are ready!"
+        echo "🎉 All core services are ready!"
         echo "📊 Final service status:"
         docker-compose -f docker-compose.FuzeInfra.yml ps
 
