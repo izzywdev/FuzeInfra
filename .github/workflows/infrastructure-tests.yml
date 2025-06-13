@@ -10,6 +10,13 @@ env:
   REGISTRY: ghcr.io
   IMAGE_NAME: izzywdev/fuzeinfra
 
+# Add permissions for GitHub token to create check runs
+permissions:
+  contents: read
+  checks: write
+  pull-requests: write
+  actions: read
+
 jobs:
   test-infrastructure:
     runs-on: ubuntu-latest
@@ -19,6 +26,14 @@ jobs:
       uses: actions/checkout@v4
       with:
         submodules: recursive
+
+    - name: Free up disk space
+      run: |
+        sudo rm -rf /usr/local/lib/android
+        sudo rm -rf /usr/share/dotnet
+        sudo rm -rf /opt/ghc
+        sudo rm -rf /usr/local/share/boost
+        df -h
 
     - name: Set up Python
       uses: actions/setup-python@v4
@@ -44,6 +59,13 @@ jobs:
         sudo chmod +x /usr/local/bin/docker-compose
         docker-compose --version
 
+    - name: Verify Docker setup
+      run: |
+        docker --version
+        docker info
+        docker ps
+        echo "Docker daemon is running and accessible"
+
     - name: Create Docker network
       run: docker network create FuzeInfra
 
@@ -55,6 +77,7 @@ jobs:
     - name: Start infrastructure services
       run: |
         docker-compose -f docker-compose.FuzeInfra.yml up -d
+      timeout-minutes: 10
 
     - name: Wait for services to be ready
       run: |
@@ -62,23 +85,25 @@ jobs:
         sleep 90
         echo "Checking service status..."
         docker-compose -f docker-compose.FuzeInfra.yml ps
+        echo "Checking Docker system resources..."
+        docker system df
 
     - name: Test PostgreSQL
       run: |
         echo "Testing PostgreSQL connection..."
-        docker exec fuzeinfra-postgres-1 pg_isready -U postgres
+        docker exec fuzeinfra-postgres pg_isready -U postgres
         echo "✅ PostgreSQL is ready"
 
     - name: Test Redis
       run: |
         echo "Testing Redis connection..."
-        docker exec fuzeinfra-redis-1 redis-cli ping
+        docker exec fuzeinfra-redis redis-cli ping
         echo "✅ Redis is working"
 
     - name: Test MongoDB
       run: |
         echo "Testing MongoDB connection..."
-        docker exec fuzeinfra-mongodb-1 mongosh --eval "db.adminCommand('ping')"
+        docker exec fuzeinfra-mongodb mongosh --eval "db.adminCommand('ping')"
         echo "✅ MongoDB is working"
 
     - name: Test Neo4j
@@ -116,13 +141,13 @@ jobs:
     - name: Test Grafana
       run: |
         echo "Testing Grafana connection..."
-        timeout 30 bash -c 'until curl -f http://localhost:3000; do sleep 2; done'
+        timeout 30 bash -c 'until curl -f http://localhost:3001; do sleep 2; done'
         echo "✅ Grafana is accessible"
 
     - name: Test Airflow
       run: |
         echo "Testing Airflow connection..."
-        timeout 60 bash -c 'until curl -f http://localhost:8081; do sleep 5; done'
+        timeout 60 bash -c 'until curl -f http://localhost:8082; do sleep 5; done'
         echo "✅ Airflow webserver is accessible"
 
     - name: Run comprehensive infrastructure tests
@@ -138,6 +163,10 @@ jobs:
     - name: Collect service logs on failure
       if: failure()
       run: |
+        echo "=== Docker System Info ==="
+        docker info
+        docker system df
+        
         echo "=== Docker Compose Services ==="
         docker-compose -f docker-compose.FuzeInfra.yml ps
         
@@ -146,12 +175,16 @@ jobs:
         
         echo "=== Container Health ==="
         docker ps -a
+        
+        echo "=== Available Disk Space ==="
+        df -h
 
     - name: Stop infrastructure services
       if: always()
       run: |
         docker-compose -f docker-compose.FuzeInfra.yml down -v
         docker network rm FuzeInfra || true
+        docker system prune -f
 
     - name: Publish Test Results
       uses: EnricoMi/publish-unit-test-result-action@v2
@@ -162,4 +195,3 @@ jobs:
           airflow-test-results.xml
         comment_mode: off
         check_name: Infrastructure Test Results
-        github_token: ${{ secrets.GITHUB_TOKEN }} 
