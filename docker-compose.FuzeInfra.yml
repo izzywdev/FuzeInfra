@@ -11,7 +11,7 @@ services:
   # PostgreSQL
   postgres:
     image: postgres:15
-    container_name: shared-postgres
+    container_name: fuzeinfra-postgres
     environment:
       POSTGRES_DB: ${POSTGRES_DB}
       POSTGRES_USER: ${POSTGRES_USER}
@@ -32,7 +32,7 @@ services:
   # MongoDB
   mongodb:
     image: mongo:7
-    container_name: shared-mongodb
+    container_name: fuzeinfra-mongodb
     environment:
       MONGO_INITDB_ROOT_USERNAME: admin
       MONGO_INITDB_ROOT_PASSWORD: admin123
@@ -47,11 +47,11 @@ services:
   # MongoDB Express (Web Interface)
   mongo-express:
     image: mongo-express:latest
-    container_name: shared-mongo-express
+    container_name: fuzeinfra-mongo-express
     environment:
       ME_CONFIG_MONGODB_ADMINUSERNAME: admin
       ME_CONFIG_MONGODB_ADMINPASSWORD: admin123
-      ME_CONFIG_MONGODB_URL: mongodb://admin:admin123@shared-mongodb:27017/
+      ME_CONFIG_MONGODB_URL: mongodb://admin:admin123@fuzeinfra-mongodb:27017/
       ME_CONFIG_BASICAUTH_USERNAME: admin
       ME_CONFIG_BASICAUTH_PASSWORD: admin
     ports:
@@ -65,7 +65,7 @@ services:
   # Redis
   redis:
     image: redis:7-alpine
-    container_name: shared-redis
+    container_name: fuzeinfra-redis
     ports:
       - "${REDIS_PORT}:6379"
     volumes:
@@ -83,7 +83,7 @@ services:
   # Neo4j
   neo4j:
     image: neo4j:5
-    container_name: shared-neo4j
+    container_name: fuzeinfra-neo4j
     environment:
       NEO4J_AUTH: neo4j/password123
       NEO4J_PLUGINS: '["apoc"]'
@@ -100,7 +100,7 @@ services:
   # Elasticsearch
   elasticsearch:
     image: docker.elastic.co/elasticsearch/elasticsearch:8.8.0
-    container_name: shared-elasticsearch
+    container_name: fuzeinfra-elasticsearch
     environment:
       - discovery.type=single-node
       - xpack.security.enabled=false
@@ -120,7 +120,7 @@ services:
   # Zookeeper (for Kafka)
   zookeeper:
     image: confluentinc/cp-zookeeper:7.4.0
-    container_name: shared-zookeeper
+    container_name: fuzeinfra-zookeeper
     environment:
       ZOOKEEPER_CLIENT_PORT: 2181
       ZOOKEEPER_TICK_TIME: 2000
@@ -134,13 +134,13 @@ services:
   # Apache Kafka
   kafka:
     image: confluentinc/cp-kafka:7.4.0
-    container_name: shared-kafka
+    container_name: fuzeinfra-kafka
     depends_on:
       - zookeeper
     environment:
       KAFKA_BROKER_ID: 1
-      KAFKA_ZOOKEEPER_CONNECT: shared-zookeeper:2181
-      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://shared-kafka:9092,PLAINTEXT_HOST://localhost:29092
+      KAFKA_ZOOKEEPER_CONNECT: fuzeinfra-zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://fuzeinfra-kafka:9092,PLAINTEXT_HOST://localhost:29092
       KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
       KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
@@ -156,11 +156,11 @@ services:
   # Kafka UI
   kafka-ui:
     image: provectuslabs/kafka-ui:latest
-    container_name: shared-kafka-ui
+    container_name: fuzeinfra-kafka-ui
     environment:
       KAFKA_CLUSTERS_0_NAME: local
-      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: shared-kafka:9092
-      KAFKA_CLUSTERS_0_ZOOKEEPER: shared-zookeeper:2181
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: fuzeinfra-kafka:9092
+      KAFKA_CLUSTERS_0_ZOOKEEPER: fuzeinfra-zookeeper:2181
     ports:
       - "8080:8080"
     depends_on:
@@ -173,7 +173,7 @@ services:
   # RabbitMQ (alternative to Kafka)
   rabbitmq:
     image: rabbitmq:3-management
-    container_name: shared-rabbitmq
+    container_name: fuzeinfra-rabbitmq
     environment:
       RABBITMQ_DEFAULT_USER: admin
       RABBITMQ_DEFAULT_PASS: admin123
@@ -193,7 +193,7 @@ services:
   # Prometheus
   prometheus:
     image: prom/prometheus:latest
-    container_name: shared-prometheus
+    container_name: fuzeinfra-prometheus
     command:
       - '--config.file=/etc/prometheus/prometheus.yml'
       - '--storage.tsdb.path=/prometheus'
@@ -213,7 +213,7 @@ services:
   # Node Exporter
   node-exporter:
     image: prom/node-exporter:latest
-    container_name: shared-node-exporter
+    container_name: fuzeinfra-node-exporter
     command:
       - '--path.procfs=/host/proc'
       - '--path.rootfs=/rootfs'
@@ -232,7 +232,7 @@ services:
   # Alertmanager
   alertmanager:
     image: prom/alertmanager:latest
-    container_name: shared-alertmanager
+    container_name: fuzeinfra-alertmanager
     ports:
       - "9093:9093"
     volumes:
@@ -245,7 +245,7 @@ services:
   # Grafana
   grafana:
     image: grafana/grafana:latest
-    container_name: shared-grafana
+    container_name: fuzeinfra-grafana
     environment:
       GF_SECURITY_ADMIN_PASSWORD: admin
       GF_USERS_ALLOW_SIGN_UP: false
@@ -267,7 +267,7 @@ services:
   # Loki
   loki:
     image: grafana/loki:2.9.0
-    container_name: shared-loki
+    container_name: fuzeinfra-loki
     ports:
       - "3100:3100"
     volumes:
@@ -281,7 +281,7 @@ services:
   # Promtail
   promtail:
     image: grafana/promtail:2.9.0
-    container_name: shared-promtail
+    container_name: fuzeinfra-promtail
     volumes:
       - ./monitoring-shared/promtail-config.yml:/etc/promtail/config.yml
       - /var/log:/var/log:ro
@@ -300,7 +300,7 @@ services:
   # Airflow Database Initialization
   airflow-init:
     image: apache/airflow:2.7.0
-    container_name: shared-airflow-init
+    container_name: fuzeinfra-airflow-init
     environment:
       AIRFLOW__CORE__EXECUTOR: CeleryExecutor
       AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/airflow
@@ -348,7 +348,7 @@ services:
   # Airflow Webserver
   airflow-webserver:
     image: apache/airflow:2.7.0
-    container_name: shared-airflow-webserver
+    container_name: fuzeinfra-airflow-webserver
     environment:
       AIRFLOW__CORE__EXECUTOR: CeleryExecutor
       AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/airflow
@@ -375,7 +375,7 @@ services:
   # Airflow Scheduler
   airflow-scheduler:
     image: apache/airflow:2.7.0
-    container_name: shared-airflow-scheduler
+    container_name: fuzeinfra-airflow-scheduler
     environment:
       AIRFLOW__CORE__EXECUTOR: CeleryExecutor
       AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/airflow
@@ -398,7 +398,7 @@ services:
   # Airflow Worker
   airflow-worker:
     image: apache/airflow:2.7.0
-    container_name: shared-airflow-worker
+    container_name: fuzeinfra-airflow-worker
     environment:
       AIRFLOW__CORE__EXECUTOR: CeleryExecutor
       AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/airflow
@@ -421,7 +421,7 @@ services:
   # Airflow Flower
   airflow-flower:
     image: apache/airflow:2.7.0
-    container_name: shared-airflow-flower
+    container_name: fuzeinfra-airflow-flower
     environment:
       AIRFLOW__CORE__EXECUTOR: CeleryExecutor
       AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/airflow
@@ -440,34 +440,34 @@ services:
 volumes:
   # Database volumes
   postgres_data:
-    name: shared-postgres-data
+    name: fuzeinfra_postgres_data
   mongodb_data:
-    name: shared-mongodb-data
+    name: fuzeinfra_mongodb_data
   redis_data:
-    name: shared-redis-data
+    name: fuzeinfra_redis_data
   neo4j_data:
-    name: shared-neo4j-data
+    name: fuzeinfra_neo4j_data
   neo4j_logs:
-    name: shared-neo4j-logs
+    name: fuzeinfra_neo4j_logs
   elasticsearch_data:
-    name: shared-elasticsearch-data
+    name: fuzeinfra_elasticsearch_data
   
   # Message queue volumes
   kafka_data:
-    name: shared-kafka-data
+    name: fuzeinfra_kafka_data
   zookeeper_data:
-    name: shared-zookeeper-data
+    name: fuzeinfra_zookeeper_data
   zookeeper_logs:
-    name: shared-zookeeper-logs
+    name: fuzeinfra_zookeeper_logs
   rabbitmq_data:
-    name: shared-rabbitmq-data
+    name: fuzeinfra_rabbitmq_data
   
   # Monitoring volumes
   prometheus_data:
-    name: shared-prometheus-data
+    name: fuzeinfra_prometheus_data
   grafana_data:
-    name: shared-grafana-data
+    name: fuzeinfra_grafana_data
   alertmanager_data:
-    name: shared-alertmanager-data
+    name: fuzeinfra_alertmanager_data
   loki_data:
-    name: shared-loki-data 
+    name: fuzeinfra_loki_data 
