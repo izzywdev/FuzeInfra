@@ -1,0 +1,29 @@
+@echo off
+REM Generic Project Shutdown Script Template for Windows
+REM Copy this file to your project root and customize as needed
+
+set PROJECT_NAME=your-project-name
+set COMPOSE_FILE=docker-compose.yml
+
+echo 🛑 Stopping %PROJECT_NAME% services...
+
+REM Check if project compose file exists
+if not exist "%COMPOSE_FILE%" (
+    echo ❌ Docker compose file not found: %COMPOSE_FILE%
+    echo Cannot stop services without compose file
+    exit /b 1
+)
+
+REM Stop project services
+echo Stopping services from %COMPOSE_FILE%...
+docker-compose -f "%COMPOSE_FILE%" down
+
+if errorlevel 1 (
+    echo ❌ Failed to stop %PROJECT_NAME% services
+    exit /b 1
+) else (
+    echo ✅ %PROJECT_NAME% services stopped successfully!
+    echo.
+    echo Note: Shared infrastructure (FuzeInfra) is still running
+    echo To stop infrastructure: .\infra-down.bat
+) 

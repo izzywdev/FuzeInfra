@@ -1,6 +1,6 @@
 # Environment Variable Manager Guide
 
-A comprehensive tool for safely managing `.env` files in the Mendys Robot Scraper Platform with automatic backups and validation.
+A comprehensive tool for safely managing `.env` files in the FuzeInfra Platform with automatic backups and validation.
 
 ## 🎯 Purpose
 
@@ -44,11 +44,12 @@ python env_manager.py list
 ```
 📋 Environment variables in .env:
 ==================================================
-DATABASE_URL=postgresql://localhost:5432/robotics
-OPENAI_API_KEY=sk-1****************************
-WP_SITE_URL=https://smarthubshopper.com
-WP_USERNAME=admin
-WP_APP_PASSWORD=abcd**********************
+POSTGRES_DB=fuzeinfra_db
+POSTGRES_USER=fuzeinfra
+POSTGRES_PASSWORD=fuze**********************
+MONGODB_HOST=localhost
+GRAFANA_ADMIN_PASSWORD=graf**********************
+JWT_SECRET=your_**********************
 ```
 
 ### **➕ Add New Variable**
@@ -150,7 +151,7 @@ python env_manager.py validate
 Work with .env files in different locations:
 ```bash
 python env_manager.py --env-file /path/to/custom/.env list
-python env_manager.py --env-file frontend/.env.local add REACT_APP_API_URL=http://localhost:5000
+python env_manager.py --env-file frontend/.env.local add API_URL=http://localhost:8090
 ```
 
 ### **Custom Backup Directory**
@@ -200,10 +201,10 @@ backups/
 ### **Initial Setup**
 ```bash
 # Create initial .env file
-python env_manager.py add DATABASE_URL=postgresql://localhost:5432/robotics_business
-python env_manager.py add MONGODB_URL=mongodb://localhost:27017/processing_pipeline
-python env_manager.py add OPENAI_API_KEY=your_openai_key_here
-python env_manager.py add WP_SITE_URL=https://smarthubshopper.com
+python env_manager.py add POSTGRES_DB=fuzeinfra_db
+python env_manager.py add MONGODB_HOST=localhost
+python env_manager.py add REDIS_PASSWORD=secure_redis_password
+python env_manager.py add GRAFANA_ADMIN_PASSWORD=secure_grafana_password
 ```
 
 ### **Credential Updates**
@@ -211,10 +212,10 @@ python env_manager.py add WP_SITE_URL=https://smarthubshopper.com
 # Backup before major changes
 python env_manager.py backup
 
-# Update API keys
-python env_manager.py modify OPENAI_API_KEY=sk-new-key-here
-python env_manager.py modify WC_CONSUMER_KEY=ck_new_consumer_key
-python env_manager.py modify WC_CONSUMER_SECRET=cs_new_consumer_secret
+# Update passwords
+python env_manager.py modify POSTGRES_PASSWORD=new_secure_password
+python env_manager.py modify JWT_SECRET=new_jwt_secret_key
+python env_manager.py modify ENCRYPTION_KEY=new_encryption_key
 
 # Validate changes
 python env_manager.py validate
@@ -223,12 +224,26 @@ python env_manager.py validate
 ### **Environment Migration**
 ```bash
 # Development to Production migration
-python env_manager.py modify DATABASE_URL=postgresql://prod-server:5432/robotics_business
-python env_manager.py modify WP_SITE_URL=https://production-site.com
-python env_manager.py remove DEBUG_MODE
+python env_manager.py modify POSTGRES_HOST=prod-server
+python env_manager.py modify APP_ENV=production
+python env_manager.py remove DEV_MODE
 
 # Verify changes
 python env_manager.py list
+```
+
+### **Infrastructure Configuration**
+```bash
+# Update service ports
+python env_manager.py modify PROMETHEUS_PORT=9091
+python env_manager.py modify GRAFANA_PORT=3002
+
+# Update network settings
+python env_manager.py modify NETWORK_NAME=FuzeInfra-prod
+python env_manager.py modify COMPOSE_PROJECT_NAME=fuzeinfra-prod
+
+# Validate configuration
+python env_manager.py validate
 ```
 
 ### **Cleanup and Maintenance**
@@ -303,11 +318,10 @@ Environment variables are automatically used by Docker Compose:
 
 ```bash
 # After updating .env
-python env_manager.py modify DATABASE_URL=postgresql://new-host:5432/db
+python env_manager.py modify POSTGRES_PASSWORD=new_password
 
 # Restart services to pick up changes
-cd ../infrastructure/
-docker-compose restart robot-crawler
+docker-compose -f docker-compose.FuzeInfra.yml restart postgres
 ```
 
 ### **Development Workflow**
@@ -316,15 +330,14 @@ docker-compose restart robot-crawler
 python env_manager.py backup
 
 # Make changes
-python env_manager.py modify DEBUG_MODE=true
+python env_manager.py modify APP_DEBUG=true
 python env_manager.py add NEW_FEATURE_FLAG=enabled
 
 # Test platform
-cd ../deployment/
-python start_robotics_platform.py
+./infra-up.sh
 
 # If issues, restore backup
-cd ../scripts-tools/
+cd scripts-tools/
 python env_manager.py restore .env.backup.before_modify.20241211_143022
 ```
 
@@ -367,7 +380,7 @@ python env_manager.py list
 python env_manager.py validate
 ```
 
-### **Platform Won't Start**
+### **Infrastructure Won't Start**
 ```bash
 # Check .env file
 python env_manager.py validate
@@ -379,4 +392,4 @@ python env_manager.py list
 python env_manager.py restore .env.backup.working_config
 ```
 
-This tool ensures safe and reliable management of your environment variables while maintaining the security and integrity of your sensitive configuration data. 
+This tool ensures safe and reliable management of your environment variables while maintaining the security and integrity of your sensitive configuration data for the FuzeInfra platform. 

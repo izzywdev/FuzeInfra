@@ -9,10 +9,10 @@ clients:
   - url: http://loki:3100/loki/api/v1/push
 
 scrape_configs:
-  - job_name: robotics-logs
+  - job_name: fuzeinfra-logs
     static_configs:
       - targets:
           - localhost
         labels:
-          job: robotics-logs
-          __path__: /var/log/robotics/*.log 
+          job: fuzeinfra-logs
+          __path__: /var/log/fuzeinfra/*.log 

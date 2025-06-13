@@ -9,14 +9,14 @@ clients:
   - url: http://loki:3100/loki/api/v1/push
 
 scrape_configs:
-  # Scrape robotics application logs
-  - job_name: robotics-logs
+  # Scrape generic application logs
+  - job_name: application-logs
     static_configs:
       - targets:
           - localhost
         labels:
-          job: robotics-scraper
-          __path__: /var/log/robotics/*.log
+          job: application-logs
+          __path__: /var/log/fuzeinfra/*.log
 
   # Scrape Docker container logs
   - job_name: containers
@@ -32,35 +32,13 @@ scrape_configs:
       - source_labels: ['__meta_docker_container_label_com_docker_compose_service']
         target_label: 'service'
 
-  # Scrape specific robotics containers
-  - job_name: kafka-processor
+  # Scrape infrastructure service containers
+  - job_name: infrastructure-services
     static_configs:
       - targets:
           - localhost
         labels:
-          job: kafka-processor
-          service: unified-kafka-processor
-          __path__: /var/lib/docker/containers/*/*-json.log
-    pipeline_stages:
-      - json:
-          expressions:
-            output: log
-            stream: stream
-            time: time
-      - timestamp:
-          source: time
-          format: RFC3339Nano
-      - output:
-          source: output
-
-  # Scrape robotics scraper logs  
-  - job_name: robot-crawler
-    static_configs:
-      - targets:
-          - localhost
-        labels:
-          job: robot-crawler
-          service: robot-crawler
+          job: infrastructure-services
           __path__: /var/lib/docker/containers/*/*-json.log
     pipeline_stages:
       - json:
@@ -83,29 +61,38 @@ scrape_configs:
           job: varlogs
           __path__: /var/log/host/*log
 
-  # Kafka logs (if available)
+  # Database logs
+  - job_name: database-logs
+    static_configs:
+      - targets:
+          - localhost
+        labels:
+          job: database
+          __path__: /var/log/fuzeinfra/postgres*.log
+
+  # Message queue logs
   - job_name: kafka-logs
     static_configs:
       - targets:
           - localhost
         labels:
           job: kafka
-          __path__: /var/log/robotics/kafka*.log
+          __path__: /var/log/fuzeinfra/kafka*.log
 
-  # Scrapy logs
-  - job_name: scrapy-logs
+  # Monitoring service logs
+  - job_name: monitoring-logs
     static_configs:
       - targets:
           - localhost
         labels:
-          job: scrapy
-          __path__: /var/log/robotics/scrapy*.log
+          job: monitoring
+          __path__: /var/log/fuzeinfra/prometheus*.log
 
-  # Airflow logs
-  - job_name: airflow-logs
+  # Redis logs
+  - job_name: redis-logs
     static_configs:
       - targets:
           - localhost
         labels:
-          job: airflow
-          __path__: /var/log/robotics/airflow*.log 
+          job: redis
+          __path__: /var/log/fuzeinfra/redis*.log 

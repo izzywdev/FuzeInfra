@@ -1,0 +1,30 @@
+#!/bin/bash
+
+# Generic Project Shutdown Script Template
+# Copy this file to your project root and customize as needed
+
+PROJECT_NAME="your-project-name"
+COMPOSE_FILE="docker-compose.yml"
+
+echo "🛑 Stopping $PROJECT_NAME services..."
+
+# Check if project compose file exists
+if [ ! -f "$COMPOSE_FILE" ]; then
+    echo "❌ Docker compose file not found: $COMPOSE_FILE"
+    echo "Cannot stop services without compose file"
+    exit 1
+fi
+
+# Stop project services
+echo "Stopping services from $COMPOSE_FILE..."
+docker-compose -f "$COMPOSE_FILE" down
+
+if [ $? -eq 0 ]; then
+    echo "✅ $PROJECT_NAME services stopped successfully!"
+    echo ""
+    echo "Note: Shared infrastructure (FuzeInfra) is still running"
+    echo "To stop infrastructure: ./infra-down.sh"
+else
+    echo "❌ Failed to stop $PROJECT_NAME services"
+    exit 1
+fi 

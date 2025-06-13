@@ -5,25 +5,24 @@ datasources:
   - name: Prometheus
     type: prometheus
     access: proxy
-    url: http://shared-prometheus:9090
+    url: http://prometheus:9090
     isDefault: true
     editable: true
-    version: 1
-    basicAuth: false
-    withCredentials: false
     jsonData:
       httpMethod: POST
-      queryTimeout: 60s
+      manageAlerts: true
+      prometheusType: Prometheus
+      prometheusVersion: 2.40.0
+      cacheLevel: 'High'
+      disableRecordingRules: false
+      incrementalQueryOverlapWindow: 10m
 
   # Loki data source
   - name: Loki
     type: loki
     access: proxy
-    url: http://shared-loki:3100
+    url: http://loki:3100
     isDefault: false
     editable: true
-    version: 1
-    basicAuth: false
-    withCredentials: false
     jsonData:
       maxLines: 1000

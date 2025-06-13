@@ -1,26 +1,25 @@
 #!/usr/bin/env python3
 """
-Version Manager for Mendys Robot Scraper Platform
+Version Manager for FuzeInfra Platform
 
-This script provides semantic versioning management with the following features:
-- Semantic versioning (MAJOR.MINOR.PATCH)
-- Pre-release versions (alpha, beta, rc)
-- Build metadata tracking
-- Git integration for tagging
+Advanced semantic versioning management with build automation,
+Git integration, and comprehensive version tracking.
+
+Features:
+- Semantic versioning (semver) compliance
+- Pre-release version support (alpha, beta, rc)
+- Build metadata handling
+- Git integration for commit tracking and tagging
 - Component version synchronization
-- Release notes generation
-- Version validation and comparison
+- Automated version bumping
+- Build number tracking
+- Comprehensive validation
 
 Usage:
-    python version_manager.py current
-    python version_manager.py bump patch
-    python version_manager.py bump minor --pre-release alpha
-    python version_manager.py bump major
-    python version_manager.py tag --push
-    python version_manager.py info
-    python version_manager.py validate
+    python version_manager.py --help
 
-Author: Mendys Robot Scraper Platform Team
+Author: FuzeInfra Platform Team
+Created: 2024
 """
 
 import os
@@ -117,7 +116,7 @@ class Version:
 
 
 class VersionManager:
-    """Manages semantic versioning for the Mendys Robot Scraper Platform."""
+    """Manages semantic versioning for the FuzeInfra Platform."""
     
     def __init__(self, version_file: str = 'version.json'):
         """
@@ -150,8 +149,8 @@ class VersionManager:
             # Create default version file
             default_data = {
                 "version": "0.1.0",
-                "name": "Mendys Robot Scraper Platform",
-                "description": "AI-powered industrial robot data collection & WordPress e-commerce sync",
+                "name": "FuzeInfra Platform",
+                "description": "Generic shared infrastructure platform for microservices development",
                 "build": {
                     "number": 1,
                     "date": datetime.datetime.utcnow().isoformat() + "Z",
@@ -162,8 +161,8 @@ class VersionManager:
                     "backend": "0.1.0",
                     "frontend": "0.1.0",
                     "infrastructure": "0.1.0",
-                    "scrapy_framework": "2.11.0",
-                    "wordpress_sync": "0.1.0"
+                    "monitoring": "0.1.0",
+                    "database": "0.1.0"
                 },
                 "metadata": {
                     "release_date": datetime.date.today().isoformat(),
@@ -321,7 +320,8 @@ class VersionManager:
             self.version_data['components']['backend'] = base_version
             self.version_data['components']['frontend'] = base_version
             self.version_data['components']['infrastructure'] = base_version
-            self.version_data['components']['wordpress_sync'] = base_version
+            self.version_data['components']['monitoring'] = base_version
+            self.version_data['components']['database'] = base_version
         
         self._save_version_data(self.version_data)
         print(f"🎯 Version updated: {new_version}")
@@ -449,7 +449,7 @@ class VersionManager:
 def main():
     """Main CLI interface for the version manager."""
     parser = argparse.ArgumentParser(
-        description="Semantic version management for Mendys Robot Scraper Platform",
+        description="Semantic version management for FuzeInfra Platform",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:

@@ -6,10 +6,10 @@ echo "🚀 Starting shared infrastructure services..."
 cd infrastructure
 
 # Create the shared network if it doesn't exist
-docker network create shared-infra 2>/dev/null || echo "Network 'shared-infra' already exists"
+docker network create FuzeInfra 2>/dev/null || echo "Network 'FuzeInfra' already exists"
 
 # Start all infrastructure services
-docker-compose -f docker-compose.shared-infra.yml up -d
+docker-compose -f docker-compose.FuzeInfra.yml up -d
 
 echo "✅ Infrastructure services started!"
 echo ""

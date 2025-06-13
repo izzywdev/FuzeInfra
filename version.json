@@ -1,0 +1,28 @@
+{
+  "version": "0.3.0",
+  "name": "FuzeInfra Platform",
+  "description": "Generic shared infrastructure platform for microservices development",
+  "build": {
+    "number": 4,
+    "date": "2025-06-13T10:34:33.489865Z",
+    "commit": "303b48d",
+    "branch": "main"
+  },
+  "components": {
+    "backend": "0.3.0",
+    "frontend": "0.3.0",
+    "infrastructure": "0.3.0",
+    "monitoring": "0.3.0",
+    "database": "0.3.0"
+  },
+  "metadata": {
+    "release_date": "2025-06-13",
+    "compatibility": {
+      "python": ">=3.9",
+      "node": ">=16.0.0",
+      "docker": ">=20.0.0"
+    },
+    "database_schema_version": "0.1.0",
+    "api_version": "v1"
+  }
+}

@@ -1,0 +1,44 @@
+@echo off
+REM Generic Project Startup Script Template for Windows
+REM Copy this file to your project root and customize as needed
+
+set PROJECT_NAME=your-project-name
+set COMPOSE_FILE=docker-compose.yml
+set BACKEND_PORT=8080
+set FRONTEND_PORT=3000
+
+echo 🚀 Starting %PROJECT_NAME% services...
+
+REM Check if shared infrastructure is running
+docker network ls | findstr "FuzeInfra" >nul
+if errorlevel 1 (
+    echo ❌ Shared infrastructure network not found!
+    echo Please start infrastructure first: .\infra-up.bat
+    exit /b 1
+)
+
+REM Check if project compose file exists
+if not exist "%COMPOSE_FILE%" (
+    echo ❌ Docker compose file not found: %COMPOSE_FILE%
+    echo Please create your project's docker-compose.yml file
+    exit /b 1
+)
+
+REM Start project services
+echo Starting services from %COMPOSE_FILE%...
+docker-compose -f "%COMPOSE_FILE%" up -d
+
+if errorlevel 1 (
+    echo ❌ Failed to start %PROJECT_NAME% services
+    exit /b 1
+) else (
+    echo ✅ %PROJECT_NAME% services started successfully!
+    echo.
+    echo Services available at:
+    echo   🔧 Backend API:   http://localhost:%BACKEND_PORT%
+    echo   🎨 Frontend:      http://localhost:%FRONTEND_PORT%
+    echo   📊 Prometheus:    http://localhost:9090
+    echo   📈 Grafana:       http://localhost:3001
+    echo.
+    echo To stop: .\project-down.bat
+) 

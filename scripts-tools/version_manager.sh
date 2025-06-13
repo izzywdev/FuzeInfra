@@ -1,9 +1,8 @@
 #!/bin/bash
+# FuzeInfra Platform - Version Manager (Linux/Unix)
+# Provides semantic versioning management functionality
 
-# Mendys Robot Scraper Platform - Version Manager (Linux/Unix)
-# Cross-platform shell script version of version_manager.py
-
-set -e  # Exit on any error
+set -euo pipefail
 
 # Colors for output
 RED='\033[0;31m'
@@ -204,7 +203,7 @@ update_version_file() {
         .components.backend = $version |
         .components.frontend = $version |
         .components.infrastructure = $version |
-        .components.wordpress_sync = $version |
+        .components.web_sync = $version |
         .metadata.release_date = ($build_date | split("T")[0])' \
        "$VERSION_FILE" > "$temp_file"
     
@@ -247,7 +246,8 @@ validate_version() {
 
 # Show usage
 show_usage() {
-    echo "Mendys Robot Scraper Platform - Version Manager (Shell Script)"
+    echo "🏷️ Version Manager"
+    echo "FuzeInfra Platform - Version Manager (Shell Script)"
     echo ""
     echo "Usage: $0 <command> [options]"
     echo ""
@@ -276,6 +276,16 @@ show_usage() {
     echo "  $0 bump patch                    # Bump patch version"
     echo "  $0 bump minor --commit --tag     # Bump minor and commit with tag"
     echo "  $0 set 2.0.0 --commit --push    # Set version and push to remote"
+}
+
+# Show header
+show_header() {
+    echo ""
+    echo -e "${BLUE}========================================${NC}"
+    echo -e "${BLUE}  FuzeInfra Platform - Version Manager${NC}"
+    echo -e "${BLUE}         (Shell Script)${NC}" 
+    echo -e "${BLUE}========================================${NC}"
+    echo ""
 }
 
 # Main function

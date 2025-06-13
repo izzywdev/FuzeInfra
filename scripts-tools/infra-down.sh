@@ -6,9 +6,9 @@ echo "🛑 Stopping shared infrastructure services..."
 cd infrastructure
 
 # Stop all infrastructure services
-docker-compose -f docker-compose.shared-infra.yml down
+docker-compose -f docker-compose.FuzeInfra.yml down
 
 echo "✅ Infrastructure services stopped!"
 echo ""
 echo "Note: Data volumes are preserved. To remove volumes:"
-echo "  docker-compose -f docker-compose.shared-infra.yml down -v" 
+echo "  docker-compose -f docker-compose.FuzeInfra.yml down -v" 

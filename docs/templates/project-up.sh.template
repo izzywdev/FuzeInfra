@@ -1,0 +1,44 @@
+#!/bin/bash
+
+# Generic Project Startup Script Template
+# Copy this file to your project root and customize as needed
+
+PROJECT_NAME="your-project-name"
+COMPOSE_FILE="docker-compose.yml"
+BACKEND_PORT="8080"
+FRONTEND_PORT="3000"
+
+echo "🚀 Starting $PROJECT_NAME services..."
+
+# Check if shared infrastructure is running
+if ! docker network ls | grep -q "FuzeInfra"; then
+    echo "❌ Shared infrastructure network not found!"
+    echo "Please start infrastructure first: ./infra-up.sh"
+    exit 1
+fi
+
+# Check if project compose file exists
+if [ ! -f "$COMPOSE_FILE" ]; then
+    echo "❌ Docker compose file not found: $COMPOSE_FILE"
+    echo "Please create your project's docker-compose.yml file"
+    exit 1
+fi
+
+# Start project services
+echo "Starting services from $COMPOSE_FILE..."
+docker-compose -f "$COMPOSE_FILE" up -d
+
+if [ $? -eq 0 ]; then
+    echo "✅ $PROJECT_NAME services started successfully!"
+    echo ""
+    echo "Services available at:"
+    echo "  🔧 Backend API:   http://localhost:$BACKEND_PORT"
+    echo "  🎨 Frontend:      http://localhost:$FRONTEND_PORT"
+    echo "  📊 Prometheus:    http://localhost:9090"
+    echo "  📈 Grafana:       http://localhost:3001"
+    echo ""
+    echo "To stop: ./project-down.sh"
+else
+    echo "❌ Failed to start $PROJECT_NAME services"
+    exit 1
+fi 

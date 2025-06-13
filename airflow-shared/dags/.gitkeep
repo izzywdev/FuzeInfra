@@ -1,0 +1,3 @@
+# This directory contains shared Airflow DAGs from all projects
+# Each project should organize their DAGs with appropriate prefixes
+# Example: project_name_dag_name.py 

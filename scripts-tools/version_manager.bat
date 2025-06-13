@@ -1,5 +1,5 @@
 @echo off
-REM Version Manager - Windows Batch Wrapper
+REM Version Manager - Windows Batch Wrapper for FuzeInfra Platform
 REM This script provides a convenient way to run version_manager.py on Windows
 
 setlocal
@@ -30,7 +30,7 @@ python scripts-tools\version_manager.py %*
 REM If no arguments provided, show help
 if "%1"=="" (
     echo.
-    echo 🏷️ Version Manager for Mendys Robot Scraper Platform
+    echo 🏷️ Version Manager for FuzeInfra Platform
     echo.
     echo Common usage examples:
     echo   version_manager.bat current

@@ -1,0 +1,473 @@
+networks:
+  FuzeInfra:
+    external: true
+    name: FuzeInfra
+
+services:
+  # ================================
+  # DATABASE SERVICES
+  # ================================
+  
+  # PostgreSQL
+  postgres:
+    image: postgres:15
+    container_name: shared-postgres
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    ports:
+      - "${POSTGRES_PORT}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - FuzeInfra
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # MongoDB
+  mongodb:
+    image: mongo:7
+    container_name: shared-mongodb
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: admin
+      MONGO_INITDB_ROOT_PASSWORD: admin123
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongodb_data:/data/db
+    networks:
+      - FuzeInfra
+    restart: unless-stopped
+
+  # MongoDB Express (Web Interface)
+  mongo-express:
+    image: mongo-express:latest
+    container_name: shared-mongo-express
+    environment:
+      ME_CONFIG_MONGODB_ADMINUSERNAME: admin
+      ME_CONFIG_MONGODB_ADMINPASSWORD: admin123
+      ME_CONFIG_MONGODB_URL: mongodb://admin:admin123@shared-mongodb:27017/
+      ME_CONFIG_BASICAUTH_USERNAME: admin
+      ME_CONFIG_BASICAUTH_PASSWORD: admin
+    ports:
+      - "8081:8081"
+    depends_on:
+      - mongodb
+    networks:
+      - FuzeInfra
+    restart: unless-stopped
+
+  # Redis
+  redis:
+    image: redis:7-alpine
+    container_name: shared-redis
+    ports:
+      - "${REDIS_PORT}:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - FuzeInfra
+    restart: unless-stopped
+    command: redis-server --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Neo4j
+  neo4j:
+    image: neo4j:5
+    container_name: shared-neo4j
+    environment:
+      NEO4J_AUTH: neo4j/password123
+      NEO4J_PLUGINS: '["apoc"]'
+    ports:
+      - "7474:7474"  # HTTP
+      - "7687:7687"  # Bolt
+    volumes:
+      - neo4j_data:/data
+      - neo4j_logs:/logs
+    networks:
+      - FuzeInfra
+    restart: unless-stopped
+
+  # Elasticsearch
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.8.0
+    container_name: shared-elasticsearch
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - "ES_JAVA_OPTS=-Xms512m -Xmx512m"
+    ports:
+      - "9200:9200"
+    volumes:
+      - elasticsearch_data:/usr/share/elasticsearch/data
+    networks:
+      - FuzeInfra
+    restart: unless-stopped
+
+  # ================================
+  # MESSAGE QUEUE SERVICES
+  # ================================
+
+  # Zookeeper (for Kafka)
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.4.0
+    container_name: shared-zookeeper
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    volumes:
+      - zookeeper_data:/var/lib/zookeeper/data
+      - zookeeper_logs:/var/lib/zookeeper/log
+    networks:
+      - FuzeInfra
+    restart: unless-stopped
+
+  # Apache Kafka
+  kafka:
+    image: confluentinc/cp-kafka:7.4.0
+    container_name: shared-kafka
+    depends_on:
+      - zookeeper
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: shared-zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://shared-kafka:9092,PLAINTEXT_HOST://localhost:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: true
+    ports:
+      - "29092:29092"
+    volumes:
+      - kafka_data:/var/lib/kafka/data
+    networks:
+      - FuzeInfra
+    restart: unless-stopped
+
+  # Kafka UI
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: shared-kafka-ui
+    environment:
+      KAFKA_CLUSTERS_0_NAME: local
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: shared-kafka:9092
+      KAFKA_CLUSTERS_0_ZOOKEEPER: shared-zookeeper:2181
+    ports:
+      - "8080:8080"
+    depends_on:
+      - kafka
+      - zookeeper
+    networks:
+      - FuzeInfra
+    restart: unless-stopped
+
+  # RabbitMQ (alternative to Kafka)
+  rabbitmq:
+    image: rabbitmq:3-management
+    container_name: shared-rabbitmq
+    environment:
+      RABBITMQ_DEFAULT_USER: admin
+      RABBITMQ_DEFAULT_PASS: admin123
+    ports:
+      - "5672:5672"   # AMQP
+      - "15672:15672" # Management UI
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    networks:
+      - FuzeInfra
+    restart: unless-stopped
+
+  # ================================
+  # MONITORING & OBSERVABILITY
+  # ================================
+
+  # Prometheus
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: shared-prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--web.enable-lifecycle'
+      - '--web.enable-admin-api'
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring-shared/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    networks:
+      - FuzeInfra
+    restart: unless-stopped
+
+  # Node Exporter
+  node-exporter:
+    image: prom/node-exporter:latest
+    container_name: shared-node-exporter
+    command:
+      - '--path.procfs=/host/proc'
+      - '--path.rootfs=/rootfs'
+      - '--path.sysfs=/host/sys'
+      - '--collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc)($$|/)'
+    ports:
+      - "9100:9100"
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/rootfs:ro
+    networks:
+      - FuzeInfra
+    restart: unless-stopped
+
+  # Alertmanager
+  alertmanager:
+    image: prom/alertmanager:latest
+    container_name: shared-alertmanager
+    ports:
+      - "9093:9093"
+    volumes:
+      - ./monitoring-shared/alertmanager.yml:/etc/alertmanager/alertmanager.yml
+      - alertmanager_data:/alertmanager
+    networks:
+      - FuzeInfra
+    restart: unless-stopped
+
+  # Grafana
+  grafana:
+    image: grafana/grafana:latest
+    container_name: shared-grafana
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_ALLOW_SIGN_UP: false
+    ports:
+      - "3001:3000"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./monitoring-shared/grafana/provisioning:/etc/grafana/provisioning
+    depends_on:
+      - prometheus
+    networks:
+      - FuzeInfra
+    restart: unless-stopped
+
+  # ================================
+  # LOGGING STACK
+  # ================================
+
+  # Loki
+  loki:
+    image: grafana/loki:2.9.0
+    container_name: shared-loki
+    ports:
+      - "3100:3100"
+    volumes:
+      - ./monitoring-shared/loki-config.yml:/etc/loki/local-config.yaml
+      - loki_data:/loki
+    command: -config.file=/etc/loki/local-config.yaml
+    networks:
+      - FuzeInfra
+    restart: unless-stopped
+
+  # Promtail
+  promtail:
+    image: grafana/promtail:2.9.0
+    container_name: shared-promtail
+    volumes:
+      - ./monitoring-shared/promtail-config.yml:/etc/promtail/config.yml
+      - /var/log:/var/log:ro
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+    command: -config.file=/etc/promtail/config.yml
+    depends_on:
+      - loki
+    networks:
+      - FuzeInfra
+    restart: unless-stopped
+
+  # ================================
+  # WORKFLOW ORCHESTRATION (AIRFLOW)
+  # ================================
+
+  # Airflow Database Initialization
+  airflow-init:
+    image: apache/airflow:2.7.0
+    container_name: shared-airflow-init
+    environment:
+      AIRFLOW__CORE__EXECUTOR: CeleryExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/airflow
+      AIRFLOW__CELERY__RESULT_BACKEND: db+postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/airflow
+      AIRFLOW__CELERY__BROKER_URL: redis://redis:6379/0
+      AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW_FERNET_KEY}
+      AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'true'
+      AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
+      AIRFLOW__API__AUTH_BACKENDS: 'airflow.api.auth.backend.basic_auth'
+      AIRFLOW__WEBSERVER__EXPOSE_CONFIG: 'true'
+      _AIRFLOW_DB_UPGRADE: 'true'
+      _AIRFLOW_WWW_USER_CREATE: 'true'
+      _AIRFLOW_WWW_USER_USERNAME: ${AIRFLOW_ADMIN_USER}
+      _AIRFLOW_WWW_USER_PASSWORD: ${AIRFLOW_ADMIN_PASSWORD}
+    volumes:
+      - ./airflow-shared/dags:/opt/airflow/dags
+      - ./airflow-shared/logs:/opt/airflow/logs
+      - ./airflow-shared/plugins:/opt/airflow/plugins
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - FuzeInfra
+    restart: "no"
+    command: >
+      bash -c "
+        # Wait for database to be ready
+        while ! pg_isready -h postgres -p 5432 -U ${POSTGRES_USER}; do
+          echo 'Waiting for PostgreSQL...'
+          sleep 2
+        done
+        
+        # Create airflow database if it doesn't exist
+        PGPASSWORD=${POSTGRES_PASSWORD} psql -h postgres -U ${POSTGRES_USER} -d postgres -tc \"SELECT 1 FROM pg_database WHERE datname = 'airflow'\" | grep -q 1 || PGPASSWORD=${POSTGRES_PASSWORD} psql -h postgres -U ${POSTGRES_USER} -d postgres -c \"CREATE DATABASE airflow\"
+        
+        # Initialize Airflow database
+        airflow db init
+        
+        # Create admin user (ignore if exists)
+        airflow users create --username ${AIRFLOW_ADMIN_USER} --firstname Admin --lastname User --role Admin --email admin@example.com --password ${AIRFLOW_ADMIN_PASSWORD} || true
+      "
+
+  # Airflow Webserver
+  airflow-webserver:
+    image: apache/airflow:2.7.0
+    container_name: shared-airflow-webserver
+    environment:
+      AIRFLOW__CORE__EXECUTOR: CeleryExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/airflow
+      AIRFLOW__CELERY__RESULT_BACKEND: db+postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/airflow
+      AIRFLOW__CELERY__BROKER_URL: redis://redis:6379/0
+      AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW_FERNET_KEY}
+      AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'true'
+      AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
+      AIRFLOW__API__AUTH_BACKENDS: 'airflow.api.auth.backend.basic_auth'
+      AIRFLOW__WEBSERVER__EXPOSE_CONFIG: 'true'
+    volumes:
+      - ./airflow-shared/dags:/opt/airflow/dags
+      - ./airflow-shared/logs:/opt/airflow/logs
+      - ./airflow-shared/plugins:/opt/airflow/plugins
+    ports:
+      - "${AIRFLOW_PORT}:8080"
+    depends_on:
+      - airflow-init
+    networks:
+      - FuzeInfra
+    restart: unless-stopped
+    command: webserver
+
+  # Airflow Scheduler
+  airflow-scheduler:
+    image: apache/airflow:2.7.0
+    container_name: shared-airflow-scheduler
+    environment:
+      AIRFLOW__CORE__EXECUTOR: CeleryExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/airflow
+      AIRFLOW__CELERY__RESULT_BACKEND: db+postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/airflow
+      AIRFLOW__CELERY__BROKER_URL: redis://redis:6379/0
+      AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW_FERNET_KEY}
+      AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'true'
+      AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
+    volumes:
+      - ./airflow-shared/dags:/opt/airflow/dags
+      - ./airflow-shared/logs:/opt/airflow/logs
+      - ./airflow-shared/plugins:/opt/airflow/plugins
+    depends_on:
+      - airflow-init
+    networks:
+      - FuzeInfra
+    restart: unless-stopped
+    command: scheduler
+
+  # Airflow Worker
+  airflow-worker:
+    image: apache/airflow:2.7.0
+    container_name: shared-airflow-worker
+    environment:
+      AIRFLOW__CORE__EXECUTOR: CeleryExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/airflow
+      AIRFLOW__CELERY__RESULT_BACKEND: db+postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/airflow
+      AIRFLOW__CELERY__BROKER_URL: redis://redis:6379/0
+      AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW_FERNET_KEY}
+      AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'true'
+      AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
+    volumes:
+      - ./airflow-shared/dags:/opt/airflow/dags
+      - ./airflow-shared/logs:/opt/airflow/logs
+      - ./airflow-shared/plugins:/opt/airflow/plugins
+    depends_on:
+      - airflow-init
+    networks:
+      - FuzeInfra
+    restart: unless-stopped
+    command: celery worker
+
+  # Airflow Flower
+  airflow-flower:
+    image: apache/airflow:2.7.0
+    container_name: shared-airflow-flower
+    environment:
+      AIRFLOW__CORE__EXECUTOR: CeleryExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/airflow
+      AIRFLOW__CELERY__RESULT_BACKEND: db+postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/airflow
+      AIRFLOW__CELERY__BROKER_URL: redis://redis:6379/0
+      AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW_FERNET_KEY}
+    ports:
+      - "${AIRFLOW_FLOWER_PORT}:5555"
+    depends_on:
+      - airflow-init
+    networks:
+      - FuzeInfra
+    restart: unless-stopped
+    command: celery flower
+
+volumes:
+  # Database volumes
+  postgres_data:
+    name: shared-postgres-data
+  mongodb_data:
+    name: shared-mongodb-data
+  redis_data:
+    name: shared-redis-data
+  neo4j_data:
+    name: shared-neo4j-data
+  neo4j_logs:
+    name: shared-neo4j-logs
+  elasticsearch_data:
+    name: shared-elasticsearch-data
+  
+  # Message queue volumes
+  kafka_data:
+    name: shared-kafka-data
+  zookeeper_data:
+    name: shared-zookeeper-data
+  zookeeper_logs:
+    name: shared-zookeeper-logs
+  rabbitmq_data:
+    name: shared-rabbitmq-data
+  
+  # Monitoring volumes
+  prometheus_data:
+    name: shared-prometheus-data
+  grafana_data:
+    name: shared-grafana-data
+  alertmanager_data:
+    name: shared-alertmanager-data
+  loki_data:
+    name: shared-loki-data 

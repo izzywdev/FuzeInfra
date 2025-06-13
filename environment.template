@@ -1,0 +1,176 @@
+# FuzeInfra Platform Environment Configuration Template
+# Copy this file to .env and customize the values for your environment
+# cp environment.template .env
+
+# =============================================================================
+# NETWORK CONFIGURATION
+# =============================================================================
+COMPOSE_PROJECT_NAME=fuzeinfra
+NETWORK_NAME=FuzeInfra
+
+# =============================================================================
+# DATABASE SERVICES
+# =============================================================================
+
+# PostgreSQL Configuration
+POSTGRES_HOST=localhost
+POSTGRES_PORT=5432
+POSTGRES_DB=fuzeinfra_db
+POSTGRES_USER=fuzeinfra
+POSTGRES_PASSWORD=fuzeinfra_secure_password
+
+# MongoDB Configuration
+MONGODB_HOST=localhost
+MONGODB_PORT=27017
+MONGO_INITDB_ROOT_USERNAME=admin
+MONGO_INITDB_ROOT_PASSWORD=mongodb_secure_password
+MONGODB_DATABASE=fuzeinfra
+
+# MongoDB Express (Web UI)
+ME_CONFIG_MONGODB_ADMINUSERNAME=admin
+ME_CONFIG_MONGODB_ADMINPASSWORD=mongodb_secure_password
+ME_CONFIG_BASICAUTH_USERNAME=admin
+ME_CONFIG_BASICAUTH_PASSWORD=admin_ui_password
+
+# Redis Configuration
+REDIS_HOST=localhost
+REDIS_PORT=6379
+REDIS_PASSWORD=redis_secure_password
+
+# Neo4j Configuration
+NEO4J_HOST=localhost
+NEO4J_HTTP_PORT=7474
+NEO4J_BOLT_PORT=7687
+NEO4J_AUTH=neo4j/neo4j_secure_password
+
+# Elasticsearch Configuration
+ELASTICSEARCH_HOST=localhost
+ELASTICSEARCH_PORT=9200
+ES_JAVA_OPTS=-Xms512m -Xmx512m
+
+# =============================================================================
+# MESSAGE QUEUE SERVICES
+# =============================================================================
+
+# Kafka Configuration
+KAFKA_HOST=localhost
+KAFKA_PORT=29092
+KAFKA_BROKER_ID=1
+ZOOKEEPER_CLIENT_PORT=2181
+ZOOKEEPER_TICK_TIME=2000
+
+# RabbitMQ Configuration
+RABBITMQ_HOST=localhost
+RABBITMQ_PORT=5672
+RABBITMQ_MANAGEMENT_PORT=15672
+RABBITMQ_DEFAULT_USER=admin
+RABBITMQ_DEFAULT_PASS=rabbitmq_secure_password
+
+# =============================================================================
+# MONITORING & OBSERVABILITY
+# =============================================================================
+
+# Prometheus Configuration
+PROMETHEUS_HOST=localhost
+PROMETHEUS_PORT=9090
+
+# Grafana Configuration
+GRAFANA_HOST=localhost
+GRAFANA_PORT=3001
+GRAFANA_ADMIN_USER=admin
+GRAFANA_ADMIN_PASSWORD=grafana_secure_password
+
+# Alertmanager Configuration
+ALERTMANAGER_HOST=localhost
+ALERTMANAGER_PORT=9093
+
+# Node Exporter Configuration
+NODE_EXPORTER_PORT=9100
+
+# =============================================================================
+# LOGGING SERVICES
+# =============================================================================
+
+# Loki Configuration
+LOKI_HOST=localhost
+LOKI_PORT=3100
+
+# =============================================================================
+# WORKFLOW SERVICES
+# =============================================================================
+
+# Airflow Configuration
+AIRFLOW_HOST=localhost
+AIRFLOW_PORT=8082
+AIRFLOW_FLOWER_PORT=5555
+AIRFLOW_ADMIN_USER=admin
+AIRFLOW_ADMIN_PASSWORD=your_secure_airflow_password
+AIRFLOW_FERNET_KEY=your_secure_fernet_key_here
+
+# =============================================================================
+# APPLICATION CONFIGURATION
+# =============================================================================
+
+# General Application Settings
+APP_ENV=development
+APP_DEBUG=true
+APP_LOG_LEVEL=info
+
+# API Configuration
+API_HOST=localhost
+API_PORT=8090
+API_VERSION=v1
+
+# Frontend Configuration
+FRONTEND_HOST=localhost
+FRONTEND_PORT=3000
+
+# =============================================================================
+# SECURITY SETTINGS
+# =============================================================================
+
+# JWT/Token Configuration
+JWT_SECRET=your_jwt_secret_key_here_change_in_production
+JWT_EXPIRATION=24h
+
+# Encryption Keys
+ENCRYPTION_KEY=your_encryption_key_here_change_in_production
+
+# =============================================================================
+# EXTERNAL SERVICES (Optional)
+# =============================================================================
+
+# Email Configuration (if needed)
+SMTP_HOST=
+SMTP_PORT=587
+SMTP_USER=
+SMTP_PASSWORD=
+SMTP_SECURE=true
+
+# AWS Configuration (if needed)
+AWS_ACCESS_KEY_ID=
+AWS_SECRET_ACCESS_KEY=
+AWS_REGION=us-east-1
+
+# =============================================================================
+# DEVELOPMENT SETTINGS
+# =============================================================================
+
+# Development specific settings
+DEV_MODE=true
+ENABLE_CORS=true
+ENABLE_SWAGGER=true
+
+# Backup and Data Persistence
+BACKUP_ENABLED=false
+BACKUP_SCHEDULE=0 2 * * *
+DATA_RETENTION_DAYS=30
+
+# =============================================================================
+# IMPORTANT SECURITY NOTES
+# =============================================================================
+# 1. Change all default passwords before production use
+# 2. Use strong, unique passwords for each service
+# 3. Keep the .env file secure and never commit it to version control
+# 4. Consider using secrets management in production
+# ============================================================================= 

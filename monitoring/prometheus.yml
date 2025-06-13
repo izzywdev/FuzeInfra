@@ -17,29 +17,28 @@ scrape_configs:
     static_configs:
       - targets: ['node-exporter:9100']
 
-  # Robotics application metrics
-  - job_name: 'robot-crawler'
+  # PostgreSQL metrics (if postgres_exporter is added)
+  - job_name: 'postgres'
     static_configs:
-      - targets: ['robot-crawler:8000']
-    metrics_path: '/metrics'
+      - targets: ['postgres-exporter:9187']
     scrape_interval: 30s
 
-  # Kafka metrics
-  - job_name: 'kafka'
+  # MongoDB metrics (if mongodb_exporter is added)
+  - job_name: 'mongodb'
     static_configs:
-      - targets: ['kafka:9101']
+      - targets: ['mongodb-exporter:9216']
     scrape_interval: 30s
 
   # Redis metrics (if redis_exporter is added)
   - job_name: 'redis'
     static_configs:
-      - targets: ['redis:6379']
+      - targets: ['redis-exporter:9121']
     scrape_interval: 30s
 
-  # PostgreSQL metrics (if postgres_exporter is added)
-  - job_name: 'postgres'
+  # Kafka metrics (if kafka_exporter is added)
+  - job_name: 'kafka'
     static_configs:
-      - targets: ['postgres:5432']
+      - targets: ['kafka-exporter:9308']
     scrape_interval: 30s
 
   # Docker container metrics
@@ -48,8 +47,14 @@ scrape_configs:
       - targets: ['cadvisor:8080']
     scrape_interval: 30s
 
+  # Elasticsearch metrics (if elasticsearch_exporter is added)
+  - job_name: 'elasticsearch'
+    static_configs:
+      - targets: ['elasticsearch-exporter:9114']
+    scrape_interval: 30s
+
 alerting:
   alertmanagers:
     - static_configs:
         - targets:
-          # - alertmanager:9093 
+          - alertmanager:9093 
