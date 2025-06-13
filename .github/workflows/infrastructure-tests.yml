@@ -81,12 +81,95 @@ jobs:
 
     - name: Wait for services to be ready
       run: |
-        echo "Waiting for services to start..."
-        sleep 90
-        echo "Checking service status..."
+        echo "🚀 Starting service readiness checks..."
+        
+        # Function to wait for container health
+        wait_for_health() {
+          local container=$1
+          local max_attempts=30
+          local attempt=1
+          
+          echo "⏳ Waiting for $container to be healthy..."
+          while [ $attempt -le $max_attempts ]; do
+            if docker inspect --format='{{.State.Health.Status}}' $container 2>/dev/null | grep -q "healthy"; then
+              echo "✅ $container is healthy"
+              return 0
+            fi
+            echo "   Attempt $attempt/$max_attempts - waiting..."
+            sleep 5
+            ((attempt++))
+          done
+          echo "❌ $container failed to become healthy"
+          return 1
+        }
+        
+        # Function to wait for service port
+        wait_for_port() {
+          local service=$1
+          local port=$2
+          local max_attempts=30
+          local attempt=1
+          
+          echo "⏳ Waiting for $service on port $port..."
+          while [ $attempt -le $max_attempts ]; do
+            if curl -f -s http://localhost:$port > /dev/null 2>&1; then
+              echo "✅ $service is responding on port $port"
+              return 0
+            fi
+            echo "   Attempt $attempt/$max_attempts - waiting..."
+            sleep 5
+            ((attempt++))
+          done
+          echo "❌ $service failed to respond on port $port"
+          return 1
+        }
+        
+        # Function to wait for database connection
+        wait_for_db() {
+          local container=$1
+          local command=$2
+          local max_attempts=30
+          local attempt=1
+          
+          echo "⏳ Waiting for database $container..."
+          while [ $attempt -le $max_attempts ]; do
+            if docker exec $container $command > /dev/null 2>&1; then
+              echo "✅ Database $container is ready"
+              return 0
+            fi
+            echo "   Attempt $attempt/$max_attempts - waiting..."
+            sleep 5
+            ((attempt++))
+          done
+          echo "❌ Database $container failed to become ready"
+          return 1
+        }
+        
+        # Wait for services with health checks first
+        echo "📋 Phase 1: Services with health checks"
+        wait_for_health fuzeinfra-postgres || exit 1
+        wait_for_health fuzeinfra-redis || exit 1
+        
+        # Wait for database services
+        echo "📋 Phase 2: Database services"
+        wait_for_db fuzeinfra-mongodb "mongosh --eval 'db.adminCommand(\"ping\")'" || exit 1
+        
+        # Wait for web services
+        echo "📋 Phase 3: Web services"
+        wait_for_port "Neo4j" 7474 || exit 1
+        wait_for_port "Elasticsearch" 9200 || exit 1
+        wait_for_port "Kafka UI" 8080 || exit 1
+        wait_for_port "RabbitMQ Management" 15672 || exit 1
+        wait_for_port "Prometheus" 9090 || exit 1
+        wait_for_port "Grafana" 3001 || exit 1
+        
+        # Wait for Airflow (takes longer to start)
+        echo "📋 Phase 4: Airflow services"
+        wait_for_port "Airflow" 8082 || exit 1
+        
+        echo "🎉 All services are ready!"
+        echo "📊 Final service status:"
         docker-compose -f docker-compose.FuzeInfra.yml ps
-        echo "Checking Docker system resources..."
-        docker system df
 
     - name: Test PostgreSQL
       run: |
@@ -147,8 +230,41 @@ jobs:
     - name: Test Airflow
       run: |
         echo "Testing Airflow connection..."
-        timeout 60 bash -c 'until curl -f http://localhost:8082; do sleep 5; done'
+        echo "⏳ Checking if airflow-init completed..."
+        
+        # Wait for airflow-init to complete (it should exit with code 0)
+        max_init_wait=60
+        init_wait=0
+        while [ $init_wait -lt $max_init_wait ]; do
+          if ! docker ps --filter "name=fuzeinfra-airflow-init" --filter "status=running" | grep -q fuzeinfra-airflow-init; then
+            echo "✅ Airflow initialization completed"
+            break
+          fi
+          echo "   Waiting for airflow-init to complete... ($init_wait/$max_init_wait)"
+          sleep 5
+          ((init_wait+=5))
+        done
+        
+        # Check airflow-init exit code
+        init_exit_code=$(docker inspect fuzeinfra-airflow-init --format='{{.State.ExitCode}}' 2>/dev/null || echo "1")
+        if [ "$init_exit_code" != "0" ]; then
+          echo "❌ Airflow initialization failed with exit code: $init_exit_code"
+          echo "=== Airflow Init Logs ==="
+          docker logs fuzeinfra-airflow-init --tail=50
+          exit 1
+        fi
+        
+        echo "⏳ Waiting for Airflow webserver to start (this may take 2-3 minutes)..."
+        timeout 180 bash -c 'until curl -f -s http://localhost:8082/health > /dev/null 2>&1; do 
+          echo "   Still waiting for Airflow webserver..."
+          sleep 10
+        done'
+        
         echo "✅ Airflow webserver is accessible"
+        
+        # Additional verification
+        echo "🔍 Verifying Airflow services..."
+        curl -s http://localhost:8082/health | head -5 || echo "Health endpoint not available, but service is responding"
 
     - name: Run comprehensive infrastructure tests
       run: |
