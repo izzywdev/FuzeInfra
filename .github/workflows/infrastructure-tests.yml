@@ -32,35 +32,24 @@ jobs:
 
     - name: Create environment file
       run: |
-        # Create .env file non-interactively for CI
         cp environment.template .env
-        # Replace placeholders with secure values for testing
-        python -c "
-import secrets, string, base64
-def gen_pass(): return ''.join(secrets.choice(string.ascii_letters + string.digits) for _ in range(16))
-def gen_key(): return base64.urlsafe_b64encode(secrets.token_bytes(32)).decode()
-with open('.env', 'r') as f: content = f.read()
-replacements = {
-    'your_secure_postgres_password': gen_pass(),
-    'your_secure_mongodb_password': gen_pass(),
-    'your_secure_admin_ui_password': gen_pass(),
-    'your_secure_redis_password': gen_pass(),
-    'your_secure_neo4j_password': gen_pass(),
-    'your_secure_rabbitmq_password': gen_pass(),
-    'your_secure_grafana_password': gen_pass(),
-    'your_secure_airflow_password': gen_pass(),
-    'your_secure_fernet_key_here': gen_key(),
-    'your_jwt_secret_key_here_change_in_production': secrets.token_urlsafe(32),
-    'your_encryption_key_here_change_in_production': secrets.token_urlsafe(32)
-}
-for old, new in replacements.items(): content = content.replace(old, new)
-with open('.env', 'w') as f: f.write(content)
-print('✅ Environment file configured for CI')
-"
+        sed -i 's/your_secure_postgres_password/testpass123/g' .env
+        sed -i 's/your_secure_mongodb_password/testpass123/g' .env
+        sed -i 's/your_secure_admin_ui_password/testpass123/g' .env
+        sed -i 's/your_secure_redis_password/testpass123/g' .env
+        sed -i 's/your_secure_neo4j_password/testpass123/g' .env
+        sed -i 's/your_secure_rabbitmq_password/testpass123/g' .env
+        sed -i 's/your_secure_grafana_password/testpass123/g' .env
+        sed -i 's/your_secure_airflow_password/testpass123/g' .env
+        sed -i 's/your_secure_fernet_key_here/dGVzdGtleWZvcmNpdGVzdGluZ29ubHkxMjM0NTY3ODkw/g' .env
+        sed -i 's/your_jwt_secret_key_here_change_in_production/testjwtsecret123/g' .env
+        sed -i 's/your_encryption_key_here_change_in_production/testencryptionkey123/g' .env
+        echo "✅ Environment file configured for CI"
 
     - name: Run basic tests
       run: |
         echo "✅ Basic workflow test passed"
         echo "Environment file created successfully"
         ls -la .env
-      continue-on-error: true 
+        echo "First few lines of .env:"
+        head -5 .env 
