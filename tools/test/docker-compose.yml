@@ -1,0 +1,375 @@
+networks:
+  FuzeInfra:
+    external: true
+    name: FuzeInfra
+
+services:
+  # ================================
+  # DATABASE SERVICES
+  # ================================
+  
+  # PostgreSQL
+  postgres:
+    image: postgres:15
+    container_name: test-postgres
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    ports:
+      - "${POSTGRES_PORT}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - FuzeInfra
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # MongoDB
+  mongodb:
+    image: mongo:7
+    container_name: test-mongodb
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: admin
+      MONGO_INITDB_ROOT_PASSWORD: admin123
+    ports:
+      - "${MONGODB_PORT}:27017"
+    volumes:
+      - mongodb_data:/data/db
+    networks:
+      - FuzeInfra
+    restart: unless-stopped
+
+  # MongoDB Express (Web Interface)
+  mongo-express:
+    image: mongo-express:latest
+    container_name: test-mongo-express
+    environment:
+      ME_CONFIG_MONGODB_ADMINUSERNAME: admin
+      ME_CONFIG_MONGODB_ADMINPASSWORD: admin123
+      ME_CONFIG_MONGODB_URL: mongodb://admin:admin123@test-mongodb:27017/
+      ME_CONFIG_BASICAUTH_USERNAME: admin
+      ME_CONFIG_BASICAUTH_PASSWORD: admin
+    ports:
+      - "${MONGO_EXPRESS_PORT}:8081"
+    depends_on:
+      - mongodb
+    networks:
+      - FuzeInfra
+    restart: unless-stopped
+
+  # Redis
+  redis:
+    image: redis:7-alpine
+    container_name: test-redis
+    ports:
+      - "${REDIS_PORT}:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - FuzeInfra
+    restart: unless-stopped
+    command: redis-server --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Neo4j
+  neo4j:
+    image: neo4j:5
+    container_name: test-neo4j
+    environment:
+      NEO4J_AUTH: neo4j/password123
+      NEO4J_PLUGINS: '["apoc"]'
+    ports:
+      - "${NEO4J_HTTP_PORT}:7474"  # HTTP
+      - "${NEO4J_BOLT_PORT}:7687"  # Bolt
+    volumes:
+      - neo4j_data:/data
+      - neo4j_logs:/logs
+    networks:
+      - FuzeInfra
+    restart: unless-stopped
+
+  # Elasticsearch
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.8.0
+    container_name: test-elasticsearch
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - "ES_JAVA_OPTS=-Xms512m -Xmx512m"
+    ports:
+      - "${ELASTICSEARCH_PORT}:9200"
+    volumes:
+      - elasticsearch_data:/usr/share/elasticsearch/data
+    networks:
+      - FuzeInfra
+    restart: unless-stopped
+
+  # ================================
+  # MESSAGE QUEUE SERVICES
+  # ================================
+
+  # Zookeeper (for Kafka)
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.4.0
+    container_name: test-zookeeper
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    volumes:
+      - zookeeper_data:/var/lib/zookeeper/data
+      - zookeeper_logs:/var/lib/zookeeper/log
+    networks:
+      - FuzeInfra
+    restart: unless-stopped
+
+  # Apache Kafka
+  kafka:
+    image: confluentinc/cp-kafka:7.4.0
+    container_name: test-kafka
+    depends_on:
+      - zookeeper
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: test-zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://test-kafka:9092,PLAINTEXT_HOST://localhost:${KAFKA_EXTERNAL_PORT}
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: true
+    ports:
+      - "${KAFKA_EXTERNAL_PORT}:29092"
+    volumes:
+      - kafka_data:/var/lib/kafka/data
+    networks:
+      - FuzeInfra
+    restart: unless-stopped
+
+  # Kafka UI
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: test-kafka-ui
+    environment:
+      KAFKA_CLUSTERS_0_NAME: local
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: test-kafka:9092
+      KAFKA_CLUSTERS_0_ZOOKEEPER: test-zookeeper:2181
+    ports:
+      - "${KAFKA_UI_PORT}:8080"
+    depends_on:
+      - kafka
+      - zookeeper
+    networks:
+      - FuzeInfra
+    restart: unless-stopped
+
+  # RabbitMQ (alternative to Kafka)
+  rabbitmq:
+    image: rabbitmq:3-management
+    container_name: test-rabbitmq
+    environment:
+      RABBITMQ_DEFAULT_USER: admin
+      RABBITMQ_DEFAULT_PASS: admin123
+    ports:
+      - "${RABBITMQ_AMQP_PORT}:5672"   # AMQP
+      - "${RABBITMQ_MANAGEMENT_PORT}:15672" # Management UI
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    networks:
+      - FuzeInfra
+    restart: unless-stopped
+
+  # ================================
+  # MONITORING & OBSERVABILITY
+  # ================================
+
+  # Prometheus
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: test-prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--web.enable-lifecycle'
+      - '--web.enable-admin-api'
+    ports:
+      - "${PROMETHEUS_PORT}:9090"
+    volumes:
+      - ./monitoring-shared/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    networks:
+      - FuzeInfra
+    restart: unless-stopped
+
+  # Node Exporter
+  node-exporter:
+    image: prom/node-exporter:latest
+    container_name: test-node-exporter
+    command:
+      - '--path.procfs=/host/proc'
+      - '--path.rootfs=/rootfs'
+      - '--path.sysfs=/host/sys'
+      - '--collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc)($$|/)'
+    ports:
+      - "${NODE_EXPORTER_PORT}:9100"
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/rootfs:ro
+    networks:
+      - FuzeInfra
+    restart: unless-stopped
+
+  # Alertmanager
+  alertmanager:
+    image: prom/alertmanager:latest
+    container_name: test-alertmanager
+    ports:
+      - "${ALERTMANAGER_PORT}:9093"
+    volumes:
+      - ./monitoring-shared/alertmanager.yml:/etc/alertmanager/alertmanager.yml
+      - alertmanager_data:/alertmanager
+    networks:
+      - FuzeInfra
+    restart: unless-stopped
+
+  # Grafana
+  grafana:
+    image: grafana/grafana:latest
+    container_name: test-grafana
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_ALLOW_SIGN_UP: false
+    ports:
+      - "${GRAFANA_PORT}:3000"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./monitoring-shared/grafana/provisioning:/etc/grafana/provisioning
+    depends_on:
+      - prometheus
+    networks:
+      - FuzeInfra
+    restart: unless-stopped
+
+  # ================================
+  # LOGGING STACK
+  # ================================
+
+  # Loki
+  loki:
+    image: grafana/loki:2.9.0
+    container_name: test-loki
+    ports:
+      - "${LOKI_PORT}:3100"
+    volumes:
+      - ./monitoring-shared/loki-config.yml:/etc/loki/local-config.yaml
+      - loki_data:/loki
+    command: -config.file=/etc/loki/local-config.yaml
+    networks:
+      - FuzeInfra
+    restart: unless-stopped
+
+  # Promtail
+  promtail:
+    image: grafana/promtail:2.9.0
+    container_name: test-promtail
+    volumes:
+      - ./monitoring-shared/promtail-config.yml:/etc/promtail/config.yml
+      - /var/log:/var/log:ro
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+    command: -config.file=/etc/promtail/config.yml
+    depends_on:
+      - loki
+    networks:
+      - FuzeInfra
+    restart: unless-stopped
+
+  # ================================
+  # WORKFLOW ORCHESTRATION (AIRFLOW)
+  # ================================
+
+  # Airflow Webserver
+  airflow-webserver:
+    image: apache/airflow:2.7.0
+    container_name: test-airflow-webserver
+    environment:
+      AIRFLOW__CORE__EXECUTOR: CeleryExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/airflow
+      AIRFLOW__CELERY__RESULT_BACKEND: db+postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/airflow
+      AIRFLOW__CELERY__BROKER_URL: redis://redis:6379/0
+      AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW_FERNET_KEY}
+      AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'true'
+      AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
+      AIRFLOW__API__AUTH_BACKENDS: 'airflow.api.auth.backend.basic_auth'
+      AIRFLOW__WEBSERVER__EXPOSE_CONFIG: 'true'
+    volumes:
+      - ./airflow-shared/dags:/opt/airflow/dags
+      - ./airflow-shared/logs:/opt/airflow/logs
+      - ./airflow-shared/plugins:/opt/airflow/plugins
+    ports:
+      - "${AIRFLOW_PORT}:8080"
+    networks:
+      - FuzeInfra
+    restart: unless-stopped
+    command: webserver
+
+  # Airflow Flower
+  airflow-flower:
+    image: apache/airflow:2.7.0
+    container_name: test-airflow-flower
+    environment:
+      AIRFLOW__CORE__EXECUTOR: CeleryExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/airflow
+      AIRFLOW__CELERY__RESULT_BACKEND: db+postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/airflow
+      AIRFLOW__CELERY__BROKER_URL: redis://redis:6379/0
+      AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW_FERNET_KEY}
+    ports:
+      - "${AIRFLOW_FLOWER_PORT}:5555"
+    networks:
+      - FuzeInfra
+    restart: unless-stopped
+    command: celery flower
+
+volumes:
+  # Database volumes
+  postgres_data:
+    name: test_postgres_data
+  mongodb_data:
+    name: test_mongodb_data
+  redis_data:
+    name: test_redis_data
+  neo4j_data:
+    name: test_neo4j_data
+  neo4j_logs:
+    name: test_neo4j_logs
+  elasticsearch_data:
+    name: test_elasticsearch_data
+  
+  # Message Queue volumes
+  zookeeper_data:
+    name: test_zookeeper_data
+  zookeeper_logs:
+    name: test_zookeeper_logs
+  kafka_data:
+    name: test_kafka_data
+  rabbitmq_data:
+    name: test_rabbitmq_data
+  
+  # Monitoring volumes
+  prometheus_data:
+    name: test_prometheus_data
+  alertmanager_data:
+    name: test_alertmanager_data
+  grafana_data:
+    name: test_grafana_data
+  loki_data:
+    name: test_loki_data 

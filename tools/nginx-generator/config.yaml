@@ -1,0 +1,24 @@
+templates_dir: "templates"
+output_dir: "../../infrastructure/shared-nginx/conf.d"
+domain_suffix: "dev.local"
+default_template: "fullstack.conf.template"
+
+# Nginx management
+nginx_reload_command: "docker exec fuzeinfra-shared-nginx nginx -s reload"
+nginx_test_command: "docker exec fuzeinfra-shared-nginx nginx -t"
+
+# SSL configuration (for future enhancement)
+ssl:
+  enabled: false
+  cert_path: "/etc/nginx/ssl"
+  
+# Load balancing settings
+load_balancing:
+  enabled: false
+  method: "round_robin"  # round_robin, least_conn, ip_hash
+  
+# Rate limiting
+rate_limiting:
+  enabled: false
+  rate: "10r/s"
+  burst: 20 

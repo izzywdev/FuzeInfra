@@ -1,0 +1,32 @@
+env_file_name: ".env"
+backup_suffix: ".backup"
+template_dir: "templates"
+
+# Additional variables to inject into .env files
+additional_variables:
+  HOST: "0.0.0.0"
+  NODE_ENV: "development"
+  
+# Service-specific additional variables
+service_variables:
+  frontend:
+    FRONTEND_HOST: "0.0.0.0"
+  backend:
+    BACKEND_HOST: "0.0.0.0"
+    API_PREFIX: "/api"
+  database:
+    DB_HOST: "localhost"
+  cache:
+    CACHE_HOST: "localhost"
+
+# Template configurations for different project types
+templates:
+  fullstack:
+    file: "fullstack.env.template"
+    services: ["frontend", "backend", "database", "cache"]
+  frontend_only:
+    file: "frontend.env.template" 
+    services: ["frontend"]
+  api_only:
+    file: "api.env.template"
+    services: ["backend", "database"] 

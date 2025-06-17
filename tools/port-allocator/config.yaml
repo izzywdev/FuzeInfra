@@ -1,0 +1,44 @@
+port_ranges:
+  - start: 3000
+    end: 3999
+    description: "Frontend applications"
+  - start: 5000
+    end: 5999
+    description: "Backend APIs"
+  - start: 6000
+    end: 6999
+    description: "Database services"
+  - start: 7000
+    end: 7999
+    description: "Cache services"
+
+consecutive_block_size: 5
+
+# Ports to exclude from allocation (commonly used system/database ports)
+excluded_ports:
+  - 5432  # PostgreSQL
+  - 6379  # Redis
+  - 3306  # MySQL
+  - 27017 # MongoDB
+  - 3000  # Common dev server
+  - 8080  # Common proxy/web server
+  - 9090  # Prometheus
+  - 9093  # Alertmanager
+
+# Service type to port range mapping
+service_mappings:
+  frontend:
+    start: 3000
+    end: 3999
+  backend:
+    start: 5000
+    end: 5999
+  database:
+    start: 6000
+    end: 6999
+  cache:
+    start: 7000
+    end: 7999
+  monitoring:
+    start: 8000
+    end: 8999 
