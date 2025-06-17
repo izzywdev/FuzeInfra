@@ -297,10 +297,10 @@ services:
   # SHARED NGINX PROXY
   # ================================
 
-  # Shared Nginx for all projects
-  shared-nginx:
+  # Nginx reverse proxy for all projects
+  nginx:
     image: nginx:alpine
-    container_name: fuzeinfra-shared-nginx
+    container_name: fuzeinfra-nginx
     ports:
       - "8008:80"
       - "8443:443"
