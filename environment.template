@@ -48,6 +48,11 @@ ELASTICSEARCH_HOST=localhost
 ELASTICSEARCH_PORT=9200
 ES_JAVA_OPTS=-Xms512m -Xmx512m
 
+# ChromaDB Configuration
+CHROMADB_HOST=localhost
+CHROMADB_PORT=8003
+CHROMADB_PERSIST_DIRECTORY=/chroma/chroma
+
 # =============================================================================
 # MESSAGE QUEUE SERVICES
 # =============================================================================
