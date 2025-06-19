@@ -113,6 +113,36 @@ services:
       - FuzeInfra
     restart: unless-stopped
 
+  # ChromaDB
+  chromadb:
+    image: chromadb/chroma:latest
+    container_name: fuzeinfra-chromadb
+    environment:
+      - CHROMA_HOST=0.0.0.0
+      - CHROMA_PORT=8000
+      - CHROMA_WORKER_IMPL=distributed
+      - CHROMA_SYSDB_IMPL=chromadb.db.impl.sqlite.SqliteDB
+      - CHROMA_SEGMENT_IMPL=chromadb.segment.impl.distributed.segment_directory.DistributedSegmentDirectory
+      - ALLOW_RESET=true
+      - IS_PERSISTENT=true
+      - PERSIST_DIRECTORY=/chroma/chroma
+    ports:
+      - "${CHROMADB_PORT}:8000"
+    volumes:
+      - chromadb_data:/chroma/chroma
+    networks:
+      - FuzeInfra
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/v1/heartbeat"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    labels:
+      - "com.fuzeinfra.service=chromadb"
+      - "com.fuzeinfra.description=ChromaDB Vector Database for AI/ML Applications"
+
   # ================================
   # MESSAGE QUEUE SERVICES
   # ================================
@@ -484,6 +514,8 @@ volumes:
     name: fuzeinfra_neo4j_logs
   elasticsearch_data:
     name: fuzeinfra_elasticsearch_data
+  chromadb_data:
+    name: fuzeinfra_chromadb_data
   
   # Message queue volumes
   kafka_data:

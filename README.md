@@ -63,6 +63,7 @@ See `environment.template` for all available options.
 - **MongoDB**: `localhost:27017` - Document database
 - **Redis**: `localhost:6379` - In-memory cache/store
 - **Neo4j**: `localhost:7474` - Graph database
+- **ChromaDB**: `localhost:8003` - Vector database for AI/ML applications
 
 ### Monitoring & Observability
 - **Grafana**: `http://localhost:3001` - Dashboards and visualization
@@ -85,6 +86,7 @@ See `environment.template` for all available options.
 - **MongoDB Express**: http://localhost:8081 (admin/[generated])
 - **Kafka UI**: http://localhost:8080
 - **Neo4j Browser**: http://localhost:7474 (neo4j/[generated])
+- **ChromaDB API**: http://localhost:8003 (REST API for vector operations)
 
 ## 🎯 Using with Your Projects
 
@@ -125,6 +127,7 @@ services:
       - POSTGRES_HOST=postgres
       - REDIS_HOST=redis
       - MONGODB_HOST=mongodb
+      - CHROMADB_HOST=chromadb
 ```
 
 See [docs/PROJECT_TEMPLATES.md](docs/PROJECT_TEMPLATES.md) for detailed instructions.
