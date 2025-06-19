@@ -15,15 +15,17 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 def wait_for_chromadb(host="localhost", port=8003, max_retries=30):
-    """Wait for ChromaDB to be ready"""
+    """Wait for ChromaDB to be ready using the Python client"""
     for i in range(max_retries):
         try:
-            response = requests.get(f"http://{host}:{port}/api/v1/heartbeat")
-            if response.status_code == 200:
+            client = chromadb.HttpClient(host=host, port=port)
+            # Test with heartbeat - this will work with the current API
+            heartbeat = client.heartbeat()
+            if heartbeat:
                 logger.info("ChromaDB is ready!")
                 return True
-        except requests.exceptions.ConnectionError:
-            logger.info(f"Waiting for ChromaDB... ({i+1}/{max_retries})")
+        except Exception as e:
+            logger.info(f"Waiting for ChromaDB... ({i+1}/{max_retries}) - {str(e)}")
             time.sleep(2)
     
     logger.error("ChromaDB failed to start within timeout period")
