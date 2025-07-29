@@ -1,0 +1,96 @@
+# Example Terraform Variables for FuzeInfra EC2 Deployment
+# Copy this file to terraform.tfvars and customize for your environment
+
+# Basic Configuration
+aws_region = "us-east-1"
+environment = "production"
+instance_name = "fuzefront-infra"
+domain_name = "fuzefront.com"
+
+# Security Configuration
+allowed_cidr_blocks = [
+  "0.0.0.0/0"  # Replace with your specific IP ranges for security
+  # Example: "203.0.113.0/24"  # Your office IP range
+  # Example: "198.51.100.0/24" # Your home IP range
+]
+
+# Instance Configuration
+create_eip = false  # Set to true if your instance doesn't have an Elastic IP
+attach_iam_profile = true  # Set to false if IAM profile is already attached
+log_retention_days = 30
+create_artifacts_bucket = true
+
+# FuzeInfra Port Configuration
+fuzeinfra_config = {
+  project_name         = "fuzeinfra"
+  network_name         = "FuzeInfra"
+  postgres_port        = 5432
+  mongodb_port         = 27017
+  redis_port           = 6379
+  grafana_port         = 3001
+  prometheus_port      = 9090
+  nginx_http_port      = 80
+  nginx_https_port     = 443
+  dns_port             = 53
+  airflow_port         = 8082
+  enable_https         = true
+  enable_tunnel        = true
+  enable_monitoring    = true
+}
+
+# Port Conflict Resolution
+# Configure existing services that may conflict with FuzeInfra ports
+port_remapping_rules = {
+  "existing-nginx" = {
+    service_name = "existing-nginx"
+    old_port     = 80
+    new_port     = 8080
+    protocol     = "tcp"
+    priority     = 100  # Lower priority than FuzeInfra (which uses 1-50)
+  }
+  "existing-postgres" = {
+    service_name = "existing-postgres"
+    old_port     = 5432
+    new_port     = 5433
+    protocol     = "tcp"
+    priority     = 100
+  }
+  # Add more services as needed
+}
+
+# Deployment Configuration
+deployment_config = {
+  docker_compose_file     = "docker-compose.FuzeInfra.yml"
+  environment_file        = ".env.production"
+  backup_before_deploy    = true
+  health_check_timeout    = 300  # seconds
+  rollback_on_failure     = true
+  notification_webhook    = ""   # Optional: Slack/Discord webhook URL
+}
+
+# SSL/TLS Configuration
+ssl_config = {
+  cert_provider     = "letsencrypt"  # or "cloudflare", "manual"
+  domain_names      = ["infra.fuzefront.com"]
+  cloudflare_email  = ""  # Required if using cloudflare provider
+  cloudflare_api_key = "" # Required if using cloudflare provider
+  auto_renewal      = true
+}
+
+# Monitoring Configuration
+monitoring_config = {
+  enable_cloudwatch_logs    = true
+  enable_prometheus_remote  = false
+  alert_manager_webhook     = ""  # Optional: webhook for alerts
+  grafana_admin_password    = ""  # Will be auto-generated if empty
+  retention_days           = 30
+}
+
+# Backup Configuration
+backup_config = {
+  enable_s3_backup     = true
+  backup_schedule      = "0 2 * * *"  # Daily at 2 AM UTC
+  retention_days       = 30
+  s3_bucket_name       = ""  # Will be auto-generated if empty
+  backup_encryption    = true
+}

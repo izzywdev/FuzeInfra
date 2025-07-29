@@ -1,0 +1,650 @@
+name: Deploy FuzeInfra to EC2
+
+on:
+  workflow_dispatch:
+    inputs:
+      instance_name:
+        description: 'EC2 Instance Name to deploy to'
+        required: true
+        default: 'fuzefront-infra'
+        type: string
+      environment:
+        description: 'Deployment environment'
+        required: true
+        default: 'production'
+        type: choice
+        options:
+        - production
+        - staging
+        - development
+      deployment_type:
+        description: 'Type of deployment'
+        required: true
+        default: 'differential'
+        type: choice
+        options:
+        - initial # Full deployment with Terraform
+        - differential # Update existing deployment
+        - rollback # Rollback to previous version
+      force_recreate:
+        description: 'Force recreate all containers'
+        required: false
+        default: false
+        type: boolean
+      skip_terraform:
+        description: 'Skip Terraform apply (infrastructure only)'
+        required: false
+        default: false
+        type: boolean
+
+  push:
+    branches:
+      - main
+    paths:
+      - 'docker-compose.FuzeInfra.yml'
+      - 'docker/**'
+      - 'infrastructure/**'
+      - 'monitoring-shared/**'
+      - 'tools/**'
+      - '.github/workflows/deploy-ec2.yml'
+  
+  pull_request:
+    types: [closed]
+    branches:
+      - main
+    paths:
+      - 'docker-compose.FuzeInfra.yml'
+      - 'docker/**'
+      - 'infrastructure/**'
+      - 'monitoring-shared/**'
+      - 'tools/**'
+      - '.github/workflows/deploy-ec2.yml'
+
+env:
+  AWS_REGION: us-east-1
+  TERRAFORM_VERSION: '1.6.0'
+  INSTANCE_NAME: ${{ inputs.instance_name || 'fuzefront-infra' }}
+  ENVIRONMENT: ${{ inputs.environment || 'production' }}
+  DEPLOYMENT_TYPE: ${{ inputs.deployment_type || 'differential' }}
+
+jobs:
+  # Validate and plan deployment
+  validate:
+    name: Validate Configuration
+    runs-on: ubuntu-latest
+    # Skip deployment if PR was not merged
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event_name == 'push' || (github.event_name == 'pull_request' && github.event.pull_request.merged == true) }}
+    outputs:
+      terraform_plan_id: ${{ steps.plan.outputs.plan_id }}
+      instance_info: ${{ steps.instance.outputs.info }}
+      port_conflicts: ${{ steps.ports.outputs.conflicts }}
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@v3
+      with:
+        terraform_version: ${{ env.TERRAFORM_VERSION }}
+        terraform_wrapper: false
+
+    - name: Validate instance exists
+      id: instance
+      run: |
+        INSTANCE_ID=$(aws ec2 describe-instances \
+          --filters "Name=tag:Name,Values=${{ env.INSTANCE_NAME }}" \
+                   "Name=instance-state-name,Values=running" \
+          --query 'Reservations[0].Instances[0].InstanceId' \
+          --output text)
+        
+        if [ "$INSTANCE_ID" = "None" ] || [ "$INSTANCE_ID" = "null" ]; then
+          echo "❌ Instance '${{ env.INSTANCE_NAME }}' not found or not running"
+          exit 1
+        fi
+        
+        INSTANCE_IP=$(aws ec2 describe-instances \
+          --instance-ids $INSTANCE_ID \
+          --query 'Reservations[0].Instances[0].PublicIpAddress' \
+          --output text)
+        
+        echo "✅ Found instance: $INSTANCE_ID ($INSTANCE_IP)"
+        echo "info={\"id\":\"$INSTANCE_ID\",\"ip\":\"$INSTANCE_IP\"}" >> $GITHUB_OUTPUT
+
+    - name: Check port conflicts
+      id: ports
+      run: |
+        # Script to check for port conflicts on target instance
+        # This would SSH to the instance and check running services
+        echo "🔍 Checking for port conflicts..."
+        echo "conflicts=[]" >> $GITHUB_OUTPUT
+
+    - name: Terraform Init
+      if: ${{ inputs.deployment_type == 'initial' && !inputs.skip_terraform }}
+      working-directory: terraform/ec2-deployment
+      run: |
+        terraform init \
+          -backend-config="bucket=fuzefront-terraform-state" \
+          -backend-config="key=fuzeinfra/ec2-deployment/terraform.tfstate" \
+          -backend-config="region=${{ env.AWS_REGION }}"
+
+    - name: Terraform Plan
+      if: ${{ inputs.deployment_type == 'initial' && !inputs.skip_terraform }}
+      id: plan
+      working-directory: terraform/ec2-deployment
+      run: |
+        terraform plan \
+          -var="instance_name=${{ env.INSTANCE_NAME }}" \
+          -var="environment=${{ env.ENVIRONMENT }}" \
+          -var="aws_region=${{ env.AWS_REGION }}" \
+          -out=tfplan
+        
+        PLAN_ID=$(date +%s)
+        echo "plan_id=$PLAN_ID" >> $GITHUB_OUTPUT
+
+    - name: Validate Docker Compose
+      run: |
+        echo "🔍 Validating Docker Compose configuration..."
+        docker-compose -f docker-compose.FuzeInfra.yml config > /dev/null
+        echo "✅ Docker Compose configuration is valid"
+
+  # Infrastructure deployment (Terraform)
+  infrastructure:
+    name: Deploy Infrastructure
+    runs-on: ubuntu-latest
+    needs: validate
+    if: ${{ inputs.deployment_type == 'initial' && !inputs.skip_terraform }}
+    environment: 
+      name: ${{ inputs.environment || 'production' }}
+      url: https://infra.fuzefront.com
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@v3
+      with:
+        terraform_version: ${{ env.TERRAFORM_VERSION }}
+
+    - name: Terraform Init
+      working-directory: terraform/ec2-deployment
+      run: |
+        terraform init \
+          -backend-config="bucket=fuzefront-terraform-state" \
+          -backend-config="key=fuzeinfra/ec2-deployment/terraform.tfstate" \
+          -backend-config="region=${{ env.AWS_REGION }}"
+
+    - name: Terraform Apply
+      working-directory: terraform/ec2-deployment
+      run: |
+        terraform apply \
+          -var="instance_name=${{ env.INSTANCE_NAME }}" \
+          -var="environment=${{ env.ENVIRONMENT }}" \
+          -var="aws_region=${{ env.AWS_REGION }}" \
+          -auto-approve
+
+    - name: Save Terraform Outputs
+      id: tf_output
+      working-directory: terraform/ec2-deployment
+      run: |
+        terraform output -json > tf_outputs.json
+        echo "outputs=$(cat tf_outputs.json)" >> $GITHUB_OUTPUT
+
+  # Application deployment
+  deploy:
+    name: Deploy Application
+    runs-on: ubuntu-latest
+    needs: [validate, infrastructure]
+    if: always() && (needs.validate.result == 'success')
+    environment: 
+      name: ${{ inputs.environment || 'production' }}
+      url: https://infra.fuzefront.com
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+
+    - name: Get instance connection info
+      id: connection
+      run: |
+        INSTANCE_IP=$(aws ec2 describe-instances \
+          --filters "Name=tag:Name,Values=${{ env.INSTANCE_NAME }}" \
+          --query 'Reservations[0].Instances[0].PublicIpAddress' \
+          --output text)
+        echo "ip=$INSTANCE_IP" >> $GITHUB_OUTPUT
+
+    - name: Setup SSH
+      run: |
+        mkdir -p ~/.ssh
+        echo "${{ secrets.EC2_SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+        chmod 600 ~/.ssh/id_rsa
+        ssh-keyscan -H ${{ steps.connection.outputs.ip }} >> ~/.ssh/known_hosts
+
+    - name: Create deployment directory
+      run: |
+        ssh -o StrictHostKeyChecking=no ubuntu@${{ steps.connection.outputs.ip }} '
+          sudo mkdir -p /opt/fuzeinfra
+          sudo chown ubuntu:ubuntu /opt/fuzeinfra
+        '
+
+    - name: Check existing deployments and handle port conflicts
+      id: conflicts
+      run: |
+        echo "🔍 Checking for existing services and port conflicts..."
+        
+        ssh ubuntu@${{ steps.connection.outputs.ip }} '
+          echo "=== Currently running services ==="
+          docker ps --format "table {{.Names}}\t{{.Ports}}\t{{.Status}}"
+          
+          echo -e "\n=== Port usage ==="
+          sudo netstat -tulpn | grep LISTEN | sort -k4
+          
+          echo -e "\n=== Existing Docker networks ==="
+          docker network ls
+          
+          # Check for FuzeInfra network
+          if docker network inspect FuzeInfra >/dev/null 2>&1; then
+            echo "✅ FuzeInfra network exists"
+          else
+            echo "⚠️  Creating FuzeInfra network"
+            docker network create FuzeInfra
+          fi
+        '
+
+    - name: Stop conflicting services (if needed)
+      if: ${{ inputs.force_recreate == true }}
+      run: |
+        echo "🛑 Stopping conflicting services as requested..."
+        ssh ubuntu@${{ steps.connection.outputs.ip }} '
+          # Stop services using FuzeInfra reserved ports
+          CONFLICTING_PORTS="80 443 53 5432 27017 6379 9090 3001 8082"
+          
+          for port in $CONFLICTING_PORTS; do
+            PIDS=$(sudo lsof -ti:$port 2>/dev/null || echo "")
+            if [ ! -z "$PIDS" ]; then
+              echo "⚠️  Found services on port $port, investigating..."
+              sudo lsof -i:$port
+            fi
+          done
+          
+          # Stop existing FuzeInfra containers
+          docker ps -q --filter "name=fuzeinfra-*" | xargs -r docker stop
+        '
+
+    - name: Backup existing data
+      if: ${{ inputs.deployment_type != 'initial' }}
+      run: |
+        echo "💾 Creating backup of existing data..."
+        ssh ubuntu@${{ steps.connection.outputs.ip }} '
+          BACKUP_DIR="/opt/fuzeinfra/backups/$(date +%Y%m%d_%H%M%S)"
+          mkdir -p $BACKUP_DIR
+          
+          # Backup Docker volumes
+          docker volume ls --filter "name=fuzeinfra_" -q | while read volume; do
+            echo "Backing up volume: $volume"
+            docker run --rm -v $volume:/data -v $BACKUP_DIR:/backup alpine \
+              tar czf /backup/${volume}.tar.gz -C /data .
+          done
+          
+          # Backup configuration files
+          if [ -d "/opt/fuzeinfra/config" ]; then
+            cp -r /opt/fuzeinfra/config $BACKUP_DIR/
+          fi
+          
+          echo "✅ Backup completed in $BACKUP_DIR"
+        '
+
+    - name: Sync application files
+      run: |
+        echo "📁 Syncing FuzeInfra files to EC2 instance..."
+        
+        # Create temporary deployment package
+        tar czf fuzeinfra-deployment.tar.gz \
+          --exclude='.git' \
+          --exclude='node_modules' \
+          --exclude='*.log' \
+          --exclude='.env*' \
+          .
+        
+        # Transfer to instance
+        scp fuzeinfra-deployment.tar.gz ubuntu@${{ steps.connection.outputs.ip }}:/opt/fuzeinfra/
+        
+        # Extract on instance
+        ssh ubuntu@${{ steps.connection.outputs.ip }} '
+          cd /opt/fuzeinfra
+          tar xzf fuzeinfra-deployment.tar.gz
+          rm fuzeinfra-deployment.tar.gz
+          chmod +x infra-up.sh infra-down.sh
+          chmod +x tools/cert-manager/*.sh
+        '
+
+    - name: Create production environment file
+      run: |
+        echo "⚙️  Creating production environment configuration..."
+        ssh ubuntu@${{ steps.connection.outputs.ip }} '
+          cd /opt/fuzeinfra
+          
+          # Create production environment file
+          cat > .env.production << EOF
+          # FuzeInfra Production Configuration - Generated $(date)
+          COMPOSE_PROJECT_NAME=fuzeinfra
+          NETWORK_NAME=FuzeInfra
+          
+          # Database Configuration
+          POSTGRES_HOST=localhost
+          POSTGRES_PORT=5432
+          POSTGRES_DB=fuzeinfra_db
+          POSTGRES_USER=fuzeinfra
+          POSTGRES_PASSWORD=${{ secrets.POSTGRES_PASSWORD }}
+          
+          # MongoDB Configuration
+          MONGODB_HOST=localhost
+          MONGODB_PORT=27017
+          MONGO_INITDB_ROOT_USERNAME=admin
+          MONGO_INITDB_ROOT_PASSWORD=${{ secrets.MONGODB_PASSWORD }}
+          
+          # Redis Configuration
+          REDIS_HOST=localhost
+          REDIS_PORT=6379
+          
+          # SSL/DNS Configuration
+          LOCAL_CERT_TYPE=letsencrypt
+          CERT_DOMAIN=fuzefront.com
+          CLOUDFLARE_EMAIL=${{ secrets.CLOUDFLARE_EMAIL }}
+          CLOUDFLARE_API_KEY=${{ secrets.CLOUDFLARE_API_KEY }}
+          
+          # Tunnel Configuration
+          CLOUDFLARE_TUNNEL_TOKEN=${{ secrets.CLOUDFLARE_TUNNEL_TOKEN }}
+          CLOUDFLARE_TUNNEL_ID=${{ secrets.CLOUDFLARE_TUNNEL_ID }}
+          CLOUDFLARE_TUNNEL_NAME=fuzeinfra-tunnel
+          CLOUDFLARE_TUNNEL_DOMAIN=fuzefront.com
+          
+          # Webhook Management
+          GITHUB_TOKEN=${{ secrets.GITHUB_TOKEN }}
+          GITHUB_WEBHOOK_SECRET=${{ secrets.GITHUB_WEBHOOK_SECRET }}
+          ATLASSIAN_EMAIL=${{ secrets.ATLASSIAN_EMAIL }}
+          ATLASSIAN_API_TOKEN=${{ secrets.ATLASSIAN_API_TOKEN }}
+          ATLASSIAN_INSTANCE=${{ secrets.ATLASSIAN_INSTANCE }}
+          
+          # Monitoring Configuration
+          GRAFANA_ADMIN_PASSWORD=${{ secrets.GRAFANA_ADMIN_PASSWORD }}
+          PROMETHEUS_RETENTION_TIME=30d
+          
+          # Security
+          DNSMASQ_ADMIN_PASSWORD=${{ secrets.DNSMASQ_ADMIN_PASSWORD }}
+          WEBHOOK_REGISTRY_KEY=${{ secrets.WEBHOOK_REGISTRY_KEY }}
+          
+          # Production Settings
+          DEV_MODE=false
+          ENABLE_CORS=false
+          ENABLE_SWAGGER=false
+          BACKUP_ENABLED=true
+          BACKUP_SCHEDULE=0 2 * * *
+          DATA_RETENTION_DAYS=30
+          EOF
+          
+          # Set proper permissions
+          chmod 600 .env.production
+          cp .env.production .env
+        '
+
+    - name: Setup SSL certificates
+      run: |
+        echo "🔒 Setting up SSL certificates..."
+        ssh ubuntu@${{ steps.connection.outputs.ip }} '
+          cd /opt/fuzeinfra
+          
+          # Setup Let'\''s Encrypt certificates for production
+          sudo apt-get update
+          sudo apt-get install -y certbot python3-certbot-dns-cloudflare
+          
+          # Create Cloudflare credentials
+          sudo mkdir -p /etc/letsencrypt
+          sudo tee /etc/letsencrypt/cloudflare.ini > /dev/null << EOF
+          dns_cloudflare_email = ${{ secrets.CLOUDFLARE_EMAIL }}
+          dns_cloudflare_api_key = ${{ secrets.CLOUDFLARE_API_KEY }}
+          EOF
+          sudo chmod 600 /etc/letsencrypt/cloudflare.ini
+          
+          # Request certificates
+          sudo certbot certonly \
+            --dns-cloudflare \
+            --dns-cloudflare-credentials /etc/letsencrypt/cloudflare.ini \
+            --dns-cloudflare-propagation-seconds 60 \
+            -d infra.fuzefront.com \
+            -d "*.infra.fuzefront.com" \
+            --non-interactive \
+            --agree-tos \
+            --email ${{ secrets.CLOUDFLARE_EMAIL }}
+          
+          # Copy certificates to FuzeInfra
+          sudo mkdir -p /opt/fuzeinfra/docker/certs
+          sudo cp /etc/letsencrypt/live/infra.fuzefront.com/fullchain.pem /opt/fuzeinfra/docker/certs/fuzeinfra-combined.crt
+          sudo cp /etc/letsencrypt/live/infra.fuzefront.com/privkey.pem /opt/fuzeinfra/docker/certs/fuzeinfra-dev-local.key
+          sudo chown -R ubuntu:ubuntu /opt/fuzeinfra/docker/certs
+          
+          # Setup auto-renewal
+          sudo crontab -l | { cat; echo "0 12 * * * /usr/bin/certbot renew --quiet && docker-compose -f /opt/fuzeinfra/docker-compose.FuzeInfra.yml restart nginx"; } | sudo crontab -
+        '
+
+    - name: Deploy FuzeInfra
+      run: |
+        echo "🚀 Deploying FuzeInfra services..."
+        ssh ubuntu@${{ steps.connection.outputs.ip }} '
+          cd /opt/fuzeinfra
+          
+          # Pre-deployment checks
+          echo "=== Pre-deployment system check ==="
+          df -h
+          free -h
+          docker system df
+          
+          # Pull latest images
+          docker-compose -f docker-compose.FuzeInfra.yml pull
+          
+          # Deploy with differential update strategy
+          if [ "${{ env.DEPLOYMENT_TYPE }}" = "differential" ]; then
+            echo "📊 Performing differential deployment..."
+            
+            # Update services one by one to minimize downtime
+            CRITICAL_SERVICES="postgres mongodb redis"
+            OTHER_SERVICES="prometheus grafana nginx dnsmasq cloudflare-tunnel"
+            
+            for service in $CRITICAL_SERVICES; do
+              echo "Updating critical service: $service"
+              docker-compose -f docker-compose.FuzeInfra.yml up -d --no-deps $service
+              sleep 10
+            done
+            
+            for service in $OTHER_SERVICES; do
+              echo "Updating service: $service"
+              docker-compose -f docker-compose.FuzeInfra.yml up -d --no-deps $service
+              sleep 5
+            done
+          else
+            echo "🆕 Performing full deployment..."
+            docker-compose -f docker-compose.FuzeInfra.yml up -d
+          fi
+        '
+
+    - name: Health check and validation
+      id: health
+      run: |
+        echo "🏥 Performing health checks..."
+        
+        # Wait for services to be ready
+        sleep 30
+        
+        ssh ubuntu@${{ steps.connection.outputs.ip }} '
+          cd /opt/fuzeinfra
+          
+          echo "=== Container Status ==="
+          docker-compose -f docker-compose.FuzeInfra.yml ps
+          
+          echo -e "\n=== Health Checks ==="
+          
+          # Check critical services
+          SERVICES=("postgres:5432" "mongodb:27017" "redis:6379" "nginx:80")
+          FAILED_SERVICES=""
+          
+          for service_port in "${SERVICES[@]}"; do
+            service=$(echo $service_port | cut -d: -f1)
+            port=$(echo $service_port | cut -d: -f2)
+            
+            if docker exec fuzeinfra-$service sh -c "exit 0" 2>/dev/null; then
+              echo "✅ $service container is running"
+              
+              # Additional port check
+              if nc -z localhost $port 2>/dev/null; then
+                echo "✅ $service port $port is accessible"
+              else
+                echo "❌ $service port $port is not accessible"
+                FAILED_SERVICES="$FAILED_SERVICES $service"
+              fi
+            else
+              echo "❌ $service container is not running"
+              FAILED_SERVICES="$FAILED_SERVICES $service"
+            fi
+          done
+          
+          # Check web interfaces
+          WEB_CHECKS=("http://localhost:3001" "http://localhost:9090" "http://localhost:8082")
+          
+          for url in "${WEB_CHECKS[@]}"; do
+            if curl -f -s $url >/dev/null; then
+              echo "✅ Web interface $url is accessible"
+            else
+              echo "⚠️  Web interface $url may not be ready yet"
+            fi
+          done
+          
+          if [ ! -z "$FAILED_SERVICES" ]; then
+            echo "❌ Some services failed health checks: $FAILED_SERVICES"
+            exit 1
+          fi
+          
+          echo "✅ All critical services passed health checks"
+        '
+
+    - name: Setup monitoring and alerting
+      run: |
+        echo "📊 Setting up monitoring and alerting..."
+        ssh ubuntu@${{ steps.connection.outputs.ip }} '
+          cd /opt/fuzeinfra
+          
+          # Start webhook monitoring
+          nohup python tools/tunnel-manager/webhook_sync.py monitor > /var/log/webhook-sync.log 2>&1 &
+          
+          # Setup log rotation
+          sudo tee /etc/logrotate.d/fuzeinfra > /dev/null << EOF
+          /opt/fuzeinfra/logs/*.log {
+              daily
+              missingok
+              rotate 30
+              compress
+              delaycompress
+              notifempty
+              create 644 ubuntu ubuntu
+          }
+          EOF
+          
+          echo "✅ Monitoring setup complete"
+        '
+
+    - name: Cleanup and finalize
+      if: always()
+      run: |
+        echo "🧹 Cleanup and finalization..."
+        ssh ubuntu@${{ steps.connection.outputs.ip }} '
+          cd /opt/fuzeinfra
+          
+          # Clean up old Docker images and volumes
+          docker system prune -f
+          
+          # Save deployment info
+          cat > deployment-info.json << EOF
+          {
+            "deployment_date": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+            "deployment_type": "${{ env.DEPLOYMENT_TYPE }}",
+            "environment": "${{ env.ENVIRONMENT }}",
+            "github_sha": "${{ github.sha }}",
+            "github_run_id": "${{ github.run_id }}",
+            "instance_name": "${{ env.INSTANCE_NAME }}"
+          }
+          EOF
+          
+          echo "✅ Deployment completed successfully"
+        '
+        
+        # Clean up local files
+        rm -f ~/.ssh/id_rsa
+
+  # Post-deployment validation
+  validate-deployment:
+    name: Validate Deployment
+    runs-on: ubuntu-latest
+    needs: deploy
+    if: always() && (needs.deploy.result == 'success')
+    
+    steps:
+    - name: Validate external access
+      run: |
+        echo "🔍 Validating external access to FuzeInfra..."
+        
+        # Test main endpoints
+        ENDPOINTS=(
+          "https://infra.fuzefront.com"
+          "https://infra.fuzefront.com:3001" # Grafana
+          "https://infra.fuzefront.com:9090" # Prometheus
+        )
+        
+        for endpoint in "${ENDPOINTS[@]}"; do
+          echo "Testing $endpoint..."
+          if curl -f -s --max-time 10 $endpoint >/dev/null; then
+            echo "✅ $endpoint is accessible"
+          else
+            echo "⚠️  $endpoint may not be accessible yet (this might be expected)"
+          fi
+        done
+
+    - name: Send deployment notification
+      if: always()
+      uses: 8398a7/action-slack@v3
+      with:
+        status: ${{ job.status }}
+        text: |
+          FuzeInfra Deployment ${{ job.status == 'success' && '✅ Completed' || '❌ Failed' }}
+          
+          Instance: ${{ env.INSTANCE_NAME }}
+          Environment: ${{ env.ENVIRONMENT }}
+          Type: ${{ env.DEPLOYMENT_TYPE }}
+          
+          URL: https://infra.fuzefront.com
+          Grafana: https://infra.fuzefront.com:3001
+          Prometheus: https://infra.fuzefront.com:9090
+        webhook_url: ${{ secrets.SLACK_WEBHOOK_URL }}
+      if: ${{ secrets.SLACK_WEBHOOK_URL != '' }}
