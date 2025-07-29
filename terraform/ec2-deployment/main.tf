@@ -12,6 +12,10 @@ terraform {
       source  = "hashicorp/tls"
       version = "~> 4.0"
     }
+    cloudflare = {
+      source  = "cloudflare/cloudflare"
+      version = "~> 4.0"
+    }
   }
   
   # Store state in S3 (configure backend as needed)
@@ -36,24 +40,7 @@ provider "aws" {
   }
 }
 
-# Local values for conditional resource creation
-locals {
-  # Use new instance values if creating, otherwise use existing instance values
-  instance_id         = var.create_instance ? aws_instance.fuzeinfra_new[0].id : data.aws_instance.fuzeinfra_instance_check[0].id
-  instance_public_ip  = var.create_instance ? aws_eip.fuzeinfra_new[0].public_ip : (var.create_eip ? aws_eip.fuzeinfra[0].public_ip : data.aws_instance.fuzeinfra_instance_check[0].public_ip)
-  instance_private_ip = var.create_instance ? aws_instance.fuzeinfra_new[0].private_ip : data.aws_instance.fuzeinfra_instance_check[0].private_ip
-  vpc_id              = var.create_instance ? data.aws_vpc.default[0].id : data.aws_instance.fuzeinfra_instance_check[0].vpc_id
-  subnet_id           = var.create_instance ? data.aws_subnet.default[0].id : data.aws_instance.fuzeinfra_instance_check[0].subnet_id
-  vpc_cidr            = var.create_instance ? data.aws_vpc.default[0].cidr_block : data.aws_vpc.existing[0].cidr_block
-  availability_zone   = var.create_instance ? aws_instance.fuzeinfra_new[0].availability_zone : data.aws_instance.fuzeinfra_instance_check[0].availability_zone
-  network_interface_id = var.create_instance ? aws_instance.fuzeinfra_new[0].primary_network_interface_id : data.aws_instance.fuzeinfra_instance_check[0].network_interface_id
-}
-
-# Data source for existing VPC when using existing instance
-data "aws_vpc" "existing" {
-  count = var.create_instance ? 0 : 1
-  id    = data.aws_instance.fuzeinfra_instance_check[0].vpc_id
-}
+# Local values are defined in ec2-instance.tf
 
 
 # Security Group for FuzeInfra services
@@ -142,18 +129,8 @@ resource "aws_eip" "fuzeinfra" {
   }
 }
 
-# Route53 DNS record for infra.fuzefront.com
-data "aws_route53_zone" "fuzefront" {
-  name = var.domain_name
-}
-
-resource "aws_route53_record" "infra" {
-  zone_id = data.aws_route53_zone.fuzefront.zone_id
-  name    = "infra.${var.domain_name}"
-  type    = "A"
-  ttl     = 300
-  records = [local.instance_public_ip]
-}
+# DNS configuration has been moved to cloudflare-dns.tf
+# since fuzefront.com is managed by Cloudflare, not Route53
 
 # CloudWatch Log Group for FuzeInfra
 resource "aws_cloudwatch_log_group" "fuzeinfra" {

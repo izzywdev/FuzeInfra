@@ -78,6 +78,31 @@ variable "sns_topic_arn" {
   default     = ""
 }
 
+# Cloudflare DNS Configuration
+variable "cloudflare_email" {
+  description = "Cloudflare account email"
+  type        = string
+  sensitive   = true
+}
+
+variable "cloudflare_api_key" {
+  description = "Cloudflare API key"
+  type        = string
+  sensitive   = true
+}
+
+variable "create_www_subdomain" {
+  description = "Whether to create www.infra subdomain"
+  type        = bool
+  default     = false
+}
+
+variable "create_service_subdomains" {
+  description = "Whether to create service-specific subdomains (grafana.infra, etc.)"
+  type        = bool
+  default     = false
+}
+
 variable "attach_iam_profile" {
   description = "Whether to attach IAM instance profile (set false if already attached)"
   type        = bool

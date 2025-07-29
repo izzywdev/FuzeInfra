@@ -165,6 +165,8 @@ jobs:
           -var="aws_region=${{ env.AWS_REGION }}" \
           -var="create_instance=${CREATE_INSTANCE}" \
           -var="create_eip=${CREATE_INSTANCE}" \
+          -var="cloudflare_email=${{ secrets.CLOUDFLARE_EMAIL }}" \
+          -var="cloudflare_api_key=${{ secrets.CLOUDFLARE_API_KEY }}" \
           -out=tfplan
         
         PLAN_ID=$(date +%s)
@@ -222,6 +224,8 @@ jobs:
           -var="aws_region=${{ env.AWS_REGION }}" \
           -var="create_instance=${CREATE_INSTANCE}" \
           -var="create_eip=${CREATE_INSTANCE}" \
+          -var="cloudflare_email=${{ secrets.CLOUDFLARE_EMAIL }}" \
+          -var="cloudflare_api_key=${{ secrets.CLOUDFLARE_API_KEY }}" \
           -auto-approve
 
     - name: Save Terraform Outputs

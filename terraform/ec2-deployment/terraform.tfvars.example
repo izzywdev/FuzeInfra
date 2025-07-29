@@ -7,6 +7,12 @@ environment = "production"
 instance_name = "fuzefront-infra"
 domain_name = "fuzefront.com"
 
+# Cloudflare DNS Configuration
+cloudflare_email = "your-email@example.com"
+cloudflare_api_key = "your-cloudflare-api-key"
+create_www_subdomain = false
+create_service_subdomains = false
+
 # Security Configuration
 allowed_cidr_blocks = [
   "0.0.0.0/0"  # Replace with your specific IP ranges for security

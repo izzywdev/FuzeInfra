@@ -22,7 +22,7 @@ output "security_group_id" {
 
 output "dns_record" {
   description = "DNS record for FuzeInfra"
-  value       = aws_route53_record.infra.fqdn
+  value       = "infra.${var.domain_name}"
 }
 
 output "cloudwatch_log_group" {
