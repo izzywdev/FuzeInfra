@@ -158,6 +158,53 @@ AWS_SECRET_ACCESS_KEY=
 AWS_REGION=us-east-1
 
 # =============================================================================
+# WEBHOOK & TUNNEL MANAGEMENT
+# =============================================================================
+
+# GitHub API Configuration
+GITHUB_TOKEN=your_github_personal_access_token_here
+GITHUB_WEBHOOK_SECRET=your_github_webhook_secret_here
+
+# Atlassian API Configuration
+ATLASSIAN_EMAIL=your-email@example.com
+ATLASSIAN_API_TOKEN=your_atlassian_api_token_here
+ATLASSIAN_INSTANCE=your-instance.atlassian.net
+
+# Google OAuth Configuration (manual updates only)
+GOOGLE_CLIENT_ID=your_google_client_id_here
+GOOGLE_CLIENT_SECRET=your_google_client_secret_here
+
+# Webhook Registry Encryption
+WEBHOOK_REGISTRY_KEY=your_webhook_registry_encryption_key_here
+
+# =============================================================================
+# DNS & NETWORK SERVICES
+# =============================================================================
+
+# dnsmasq DNS Server Configuration
+DNSMASQ_ADMIN_PASSWORD=dnsmasq_secure_password
+
+# Cloudflare Tunnel Configuration
+CLOUDFLARE_TUNNEL_TOKEN=your_tunnel_token_here
+CLOUDFLARE_TUNNEL_ID=your_tunnel_id_here
+CLOUDFLARE_TUNNEL_NAME=fuzeinfra-tunnel
+CLOUDFLARE_TUNNEL_DOMAIN=your-domain.com
+
+# =============================================================================
+# CERTIFICATE MANAGEMENT
+# =============================================================================
+
+# Local Certificate Configuration
+LOCAL_CERT_TYPE=mkcert
+# Options: mkcert (recommended), letsencrypt, selfsigned
+CERT_DOMAIN=dev.local
+# For production/tunnel use: your-domain.com
+
+# Let's Encrypt Configuration (if using letsencrypt)
+CLOUDFLARE_EMAIL=your-email@example.com
+CLOUDFLARE_API_KEY=your_cloudflare_api_key_here
+
+# =============================================================================
 # DEVELOPMENT SETTINGS
 # =============================================================================
 

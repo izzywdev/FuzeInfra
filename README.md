@@ -1,12 +1,22 @@
 # FuzeInfra - Shared Infrastructure Platform
 
-A containerized shared infrastructure platform providing common services for microservices development. This repository contains **only** generic infrastructure components - no application-specific code.
+A comprehensive containerized shared infrastructure platform providing databases, monitoring, networking, and deployment tools for microservices development. Features include local DNS management, HTTPS certificates, tunnel management, and webhook automation.
+
+## ✨ New Features
+
+- 🌐 **Local DNS Server** (dnsmasq) with wildcard `*.dev.local` support
+- 🔒 **HTTPS Certificates** (mkcert) for all services with browser trust
+- 🚇 **Cloudflare Tunnel** integration for secure external access
+- 🔗 **Webhook Management** with automatic URL updates for GitHub/Atlassian
+- 📊 **Comprehensive Monitoring** with Prometheus, Grafana, and Loki
+- 🔧 **Development Orchestrator** with port allocation and clean URLs
 
 ## 🚀 Quick Start
 
 1. **Clone repository**: `git clone --recursive https://github.com/izzywdev/FuzeInfra.git`
 2. **Set up environment**: `python scripts-tools/setup_environment.py`
-3. **Start infrastructure**: `./infra-up.bat` (Windows) or `./infra-up.sh` (Linux/Mac)
+3. **Generate certificates**: `./tools/cert-manager/setup-local-certs.sh`
+4. **Start infrastructure**: `./infra-up.bat` (Windows) or `./infra-up.sh` (Linux/Mac)
 
 > **Note**: Use `--recursive` to automatically clone the envmanager submodule. If already cloned, run `git submodule update --init --recursive`.
 
@@ -78,15 +88,23 @@ See `environment.template` for all available options.
 ### Workflow Orchestration
 - **Airflow**: `localhost:8082` - Workflow orchestration and scheduling
 
-### Management UIs
-- **Airflow UI**: http://localhost:8082 (admin/[generated])
+### Management UIs (HTTP & HTTPS)
+- **Airflow UI**: http://localhost:8082 | https://airflow.dev.local (admin/[generated])
 - **Flower (Celery Monitor)**: http://localhost:5555
-- **Grafana**: http://localhost:3001 (admin/[generated])
-- **Prometheus**: http://localhost:9090
-- **MongoDB Express**: http://localhost:8081 (admin/[generated])
+- **Grafana**: http://localhost:3001 | https://grafana.dev.local (admin/[generated])
+- **Prometheus**: http://localhost:9090 | https://prometheus.dev.local
+- **MongoDB Express**: http://localhost:8081 | https://mongo-express.dev.local (admin/[generated])
 - **Kafka UI**: http://localhost:8080
 - **Neo4j Browser**: http://localhost:7474 (neo4j/[generated])
 - **ChromaDB API**: http://localhost:8003 (REST API for vector operations)
+- **DNS Management**: http://localhost:8053 | https://dnsmasq.dev.local
+- **RabbitMQ Management**: http://localhost:15672 | https://rabbitmq.dev.local
+
+### New Service Features
+- 🌐 **DNS Server**: Automatic `*.dev.local` domain resolution
+- 🔒 **HTTPS Support**: Trusted certificates for all services
+- 🚇 **Tunnel Access**: External webhook endpoints via Cloudflare
+- 📈 **Enhanced Monitoring**: Complete observability stack
 
 ## 🎯 Using with Your Projects
 
@@ -130,7 +148,7 @@ services:
       - CHROMADB_HOST=chromadb
 ```
 
-See [docs/PROJECT_TEMPLATES.md](docs/PROJECT_TEMPLATES.md) for detailed instructions.
+See [docs/PROJECT_TEMPLATES.md](docs/PROJECT_TEMPLATES.md) and [docs/PROJECT_INTEGRATION_GUIDE.md](docs/PROJECT_INTEGRATION_GUIDE.md) for detailed instructions.
 
 ## 🛠️ Management Tools
 
@@ -147,8 +165,14 @@ See [docs/PROJECT_TEMPLATES.md](docs/PROJECT_TEMPLATES.md) for detailed instruct
 - `scripts-tools/version_manager.py` - Semantic versioning
 - `scripts-tools/ci_cd_manager.py` - CI/CD utilities
 
+### DNS and Network Management
+- `tools/dns-manager/dns-manager.py` - Local DNS management
+- `tools/tunnel-manager/tunnel-manager.py` - Webhook tunnel management
+- `tools/cert-manager/setup-local-certs.sh` - HTTPS certificate generation
+
 ### Health Monitoring
 - `docker/app/health_check.py` - Infrastructure health checks
+- `tools/tunnel-manager/webhook_sync.py` - Webhook monitoring and sync
 
 ## 🔒 Security Notes
 

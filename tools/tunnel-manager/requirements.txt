@@ -1,0 +1,44 @@
+# Tunnel Manager Dependencies
+# Core dependencies for tunnel management and webhook API integration
+
+# HTTP clients and API interaction
+requests>=2.31.0
+httpx>=0.25.0
+
+# Configuration and data handling
+pyyaml>=6.0.1
+python-dotenv>=1.0.0
+
+# GitHub API integration
+PyGithub>=1.59.1
+
+# Atlassian API integration
+atlassian-python-api>=3.41.0
+
+# Google API client (for future OAuth management)
+google-api-python-client>=2.100.0
+google-auth>=2.23.0
+
+# Cloudflare API integration
+cloudflare>=2.11.1
+
+# Database and storage
+tinydb>=4.8.0
+
+# Async support
+aiohttp>=3.8.5
+asyncio>=3.4.3
+
+# Cryptography for token encryption
+cryptography>=41.0.4
+
+# CLI interface
+click>=8.1.7
+rich>=13.5.2
+
+# Logging and monitoring
+structlog>=23.1.0
+
+# Utilities
+python-dateutil>=2.8.2
+validators>=0.22.0

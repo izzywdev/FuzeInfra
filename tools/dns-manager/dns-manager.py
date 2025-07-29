@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 DNS Management Service for Local Development Orchestrator
-Handles local DNS routing for *.dev.local domains.
+Handles local DNS routing for *.dev.local domains via dnsmasq and hosts file fallback.
 """
 
 import os
@@ -12,6 +12,7 @@ import argparse
 import platform
 import subprocess
 import shutil
+import requests
 from pathlib import Path
 from typing import Dict, List, Optional
 from datetime import datetime
@@ -24,6 +25,7 @@ class DNSManager:
         self.config_path = config_path
         self.config = self._load_config()
         self.platform = platform.system().lower()
+        self.dnsmasq_available = self._check_dnsmasq_availability()
         
     def _load_config(self) -> Dict:
         """Load configuration from YAML file."""
@@ -39,7 +41,12 @@ class DNSManager:
                 "linux": "/etc/hosts",
                 "darwin": "/etc/hosts"
             },
-            "comment_prefix": "# Local Dev Orchestrator:"
+            "comment_prefix": "# Local Dev Orchestrator:",
+            "dnsmasq": {
+                "web_ui_url": "http://localhost:8053",
+                "container_name": "fuzeinfra-dnsmasq",
+                "api_enabled": True
+            }
         }
         
         if config_file.exists():
@@ -54,11 +61,61 @@ class DNSManager:
         return default_config
     
     def add_dns_entry(self, project_name: str, domain_suffix: str = None, ip: str = None) -> Dict:
-        """Add DNS entry for project."""
+        """Add DNS entry for project via dnsmasq or hosts file fallback."""
         domain_suffix = domain_suffix or self.config["domain_suffix"]
         ip = ip or self.config["default_ip"]
         domain = f"{project_name}.{domain_suffix}"
         
+        # Try dnsmasq first if available
+        if self.dnsmasq_available:
+            result = self._add_dnsmasq_entry(domain, ip, project_name)
+            if result["success"]:
+                return result
+            # If dnsmasq fails, fall back to hosts file
+            print(f"Warning: dnsmasq failed ({result['error']}), falling back to hosts file")
+        
+        # Hosts file fallback
+        return self._add_hosts_entry(domain, ip, project_name)
+    
+    def _add_dnsmasq_entry(self, domain: str, ip: str, project_name: str) -> Dict:
+        """Add DNS entry via dnsmasq container."""
+        try:
+            # Add entry to dnsmasq configuration via Docker exec
+            cmd = [
+                "docker", "exec", self.config["dnsmasq"]["container_name"],
+                "sh", "-c", f"echo 'address=/{domain}/{ip}' >> /etc/dnsmasq.conf"
+            ]
+            
+            result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+            
+            # Reload dnsmasq configuration
+            reload_cmd = [
+                "docker", "exec", self.config["dnsmasq"]["container_name"],
+                "killall", "-HUP", "dnsmasq"
+            ]
+            subprocess.run(reload_cmd, capture_output=True, text=True, check=True)
+            
+            return {
+                "success": True,
+                "domain": domain,
+                "ip": ip,
+                "method": "dnsmasq",
+                "message": f"Added DNS entry via dnsmasq: {domain} -> {ip}"
+            }
+            
+        except subprocess.CalledProcessError as e:
+            return {
+                "success": False,
+                "error": f"Failed to add dnsmasq entry: {e.stderr}"
+            }
+        except Exception as e:
+            return {
+                "success": False,
+                "error": f"Failed to communicate with dnsmasq: {str(e)}"
+            }
+    
+    def _add_hosts_entry(self, domain: str, ip: str, project_name: str) -> Dict:
+        """Add DNS entry to hosts file (fallback method)."""
         try:
             hosts_file = Path(self.config["hosts_file_paths"][self.platform])
             
@@ -80,7 +137,8 @@ class DNSManager:
             if self._entry_exists(hosts_content, domain):
                 return {
                     "success": True,
-                    "message": f"DNS entry for {domain} already exists"
+                    "method": "hosts_file",
+                    "message": f"DNS entry for {domain} already exists in hosts file"
                 }
             
             # Add entry
@@ -97,13 +155,14 @@ class DNSManager:
                 "success": True,
                 "domain": domain,
                 "ip": ip,
-                "message": f"Added DNS entry: {domain} -> {ip}"
+                "method": "hosts_file",
+                "message": f"Added DNS entry to hosts file: {domain} -> {ip}"
             }
             
         except Exception as e:
             return {
                 "success": False,
-                "error": f"Failed to add DNS entry: {str(e)}"
+                "error": f"Failed to add hosts file entry: {str(e)}"
             }
     
     def remove_dns_entry(self, project_name: str, domain_suffix: str = None) -> Dict:
@@ -205,12 +264,35 @@ class DNSManager:
                         continue
         except:
             pass  # Non-critical if fails
+    
+    def _check_dnsmasq_availability(self) -> bool:
+        """Check if dnsmasq container is running and accessible."""
+        try:
+            # Check if container is running
+            result = subprocess.run([
+                "docker", "ps", "--filter", f"name={self.config['dnsmasq']['container_name']}", 
+                "--format", "{{.Names}}"
+            ], capture_output=True, text=True, check=True)
+            
+            return self.config["dnsmasq"]["container_name"] in result.stdout
+        except:
+            return False
+    
+    def get_dns_status(self) -> Dict:
+        """Get current DNS management status."""
+        return {
+            "dnsmasq_available": self.dnsmasq_available,
+            "dnsmasq_container": self.config["dnsmasq"]["container_name"],
+            "web_ui_url": self.config["dnsmasq"]["web_ui_url"],
+            "domain_suffix": self.config["domain_suffix"],
+            "platform": self.platform
+        }
 
 def main():
     """Command line interface for the DNS manager."""
     parser = argparse.ArgumentParser(description="DNS Manager for Local Development Orchestrator")
-    parser.add_argument("action", choices=["add", "remove"], help="Action to perform")
-    parser.add_argument("project_name", help="Project name for DNS entry")
+    parser.add_argument("action", choices=["add", "remove", "status"], help="Action to perform")
+    parser.add_argument("project_name", nargs="?", help="Project name for DNS entry (not required for status)")
     parser.add_argument("--domain-suffix", type=str, help="Domain suffix (default: dev.local)")
     parser.add_argument("--ip", type=str, help="IP address (default: 127.0.0.1)")
     
@@ -219,9 +301,17 @@ def main():
     dns_manager = DNSManager()
     
     try:
-        if args.action == "add":
+        if args.action == "status":
+            result = dns_manager.get_dns_status()
+        elif args.action == "add":
+            if not args.project_name:
+                print("Error: project_name is required for add action", file=sys.stderr)
+                sys.exit(1)
             result = dns_manager.add_dns_entry(args.project_name, args.domain_suffix, args.ip)
         elif args.action == "remove":
+            if not args.project_name:
+                print("Error: project_name is required for remove action", file=sys.stderr)
+                sys.exit(1)
             result = dns_manager.remove_dns_entry(args.project_name, args.domain_suffix)
         
         print(json.dumps(result, indent=2))

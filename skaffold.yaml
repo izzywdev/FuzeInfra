@@ -1,0 +1,78 @@
+apiVersion: skaffold/v4beta7
+kind: Config
+metadata:
+  name: fuzeinfra
+
+# Build configuration
+build:
+  local:
+    push: false
+    useDockerCLI: true
+  artifacts: []
+  # Project artifacts will be added here as you develop applications
+
+# Test configuration
+test:
+- image: fuzeinfra/test-runner
+  custom:
+  - command: ./run-tests.sh
+    dependencies:
+      paths: ["tests/**"]
+
+# Deploy configuration
+deploy:
+  docker:
+    compose:
+      - docker-compose.FuzeInfra.yml
+
+# Development profiles
+profiles:
+- name: infrastructure-only
+  deploy:
+    docker:
+      compose:
+        - docker-compose.FuzeInfra.yml
+
+- name: with-tunnel
+  patches:
+  - op: add
+    path: /deploy/docker/compose/-
+    value: docker-compose.tunnel.yml
+
+- name: https-enabled
+  activation:
+  - env: ENABLE_HTTPS=true
+  patches:
+  - op: replace
+    path: /deploy/docker/compose/0
+    value: docker-compose.FuzeInfra-https.yml
+
+# Port forwarding for development
+portForward:
+- resourceType: service
+  resourceName: grafana
+  port: 3000
+  localPort: 3001
+- resourceType: service
+  resourceName: prometheus
+  port: 9090
+  localPort: 9091
+
+# File synchronization
+sync:
+  manual:
+  - src: "infrastructure/**/*.conf"
+    dest: /etc/nginx/
+  - src: "monitoring-shared/**/*.yml"
+    dest: /etc/
+  - src: "docker/**/*.conf"
+    dest: /etc/
+
+# Custom commands
+customActions:
+- name: setup-certificates
+  containers:
+  - name: setup
+    image: alpine/openssl
+  - name: nginx
+    image: nginx:alpine

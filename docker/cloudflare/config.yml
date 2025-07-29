@@ -1,0 +1,43 @@
+# Cloudflare Tunnel Configuration
+# This file configures ingress rules for the tunnel
+
+tunnel: ${CLOUDFLARE_TUNNEL_ID}
+credentials-file: /etc/cloudflared/cert.pem
+
+# Ingress rules - route external requests to internal services
+ingress:
+  # Webhook endpoints - route to nginx for load balancing
+  - hostname: "*.webhook.${CLOUDFLARE_TUNNEL_DOMAIN}"
+    service: http://nginx:80
+    
+  # Direct service access for development
+  - hostname: "grafana.${CLOUDFLARE_TUNNEL_DOMAIN}"
+    service: http://grafana:3000
+    
+  - hostname: "prometheus.${CLOUDFLARE_TUNNEL_DOMAIN}"
+    service: http://prometheus:9090
+    
+  - hostname: "airflow.${CLOUDFLARE_TUNNEL_DOMAIN}"
+    service: http://airflow-webserver:8080
+    
+  - hostname: "mongo-express.${CLOUDFLARE_TUNNEL_DOMAIN}"
+    service: http://mongo-express:8081
+    
+  - hostname: "rabbitmq.${CLOUDFLARE_TUNNEL_DOMAIN}"
+    service: http://rabbitmq:15672
+    
+  - hostname: "dnsmasq.${CLOUDFLARE_TUNNEL_DOMAIN}"
+    service: http://dnsmasq:8080
+    
+  # Default wildcard - route everything else to nginx
+  - hostname: "*.${CLOUDFLARE_TUNNEL_DOMAIN}"
+    service: http://nginx:80
+    
+  # Catch-all rule (required as last rule)
+  - service: http_status:404
+
+# Logging configuration
+loglevel: info
+
+# Metrics configuration
+metrics: 0.0.0.0:2000

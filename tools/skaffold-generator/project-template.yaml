@@ -1,0 +1,91 @@
+# Skaffold Template for New FuzeInfra Projects
+# This template is used by the project generator
+
+apiVersion: skaffold/v4beta7
+kind: Config
+metadata:
+  name: {{PROJECT_NAME}}
+
+build:
+  local:
+    push: false
+  artifacts:
+  - image: fuzeinfra/{{PROJECT_NAME}}
+    docker:
+      dockerfile: Dockerfile
+      buildArgs:
+        PROJECT_NAME: "{{PROJECT_NAME}}"
+        PORT: "{{PROJECT_PORT}}"
+    sync:
+      manual:
+      # Hot reload for different project types
+      {{#if REACT_PROJECT}}
+      - src: "src/**/*.{js,jsx,ts,tsx}"
+        dest: /app/src
+      - src: "public/**/*"
+        dest: /app/public
+      {{/if}}
+      
+      {{#if NODE_API_PROJECT}}
+      - src: "src/**/*.{js,ts}"
+        dest: /app/src
+      - src: "package.json"
+        dest: /app/package.json
+      {{/if}}
+      
+      {{#if PYTHON_PROJECT}}
+      - src: "**/*.py"
+        dest: /app/
+      - src: "requirements.txt"
+        dest: /app/requirements.txt
+      {{/if}}
+
+test:
+- image: fuzeinfra/{{PROJECT_NAME}}
+  custom:
+  - command: npm test
+    timeoutSeconds: 60
+    dependencies:
+      paths: ["src/**", "tests/**"]
+
+deploy:
+  docker:
+    compose:
+      - docker-compose.FuzeInfra.yml
+      - docker-compose.{{PROJECT_NAME}}.yml
+
+profiles:
+- name: development
+  activation:
+  - env: NODE_ENV=development
+  build:
+    artifacts:
+    - image: fuzeinfra/{{PROJECT_NAME}}
+      docker:
+        target: development
+  deploy:
+    docker:
+      env:
+        NODE_ENV: development
+        DEBUG: "{{PROJECT_NAME}}:*"
+
+- name: production
+  build:
+    artifacts:
+    - image: fuzeinfra/{{PROJECT_NAME}}
+      docker:
+        target: production
+
+# Automatic port forwarding based on project type
+portForward:
+- resourceType: service
+  resourceName: {{PROJECT_NAME}}
+  port: {{PROJECT_PORT}}
+  localPort: {{LOCAL_PORT}}
+
+# Webhook integration
+deploy:
+  hooks:
+    after:
+    - host:
+        command: ["python", "tools/tunnel-manager/tunnel-manager.py", "register", "{{PROJECT_NAME}}", "webhook"]

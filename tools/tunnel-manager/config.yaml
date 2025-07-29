@@ -1,0 +1,57 @@
+# Tunnel Manager Configuration
+# Manages Cloudflare tunnels and webhook URL updates
+
+# Cloudflare configuration
+cloudflare:
+  tunnel_name: "fuzeinfra-tunnel"
+  domain: "your-domain.com"  # Replace with your actual domain
+  container_name: "fuzeinfra-cloudflare-tunnel"
+  config_path: "/etc/cloudflared/config.yml"
+
+# Webhook URL patterns
+url_patterns:
+  github_webhook: "{project}.webhook.{domain}/github"
+  atlassian_webhook: "{project}.webhook.{domain}/atlassian"
+  oauth_callback: "{project}.auth.{domain}/oauth/{provider}/callback"
+  generic_webhook: "{project}.webhook.{domain}/{service}"
+
+# API endpoints and authentication
+apis:
+  github:
+    base_url: "https://api.github.com"
+    timeout: 30
+    retries: 3
+  
+  atlassian:
+    timeout: 30
+    retries: 3
+    # Base URL will be constructed as: https://{instance}.atlassian.net
+  
+  google:
+    console_url: "https://console.cloud.google.com/apis/credentials"
+    manual_update_required: true
+
+# Webhook registry database
+registry:
+  file_path: "webhook_registry.json"
+  backup_enabled: true
+  backup_retention_days: 30
+
+# Health monitoring
+monitoring:
+  check_interval_seconds: 60
+  tunnel_health_timeout: 10
+  webhook_test_timeout: 5
+  max_consecutive_failures: 3
+
+# Notification settings
+notifications:
+  manual_update_webhook: "http://localhost:3000/api/notifications/manual-update"
+  email_notifications: false
+  slack_webhook: ""  # Optional: Slack webhook for notifications
+
+# Security
+security:
+  encrypt_tokens: true
+  token_rotation_days: 90
+  webhook_signature_validation: true
