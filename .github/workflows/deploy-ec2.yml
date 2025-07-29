@@ -26,6 +26,7 @@ on:
         - initial # Full deployment with Terraform
         - differential # Update existing deployment
         - rollback # Rollback to previous version
+        - create-instance # Create new EC2 instance
       force_recreate:
         description: 'Force recreate all containers'
         required: false
@@ -78,6 +79,8 @@ jobs:
       terraform_plan_id: ${{ steps.plan.outputs.plan_id }}
       instance_info: ${{ steps.instance.outputs.info }}
       port_conflicts: ${{ steps.ports.outputs.conflicts }}
+      create_instance: ${{ steps.instance.outputs.create_instance }}
+      instance_exists: ${{ steps.instance.outputs.instance_exists }}
     
     steps:
     - name: Checkout code
@@ -98,27 +101,38 @@ jobs:
         terraform_version: ${{ env.TERRAFORM_VERSION }}
         terraform_wrapper: false
 
-    - name: Validate instance exists
+    - name: Check instance existence
       id: instance
       run: |
+        echo "🔍 Checking if instance '${{ env.INSTANCE_NAME }}' exists..."
+        
         INSTANCE_ID=$(aws ec2 describe-instances \
           --filters "Name=tag:Name,Values=${{ env.INSTANCE_NAME }}" \
-                   "Name=instance-state-name,Values=running" \
+                   "Name=instance-state-name,Values=running,stopped" \
           --query 'Reservations[0].Instances[0].InstanceId' \
-          --output text)
+          --output text 2>/dev/null || echo "None")
         
         if [ "$INSTANCE_ID" = "None" ] || [ "$INSTANCE_ID" = "null" ]; then
-          echo "❌ Instance '${{ env.INSTANCE_NAME }}' not found or not running"
-          exit 1
+          echo "⚠️  Instance '${{ env.INSTANCE_NAME }}' not found"
+          echo "instance_exists=false" >> $GITHUB_OUTPUT
+          echo "create_instance=true" >> $GITHUB_OUTPUT
+          
+          if [ "${{ env.DEPLOYMENT_TYPE }}" = "create-instance" ]; then
+            echo "✅ Will create new instance as requested"
+          else
+            echo "✅ Will auto-create instance (none found)"
+          fi
+        else
+          INSTANCE_IP=$(aws ec2 describe-instances \
+            --instance-ids $INSTANCE_ID \
+            --query 'Reservations[0].Instances[0].PublicIpAddress' \
+            --output text)
+          
+          echo "✅ Found existing instance: $INSTANCE_ID ($INSTANCE_IP)"
+          echo "instance_exists=true" >> $GITHUB_OUTPUT
+          echo "create_instance=false" >> $GITHUB_OUTPUT
+          echo "info={\"id\":\"$INSTANCE_ID\",\"ip\":\"$INSTANCE_IP\"}" >> $GITHUB_OUTPUT
         fi
-        
-        INSTANCE_IP=$(aws ec2 describe-instances \
-          --instance-ids $INSTANCE_ID \
-          --query 'Reservations[0].Instances[0].PublicIpAddress' \
-          --output text)
-        
-        echo "✅ Found instance: $INSTANCE_ID ($INSTANCE_IP)"
-        echo "info={\"id\":\"$INSTANCE_ID\",\"ip\":\"$INSTANCE_IP\"}" >> $GITHUB_OUTPUT
 
     - name: Check port conflicts
       id: ports
@@ -129,7 +143,7 @@ jobs:
         echo "conflicts=[]" >> $GITHUB_OUTPUT
 
     - name: Terraform Init
-      if: ${{ inputs.deployment_type == 'initial' && !inputs.skip_terraform }}
+      if: ${{ (inputs.deployment_type == 'initial' || steps.instance.outputs.create_instance == 'true') && !inputs.skip_terraform }}
       working-directory: terraform/ec2-deployment
       run: |
         terraform init \
@@ -138,14 +152,19 @@ jobs:
           -backend-config="region=${{ env.AWS_REGION }}"
 
     - name: Terraform Plan
-      if: ${{ inputs.deployment_type == 'initial' && !inputs.skip_terraform }}
+      if: ${{ (inputs.deployment_type == 'initial' || steps.instance.outputs.create_instance == 'true') && !inputs.skip_terraform }}
       id: plan
       working-directory: terraform/ec2-deployment
       run: |
+        # Determine if we need to create instance
+        CREATE_INSTANCE="${{ steps.instance.outputs.create_instance }}"
+        
         terraform plan \
           -var="instance_name=${{ env.INSTANCE_NAME }}" \
           -var="environment=${{ env.ENVIRONMENT }}" \
           -var="aws_region=${{ env.AWS_REGION }}" \
+          -var="create_instance=${CREATE_INSTANCE}" \
+          -var="create_eip=${CREATE_INSTANCE}" \
           -out=tfplan
         
         PLAN_ID=$(date +%s)
@@ -162,7 +181,7 @@ jobs:
     name: Deploy Infrastructure
     runs-on: ubuntu-latest
     needs: validate
-    if: ${{ inputs.deployment_type == 'initial' && !inputs.skip_terraform }}
+    if: ${{ (inputs.deployment_type == 'initial' || needs.validate.outputs.create_instance == 'true') && !inputs.skip_terraform }}
     environment: 
       name: ${{ inputs.environment || 'production' }}
       url: https://infra.fuzefront.com
@@ -194,10 +213,15 @@ jobs:
     - name: Terraform Apply
       working-directory: terraform/ec2-deployment
       run: |
+        # Determine if we need to create instance
+        CREATE_INSTANCE="${{ needs.validate.outputs.create_instance }}"
+        
         terraform apply \
           -var="instance_name=${{ env.INSTANCE_NAME }}" \
           -var="environment=${{ env.ENVIRONMENT }}" \
           -var="aws_region=${{ env.AWS_REGION }}" \
+          -var="create_instance=${CREATE_INSTANCE}" \
+          -var="create_eip=${CREATE_INSTANCE}" \
           -auto-approve
 
     - name: Save Terraform Outputs
@@ -231,11 +255,58 @@ jobs:
     - name: Get instance connection info
       id: connection
       run: |
-        INSTANCE_IP=$(aws ec2 describe-instances \
-          --filters "Name=tag:Name,Values=${{ env.INSTANCE_NAME }}" \
-          --query 'Reservations[0].Instances[0].PublicIpAddress' \
-          --output text)
+        # Get instance IP from validation or Terraform outputs
+        if [ "${{ needs.validate.outputs.instance_exists }}" = "true" ]; then
+          # Use existing instance IP
+          INSTANCE_IP=$(aws ec2 describe-instances \
+            --filters "Name=tag:Name,Values=${{ env.INSTANCE_NAME }}" \
+            --query 'Reservations[0].Instances[0].PublicIpAddress' \
+            --output text)
+        else
+          # Use new instance IP from Terraform outputs
+          INSTANCE_IP=$(terraform -chdir=terraform/ec2-deployment output -raw instance_public_ip)
+        fi
+        
         echo "ip=$INSTANCE_IP" >> $GITHUB_OUTPUT
+        echo "✅ Instance IP: $INSTANCE_IP"
+
+    - name: Wait for new instance to be ready
+      if: ${{ needs.validate.outputs.create_instance == 'true' }}
+      run: |
+        echo "⏳ Waiting for newly created instance to be ready..."
+        INSTANCE_IP="${{ steps.connection.outputs.ip }}"
+        
+        # Wait for instance to be running and pass status checks
+        timeout 300 bash -c '
+          while true; do
+            STATUS=$(aws ec2 describe-instance-status \
+              --filters "Name=instance-state-name,Values=running" \
+              --query "InstanceStatuses[?InstanceId==\`$(aws ec2 describe-instances \
+                --filters \"Name=tag:Name,Values=${{ env.INSTANCE_NAME }}\" \
+                --query \"Reservations[0].Instances[0].InstanceId\" \
+                --output text)\`].SystemStatus.Status" \
+              --output text)
+            
+            if [ "$STATUS" = "ok" ]; then
+              echo "✅ Instance is running and ready"
+              break
+            fi
+            
+            echo "Instance status: $STATUS, waiting..."
+            sleep 30
+          done
+        '
+        
+        # Wait for SSH to be available
+        echo "⏳ Waiting for SSH to be ready..."
+        timeout 180 bash -c "
+          while ! nc -z $INSTANCE_IP 22; do
+            echo 'Waiting for SSH port 22...'
+            sleep 10
+          done
+        "
+        
+        echo "✅ Instance is ready for deployment"
 
     - name: Setup SSH
       run: |
@@ -384,8 +455,8 @@ jobs:
           CLOUDFLARE_TUNNEL_DOMAIN=fuzefront.com
           
           # Webhook Management
-          GITHUB_TOKEN=${{ secrets.GITHUB_TOKEN }}
-          GITHUB_WEBHOOK_SECRET=${{ secrets.GITHUB_WEBHOOK_SECRET }}
+          GITHUB_TOKEN=${{ secrets.GH_TOKEN }}
+          GITHUB_WEBHOOK_SECRET=${{ secrets.WEBHOOK_SECRET }}
           ATLASSIAN_EMAIL=${{ secrets.ATLASSIAN_EMAIL }}
           ATLASSIAN_API_TOKEN=${{ secrets.ATLASSIAN_API_TOKEN }}
           ATLASSIAN_INSTANCE=${{ secrets.ATLASSIAN_INSTANCE }}

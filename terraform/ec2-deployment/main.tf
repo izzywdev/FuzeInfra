@@ -36,34 +36,31 @@ provider "aws" {
   }
 }
 
-# Data source for existing EC2 instance
-data "aws_instance" "fuzeinfra_instance" {
-  filter {
-    name   = "tag:Name"
-    values = [var.instance_name]
-  }
-  
-  filter {
-    name   = "instance-state-name"
-    values = ["running"]
-  }
+# Local values for conditional resource creation
+locals {
+  # Use new instance values if creating, otherwise use existing instance values
+  instance_id         = var.create_instance ? aws_instance.fuzeinfra_new[0].id : data.aws_instance.fuzeinfra_instance_check[0].id
+  instance_public_ip  = var.create_instance ? aws_eip.fuzeinfra_new[0].public_ip : (var.create_eip ? aws_eip.fuzeinfra[0].public_ip : data.aws_instance.fuzeinfra_instance_check[0].public_ip)
+  instance_private_ip = var.create_instance ? aws_instance.fuzeinfra_new[0].private_ip : data.aws_instance.fuzeinfra_instance_check[0].private_ip
+  vpc_id              = var.create_instance ? data.aws_vpc.default[0].id : data.aws_instance.fuzeinfra_instance_check[0].vpc_id
+  subnet_id           = var.create_instance ? data.aws_subnet.default[0].id : data.aws_instance.fuzeinfra_instance_check[0].subnet_id
+  vpc_cidr            = var.create_instance ? data.aws_vpc.default[0].cidr_block : data.aws_vpc.existing[0].cidr_block
+  availability_zone   = var.create_instance ? aws_instance.fuzeinfra_new[0].availability_zone : data.aws_instance.fuzeinfra_instance_check[0].availability_zone
+  network_interface_id = var.create_instance ? aws_instance.fuzeinfra_new[0].primary_network_interface_id : data.aws_instance.fuzeinfra_instance_check[0].network_interface_id
 }
 
-# Data source for existing VPC
-data "aws_vpc" "main" {
-  id = data.aws_instance.fuzeinfra_instance.vpc_id
+# Data source for existing VPC when using existing instance
+data "aws_vpc" "existing" {
+  count = var.create_instance ? 0 : 1
+  id    = data.aws_instance.fuzeinfra_instance_check[0].vpc_id
 }
 
-# Data source for existing subnet
-data "aws_subnet" "main" {
-  id = data.aws_instance.fuzeinfra_instance.subnet_id
-}
 
 # Security Group for FuzeInfra services
 resource "aws_security_group" "fuzeinfra" {
   name_prefix = "fuzeinfra-${var.environment}-"
   description = "Security group for FuzeInfra services"
-  vpc_id      = data.aws_vpc.main.id
+  vpc_id      = local.vpc_id
 
   # HTTP (nginx)
   ingress {
@@ -89,7 +86,7 @@ resource "aws_security_group" "fuzeinfra" {
     from_port   = 53
     to_port     = 53
     protocol    = "udp"
-    cidr_blocks = [data.aws_vpc.main.cidr_block]
+    cidr_blocks = [local.vpc_cidr]
   }
 
   # FuzeInfra Web UIs (restricted to specific IPs)
@@ -127,16 +124,17 @@ resource "aws_security_group" "fuzeinfra" {
   }
 }
 
-# Attach security group to existing instance
+# Attach security group to existing instance (only if not creating new instance)
 resource "aws_network_interface_sg_attachment" "fuzeinfra" {
+  count                = var.create_instance ? 0 : 1
   security_group_id    = aws_security_group.fuzeinfra.id
-  network_interface_id = data.aws_instance.fuzeinfra_instance.network_interface_id
+  network_interface_id = local.network_interface_id
 }
 
-# Elastic IP for stable access (if not already assigned)
+# Elastic IP for existing instance (if not already assigned and not creating new)
 resource "aws_eip" "fuzeinfra" {
-  count    = var.create_eip ? 1 : 0
-  instance = data.aws_instance.fuzeinfra_instance.id
+  count    = var.create_eip && !var.create_instance ? 1 : 0
+  instance = local.instance_id
   domain   = "vpc"
 
   tags = {
@@ -154,9 +152,7 @@ resource "aws_route53_record" "infra" {
   name    = "infra.${var.domain_name}"
   type    = "A"
   ttl     = 300
-  records = [
-    var.create_eip ? aws_eip.fuzeinfra[0].public_ip : data.aws_instance.fuzeinfra_instance.public_ip
-  ]
+  records = [local.instance_public_ip]
 }
 
 # CloudWatch Log Group for FuzeInfra

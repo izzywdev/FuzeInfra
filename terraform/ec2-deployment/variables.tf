@@ -30,10 +30,52 @@ variable "allowed_cidr_blocks" {
   default     = ["0.0.0.0/0"] # Restrict this in production
 }
 
+variable "create_instance" {
+  description = "Whether to create a new EC2 instance (true) or use existing (false)"
+  type        = bool
+  default     = false
+}
+
 variable "create_eip" {
   description = "Whether to create and associate an Elastic IP"
   type        = bool
   default     = false # Set to true if instance doesn't have EIP
+}
+
+variable "instance_type" {
+  description = "EC2 instance type for new instances"
+  type        = string
+  default     = "t3.large"
+}
+
+variable "availability_zone" {
+  description = "Availability zone for new instances"
+  type        = string
+  default     = "us-east-1a"
+}
+
+variable "root_volume_size" {
+  description = "Root volume size in GB for new instances"
+  type        = number
+  default     = 30
+}
+
+variable "docker_volume_size" {
+  description = "Docker data volume size in GB for new instances"
+  type        = number
+  default     = 50
+}
+
+variable "enable_monitoring" {
+  description = "Whether to enable detailed monitoring and CloudWatch alarms"
+  type        = bool
+  default     = true
+}
+
+variable "sns_topic_arn" {
+  description = "SNS topic ARN for CloudWatch alarms"
+  type        = string
+  default     = ""
 }
 
 variable "attach_iam_profile" {

@@ -2,17 +2,17 @@
 
 output "instance_id" {
   description = "ID of the EC2 instance"
-  value       = data.aws_instance.fuzeinfra_instance.id
+  value       = local.instance_id
 }
 
 output "instance_public_ip" {
   description = "Public IP address of the EC2 instance"
-  value       = var.create_eip ? aws_eip.fuzeinfra[0].public_ip : data.aws_instance.fuzeinfra_instance.public_ip
+  value       = local.instance_public_ip
 }
 
 output "instance_private_ip" {
   description = "Private IP address of the EC2 instance"
-  value       = data.aws_instance.fuzeinfra_instance.private_ip
+  value       = local.instance_private_ip
 }
 
 output "security_group_id" {
@@ -89,10 +89,10 @@ output "deployment_info" {
 output "network_info" {
   description = "Network configuration information"
   value = {
-    vpc_id           = data.aws_vpc.main.id
-    subnet_id        = data.aws_subnet.main.id
-    vpc_cidr         = data.aws_vpc.main.cidr_block
-    availability_zone = data.aws_instance.fuzeinfra_instance.availability_zone
+    vpc_id           = local.vpc_id
+    subnet_id        = local.subnet_id
+    vpc_cidr         = local.vpc_cidr
+    availability_zone = local.availability_zone
   }
 }
 

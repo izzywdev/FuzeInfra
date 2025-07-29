@@ -12,6 +12,14 @@
 secrets/
 config/secrets/
 
+# SSH Keys Directory - track structure but not key files
+keys/*.pem
+keys/*.key
+keys/*_key
+keys/*.old
+!keys/.gitkeep
+!keys/README.md
+
 # =============================================================================
 # LOGS AND RUNTIME
 # =============================================================================
