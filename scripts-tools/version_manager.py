@@ -153,7 +153,7 @@ class VersionManager:
                 "description": "Generic shared infrastructure platform for microservices development",
                 "build": {
                     "number": 1,
-                    "date": datetime.datetime.utcnow().isoformat() + "Z",
+                    "date": datetime.datetime.now(datetime.timezone.utc).isoformat() + "Z",
                     "commit": "",
                     "branch": "main"
                 },
@@ -309,7 +309,7 @@ class VersionManager:
         # Update main version data
         self.version_data['version'] = str(new_version)
         self.version_data['build']['number'] += 1
-        self.version_data['build']['date'] = datetime.datetime.utcnow().isoformat() + "Z"
+        self.version_data['build']['date'] = datetime.datetime.now(datetime.timezone.utc).isoformat() + "Z"
         self.version_data['build']['commit'] = git_info['commit']
         self.version_data['build']['branch'] = git_info['branch']
         self.version_data['metadata']['release_date'] = datetime.date.today().isoformat()

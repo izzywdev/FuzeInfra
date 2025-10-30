@@ -309,10 +309,10 @@ class PortAllocator:
         try:
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
                 sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-                result = sock.bind(('127.0.0.1', port))
-                return True
+                sock.bind(('127.0.0.1', port))
+                return True  # If bind() succeeds, port is available
         except OSError:
-            return False
+            return False  # If bind() fails, port is in use
     
     def scan_ports(self, start_port: int = 3000, end_port: int = 9999) -> Dict:
         """Scan for available ports in a range."""

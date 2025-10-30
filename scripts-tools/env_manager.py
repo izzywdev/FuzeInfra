@@ -224,9 +224,9 @@ class EnvManager:
         # Create backup before making changes
         self.create_backup(suffix="before_remove")
         
-        # Remove the line
+        # Remove the line by filtering (safer than pop which changes indices)
         old_value, line_num = env_vars[key]
-        lines.pop(line_num)
+        lines = [line for i, line in enumerate(lines) if i != line_num]
         
         print(f"🗑️  Removed {key}={old_value}")
         return self.write_env_file(lines)
