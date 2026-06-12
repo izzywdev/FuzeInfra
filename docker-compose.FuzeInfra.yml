@@ -133,12 +133,9 @@ services:
     networks:
       - FuzeInfra
     restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/api/v1/heartbeat"]
-      interval: 30s
-      timeout: 10s
-      retries: 5
-      start_period: 30s
+    # No healthcheck: chromadb/chroma:latest is a distroless image (no curl/python/shell
+    # and the chroma CLI has no heartbeat command), so an in-container probe is impossible.
+    # Readiness can be checked externally via GET http://localhost:8000/api/v2/heartbeat.
     labels:
       - "com.fuzeinfra.service=chromadb"
       - "com.fuzeinfra.description=ChromaDB Vector Database for AI/ML Applications"
@@ -253,11 +250,9 @@ services:
       - TUNNEL_TOKEN=${CLOUDFLARE_TUNNEL_TOKEN}
     depends_on:
       - nginx
-    healthcheck:
-      test: ["CMD-SHELL", "cloudflared tunnel info ${CLOUDFLARE_TUNNEL_NAME} || exit 1"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
+    # No healthcheck: cloudflare/cloudflared:latest is distroless (no /bin/sh), and a
+    # token-run tunnel has no local name/creds for `cloudflared tunnel info`. Tunnel
+    # connectivity is visible in the container logs ("Registered tunnel connection").
 
   # ================================
   # MONITORING & OBSERVABILITY
@@ -471,7 +466,7 @@ services:
       - ./airflow-shared/logs:/opt/airflow/logs
       - ./airflow-shared/plugins:/opt/airflow/plugins
     ports:
-      - "${AIRFLOW_PORT}:8080"
+      - "${AIRFLOW_PORT:-8082}:8080"    # Airflow Webserver - management via tunnel only (host port from .env, leaves 8080 for kafka-ui)
     depends_on:
       - airflow-init
     networks:
