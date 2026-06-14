@@ -1,0 +1,460 @@
+{{- /* ===================== RBAC for Prometheus & Promtail SD ===================== */ -}}
+{{- if or .Values.prometheus.enabled .Values.promtail.enabled }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: fuzeinfra-monitoring
+  labels:
+    {{- include "fuzeinfra.labels" . | nindent 4 }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ .Release.Namespace }}-fuzeinfra-monitoring
+  labels:
+    {{- include "fuzeinfra.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["nodes", "nodes/proxy", "nodes/metrics", "services", "endpoints", "pods"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get"]
+  - nonResourceURLs: ["/metrics"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ .Release.Namespace }}-fuzeinfra-monitoring
+  labels:
+    {{- include "fuzeinfra.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ .Release.Namespace }}-fuzeinfra-monitoring
+subjects:
+  - kind: ServiceAccount
+    name: fuzeinfra-monitoring
+    namespace: {{ .Release.Namespace }}
+{{- end }}
+
+{{- /* ===================== Prometheus ===================== */ -}}
+{{- if .Values.prometheus.enabled }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: prometheus
+  labels:
+    {{- include "fuzeinfra.labels" . | nindent 4 }}
+    {{- include "fuzeinfra.selectorLabels" (dict "component" "prometheus") | nindent 4 }}
+spec:
+  selector:
+    {{- include "fuzeinfra.selectorLabels" (dict "component" "prometheus") | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ .Values.prometheus.port }}
+      targetPort: 9090
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: prometheus
+  labels:
+    {{- include "fuzeinfra.labels" . | nindent 4 }}
+spec:
+  serviceName: prometheus
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "fuzeinfra.selectorLabels" (dict "component" "prometheus") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "fuzeinfra.labels" . | nindent 8 }}
+        {{- include "fuzeinfra.selectorLabels" (dict "component" "prometheus") | nindent 8 }}
+    spec:
+      serviceAccountName: fuzeinfra-monitoring
+      securityContext:
+        fsGroup: 65534
+      containers:
+        - name: prometheus
+          image: {{ .Values.prometheus.image }}
+          imagePullPolicy: {{ include "fuzeinfra.pullPolicy" . }}
+          args:
+            - '--config.file=/etc/prometheus/prometheus.yml'
+            - '--storage.tsdb.path=/prometheus'
+            - '--web.enable-lifecycle'
+          ports:
+            - containerPort: 9090
+              name: http
+          volumeMounts:
+            - name: config
+              mountPath: /etc/prometheus
+            - name: data
+              mountPath: /prometheus
+          readinessProbe:
+            httpGet:
+              path: /-/ready
+              port: 9090
+            initialDelaySeconds: 15
+            periodSeconds: 10
+      volumes:
+        - name: config
+          configMap:
+            name: prometheus-config
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        {{- include "fuzeinfra.storageClass" . | nindent 8 }}
+        resources:
+          requests:
+            storage: {{ .Values.prometheus.storage }}
+{{- end }}
+
+{{- /* ===================== Alertmanager ===================== */ -}}
+{{- if .Values.alertmanager.enabled }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: alertmanager
+  labels:
+    {{- include "fuzeinfra.labels" . | nindent 4 }}
+    {{- include "fuzeinfra.selectorLabels" (dict "component" "alertmanager") | nindent 4 }}
+spec:
+  selector:
+    {{- include "fuzeinfra.selectorLabels" (dict "component" "alertmanager") | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ .Values.alertmanager.port }}
+      targetPort: 9093
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: alertmanager
+  labels:
+    {{- include "fuzeinfra.labels" . | nindent 4 }}
+spec:
+  serviceName: alertmanager
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "fuzeinfra.selectorLabels" (dict "component" "alertmanager") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "fuzeinfra.labels" . | nindent 8 }}
+        {{- include "fuzeinfra.selectorLabels" (dict "component" "alertmanager") | nindent 8 }}
+    spec:
+      containers:
+        - name: alertmanager
+          image: {{ .Values.alertmanager.image }}
+          imagePullPolicy: {{ include "fuzeinfra.pullPolicy" . }}
+          args:
+            - '--config.file=/etc/alertmanager/alertmanager.yml'
+            - '--storage.path=/alertmanager'
+          ports:
+            - containerPort: 9093
+              name: http
+          volumeMounts:
+            - name: config
+              mountPath: /etc/alertmanager
+            - name: data
+              mountPath: /alertmanager
+      volumes:
+        - name: config
+          configMap:
+            name: alertmanager-config
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        {{- include "fuzeinfra.storageClass" . | nindent 8 }}
+        resources:
+          requests:
+            storage: {{ .Values.alertmanager.storage }}
+{{- end }}
+
+{{- /* ===================== Grafana ===================== */ -}}
+{{- if .Values.grafana.enabled }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: grafana
+  labels:
+    {{- include "fuzeinfra.labels" . | nindent 4 }}
+    {{- include "fuzeinfra.selectorLabels" (dict "component" "grafana") | nindent 4 }}
+spec:
+  selector:
+    {{- include "fuzeinfra.selectorLabels" (dict "component" "grafana") | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ .Values.grafana.port }}
+      targetPort: 3000
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: grafana
+  labels:
+    {{- include "fuzeinfra.labels" . | nindent 4 }}
+spec:
+  serviceName: grafana
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "fuzeinfra.selectorLabels" (dict "component" "grafana") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "fuzeinfra.labels" . | nindent 8 }}
+        {{- include "fuzeinfra.selectorLabels" (dict "component" "grafana") | nindent 8 }}
+    spec:
+      securityContext:
+        fsGroup: 472
+      containers:
+        - name: grafana
+          image: {{ .Values.grafana.image }}
+          imagePullPolicy: {{ include "fuzeinfra.pullPolicy" . }}
+          env:
+            - name: GF_SECURITY_ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "fuzeinfra.secretName" . }}
+                  key: GRAFANA_ADMIN_PASSWORD
+            - name: GF_USERS_ALLOW_SIGN_UP
+              value: "false"
+          ports:
+            - containerPort: 3000
+              name: http
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/grafana
+            - name: datasources
+              mountPath: /etc/grafana/provisioning/datasources
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: 3000
+            initialDelaySeconds: 15
+            periodSeconds: 10
+      volumes:
+        - name: datasources
+          configMap:
+            name: grafana-datasources
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        {{- include "fuzeinfra.storageClass" . | nindent 8 }}
+        resources:
+          requests:
+            storage: {{ .Values.grafana.storage }}
+{{- end }}
+
+{{- /* ===================== Loki ===================== */ -}}
+{{- if .Values.loki.enabled }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: loki
+  labels:
+    {{- include "fuzeinfra.labels" . | nindent 4 }}
+    {{- include "fuzeinfra.selectorLabels" (dict "component" "loki") | nindent 4 }}
+spec:
+  selector:
+    {{- include "fuzeinfra.selectorLabels" (dict "component" "loki") | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ .Values.loki.port }}
+      targetPort: 3100
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: loki
+  labels:
+    {{- include "fuzeinfra.labels" . | nindent 4 }}
+spec:
+  serviceName: loki
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "fuzeinfra.selectorLabels" (dict "component" "loki") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "fuzeinfra.labels" . | nindent 8 }}
+        {{- include "fuzeinfra.selectorLabels" (dict "component" "loki") | nindent 8 }}
+    spec:
+      securityContext:
+        fsGroup: 10001
+      containers:
+        - name: loki
+          image: {{ .Values.loki.image }}
+          imagePullPolicy: {{ include "fuzeinfra.pullPolicy" . }}
+          args: ["-config.file=/etc/loki/loki-config.yaml"]
+          ports:
+            - containerPort: 3100
+              name: http
+          volumeMounts:
+            - name: config
+              mountPath: /etc/loki
+            - name: data
+              mountPath: /loki
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: 3100
+            initialDelaySeconds: 20
+            periodSeconds: 10
+      volumes:
+        - name: config
+          configMap:
+            name: loki-config
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        {{- include "fuzeinfra.storageClass" . | nindent 8 }}
+        resources:
+          requests:
+            storage: {{ .Values.loki.storage }}
+{{- end }}
+
+{{- /* ===================== Promtail (DaemonSet) ===================== */ -}}
+{{- if .Values.promtail.enabled }}
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: promtail
+  labels:
+    {{- include "fuzeinfra.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "fuzeinfra.selectorLabels" (dict "component" "promtail") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "fuzeinfra.labels" . | nindent 8 }}
+        {{- include "fuzeinfra.selectorLabels" (dict "component" "promtail") | nindent 8 }}
+    spec:
+      serviceAccountName: fuzeinfra-monitoring
+      containers:
+        - name: promtail
+          image: {{ .Values.promtail.image }}
+          imagePullPolicy: {{ include "fuzeinfra.pullPolicy" . }}
+          args: ["-config.file=/etc/promtail/config.yml"]
+          env:
+            - name: HOSTNAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          volumeMounts:
+            - name: config
+              mountPath: /etc/promtail
+            - name: run
+              mountPath: /run/promtail
+            - name: pods
+              mountPath: /var/log/pods
+              readOnly: true
+            - name: containers
+              mountPath: /var/lib/docker/containers
+              readOnly: true
+      volumes:
+        - name: config
+          configMap:
+            name: promtail-config
+        - name: run
+          hostPath:
+            path: /run/promtail
+        - name: pods
+          hostPath:
+            path: /var/log/pods
+        - name: containers
+          hostPath:
+            path: /var/lib/docker/containers
+{{- end }}
+
+{{- /* ===================== Node Exporter (DaemonSet) ===================== */ -}}
+{{- if .Values.nodeExporter.enabled }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: node-exporter
+  labels:
+    {{- include "fuzeinfra.labels" . | nindent 4 }}
+    {{- include "fuzeinfra.selectorLabels" (dict "component" "node-exporter") | nindent 4 }}
+spec:
+  clusterIP: None
+  selector:
+    {{- include "fuzeinfra.selectorLabels" (dict "component" "node-exporter") | nindent 4 }}
+  ports:
+    - name: metrics
+      port: {{ .Values.nodeExporter.port }}
+      targetPort: 9100
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: node-exporter
+  labels:
+    {{- include "fuzeinfra.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "fuzeinfra.selectorLabels" (dict "component" "node-exporter") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "fuzeinfra.labels" . | nindent 8 }}
+        {{- include "fuzeinfra.selectorLabels" (dict "component" "node-exporter") | nindent 8 }}
+    spec:
+      hostNetwork: true
+      hostPID: true
+      containers:
+        - name: node-exporter
+          image: {{ .Values.nodeExporter.image }}
+          imagePullPolicy: {{ include "fuzeinfra.pullPolicy" . }}
+          args:
+            - '--path.procfs=/host/proc'
+            - '--path.sysfs=/host/sys'
+            - '--path.rootfs=/host/root'
+            - '--collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc)($$|/)'
+          ports:
+            - containerPort: 9100
+              name: metrics
+          volumeMounts:
+            - name: proc
+              mountPath: /host/proc
+              readOnly: true
+            - name: sys
+              mountPath: /host/sys
+              readOnly: true
+            - name: root
+              mountPath: /host/root
+              readOnly: true
+      volumes:
+        - name: proc
+          hostPath:
+            path: /proc
+        - name: sys
+          hostPath:
+            path: /sys
+        - name: root
+          hostPath:
+            path: /
+{{- end }}

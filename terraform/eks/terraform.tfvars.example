@@ -1,0 +1,14 @@
+# Copy to terraform.tfvars and adjust.
+aws_region      = "us-east-1"
+cluster_name    = "fuzeinfra"
+cluster_version = "1.29"
+
+# Worker node group sizing.
+node_instance_types = ["t3.large"]
+node_desired_size   = 2
+node_min_size       = 2
+node_max_size       = 4
+node_disk_size      = 50
+
+# IMPORTANT: restrict this to your IP/office CIDR in production.
+admin_access_cidrs = ["0.0.0.0/0"]

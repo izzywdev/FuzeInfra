@@ -1,0 +1,25 @@
+# =============================================================================
+# Local (kind) overlay.
+#   helm upgrade --install fuzeinfra helm/fuzeinfra \
+#     -n fuzeinfra --create-namespace -f helm/fuzeinfra/values-local.yaml
+# =============================================================================
+global:
+  storageClass: "standard"   # kind's default dynamic provisioner
+  domain: dev.local
+  imagePullPolicy: IfNotPresent
+
+ingress:
+  enabled: true
+  className: nginx
+  tls:
+    enabled: false
+
+# Smaller footprint for laptops.
+elasticsearch:
+  javaOpts: "-Xms256m -Xmx256m"
+  resources:
+    requests: { cpu: 100m, memory: 512Mi }
+    limits:   { cpu: 500m, memory: 1Gi }
+
+airflow:
+  workerReplicas: 1

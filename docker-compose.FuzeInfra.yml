@@ -144,34 +144,32 @@ services:
   # MESSAGE QUEUE SERVICES
   # ================================
 
-  # Zookeeper (for Kafka)
-  zookeeper:
-    image: confluentinc/cp-zookeeper:7.4.0
-    container_name: fuzeinfra-zookeeper
-    environment:
-      ZOOKEEPER_CLIENT_PORT: 2181
-      ZOOKEEPER_TICK_TIME: 2000
-    volumes:
-      - zookeeper_data:/var/lib/zookeeper/data
-      - zookeeper_logs:/var/lib/zookeeper/log
-    networks:
-      - FuzeInfra
-    restart: unless-stopped
-
-  # Apache Kafka
+  # Apache Kafka (KRaft mode - no ZooKeeper).
+  # KRaft removes the separate ZooKeeper service and the startup race / deprecation
+  # warnings that produced the errors seen in `docker logs fuzeinfra-kafka`.
+  # NOTE: switching from the old ZooKeeper-based broker changes the on-disk format.
+  # If you previously ran the ZooKeeper version, remove the stale volumes first:
+  #   docker volume rm fuzeinfra_kafka_data fuzeinfra_zookeeper_data fuzeinfra_zookeeper_logs
   kafka:
-    image: confluentinc/cp-kafka:7.4.0
+    image: confluentinc/cp-kafka:7.6.1
     container_name: fuzeinfra-kafka
-    depends_on:
-      - zookeeper
     environment:
-      KAFKA_BROKER_ID: 1
-      KAFKA_ZOOKEEPER_CONNECT: fuzeinfra-zookeeper:2181
+      # KRaft single-node: this broker is also the controller.
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@fuzeinfra-kafka:9093
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093,PLAINTEXT_HOST://0.0.0.0:29092
       KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://fuzeinfra-kafka:9092,PLAINTEXT_HOST://localhost:29092
-      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
       KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
-      KAFKA_AUTO_CREATE_TOPICS_ENABLE: true
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
+      # Fixed cluster id so the broker formats KRaft storage deterministically.
+      CLUSTER_ID: fuzeinfra-kafka-cluster01
     ports:
       - "29092:29092"
     volumes:
@@ -179,6 +177,12 @@ services:
     networks:
       - FuzeInfra
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "kafka-broker-api-versions", "--bootstrap-server", "localhost:9092"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
 
   # Kafka UI
   kafka-ui:
@@ -186,13 +190,14 @@ services:
     container_name: fuzeinfra-kafka-ui
     environment:
       KAFKA_CLUSTERS_0_NAME: local
+      # KRaft: bootstrap servers only (ZooKeeper config removed).
       KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: fuzeinfra-kafka:9092
-      KAFKA_CLUSTERS_0_ZOOKEEPER: fuzeinfra-zookeeper:2181
+      DYNAMIC_CONFIG_ENABLED: "true"
     ports:
       - "8080:8080"
     depends_on:
-      - kafka
-      - zookeeper
+      kafka:
+        condition: service_healthy
     networks:
       - FuzeInfra
     restart: unless-stopped
@@ -559,10 +564,6 @@ volumes:
   # Message queue volumes
   kafka_data:
     name: fuzeinfra_kafka_data
-  zookeeper_data:
-    name: fuzeinfra_zookeeper_data
-  zookeeper_logs:
-    name: fuzeinfra_zookeeper_logs
   rabbitmq_data:
     name: fuzeinfra_rabbitmq_data
   

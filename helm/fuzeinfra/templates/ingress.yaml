@@ -1,0 +1,48 @@
+{{- if .Values.ingress.enabled }}
+{{- $root := . -}}
+{{- /* service name -> service port for each web UI we expose */ -}}
+{{- $routes := dict
+  "grafana"           (dict "svc" "grafana"           "port" $root.Values.grafana.port           "enabled" $root.Values.grafana.enabled)
+  "prometheus"        (dict "svc" "prometheus"        "port" $root.Values.prometheus.port        "enabled" $root.Values.prometheus.enabled)
+  "alertmanager"      (dict "svc" "alertmanager"      "port" $root.Values.alertmanager.port      "enabled" $root.Values.alertmanager.enabled)
+  "airflow"           (dict "svc" "airflow-webserver" "port" $root.Values.airflow.webPort        "enabled" $root.Values.airflow.enabled)
+  "flower"            (dict "svc" "airflow-flower"    "port" $root.Values.airflow.flowerPort     "enabled" $root.Values.airflow.enabled)
+  "kafka-ui"          (dict "svc" "kafka-ui"          "port" $root.Values.kafkaUi.port           "enabled" (and $root.Values.kafkaUi.enabled $root.Values.kafka.enabled))
+  "mongo-express"     (dict "svc" "mongo-express"     "port" $root.Values.mongoExpress.port      "enabled" (and $root.Values.mongoExpress.enabled $root.Values.mongodb.enabled))
+  "rabbitmq"          (dict "svc" "rabbitmq"          "port" $root.Values.rabbitmq.managementPort "enabled" $root.Values.rabbitmq.enabled)
+  "neo4j"             (dict "svc" "neo4j"             "port" $root.Values.neo4j.httpPort         "enabled" $root.Values.neo4j.enabled)
+-}}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: fuzeinfra
+  labels:
+    {{- include "fuzeinfra.labels" . | nindent 4 }}
+spec:
+  ingressClassName: {{ .Values.ingress.className }}
+  {{- if .Values.ingress.tls.enabled }}
+  tls:
+    - hosts:
+        {{- range $sub, $r := $routes }}
+        {{- if $r.enabled }}
+        - {{ include "fuzeinfra.host" (dict "root" $root "sub" $sub) }}
+        {{- end }}
+        {{- end }}
+      secretName: fuzeinfra-tls
+  {{- end }}
+  rules:
+    {{- range $sub, $r := $routes }}
+    {{- if $r.enabled }}
+    - host: {{ include "fuzeinfra.host" (dict "root" $root "sub" $sub) }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ $r.svc }}
+                port:
+                  number: {{ $r.port }}
+    {{- end }}
+    {{- end }}
+{{- end }}

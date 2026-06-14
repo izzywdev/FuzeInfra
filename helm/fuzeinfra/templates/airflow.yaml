@@ -1,0 +1,289 @@
+{{- /*
+Shared Airflow env block. POSTGRES_USER/PASSWORD come from the secret and are
+referenced via $(VAR) interpolation to build the SQLAlchemy/Celery URLs.
+*/ -}}
+{{- define "fuzeinfra.airflowEnv" -}}
+- name: POSTGRES_USER
+  valueFrom:
+    secretKeyRef:
+      name: {{ include "fuzeinfra.secretName" . }}
+      key: POSTGRES_USER
+- name: POSTGRES_PASSWORD
+  valueFrom:
+    secretKeyRef:
+      name: {{ include "fuzeinfra.secretName" . }}
+      key: POSTGRES_PASSWORD
+- name: AIRFLOW__CORE__EXECUTOR
+  value: CeleryExecutor
+- name: AIRFLOW__DATABASE__SQL_ALCHEMY_CONN
+  value: "postgresql+psycopg2://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@postgres:5432/airflow"
+- name: AIRFLOW__CELERY__RESULT_BACKEND
+  value: "db+postgresql://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@postgres:5432/airflow"
+- name: AIRFLOW__CELERY__BROKER_URL
+  value: "redis://redis:6379/0"
+- name: AIRFLOW__CORE__FERNET_KEY
+  valueFrom:
+    secretKeyRef:
+      name: {{ include "fuzeinfra.secretName" . }}
+      key: AIRFLOW_FERNET_KEY
+- name: AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION
+  value: "true"
+- name: AIRFLOW__CORE__LOAD_EXAMPLES
+  value: {{ .Values.airflow.loadExamples | quote }}
+- name: AIRFLOW__API__AUTH_BACKENDS
+  value: "airflow.api.auth.backend.basic_auth"
+{{- end -}}
+
+{{- if .Values.airflow.enabled }}
+{{- /* Example DAG shipped as a ConfigMap so the stack works out of the box.
+     For production, replace with git-sync or a baked image. */ -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: airflow-dags
+  labels:
+    {{- include "fuzeinfra.labels" . | nindent 4 }}
+data:
+  example_fuzeinfra_dag.py: |
+    from datetime import datetime
+    from airflow import DAG
+    from airflow.operators.bash import BashOperator
+
+    with DAG(
+        dag_id="example_fuzeinfra_pipeline",
+        start_date=datetime(2024, 1, 1),
+        schedule=None,
+        catchup=False,
+        tags=["fuzeinfra", "example"],
+    ) as dag:
+        BashOperator(
+            task_id="hello",
+            bash_command="echo 'FuzeInfra Airflow + Celery is running'",
+        )
+---
+{{- /* ===================== Airflow DB migrate / bootstrap Job ===================== */}}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: airflow-init
+  labels:
+    {{- include "fuzeinfra.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "0"
+    "helm.sh/hook-delete-policy": before-hook-creation
+spec:
+  backoffLimit: 6
+  template:
+    metadata:
+      labels:
+        {{- include "fuzeinfra.labels" . | nindent 8 }}
+        {{- include "fuzeinfra.selectorLabels" (dict "component" "airflow-init") | nindent 8 }}
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: airflow-init
+          image: {{ .Values.airflow.image }}
+          imagePullPolicy: {{ include "fuzeinfra.pullPolicy" . }}
+          env:
+            {{- include "fuzeinfra.airflowEnv" . | nindent 12 }}
+            - name: AIRFLOW_ADMIN_USER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "fuzeinfra.secretName" . }}
+                  key: AIRFLOW_ADMIN_USER
+            - name: AIRFLOW_ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "fuzeinfra.secretName" . }}
+                  key: AIRFLOW_ADMIN_PASSWORD
+          command:
+            - bash
+            - -c
+            - |
+              set -e
+              echo "Waiting for PostgreSQL..."
+              until PGPASSWORD="$POSTGRES_PASSWORD" psql -h postgres -U "$POSTGRES_USER" -d postgres -c '\q' 2>/dev/null; do
+                sleep 2
+              done
+              echo "Ensuring 'airflow' database exists..."
+              PGPASSWORD="$POSTGRES_PASSWORD" psql -h postgres -U "$POSTGRES_USER" -d postgres -tc \
+                "SELECT 1 FROM pg_database WHERE datname = 'airflow'" | grep -q 1 || \
+                PGPASSWORD="$POSTGRES_PASSWORD" psql -h postgres -U "$POSTGRES_USER" -d postgres -c "CREATE DATABASE airflow"
+              echo "Running airflow db migrate..."
+              airflow db migrate
+              echo "Creating admin user (idempotent)..."
+              airflow users create \
+                --username "$AIRFLOW_ADMIN_USER" --firstname Admin --lastname User \
+                --role Admin --email admin@example.com --password "$AIRFLOW_ADMIN_PASSWORD" || true
+---
+{{- /* ===================== Airflow Webserver ===================== */}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: airflow-webserver
+  labels:
+    {{- include "fuzeinfra.labels" . | nindent 4 }}
+    {{- include "fuzeinfra.selectorLabels" (dict "component" "airflow-webserver") | nindent 4 }}
+spec:
+  selector:
+    {{- include "fuzeinfra.selectorLabels" (dict "component" "airflow-webserver") | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ .Values.airflow.webPort }}
+      targetPort: 8080
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: airflow-webserver
+  labels:
+    {{- include "fuzeinfra.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "fuzeinfra.selectorLabels" (dict "component" "airflow-webserver") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "fuzeinfra.labels" . | nindent 8 }}
+        {{- include "fuzeinfra.selectorLabels" (dict "component" "airflow-webserver") | nindent 8 }}
+    spec:
+      containers:
+        - name: webserver
+          image: {{ .Values.airflow.image }}
+          imagePullPolicy: {{ include "fuzeinfra.pullPolicy" . }}
+          args: ["webserver"]
+          env:
+            {{- include "fuzeinfra.airflowEnv" . | nindent 12 }}
+            - name: AIRFLOW__WEBSERVER__EXPOSE_CONFIG
+              value: "true"
+          ports:
+            - containerPort: 8080
+              name: http
+          volumeMounts:
+            - name: dags
+              mountPath: /opt/airflow/dags
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            failureThreshold: 12
+      volumes:
+        - name: dags
+          configMap:
+            name: airflow-dags
+---
+{{- /* ===================== Airflow Scheduler ===================== */}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: airflow-scheduler
+  labels:
+    {{- include "fuzeinfra.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "fuzeinfra.selectorLabels" (dict "component" "airflow-scheduler") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "fuzeinfra.labels" . | nindent 8 }}
+        {{- include "fuzeinfra.selectorLabels" (dict "component" "airflow-scheduler") | nindent 8 }}
+    spec:
+      containers:
+        - name: scheduler
+          image: {{ .Values.airflow.image }}
+          imagePullPolicy: {{ include "fuzeinfra.pullPolicy" . }}
+          args: ["scheduler"]
+          env:
+            {{- include "fuzeinfra.airflowEnv" . | nindent 12 }}
+          volumeMounts:
+            - name: dags
+              mountPath: /opt/airflow/dags
+      volumes:
+        - name: dags
+          configMap:
+            name: airflow-dags
+---
+{{- /* ===================== Airflow Celery Worker ===================== */}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: airflow-worker
+  labels:
+    {{- include "fuzeinfra.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.airflow.workerReplicas }}
+  selector:
+    matchLabels:
+      {{- include "fuzeinfra.selectorLabels" (dict "component" "airflow-worker") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "fuzeinfra.labels" . | nindent 8 }}
+        {{- include "fuzeinfra.selectorLabels" (dict "component" "airflow-worker") | nindent 8 }}
+    spec:
+      containers:
+        - name: worker
+          image: {{ .Values.airflow.image }}
+          imagePullPolicy: {{ include "fuzeinfra.pullPolicy" . }}
+          args: ["celery", "worker"]
+          env:
+            {{- include "fuzeinfra.airflowEnv" . | nindent 12 }}
+          volumeMounts:
+            - name: dags
+              mountPath: /opt/airflow/dags
+      volumes:
+        - name: dags
+          configMap:
+            name: airflow-dags
+---
+{{- /* ===================== Airflow Flower (Celery monitoring) ===================== */}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: airflow-flower
+  labels:
+    {{- include "fuzeinfra.labels" . | nindent 4 }}
+    {{- include "fuzeinfra.selectorLabels" (dict "component" "airflow-flower") | nindent 4 }}
+spec:
+  selector:
+    {{- include "fuzeinfra.selectorLabels" (dict "component" "airflow-flower") | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ .Values.airflow.flowerPort }}
+      targetPort: 5555
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: airflow-flower
+  labels:
+    {{- include "fuzeinfra.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "fuzeinfra.selectorLabels" (dict "component" "airflow-flower") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "fuzeinfra.labels" . | nindent 8 }}
+        {{- include "fuzeinfra.selectorLabels" (dict "component" "airflow-flower") | nindent 8 }}
+    spec:
+      containers:
+        - name: flower
+          image: {{ .Values.airflow.image }}
+          imagePullPolicy: {{ include "fuzeinfra.pullPolicy" . }}
+          args: ["celery", "flower"]
+          env:
+            {{- include "fuzeinfra.airflowEnv" . | nindent 12 }}
+          ports:
+            - containerPort: 5555
+              name: http
+{{- end }}

@@ -1,0 +1,15 @@
+# gp3 StorageClass for EKS (backed by the aws-ebs-csi-driver addon).
+# Apply after the cluster is up:  kubectl apply -f k8s/aws/gp3-storageclass.yaml
+# This becomes the default class so the chart's PVCs (storageClass: gp3) bind.
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: gp3
+  annotations:
+    storageclass.kubernetes.io/is-default-class: "true"
+provisioner: ebs.csi.aws.com
+volumeBindingMode: WaitForFirstConsumer
+allowVolumeExpansion: true
+parameters:
+  type: gp3
+  encrypted: "true"

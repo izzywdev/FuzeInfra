@@ -1,0 +1,200 @@
+# =============================================================================
+# FuzeInfra Helm chart - default values (in-cluster everything)
+#
+# These defaults run the full stack with StatefulSets for stateful services.
+# Override per environment with values-local.yaml (kind) or values-aws.yaml (EKS).
+# =============================================================================
+
+global:
+  # Namespace is taken from the Helm release namespace (`helm -n fuzeinfra`).
+  # Storage class for PersistentVolumeClaims:
+  #   - kind:  "standard" (default kind storage class)
+  #   - EKS:   "gp3" (provided by the aws-ebs-csi-driver / values-aws.yaml)
+  storageClass: "standard"
+
+  # Base domain used to build Ingress hostnames, e.g. grafana.dev.local.
+  # Local:  dev.local   (resolve via /etc/hosts or dnsmasq -> 127.0.0.1)
+  # AWS:    set to your real domain in values-aws.yaml
+  domain: dev.local
+
+  # imagePullPolicy applied to every workload.
+  imagePullPolicy: IfNotPresent
+
+# -----------------------------------------------------------------------------
+# Credentials. For real environments, override these or supply an existing
+# Secret via `existingSecret`. Defaults mirror the docker-compose dev values.
+# -----------------------------------------------------------------------------
+credentials:
+  # If set, the chart will NOT create a Secret and instead reads keys from this one.
+  existingSecret: ""
+  postgres:
+    user: fuzeinfra
+    password: fuzeinfra_secure_password
+    db: fuzeinfra_db
+  mongodb:
+    user: admin
+    password: admin123
+  neo4j:
+    user: neo4j
+    password: password123
+  rabbitmq:
+    user: admin
+    password: admin123
+  grafana:
+    adminPassword: admin
+  airflow:
+    adminUser: admin
+    adminPassword: admin
+    # Fernet key for Airflow connection encryption. Generate a real one with:
+    #   python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+    fernetKey: "Zp9p8x0Q3y0sJpQ8m2nq3l4F6tH9wXyZ1aB2cD3eF4="
+
+# -----------------------------------------------------------------------------
+# Ingress (replaces the docker-compose nginx reverse proxy). Web UIs are exposed
+# at <service>.<global.domain>. Requires an ingress controller (ingress-nginx),
+# installed by the bootstrap scripts for kind and as an EKS addon path.
+# -----------------------------------------------------------------------------
+ingress:
+  enabled: true
+  className: nginx
+  # TLS via cert-manager / secrets is left to the environment overlay.
+  tls:
+    enabled: false
+
+# =============================================================================
+# Service definitions. Each block: enabled, image, resources, storage size.
+# =============================================================================
+
+postgres:
+  enabled: true
+  image: postgres:15
+  port: 5432
+  storage: 5Gi
+  resources:
+    requests: { cpu: 100m, memory: 256Mi }
+    limits:   { cpu: "1",  memory: 1Gi }
+
+mongodb:
+  enabled: true
+  image: mongo:7
+  port: 27017
+  storage: 5Gi
+  resources:
+    requests: { cpu: 100m, memory: 256Mi }
+    limits:   { cpu: "1",  memory: 1Gi }
+
+mongoExpress:
+  enabled: true
+  image: mongo-express:latest
+  port: 8081
+
+redis:
+  enabled: true
+  image: redis:7-alpine
+  port: 6379
+  storage: 2Gi
+  resources:
+    requests: { cpu: 50m,  memory: 64Mi }
+    limits:   { cpu: 500m, memory: 512Mi }
+
+neo4j:
+  enabled: true
+  image: neo4j:5
+  httpPort: 7474
+  boltPort: 7687
+  storage: 5Gi
+  resources:
+    requests: { cpu: 200m, memory: 512Mi }
+    limits:   { cpu: "1",  memory: 2Gi }
+
+elasticsearch:
+  enabled: true
+  image: docker.elastic.co/elasticsearch/elasticsearch:8.8.0
+  port: 9200
+  storage: 10Gi
+  javaOpts: "-Xms512m -Xmx512m"
+  resources:
+    requests: { cpu: 250m, memory: 1Gi }
+    limits:   { cpu: "1",  memory: 2Gi }
+
+chromadb:
+  enabled: true
+  image: chromadb/chroma:latest
+  port: 8000
+  storage: 5Gi
+
+# Kafka in KRaft mode (no ZooKeeper) - fixes the ZooKeeper startup races and
+# deprecation warnings from the docker-compose ZooKeeper-based setup.
+kafka:
+  enabled: true
+  image: confluentinc/cp-kafka:7.6.1
+  port: 9092
+  storage: 5Gi
+  # Fixed cluster id so the StatefulSet can re-format storage deterministically.
+  clusterId: "fuzeinfra-kafka-cluster01"
+  resources:
+    requests: { cpu: 250m, memory: 512Mi }
+    limits:   { cpu: "1",  memory: 1Gi }
+
+kafkaUi:
+  enabled: true
+  image: provectuslabs/kafka-ui:latest
+  port: 8080
+
+rabbitmq:
+  enabled: true
+  image: rabbitmq:3-management
+  amqpPort: 5672
+  managementPort: 15672
+  storage: 2Gi
+
+# -----------------------------------------------------------------------------
+# Monitoring & logging
+# -----------------------------------------------------------------------------
+prometheus:
+  enabled: true
+  image: prom/prometheus:latest
+  port: 9090
+  storage: 10Gi
+
+grafana:
+  enabled: true
+  image: grafana/grafana:latest
+  port: 3000
+  storage: 2Gi
+
+alertmanager:
+  enabled: true
+  image: prom/alertmanager:latest
+  port: 9093
+  storage: 1Gi
+
+loki:
+  enabled: true
+  image: grafana/loki:2.9.0
+  port: 3100
+  storage: 5Gi
+
+promtail:
+  enabled: true
+  image: grafana/promtail:2.9.0
+
+nodeExporter:
+  enabled: true
+  image: prom/node-exporter:latest
+  port: 9100
+
+# -----------------------------------------------------------------------------
+# Airflow (CeleryExecutor) - workflow orchestration for data pipelines.
+# Reuses the in-cluster Postgres (metadata DB) and Redis (Celery broker).
+# -----------------------------------------------------------------------------
+airflow:
+  enabled: true
+  image: apache/airflow:2.7.0
+  webPort: 8080
+  flowerPort: 5555
+  # Number of Celery workers (scale data pipeline throughput here).
+  workerReplicas: 1
+  # Mount DAGs from a ConfigMap built from airflow-shared/dags? For real use,
+  # prefer git-sync or a baked image. Default: empty dir + example DAG ConfigMap.
+  loadExamples: false

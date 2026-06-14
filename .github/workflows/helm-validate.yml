@@ -1,0 +1,46 @@
+name: Helm Chart Validation
+
+on:
+  push:
+    branches: [main, develop]
+    paths:
+      - 'helm/**'
+      - '.github/workflows/helm-validate.yml'
+  pull_request:
+    paths:
+      - 'helm/**'
+      - '.github/workflows/helm-validate.yml'
+
+jobs:
+  validate:
+    name: Lint & schema-validate chart
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: v3.16.4
+
+      - name: Helm lint (all overlays)
+        run: |
+          helm lint helm/fuzeinfra
+          helm lint helm/fuzeinfra -f helm/fuzeinfra/values-local.yaml
+          helm lint helm/fuzeinfra -f helm/fuzeinfra/values-aws.yaml
+
+      - name: Install kubeconform
+        run: |
+          curl -sSLo /tmp/kubeconform.tar.gz \
+            https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz
+          tar -xzf /tmp/kubeconform.tar.gz -C /tmp
+          sudo install /tmp/kubeconform /usr/local/bin/kubeconform
+
+      - name: Render & validate (local + aws overlays)
+        run: |
+          for overlay in values-local.yaml values-aws.yaml; do
+            echo "::group::$overlay"
+            helm template fuzeinfra helm/fuzeinfra -f "helm/fuzeinfra/$overlay" \
+              | kubeconform -strict -summary -kubernetes-version 1.29.0
+            echo "::endgroup::"
+          done

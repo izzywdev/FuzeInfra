@@ -1,0 +1,463 @@
+{{- /* ============================ PostgreSQL ============================ */ -}}
+{{- if .Values.postgres.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  labels:
+    {{- include "fuzeinfra.labels" . | nindent 4 }}
+    {{- include "fuzeinfra.selectorLabels" (dict "component" "postgres") | nindent 4 }}
+spec:
+  clusterIP: None
+  selector:
+    {{- include "fuzeinfra.selectorLabels" (dict "component" "postgres") | nindent 4 }}
+  ports:
+    - name: postgres
+      port: {{ .Values.postgres.port }}
+      targetPort: 5432
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres
+  labels:
+    {{- include "fuzeinfra.labels" . | nindent 4 }}
+spec:
+  serviceName: postgres
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "fuzeinfra.selectorLabels" (dict "component" "postgres") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "fuzeinfra.labels" . | nindent 8 }}
+        {{- include "fuzeinfra.selectorLabels" (dict "component" "postgres") | nindent 8 }}
+    spec:
+      containers:
+        - name: postgres
+          image: {{ .Values.postgres.image }}
+          imagePullPolicy: {{ include "fuzeinfra.pullPolicy" . }}
+          envFrom:
+            - secretRef:
+                name: {{ include "fuzeinfra.secretName" . }}
+          env:
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          ports:
+            - containerPort: 5432
+              name: postgres
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+          readinessProbe:
+            exec:
+              command: ["sh", "-c", "pg_isready -U \"$POSTGRES_USER\""]
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+          livenessProbe:
+            exec:
+              command: ["sh", "-c", "pg_isready -U \"$POSTGRES_USER\""]
+            initialDelaySeconds: 30
+            periodSeconds: 15
+          resources:
+            {{- toYaml .Values.postgres.resources | nindent 12 }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        {{- include "fuzeinfra.storageClass" . | nindent 8 }}
+        resources:
+          requests:
+            storage: {{ .Values.postgres.storage }}
+{{- end }}
+
+{{- /* ============================ MongoDB ============================ */ -}}
+{{- if .Values.mongodb.enabled }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mongodb
+  labels:
+    {{- include "fuzeinfra.labels" . | nindent 4 }}
+    {{- include "fuzeinfra.selectorLabels" (dict "component" "mongodb") | nindent 4 }}
+spec:
+  clusterIP: None
+  selector:
+    {{- include "fuzeinfra.selectorLabels" (dict "component" "mongodb") | nindent 4 }}
+  ports:
+    - name: mongodb
+      port: {{ .Values.mongodb.port }}
+      targetPort: 27017
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: mongodb
+  labels:
+    {{- include "fuzeinfra.labels" . | nindent 4 }}
+spec:
+  serviceName: mongodb
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "fuzeinfra.selectorLabels" (dict "component" "mongodb") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "fuzeinfra.labels" . | nindent 8 }}
+        {{- include "fuzeinfra.selectorLabels" (dict "component" "mongodb") | nindent 8 }}
+    spec:
+      containers:
+        - name: mongodb
+          image: {{ .Values.mongodb.image }}
+          imagePullPolicy: {{ include "fuzeinfra.pullPolicy" . }}
+          env:
+            - name: MONGO_INITDB_ROOT_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "fuzeinfra.secretName" . }}
+                  key: MONGODB_USER
+            - name: MONGO_INITDB_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "fuzeinfra.secretName" . }}
+                  key: MONGODB_PASSWORD
+          ports:
+            - containerPort: 27017
+              name: mongodb
+          volumeMounts:
+            - name: data
+              mountPath: /data/db
+          readinessProbe:
+            exec:
+              command: ["mongosh", "--quiet", "--eval", "db.adminCommand('ping')"]
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+          resources:
+            {{- toYaml .Values.mongodb.resources | nindent 12 }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        {{- include "fuzeinfra.storageClass" . | nindent 8 }}
+        resources:
+          requests:
+            storage: {{ .Values.mongodb.storage }}
+{{- end }}
+
+{{- /* ============================ Redis ============================ */ -}}
+{{- if .Values.redis.enabled }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+  labels:
+    {{- include "fuzeinfra.labels" . | nindent 4 }}
+    {{- include "fuzeinfra.selectorLabels" (dict "component" "redis") | nindent 4 }}
+spec:
+  clusterIP: None
+  selector:
+    {{- include "fuzeinfra.selectorLabels" (dict "component" "redis") | nindent 4 }}
+  ports:
+    - name: redis
+      port: {{ .Values.redis.port }}
+      targetPort: 6379
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: redis
+  labels:
+    {{- include "fuzeinfra.labels" . | nindent 4 }}
+spec:
+  serviceName: redis
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "fuzeinfra.selectorLabels" (dict "component" "redis") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "fuzeinfra.labels" . | nindent 8 }}
+        {{- include "fuzeinfra.selectorLabels" (dict "component" "redis") | nindent 8 }}
+    spec:
+      containers:
+        - name: redis
+          image: {{ .Values.redis.image }}
+          imagePullPolicy: {{ include "fuzeinfra.pullPolicy" . }}
+          args: ["redis-server", "--appendonly", "yes"]
+          ports:
+            - containerPort: 6379
+              name: redis
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          readinessProbe:
+            exec:
+              command: ["redis-cli", "ping"]
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 5
+          resources:
+            {{- toYaml .Values.redis.resources | nindent 12 }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        {{- include "fuzeinfra.storageClass" . | nindent 8 }}
+        resources:
+          requests:
+            storage: {{ .Values.redis.storage }}
+{{- end }}
+
+{{- /* ============================ Neo4j ============================ */ -}}
+{{- if .Values.neo4j.enabled }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: neo4j
+  labels:
+    {{- include "fuzeinfra.labels" . | nindent 4 }}
+    {{- include "fuzeinfra.selectorLabels" (dict "component" "neo4j") | nindent 4 }}
+spec:
+  selector:
+    {{- include "fuzeinfra.selectorLabels" (dict "component" "neo4j") | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ .Values.neo4j.httpPort }}
+      targetPort: 7474
+    - name: bolt
+      port: {{ .Values.neo4j.boltPort }}
+      targetPort: 7687
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: neo4j
+  labels:
+    {{- include "fuzeinfra.labels" . | nindent 4 }}
+spec:
+  serviceName: neo4j
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "fuzeinfra.selectorLabels" (dict "component" "neo4j") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "fuzeinfra.labels" . | nindent 8 }}
+        {{- include "fuzeinfra.selectorLabels" (dict "component" "neo4j") | nindent 8 }}
+    spec:
+      containers:
+        - name: neo4j
+          image: {{ .Values.neo4j.image }}
+          imagePullPolicy: {{ include "fuzeinfra.pullPolicy" . }}
+          env:
+            - name: NEO4J_AUTH
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "fuzeinfra.secretName" . }}
+                  key: NEO4J_AUTH
+            - name: NEO4J_PLUGINS
+              value: '["apoc"]'
+          ports:
+            - containerPort: 7474
+              name: http
+            - containerPort: 7687
+              name: bolt
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: logs
+              mountPath: /logs
+          readinessProbe:
+            tcpSocket:
+              port: 7687
+            initialDelaySeconds: 20
+            periodSeconds: 10
+            failureThreshold: 12
+          resources:
+            {{- toYaml .Values.neo4j.resources | nindent 12 }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        {{- include "fuzeinfra.storageClass" . | nindent 8 }}
+        resources:
+          requests:
+            storage: {{ .Values.neo4j.storage }}
+    - metadata:
+        name: logs
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        {{- include "fuzeinfra.storageClass" . | nindent 8 }}
+        resources:
+          requests:
+            storage: 1Gi
+{{- end }}
+
+{{- /* ============================ Elasticsearch ============================ */ -}}
+{{- if .Values.elasticsearch.enabled }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: elasticsearch
+  labels:
+    {{- include "fuzeinfra.labels" . | nindent 4 }}
+    {{- include "fuzeinfra.selectorLabels" (dict "component" "elasticsearch") | nindent 4 }}
+spec:
+  selector:
+    {{- include "fuzeinfra.selectorLabels" (dict "component" "elasticsearch") | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ .Values.elasticsearch.port }}
+      targetPort: 9200
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: elasticsearch
+  labels:
+    {{- include "fuzeinfra.labels" . | nindent 4 }}
+spec:
+  serviceName: elasticsearch
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "fuzeinfra.selectorLabels" (dict "component" "elasticsearch") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "fuzeinfra.labels" . | nindent 8 }}
+        {{- include "fuzeinfra.selectorLabels" (dict "component" "elasticsearch") | nindent 8 }}
+    spec:
+      initContainers:
+        # Elasticsearch requires vm.max_map_count >= 262144.
+        - name: sysctl
+          image: busybox:1.36
+          imagePullPolicy: {{ include "fuzeinfra.pullPolicy" . }}
+          securityContext:
+            privileged: true
+            runAsUser: 0
+          command: ["sh", "-c", "sysctl -w vm.max_map_count=262144 || true"]
+      containers:
+        - name: elasticsearch
+          image: {{ .Values.elasticsearch.image }}
+          imagePullPolicy: {{ include "fuzeinfra.pullPolicy" . }}
+          env:
+            - name: discovery.type
+              value: single-node
+            - name: xpack.security.enabled
+              value: "false"
+            - name: ES_JAVA_OPTS
+              value: {{ .Values.elasticsearch.javaOpts | quote }}
+          ports:
+            - containerPort: 9200
+              name: http
+          volumeMounts:
+            - name: data
+              mountPath: /usr/share/elasticsearch/data
+          readinessProbe:
+            httpGet:
+              path: /_cluster/health?local=true
+              port: 9200
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            failureThreshold: 12
+          resources:
+            {{- toYaml .Values.elasticsearch.resources | nindent 12 }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        {{- include "fuzeinfra.storageClass" . | nindent 8 }}
+        resources:
+          requests:
+            storage: {{ .Values.elasticsearch.storage }}
+{{- end }}
+
+{{- /* ============================ ChromaDB ============================ */ -}}
+{{- if .Values.chromadb.enabled }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: chromadb
+  labels:
+    {{- include "fuzeinfra.labels" . | nindent 4 }}
+    {{- include "fuzeinfra.selectorLabels" (dict "component" "chromadb") | nindent 4 }}
+spec:
+  selector:
+    {{- include "fuzeinfra.selectorLabels" (dict "component" "chromadb") | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ .Values.chromadb.port }}
+      targetPort: 8000
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: chromadb
+  labels:
+    {{- include "fuzeinfra.labels" . | nindent 4 }}
+spec:
+  serviceName: chromadb
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "fuzeinfra.selectorLabels" (dict "component" "chromadb") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "fuzeinfra.labels" . | nindent 8 }}
+        {{- include "fuzeinfra.selectorLabels" (dict "component" "chromadb") | nindent 8 }}
+    spec:
+      containers:
+        - name: chromadb
+          image: {{ .Values.chromadb.image }}
+          imagePullPolicy: {{ include "fuzeinfra.pullPolicy" . }}
+          env:
+            - name: IS_PERSISTENT
+              value: "true"
+            - name: PERSIST_DIRECTORY
+              value: /chroma/chroma
+            - name: ALLOW_RESET
+              value: "true"
+          ports:
+            - containerPort: 8000
+              name: http
+          volumeMounts:
+            - name: data
+              mountPath: /chroma/chroma
+          # chromadb/chroma is distroless; probe externally via TCP.
+          readinessProbe:
+            tcpSocket:
+              port: 8000
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            failureThreshold: 6
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        {{- include "fuzeinfra.storageClass" . | nindent 8 }}
+        resources:
+          requests:
+            storage: {{ .Values.chromadb.storage }}
+{{- end }}
