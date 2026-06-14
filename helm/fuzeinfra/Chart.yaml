@@ -1,0 +1,23 @@
+apiVersion: v2
+name: fuzeinfra
+description: |
+  FuzeInfra - shared infrastructure platform for microservices development,
+  packaged as a single Helm chart. Runs the same stack on a local kind cluster
+  and on Amazon EKS: databases, message queues, monitoring/logging, an Nginx-style
+  ingress, and an Airflow + Celery workflow stack for data pipelines.
+type: application
+# Chart version - bump on chart changes. See version.json for platform version.
+version: 0.1.0
+# The platform/app version this chart deploys.
+appVersion: "0.3.0"
+keywords:
+  - infrastructure
+  - postgres
+  - redis
+  - mongodb
+  - kafka
+  - airflow
+  - monitoring
+maintainers:
+  - name: FuzeFrontier
+home: https://github.com/izzywdev/FuzeInfra

@@ -1,0 +1,23 @@
+# kind cluster for FuzeInfra local development.
+# Maps host ports 80/443 to the ingress-nginx controller so *.dev.local works.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: fuzeinfra
+nodes:
+  - role: control-plane
+    kubeadmConfigPatches:
+      - |
+        kind: InitConfiguration
+        nodeRegistration:
+          kubeletExtraArgs:
+            node-labels: "ingress-ready=true"
+    extraPortMappings:
+      # Ingress controller HTTP/HTTPS exposed on localhost.
+      - containerPort: 80
+        hostPort: 80
+        protocol: TCP
+      - containerPort: 443
+        hostPort: 443
+        protocol: TCP
+  - role: worker
+  - role: worker

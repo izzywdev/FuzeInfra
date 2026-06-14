@@ -1,0 +1,50 @@
+# =============================================================================
+# AWS (EKS) overlay.
+#   helm upgrade --install fuzeinfra helm/fuzeinfra \
+#     -n fuzeinfra --create-namespace -f helm/fuzeinfra/values-aws.yaml
+#
+# Prereqs on the cluster (see terraform/eks + docs/kubernetes-migration.md):
+#   - aws-ebs-csi-driver with a "gp3" StorageClass
+#   - ingress-nginx controller (creates an AWS NLB)
+# =============================================================================
+global:
+  storageClass: "gp3"
+  # Replace with your real domain; point a wildcard *.infra.<domain> at the
+  # ingress-nginx load balancer (Route53 / Cloudflare).
+  domain: infra.fuzefront.com
+  imagePullPolicy: IfNotPresent
+
+ingress:
+  enabled: true
+  className: nginx
+  tls:
+    # Set up cert-manager + a ClusterIssuer, then enable.
+    enabled: false
+
+# Production-leaning sizing. Tune to your node group.
+postgres:
+  storage: 20Gi
+  resources:
+    requests: { cpu: 250m, memory: 512Mi }
+    limits:   { cpu: "2",  memory: 2Gi }
+
+elasticsearch:
+  storage: 30Gi
+  javaOpts: "-Xms1g -Xmx1g"
+  resources:
+    requests: { cpu: 500m, memory: 2Gi }
+    limits:   { cpu: "2",  memory: 3Gi }
+
+kafka:
+  storage: 20Gi
+
+prometheus:
+  storage: 30Gi
+
+airflow:
+  workerReplicas: 2
+
+# NOTE: The "managed services later" path - when you are ready to move
+# stateful services to RDS/ElastiCache/MSK/OpenSearch, disable them here
+# (e.g. postgres.enabled: false) and point apps/airflow at the managed
+# endpoints via the credentials/secret. See docs/kubernetes-migration.md.
