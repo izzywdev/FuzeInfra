@@ -50,8 +50,8 @@ self-heal, and diverge between "local" and "cloud". Kubernetes gives us:
 | prometheus, grafana, alertmanager, loki | StatefulSet + PVC | Configs as ConfigMaps |
 | promtail, node-exporter | DaemonSet | Per-node log/metric collection |
 | nginx (reverse proxy) | **Ingress** (ingress-nginx) | `*.dev.local` / `*.infra.<domain>` |
-| dnsmasq | **CoreDNS** (built-in) + host DNS | Not deployed by the chart |
-| cloudflare-tunnel | (optional, not in chart yet) | Add later if external access needed |
+| dnsmasq | Deployment + Service (optional) | CoreDNS handles in-cluster DNS; dnsmasq serves the wildcard dev domain. Off by default, on in `values-local`. |
+| cloudflare-tunnel | Deployment (optional, token from Secret) | Off by default; enable + set `credentials.cloudflare.tunnelToken` |
 | airflow-* (init/webserver/scheduler/worker/flower) | Job (Helm hook) + Deployments | CeleryExecutor, Redis broker, Postgres backend |
 
 Stateful data services run **in-cluster** for now (StatefulSets), with a

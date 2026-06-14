@@ -48,6 +48,10 @@ credentials:
     # Fernet key for Airflow connection encryption. Generate a real one with:
     #   python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
     fernetKey: "Zp9p8x0Q3y0sJpQ8m2nq3l4F6tH9wXyZ1aB2cD3eF4="
+  cloudflare:
+    # Tunnel token from the Cloudflare Zero Trust dashboard. Required only when
+    # cloudflareTunnel.enabled=true. Prefer supplying via an existing Secret.
+    tunnelToken: ""
 
 # -----------------------------------------------------------------------------
 # Ingress (replaces the docker-compose nginx reverse proxy). Web UIs are exposed
@@ -198,3 +202,33 @@ airflow:
   # Mount DAGs from a ConfigMap built from airflow-shared/dags? For real use,
   # prefer git-sync or a baked image. Default: empty dir + example DAG ConfigMap.
   loadExamples: false
+
+# -----------------------------------------------------------------------------
+# DNS & external access
+# -----------------------------------------------------------------------------
+# dnsmasq: optional in-cluster DNS server that resolves the wildcard dev domain
+# (*.<global.domain>) to a single target. In-cluster service discovery is already
+# handled by CoreDNS, so this is OFF by default and mainly useful for kind where
+# you want *.dev.local resolution served from the cluster.
+dnsmasq:
+  enabled: false
+  image: jpillora/dnsmasq:latest
+  dnsPort: 53
+  webPort: 8080
+  # Where *.<global.domain> resolves to. For host-side resolution keep 127.0.0.1;
+  # set to the ingress controller address to route into the cluster.
+  wildcardTarget: "127.0.0.1"
+  adminPassword: admin123
+  # ClusterIP | NodePort | LoadBalancer. Use LoadBalancer/NodePort to use this as
+  # an actual DNS server from outside the cluster.
+  serviceType: ClusterIP
+
+# cloudflare-tunnel: optional cloudflared Deployment for secure external access /
+# webhook endpoints. OFF by default; requires credentials.cloudflare.tunnelToken
+# (or an existing Secret). Ingress routing is configured in the Cloudflare
+# Zero Trust dashboard (token-based tunnel), mirroring the docker-compose setup.
+cloudflareTunnel:
+  enabled: false
+  image: cloudflare/cloudflared:latest
+  metricsPort: 2000
+  replicas: 1

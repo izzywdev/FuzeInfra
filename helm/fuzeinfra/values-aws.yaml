@@ -44,6 +44,19 @@ prometheus:
 airflow:
   workerReplicas: 2
 
+# DNS & external access on EKS:
+# - dnsmasq is usually unnecessary on AWS (use Route53 / Cloudflare for the real
+#   domain). Leave it off. Enable only if you want an in-cluster resolver.
+dnsmasq:
+  enabled: false
+
+# - cloudflare-tunnel gives secure external access without a public LB. To enable,
+#   set cloudflareTunnel.enabled=true and provide the token (prefer an existing
+#   Secret via credentials.existingSecret).
+cloudflareTunnel:
+  enabled: false
+  # replicas: 2   # run multiple replicas for HA once enabled
+
 # NOTE: The "managed services later" path - when you are ready to move
 # stateful services to RDS/ElastiCache/MSK/OpenSearch, disable them here
 # (e.g. postgres.enabled: false) and point apps/airflow at the managed

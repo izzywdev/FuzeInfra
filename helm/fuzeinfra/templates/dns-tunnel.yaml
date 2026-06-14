@@ -1,0 +1,159 @@
+{{- /* ===================== dnsmasq (optional local DNS) ===================== */ -}}
+{{- if .Values.dnsmasq.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: dnsmasq-config
+  labels:
+    {{- include "fuzeinfra.labels" . | nindent 4 }}
+data:
+  dnsmasq.conf: |
+    # dnsmasq for FuzeInfra - resolves the wildcard dev domain.
+    # In-cluster service discovery is handled by CoreDNS; this serves
+    # *.{{ .Values.global.domain }} for host-side / external resolution.
+    port=53
+    no-resolv
+    server=8.8.8.8
+    server=8.8.4.4
+    # Wildcard: *.{{ .Values.global.domain }} -> configured target
+    address=/{{ .Values.global.domain }}/{{ .Values.dnsmasq.wildcardTarget }}
+    cache-size=1000
+    no-hosts
+    bind-interfaces
+    listen-address=0.0.0.0
+    domain={{ .Values.global.domain }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: dnsmasq
+  labels:
+    {{- include "fuzeinfra.labels" . | nindent 4 }}
+    {{- include "fuzeinfra.selectorLabels" (dict "component" "dnsmasq") | nindent 4 }}
+spec:
+  type: {{ .Values.dnsmasq.serviceType }}
+  selector:
+    {{- include "fuzeinfra.selectorLabels" (dict "component" "dnsmasq") | nindent 4 }}
+  ports:
+    - name: dns-udp
+      port: {{ .Values.dnsmasq.dnsPort }}
+      targetPort: 53
+      protocol: UDP
+    - name: dns-tcp
+      port: {{ .Values.dnsmasq.dnsPort }}
+      targetPort: 53
+      protocol: TCP
+    - name: http
+      port: {{ .Values.dnsmasq.webPort }}
+      targetPort: 8080
+      protocol: TCP
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dnsmasq
+  labels:
+    {{- include "fuzeinfra.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "fuzeinfra.selectorLabels" (dict "component" "dnsmasq") | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        # Roll the pod when the config changes.
+        checksum/config: {{ .Values.global.domain | printf "%s-%s" .Values.dnsmasq.wildcardTarget | sha256sum }}
+      labels:
+        {{- include "fuzeinfra.labels" . | nindent 8 }}
+        {{- include "fuzeinfra.selectorLabels" (dict "component" "dnsmasq") | nindent 8 }}
+    spec:
+      containers:
+        - name: dnsmasq
+          image: {{ .Values.dnsmasq.image }}
+          imagePullPolicy: {{ include "fuzeinfra.pullPolicy" . }}
+          securityContext:
+            capabilities:
+              add: ["NET_ADMIN"]
+          env:
+            - name: HTTP_USER
+              value: "admin"
+            - name: HTTP_PASS
+              value: {{ .Values.dnsmasq.adminPassword | quote }}
+          ports:
+            - containerPort: 53
+              protocol: UDP
+            - containerPort: 53
+              protocol: TCP
+            - containerPort: 8080
+              name: http
+          volumeMounts:
+            - name: config
+              mountPath: /etc/dnsmasq.conf
+              subPath: dnsmasq.conf
+          readinessProbe:
+            tcpSocket:
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+      volumes:
+        - name: config
+          configMap:
+            name: dnsmasq-config
+{{- end }}
+
+{{- /* ===================== cloudflare-tunnel (optional) ===================== */ -}}
+{{- if .Values.cloudflareTunnel.enabled }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cloudflare-tunnel
+  labels:
+    {{- include "fuzeinfra.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.cloudflareTunnel.replicas }}
+  selector:
+    matchLabels:
+      {{- include "fuzeinfra.selectorLabels" (dict "component" "cloudflare-tunnel") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "fuzeinfra.labels" . | nindent 8 }}
+        {{- include "fuzeinfra.selectorLabels" (dict "component" "cloudflare-tunnel") | nindent 8 }}
+    spec:
+      containers:
+        - name: cloudflared
+          image: {{ .Values.cloudflareTunnel.image }}
+          imagePullPolicy: {{ include "fuzeinfra.pullPolicy" . }}
+          # Token-based tunnel: ingress routes are managed in the Cloudflare
+          # Zero Trust dashboard (mirrors the docker-compose `tunnel run --token`).
+          args:
+            - tunnel
+            - --no-autoupdate
+            - --metrics
+            - 0.0.0.0:{{ .Values.cloudflareTunnel.metricsPort }}
+            - run
+          env:
+            - name: TUNNEL_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "fuzeinfra.secretName" . }}
+                  key: CLOUDFLARE_TUNNEL_TOKEN
+          ports:
+            - containerPort: {{ .Values.cloudflareTunnel.metricsPort }}
+              name: metrics
+          # cloudflared exposes a readiness endpoint on the metrics port.
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: metrics
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          livenessProbe:
+            httpGet:
+              path: /ready
+              port: metrics
+            initialDelaySeconds: 30
+            periodSeconds: 30
+{{- end }}

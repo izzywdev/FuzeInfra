@@ -23,3 +23,15 @@ elasticsearch:
 
 airflow:
   workerReplicas: 1
+
+# Optional local DNS server for *.dev.local. Exposed in-cluster; query it via the
+# dnsmasq Service. CoreDNS still handles in-cluster service names.
+dnsmasq:
+  enabled: true
+  wildcardTarget: "127.0.0.1"
+  serviceType: ClusterIP
+
+# cloudflare-tunnel stays off locally (needs a real tunnel token). To enable:
+#   cloudflareTunnel.enabled=true and set credentials.cloudflare.tunnelToken
+cloudflareTunnel:
+  enabled: false
