@@ -14,14 +14,16 @@ class TestKafka:
     
     def test_kafka_producer_connection(self, kafka_producer, wait_for_services):
         """Test Kafka producer connection."""
-        # bootstrap_connected() is lazy/False until the first metadata request,
-        # so force a metadata fetch and allow a brief connect window.
+        # bootstrap_connected() is unreliable: once the client fetches metadata and
+        # switches to per-broker connections, the bootstrap connection drops. Prove
+        # connectivity by fetching topic metadata instead (auto-creates the topic).
+        partitions = None
         for _ in range(10):
-            kafka_producer.partitions_for("test_topic")
-            if kafka_producer.bootstrap_connected():
+            partitions = kafka_producer.partitions_for("test_topic")
+            if partitions:
                 break
             time.sleep(1)
-        assert kafka_producer.bootstrap_connected() is True
+        assert partitions, "Kafka broker not reachable / topic metadata unavailable"
 
     def test_kafka_message_production(self, kafka_producer, wait_for_services):
         """Test Kafka message production and consumption."""

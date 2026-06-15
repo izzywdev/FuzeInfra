@@ -345,3 +345,6 @@ jobs:
           airflow-test-results.xml
         comment_mode: off
         check_name: Infrastructure Test Results
+        # Fail the job (not just the published check) when any test fails, so the
+        # workflow's own conclusion reflects test results and notifications fire.
+        action_fail: true
