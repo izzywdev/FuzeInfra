@@ -20,6 +20,8 @@ services:
       - "${POSTGRES_PORT}:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
+      # Pre-creates the 'airflow' metadata database on first init.
+      - ./docker/postgres/init:/docker-entrypoint-initdb.d:ro
     networks:
       - FuzeInfra
     restart: unless-stopped
