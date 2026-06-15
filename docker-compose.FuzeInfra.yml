@@ -169,7 +169,7 @@ services:
       KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
       KAFKA_LOG_DIRS: /var/lib/kafka/data
       # Fixed cluster id so the broker formats KRaft storage deterministically.
-      CLUSTER_ID: fuzeinfra-kafka-cluster01
+      CLUSTER_ID: j7z6bP_dQ8-uF_3Dp5tiXw
     ports:
       - "29092:29092"
     volumes:
