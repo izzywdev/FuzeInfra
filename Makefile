@@ -75,3 +75,28 @@ eks-plan:
 .PHONY: eks-apply
 eks-apply:
 	cd terraform/eks && terraform apply
+
+# ----------------------------------------------------------------------------
+# Argo CD (GitOps) - see docs/gitops.md
+# ----------------------------------------------------------------------------
+# ENV selects which Application to bootstrap: local (kind) or aws (EKS).
+ENV ?= local
+
+.PHONY: argocd-install
+argocd-install:
+	./argocd/install/setup-argocd.sh $(ENV)
+
+.PHONY: argocd-password
+argocd-password:
+	@kubectl -n argocd get secret argocd-initial-admin-secret \
+	  -o jsonpath="{.data.password}" | base64 -d; echo
+
+.PHONY: argocd-ui
+argocd-ui:
+	@echo "Argo CD UI at https://localhost:8080 (user: admin)"
+	kubectl -n argocd port-forward svc/argocd-server 8080:443
+
+.PHONY: argocd-status
+argocd-status:
+	kubectl -n argocd get applications
+

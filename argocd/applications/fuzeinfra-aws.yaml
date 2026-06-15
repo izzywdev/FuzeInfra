@@ -1,0 +1,40 @@
+# Argo CD Application for AWS (EKS).
+# Deploys helm/fuzeinfra with the aws overlay into the fuzeinfra namespace.
+# Apply on the EKS cluster only:  kubectl apply -f argocd/applications/fuzeinfra-aws.yaml
+#
+# Prereqs on the cluster (see terraform/eks + docs/kubernetes-migration.md):
+#   - gp3 default StorageClass, ingress-nginx controller.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: fuzeinfra-aws
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: fuzeinfra
+  source:
+    repoURL: https://github.com/izzywdev/FuzeInfra.git
+    targetRevision: main
+    path: helm/fuzeinfra
+    helm:
+      valueFiles:
+        - values-aws.yaml
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: fuzeinfra
+  syncPolicy:
+    # selfHeal keeps the cluster matching git; prune removes deleted resources.
+    # For a more conservative prod posture, remove `automated` and sync manually.
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 15s
+        factor: 2
+        maxDuration: 5m

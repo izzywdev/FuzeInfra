@@ -1,0 +1,23 @@
+# Argo CD AppProject scoping FuzeInfra: which repo it may deploy from and where.
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: fuzeinfra
+  namespace: argocd
+spec:
+  description: FuzeInfra shared infrastructure platform
+  sourceRepos:
+    - https://github.com/izzywdev/FuzeInfra.git
+  destinations:
+    - namespace: fuzeinfra
+      server: https://kubernetes.default.svc
+    - namespace: argocd
+      server: https://kubernetes.default.svc
+  # The chart creates cluster-scoped objects (monitoring ClusterRole/Binding),
+  # so cluster resources must be allowed for this project.
+  clusterResourceWhitelist:
+    - group: "*"
+      kind: "*"
+  namespaceResourceWhitelist:
+    - group: "*"
+      kind: "*"
