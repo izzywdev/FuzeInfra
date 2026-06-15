@@ -172,21 +172,21 @@ class TestElasticsearch:
             "timestamp": "2024-01-01T00:00:00"
         }
         
-        # Index document
-        response = elasticsearch_connection.index(index=index_name, body=doc)
+        # Index document (elasticsearch-py 8.x: use document=, not body=)
+        response = elasticsearch_connection.index(index=index_name, document=doc)
         assert response["result"] in ["created", "updated"]
-        
+
         # Refresh index to make document searchable
         elasticsearch_connection.indices.refresh(index=index_name)
-        
-        # Search for document
+
+        # Search for document (8.x: top-level query=, not body=)
         search_response = elasticsearch_connection.search(
             index=index_name,
-            body={"query": {"match": {"title": "Test Document"}}}
+            query={"match": {"title": "Test Document"}}
         )
-        
+
         assert search_response["hits"]["total"]["value"] >= 1
         assert search_response["hits"]["hits"][0]["_source"]["title"] == "Test Document"
-        
-        # Cleanup
-        elasticsearch_connection.indices.delete(index=index_name, ignore=[400, 404]) 
+
+        # Cleanup (8.x: ignore_status via .options())
+        elasticsearch_connection.options(ignore_status=[400, 404]).indices.delete(index=index_name) 

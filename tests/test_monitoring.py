@@ -112,22 +112,21 @@ class TestAlertmanager:
         assert response.status_code == 200
 
     def test_alertmanager_config(self, service_urls, wait_for_services):
-        """Test Alertmanager configuration."""
-        response = requests.get(f"{service_urls['alertmanager']}/api/v1/status", timeout=10)
+        """Test Alertmanager configuration (v2 API; v1 was removed in >=0.27)."""
+        response = requests.get(f"{service_urls['alertmanager']}/api/v2/status", timeout=10)
         assert response.status_code == 200
-        
+
         status_data = response.json()
-        assert "data" in status_data
-        assert "configYAML" in status_data["data"]
+        # v2 status returns {cluster, config, uptime, versionInfo}
+        assert "config" in status_data
 
     def test_alertmanager_alerts(self, service_urls, wait_for_services):
-        """Test Alertmanager alerts endpoint."""
-        response = requests.get(f"{service_urls['alertmanager']}/api/v1/alerts", timeout=10)
+        """Test Alertmanager alerts endpoint (v2 returns a JSON array)."""
+        response = requests.get(f"{service_urls['alertmanager']}/api/v2/alerts", timeout=10)
         assert response.status_code == 200
-        
+
         alerts_data = response.json()
-        assert "data" in alerts_data
-        assert isinstance(alerts_data["data"], list)
+        assert isinstance(alerts_data, list)
 
 
 class TestLoki:
