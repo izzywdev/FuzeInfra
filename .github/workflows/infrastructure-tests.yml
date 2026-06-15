@@ -86,6 +86,15 @@ jobs:
           -addext "subjectAltName=DNS:*.dev.local,DNS:dev.local,DNS:localhost"
         echo "✅ Generated self-signed certs in docker/certs"
 
+    - name: Prepare Airflow host directories
+      run: |
+        # Airflow runs as UID 50000 inside the container and writes to the
+        # bind-mounted ./airflow-shared/{logs,dags,plugins}. Without world-writable
+        # permissions, airflow-init fails with PermissionError on /opt/airflow/logs.
+        mkdir -p airflow-shared/logs airflow-shared/dags airflow-shared/plugins
+        chmod -R 777 airflow-shared
+        echo "✅ Prepared airflow-shared directories"
+
     - name: Start infrastructure services
       run: |
         # The CI overlay parks cloudflare-tunnel behind an inactive profile so it
