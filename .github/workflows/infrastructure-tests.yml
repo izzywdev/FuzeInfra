@@ -36,12 +36,12 @@ jobs:
         df -h
 
     - name: Set up Python
-      uses: actions/setup-python@v4
+      uses: actions/setup-python@v5
       with:
         python-version: '3.11'
 
     - name: Cache Python dependencies
-      uses: actions/cache@v3
+      uses: actions/cache@v4
       with:
         path: ~/.cache/pip
         key: ${{ runner.os }}-pip-${{ hashFiles('tests/requirements.txt') }}
@@ -74,9 +74,32 @@ jobs:
         cp environment.template .env
         python scripts-tools/setup_environment_ci.py
 
+    - name: Generate self-signed certificates for nginx
+      run: |
+        # nginx.conf references these files; without them nginx crash-loops in CI.
+        mkdir -p docker/certs
+        openssl req -x509 -nodes -newkey rsa:2048 \
+          -keyout docker/certs/fuzeinfra-dev-local.key \
+          -out docker/certs/fuzeinfra-combined.crt \
+          -days 365 \
+          -subj "/CN=*.dev.local" \
+          -addext "subjectAltName=DNS:*.dev.local,DNS:dev.local,DNS:localhost"
+        echo "✅ Generated self-signed certs in docker/certs"
+
+    - name: Prepare Airflow host directories
+      run: |
+        # Airflow runs as UID 50000 inside the container and writes to the
+        # bind-mounted ./airflow-shared/{logs,dags,plugins}. Without world-writable
+        # permissions, airflow-init fails with PermissionError on /opt/airflow/logs.
+        mkdir -p airflow-shared/logs airflow-shared/dags airflow-shared/plugins
+        chmod -R 777 airflow-shared
+        echo "✅ Prepared airflow-shared directories"
+
     - name: Start infrastructure services
       run: |
-        docker-compose -f docker-compose.FuzeInfra.yml up -d
+        # The CI overlay parks cloudflare-tunnel behind an inactive profile so it
+        # does not crash-loop (it needs a real token, absent in CI).
+        docker-compose -f docker-compose.FuzeInfra.yml -f docker-compose.ci.yml up -d
       timeout-minutes: 10
 
     - name: Wait for services to be ready
@@ -192,39 +215,39 @@ jobs:
     - name: Test Neo4j
       run: |
         echo "Testing Neo4j connection..."
-        timeout 30 bash -c 'until curl -f http://localhost:7474; do sleep 2; done'
+        timeout 120 bash -c 'until curl -f http://localhost:7474; do sleep 2; done'
         echo "✅ Neo4j is accessible"
 
     - name: Test Elasticsearch
       run: |
         echo "Testing Elasticsearch connection..."
-        timeout 30 bash -c 'until curl -f http://localhost:9200; do sleep 2; done'
+        timeout 120 bash -c 'until curl -f http://localhost:9200; do sleep 2; done'
         curl -X GET "localhost:9200/_cluster/health"
         echo "✅ Elasticsearch is working"
 
     - name: Test Kafka
       run: |
         echo "Testing Kafka connection..."
-        timeout 30 bash -c 'until curl -f http://localhost:8080; do sleep 2; done'
+        timeout 120 bash -c 'until curl -f http://localhost:8080; do sleep 2; done'
         echo "✅ Kafka UI is accessible"
 
     - name: Test RabbitMQ
       run: |
         echo "Testing RabbitMQ connection..."
-        timeout 30 bash -c 'until curl -f http://localhost:15672; do sleep 2; done'
+        timeout 120 bash -c 'until curl -f http://localhost:15672; do sleep 2; done'
         echo "✅ RabbitMQ Management UI is accessible"
 
     - name: Test Prometheus
       run: |
         echo "Testing Prometheus connection..."
-        timeout 30 bash -c 'until curl -f http://localhost:9090; do sleep 2; done'
+        timeout 120 bash -c 'until curl -f http://localhost:9090; do sleep 2; done'
         curl -X GET "http://localhost:9090/api/v1/query?query=up"
         echo "✅ Prometheus is working"
 
     - name: Test Grafana
       run: |
         echo "Testing Grafana connection..."
-        timeout 30 bash -c 'until curl -f http://localhost:3001; do sleep 2; done'
+        timeout 120 bash -c 'until curl -f http://localhost:3001; do sleep 2; done'
         echo "✅ Grafana is accessible"
 
     - name: Test Airflow

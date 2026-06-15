@@ -135,7 +135,7 @@ kafka:
   port: 9092
   storage: 5Gi
   # Fixed cluster id so the StatefulSet can re-format storage deterministically.
-  clusterId: "fuzeinfra-kafka-cluster01"
+  clusterId: "j7z6bP_dQ8-uF_3Dp5tiXw"
   resources:
     requests: { cpu: 250m, memory: 512Mi }
     limits:   { cpu: "1",  memory: 1Gi }
