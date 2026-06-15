@@ -46,7 +46,9 @@ class TestKafkaUI:
         assert response.status_code == 200
         
         topics_data = response.json()
-        assert isinstance(topics_data, list)
+        # kafka-ui returns either a bare list or a paginated object
+        # ({"topics": [...], "pageCount": N}) depending on version.
+        assert isinstance(topics_data, (list, dict))
 
 
 class TestRabbitMQManagement:

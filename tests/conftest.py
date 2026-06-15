@@ -1,6 +1,7 @@
 """
 Pytest configuration and fixtures for FuzeInfra infrastructure testing.
 """
+import os
 import pytest
 import time
 import requests
@@ -27,12 +28,14 @@ def wait_for_services():
 def postgres_connection():
     """PostgreSQL connection fixture."""
     try:
+        # Credentials come from the running container's env (.env in CI). Default
+        # to the environment.template values, NOT the postgres superuser defaults.
         conn = psycopg2.connect(
-            host="localhost",
-            port=5432,
-            database="postgres",
-            user="postgres",
-            password="postgres"
+            host=os.getenv("POSTGRES_HOST", "localhost"),
+            port=int(os.getenv("POSTGRES_PORT", "5432")),
+            database=os.getenv("POSTGRES_DB", "fuzeinfra_db"),
+            user=os.getenv("POSTGRES_USER", "fuzeinfra"),
+            password=os.getenv("POSTGRES_PASSWORD", "fuzeinfra_secure_password"),
         )
         yield conn
         conn.close()
@@ -76,7 +79,8 @@ def neo4j_connection():
 def elasticsearch_connection():
     """Elasticsearch connection fixture."""
     try:
-        es = Elasticsearch([{"host": "localhost", "port": 9200, "scheme": "http"}])
+        # elasticsearch-py 8.x dropped the list-of-dicts host form; use a URL.
+        es = Elasticsearch("http://localhost:9200")
         yield es
     except Exception as e:
         pytest.fail(f"Failed to connect to Elasticsearch: {e}")

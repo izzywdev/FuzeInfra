@@ -291,7 +291,18 @@ jobs:
 
     - name: Run comprehensive infrastructure tests
       run: |
-        pytest tests/test_infrastructure_health.py -v --junitxml=test-results.xml
+        # Export DB credentials from .env without shell-expanding the generated
+        # password (cut captures the value literally; no re-evaluation of $/!).
+        export POSTGRES_USER="$(grep -E '^POSTGRES_USER=' .env | cut -d= -f2-)"
+        export POSTGRES_PASSWORD="$(grep -E '^POSTGRES_PASSWORD=' .env | cut -d= -f2-)"
+        export POSTGRES_DB="$(grep -E '^POSTGRES_DB=' .env | cut -d= -f2-)"
+        export POSTGRES_PORT="$(grep -E '^POSTGRES_PORT=' .env | cut -d= -f2-)"
+        pytest -v --junitxml=test-results.xml \
+          tests/test_databases.py \
+          tests/test_messaging.py \
+          tests/test_monitoring.py \
+          tests/test_web_interfaces.py \
+          tests/test_airflow.py
       continue-on-error: true
 
     - name: Run Airflow workflow tests
@@ -334,3 +345,6 @@ jobs:
           airflow-test-results.xml
         comment_mode: off
         check_name: Infrastructure Test Results
+        # Fail the job (not just the published check) when any test fails, so the
+        # workflow's own conclusion reflects test results and notifications fire.
+        action_fail: true

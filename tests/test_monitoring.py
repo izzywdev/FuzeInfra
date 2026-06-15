@@ -112,22 +112,21 @@ class TestAlertmanager:
         assert response.status_code == 200
 
     def test_alertmanager_config(self, service_urls, wait_for_services):
-        """Test Alertmanager configuration."""
-        response = requests.get(f"{service_urls['alertmanager']}/api/v1/status", timeout=10)
+        """Test Alertmanager configuration (v2 API; v1 was removed in >=0.27)."""
+        response = requests.get(f"{service_urls['alertmanager']}/api/v2/status", timeout=10)
         assert response.status_code == 200
-        
+
         status_data = response.json()
-        assert "data" in status_data
-        assert "configYAML" in status_data["data"]
+        # v2 status returns {cluster, config, uptime, versionInfo}
+        assert "config" in status_data
 
     def test_alertmanager_alerts(self, service_urls, wait_for_services):
-        """Test Alertmanager alerts endpoint."""
-        response = requests.get(f"{service_urls['alertmanager']}/api/v1/alerts", timeout=10)
+        """Test Alertmanager alerts endpoint (v2 returns a JSON array)."""
+        response = requests.get(f"{service_urls['alertmanager']}/api/v2/alerts", timeout=10)
         assert response.status_code == 200
-        
+
         alerts_data = response.json()
-        assert "data" in alerts_data
-        assert isinstance(alerts_data["data"], list)
+        assert isinstance(alerts_data, list)
 
 
 class TestLoki:
@@ -135,8 +134,15 @@ class TestLoki:
     
     def test_loki_health(self, service_urls, wait_for_services):
         """Test Loki health endpoint."""
-        response = requests.get(f"{service_urls['loki']}/ready", timeout=10)
-        assert response.status_code == 200
+        # Loki's /ready returns 503 until the ingester is ready; poll for it.
+        deadline = time.time() + 60
+        status = None
+        while time.time() < deadline:
+            status = requests.get(f"{service_urls['loki']}/ready", timeout=10).status_code
+            if status == 200:
+                break
+            time.sleep(3)
+        assert status == 200
 
     def test_loki_metrics(self, service_urls, wait_for_services):
         """Test Loki metrics endpoint."""
@@ -150,8 +156,9 @@ class TestLoki:
         assert response.status_code == 200
         
         labels_data = response.json()
-        assert "data" in labels_data
-        assert isinstance(labels_data["data"], list)
+        # An empty Loki returns {"status":"success"} with no "data" key yet.
+        assert labels_data.get("status") == "success"
+        assert isinstance(labels_data.get("data", []), list)
 
     def test_loki_log_ingestion(self, service_urls, wait_for_services):
         """Test Loki log ingestion."""
