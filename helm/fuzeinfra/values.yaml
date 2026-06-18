@@ -61,9 +61,18 @@ credentials:
 ingress:
   enabled: true
   className: nginx
-  # TLS via cert-manager / secrets is left to the environment overlay.
+  # Extra annotations applied to the FuzeInfra Ingress (merged with the
+  # cert-manager issuer annotation below when tls.clusterIssuer is set).
+  annotations: {}
+  # TLS is provided centrally via cert-manager (see k8s/cert-manager/ and
+  # docs/cert-management.md). Set tls.clusterIssuer to have cert-manager
+  # auto-provision the certificate into tls.secretName:
+  #   Local (kind/k3s dev): fuzeinfra-local-ca
+  #   Prod  (k3s/EKS):      letsencrypt-prod
   tls:
     enabled: false
+    clusterIssuer: ""
+    secretName: fuzeinfra-tls
 
 # =============================================================================
 # Service definitions. Each block: enabled, image, resources, storage size.

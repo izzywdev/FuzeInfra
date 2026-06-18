@@ -1,0 +1,61 @@
+# =============================================================================
+# Local development CA for *.dev.local — provided centrally by FuzeInfra.
+#
+# How it works (standard cert-manager "self-signed root CA" pattern):
+#   1. A self-signed ClusterIssuer bootstraps a single root CA certificate.
+#   2. That root CA is stored as a Secret in the cert-manager namespace.
+#   3. A CA ClusterIssuer ("fuzeinfra-local-ca") signs leaf certs from that root.
+#
+# Any Ingress (in ANY namespace) that requests a cert from the
+# "fuzeinfra-local-ca" ClusterIssuer gets a certificate signed by this one dev
+# root. Trust the root CA once (see docs/cert-management.md or run
+# setup-cert-manager.sh, which prints the steps) and every *.dev.local service —
+# including those owned by dependent repos — is trusted in the browser with no
+# per-repo cert-manager install.
+#
+# NOTE: the CA Secret lives in the cert-manager namespace because CA
+# ClusterIssuers read their signing Secret from cert-manager's
+# --cluster-resource-namespace (default: "cert-manager").
+# =============================================================================
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: fuzeinfra-selfsigned-bootstrap
+  labels:
+    app.kubernetes.io/part-of: fuzeinfra
+spec:
+  selfSigned: {}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: fuzeinfra-local-ca
+  namespace: cert-manager
+  labels:
+    app.kubernetes.io/part-of: fuzeinfra
+spec:
+  isCA: true
+  commonName: FuzeInfra Local Dev CA
+  secretName: fuzeinfra-local-ca
+  duration: 87600h    # 10 years — a long-lived local dev root
+  renewBefore: 720h   # 30 days
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+  subject:
+    organizations:
+      - FuzeInfra
+  issuerRef:
+    name: fuzeinfra-selfsigned-bootstrap
+    kind: ClusterIssuer
+    group: cert-manager.io
+---
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: fuzeinfra-local-ca
+  labels:
+    app.kubernetes.io/part-of: fuzeinfra
+spec:
+  ca:
+    secretName: fuzeinfra-local-ca

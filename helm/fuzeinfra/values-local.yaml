@@ -11,8 +11,14 @@ global:
 ingress:
   enabled: true
   className: nginx
+  # TLS for *.dev.local via the local CA ClusterIssuer. cert-manager + this
+  # issuer are installed by `make kind-up` (k8s/cert-manager/setup-cert-manager.sh
+  # local). Trust the root CA once to remove browser warnings — the setup script
+  # prints the steps. See docs/cert-management.md.
   tls:
-    enabled: false
+    enabled: true
+    clusterIssuer: fuzeinfra-local-ca
+    secretName: fuzeinfra-tls
 
 # Smaller footprint for laptops.
 elasticsearch:

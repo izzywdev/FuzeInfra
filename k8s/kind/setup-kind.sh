@@ -34,6 +34,11 @@ kubectl wait --namespace ingress-nginx \
   --selector=app.kubernetes.io/component=controller \
   --timeout=180s
 
+echo "==> Installing cert-manager + local CA ClusterIssuer (*.dev.local TLS)"
+# Provides the "fuzeinfra-local-ca" ClusterIssuer that values-local.yaml uses so
+# the chart's ingress (and any dependent repo's ingress) gets a trusted cert.
+"$REPO_ROOT/k8s/cert-manager/setup-cert-manager.sh" local
+
 echo "==> Deploying FuzeInfra Helm chart"
 helm upgrade --install fuzeinfra "$REPO_ROOT/helm/fuzeinfra" \
   --namespace "$NAMESPACE" --create-namespace \
@@ -53,6 +58,8 @@ wildcard for *.dev.local:
             flower.dev.local kafka-ui.dev.local mongo-express.dev.local \\
             rabbitmq.dev.local neo4j.dev.local alertmanager.dev.local
 
-Then open:  http://grafana.dev.local  (admin / admin)
+Then open:  https://grafana.dev.local  (admin / admin)
+            (TLS via the local CA; trust the root once — see docs/cert-management.md
+             or the cert-manager step above. Plain http:// also works.)
 Check pods: kubectl -n $NAMESPACE get pods
 EOF

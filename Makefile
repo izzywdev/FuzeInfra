@@ -13,6 +13,10 @@ help:
 	@echo "    make kind-down       Delete the kind cluster"
 	@echo "    make k8s-deploy      Deploy/upgrade chart to current kube-context (local values)"
 	@echo "    make k8s-status      Show pods in the $(NAMESPACE) namespace"
+	@echo "  TLS / certificates (cert-manager) - see docs/cert-management.md:"
+	@echo "    make cert-manager-local   Install cert-manager + local *.dev.local CA issuer"
+	@echo "    make cert-manager-prod    Install cert-manager + Let's Encrypt issuers (ACME_EMAIL=...)"
+	@echo "    make cert-status          Show ClusterIssuers and certificates"
 	@echo "  Chart validation (no cluster needed):"
 	@echo "    make helm-lint       helm lint the chart (all overlays)"
 	@echo "    make helm-template   Render the chart to stdout"
@@ -42,6 +46,22 @@ k8s-deploy:
 .PHONY: k8s-status
 k8s-status:
 	kubectl -n $(NAMESPACE) get pods,svc,ingress
+
+# ----------------------------------------------------------------------------
+# TLS / certificates (cert-manager) - see docs/cert-management.md
+# ----------------------------------------------------------------------------
+.PHONY: cert-manager-local
+cert-manager-local:
+	./k8s/cert-manager/setup-cert-manager.sh local
+
+.PHONY: cert-manager-prod
+cert-manager-prod:
+	./k8s/cert-manager/setup-cert-manager.sh prod
+
+.PHONY: cert-status
+cert-status:
+	kubectl get clusterissuers
+	kubectl get certificates -A
 
 # ----------------------------------------------------------------------------
 # Validation

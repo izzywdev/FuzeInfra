@@ -17,9 +17,15 @@ global:
 ingress:
   enabled: true
   className: nginx
+  # Real TLS via Let's Encrypt. First install cert-manager + the ACME issuers:
+  #   ACME_EMAIL=you@example.com ./k8s/cert-manager/setup-cert-manager.sh prod
+  # then set enabled: true. Requires public DNS (*.<domain>) pointing at the
+  # ingress load balancer and ports 80/443 reachable for the HTTP-01 challenge.
+  # See docs/cert-management.md.
   tls:
-    # Set up cert-manager + a ClusterIssuer, then enable.
     enabled: false
+    clusterIssuer: letsencrypt-prod
+    secretName: fuzeinfra-tls
 
 # Production-leaning sizing. Tune to your node group.
 postgres:

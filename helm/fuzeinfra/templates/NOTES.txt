@@ -18,6 +18,12 @@ Web UIs (via Ingress, class "{{ .Values.ingress.className }}"):
 
 For local (kind), ensure these hostnames resolve to 127.0.0.1, e.g. add to
 /etc/hosts or use the dnsmasq wildcard for *.{{ .Values.global.domain }}.
+{{- if .Values.ingress.tls.enabled }}
+
+TLS is ENABLED (cert-manager issuer "{{ .Values.ingress.tls.clusterIssuer | default "<none>" }}"),
+so the UIs above are also reachable over https://. Trust the local CA once to
+avoid browser warnings — see docs/cert-management.md.
+{{- end }}
 
 In-cluster service DNS (use these from your apps):
   postgres:5432  redis:6379  mongodb:27017  kafka:9092  rabbitmq:5672

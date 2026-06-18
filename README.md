@@ -5,7 +5,9 @@ A comprehensive containerized shared infrastructure platform providing databases
 ## ✨ New Features
 
 - 🌐 **Local DNS Server** (dnsmasq) with wildcard `*.dev.local` support
-- 🔒 **HTTPS Certificates** (mkcert) for all services with browser trust
+- 🔒 **HTTPS Certificates** — Docker Compose: mkcert; **Kubernetes: shared
+  cert-manager** so dependent repos get TLS for free (see
+  [docs/cert-management.md](docs/cert-management.md))
 - 🚇 **Cloudflare Tunnel** integration for secure external access
 - 🔗 **Webhook Management** with automatic URL updates for GitHub/Atlassian
 - 📊 **Comprehensive Monitoring** with Prometheus, Grafana, and Loki

@@ -12,12 +12,23 @@
   "rabbitmq"          (dict "svc" "rabbitmq"          "port" $root.Values.rabbitmq.managementPort "enabled" $root.Values.rabbitmq.enabled)
   "neo4j"             (dict "svc" "neo4j"             "port" $root.Values.neo4j.httpPort         "enabled" $root.Values.neo4j.enabled)
 -}}
+{{- /* Merge user annotations with the cert-manager issuer annotation (when TLS
+       is enabled and a ClusterIssuer is configured), so cert-manager auto-mints
+       the TLS secret named below. See k8s/cert-manager/ + docs/cert-management.md. */ -}}
+{{- $annotations := merge (dict) (default (dict) .Values.ingress.annotations) -}}
+{{- if and .Values.ingress.tls.enabled .Values.ingress.tls.clusterIssuer -}}
+{{- $_ := set $annotations "cert-manager.io/cluster-issuer" .Values.ingress.tls.clusterIssuer -}}
+{{- end -}}
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
   name: fuzeinfra
   labels:
     {{- include "fuzeinfra.labels" . | nindent 4 }}
+  {{- if $annotations }}
+  annotations:
+    {{- toYaml $annotations | nindent 4 }}
+  {{- end }}
 spec:
   ingressClassName: {{ .Values.ingress.className }}
   {{- if .Values.ingress.tls.enabled }}
@@ -28,7 +39,7 @@ spec:
         - {{ include "fuzeinfra.host" (dict "root" $root "sub" $sub) }}
         {{- end }}
         {{- end }}
-      secretName: fuzeinfra-tls
+      secretName: {{ .Values.ingress.tls.secretName | default "fuzeinfra-tls" }}
   {{- end }}
   rules:
     {{- range $sub, $r := $routes }}

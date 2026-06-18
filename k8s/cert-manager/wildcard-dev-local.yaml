@@ -1,0 +1,39 @@
+# =============================================================================
+# OPTIONAL: a single wildcard *.dev.local certificate.
+#
+# Instead of letting each Ingress request its own per-host cert, you can issue
+# one wildcard cert from the local CA and have ingresses reference its Secret
+# directly (no per-ingress cert-manager annotation needed). Handy when you run
+# many short-lived dev hostnames.
+#
+# Caveat: a Secret is namespace-scoped, so this cert is only usable by Ingresses
+# in the SAME namespace (here: fuzeinfra). Dependent repos in their own
+# namespaces should either:
+#   - issue their own wildcard cert from the "fuzeinfra-local-ca" ClusterIssuer
+#     (copy this file, change the namespace), or
+#   - just annotate their Ingress with cert-manager.io/cluster-issuer:
+#     fuzeinfra-local-ca and let cert-manager mint a per-host cert (recommended —
+#     see docs/cert-management.md).
+#
+# Apply with:  kubectl apply -f k8s/cert-manager/wildcard-dev-local.yaml
+# Then reference secretName "wildcard-dev-local-tls" in your Ingress tls block.
+# =============================================================================
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: wildcard-dev-local
+  namespace: fuzeinfra
+  labels:
+    app.kubernetes.io/part-of: fuzeinfra
+spec:
+  secretName: wildcard-dev-local-tls
+  duration: 2160h     # 90 days
+  renewBefore: 360h   # 15 days
+  commonName: "*.dev.local"
+  dnsNames:
+    - "*.dev.local"
+    - "dev.local"
+  issuerRef:
+    name: fuzeinfra-local-ca
+    kind: ClusterIssuer
+    group: cert-manager.io

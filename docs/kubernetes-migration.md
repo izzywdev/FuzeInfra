@@ -1,8 +1,20 @@
 # FuzeInfra Kubernetes Migration
 
 This document describes the migration of FuzeInfra from a Docker Compose stack
-to Kubernetes — running locally on **kind** and on AWS via **Amazon EKS**, using
-a single **Helm chart** as the source of truth for both.
+to Kubernetes, using a single **Helm chart** as the source of truth across
+environments:
+
+- **Local dev** — a **kind** cluster (`fuzeinfra`), with **ingress-nginx** and
+  **cert-manager** (local `*.dev.local` CA) installed by `make kind-up`.
+- **Production** — **k3s** on **Contabo**, with the same ingress-nginx +
+  cert-manager (Let's Encrypt) providing shared TLS.
+- **AWS (optional)** — **Amazon EKS**, provisioned via `terraform/eks/`, for when
+  a managed/elastic cluster is wanted. The chart and overlays are the same; only
+  the storage class and ingress LB differ.
+
+Because the issuers and ingress are shared, dependent products get HTTPS **for
+free** by adding a `cert-manager.io/cluster-issuer` annotation to their Ingress —
+see [cert-management.md](cert-management.md).
 
 ## Why
 
@@ -115,12 +127,32 @@ kubectl -n ingress-nginx get svc ingress-nginx-controller
 - **Enable/disable services**: every service has an `enabled` flag.
 - **Scale Airflow**: `airflow.workerReplicas`.
 
+## TLS / certificates (cert-manager)
+
+TLS is now **provided centrally** by FuzeInfra via cert-manager — it is no longer
+a roadmap item. dependent repos do not install cert-manager or ship their own CA;
+they add a `cert-manager.io/cluster-issuer` annotation + a `tls:` block to their
+Ingress and get a cert automatically.
+
+- **Local (kind):** `make kind-up` installs cert-manager and a self-signed
+  **`fuzeinfra-local-ca`** ClusterIssuer, and `values-local.yaml` enables TLS on
+  the FuzeInfra ingress. Trust the root CA once for warning-free `*.dev.local`.
+- **Prod (k3s / EKS):** run
+  `ACME_EMAIL=you@example.com ./k8s/cert-manager/setup-cert-manager.sh prod` to
+  install cert-manager + **`letsencrypt-prod`** (and `letsencrypt-staging`)
+  ClusterIssuers, then set `ingress.tls.enabled: true` /
+  `clusterIssuer: letsencrypt-prod`.
+
+Everything lives in `k8s/cert-manager/`. Full guide:
+[cert-management.md](cert-management.md).
+
 ## Roadmap (next phases)
 
 1. **Live validation**: `kind` bring-up + smoke tests; `terraform plan/apply` on EKS.
 2. **CI**: add a GitHub Actions job running `helm lint` + `kubeconform` (offline)
    and a `kind`-based integration test of the chart.
-3. **TLS**: cert-manager + ClusterIssuer; enable `ingress.tls`.
+3. ✅ **TLS**: cert-manager + ClusterIssuers (local CA + Let's Encrypt), shared so
+   dependent repos get HTTPS for free. See [cert-management.md](cert-management.md).
 4. **Managed data services (AWS)**: optional swap of in-cluster StatefulSets for
    RDS (Postgres), ElastiCache (Redis), MSK (Kafka), OpenSearch, DocumentDB.
    Disable the corresponding chart services and point `credentials`/Secret at the
