@@ -150,6 +150,40 @@ services:
 
 See [docs/PROJECT_TEMPLATES.md](docs/PROJECT_TEMPLATES.md) and [docs/PROJECT_INTEGRATION_GUIDE.md](docs/PROJECT_INTEGRATION_GUIDE.md) for detailed instructions.
 
+## 🤖 FuzeInfra Expert (Claude Agent)
+
+This repo ships a reusable **Claude subagent** that is an expert on FuzeInfra — its
+kind/k3s/EKS topology, Helm charts, docker-compose stack, and every shared service — so any
+session working on a product that depends on FuzeInfra can offload base-infra setup to it
+instead of relearning FuzeInfra from scratch.
+
+Ask it things like *"I'm adding a service `foo` that needs a Postgres DB, an ingress at
+`foo.dev.local` with TLS, and a Redis namespace"* and it produces the exact SQL, manifests,
+service-discovery DNS names, and env wiring — grounded in this repository.
+
+**Agent definition:** [`docs/claude-agents/fuzeinfra-expert.md`](docs/claude-agents/fuzeinfra-expert.md)
+
+### Install
+
+Copy the agent into your Claude agents directory so it's available in any session:
+
+```bash
+# Install globally (available in every project on your machine)
+mkdir -p ~/.claude/agents
+cp docs/claude-agents/fuzeinfra-expert.md ~/.claude/agents/
+
+# …or install per-project (only the repo you run it from)
+mkdir -p .claude/agents
+cp /path/to/FuzeInfra/docs/claude-agents/fuzeinfra-expert.md .claude/agents/
+```
+
+In Claude Code, confirm it loaded with `/agents`. Claude will then delegate FuzeInfra
+provisioning questions to `fuzeinfra-expert` automatically, or you can invoke it explicitly.
+
+> Note: the canonical copy lives at `docs/claude-agents/` (the CI sandbox protects `.claude/`
+> from automated writes). For local repo auto-loading, copy it into `.claude/agents/` with the
+> per-project command above.
+
 ## 🛠️ Management Tools
 
 ### Infrastructure Management
