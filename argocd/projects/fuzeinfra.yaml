@@ -13,6 +13,10 @@ spec:
       server: https://kubernetes.default.svc
     - namespace: argocd
       server: https://kubernetes.default.svc
+    - namespace: arc-systems
+      server: https://kubernetes.default.svc
+    - namespace: arc-runners
+      server: https://kubernetes.default.svc
   # The chart creates cluster-scoped objects (monitoring ClusterRole/Binding),
   # so cluster resources must be allowed for this project.
   clusterResourceWhitelist:

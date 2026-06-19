@@ -1,0 +1,76 @@
+# =============================================================================
+# ARC Runner Scale Set Helm values
+# Chart: oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set
+# Namespace: arc-runners  |  Release name: staging
+#
+# Registers an org-level ephemeral runner with labels [self-hosted, staging].
+# Consumers target it with:
+#   runs-on: [self-hosted, staging]
+# =============================================================================
+
+# ---- GitHub target ----------------------------------------------------------
+# Org-level URL → runner is available to every allowlisted repo in the group.
+githubConfigUrl: "https://github.com/izzywdev"
+
+# Name of the Kubernetes Secret containing GitHub App credentials.
+# Create it from runners/arc/github-secret.yaml before installing.
+githubConfigSecret: arc-runner-github-app
+
+# ---- Runner group -----------------------------------------------------------
+# Org runner group created at: Settings → Actions → Runner groups.
+# Set "Repository access" to the explicit repo allowlist (NOT "All repositories").
+runnerGroup: "staging-runners"
+
+# ---- Scale set label --------------------------------------------------------
+# This value becomes the runner's primary label.  Combined with the automatic
+# "self-hosted" label, workflows can target: runs-on: [self-hosted, staging]
+runnerScaleSetName: staging
+
+# ---- Scaling ----------------------------------------------------------------
+# minRunners=0  → idle costs nothing; runners spin up on demand.
+# maxRunners    → hard cap; tune based on cluster capacity.
+minRunners: 0
+maxRunners: 5
+
+# ---- Runner pod spec --------------------------------------------------------
+template:
+  spec:
+    # deployer ServiceAccount: grants namespaced RBAC in each consumer's
+    # staging namespace via a RoleBinding the platform grants at onboarding.
+    serviceAccountName: arc-runner-sa
+
+    containers:
+      - name: runner
+        image: ghcr.io/actions/actions-runner:latest
+        # Runners are ephemeral — no privileged flag, no host mounts.
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]
+          runAsNonRoot: true
+          seccompProfile:
+            type: RuntimeDefault
+        resources:
+          requests:
+            cpu: 200m
+            memory: 256Mi
+          limits:
+            cpu: "2"
+            memory: 1Gi
+        env:
+          # Prevent the runner from self-updating (image version is the pin).
+          - name: DISABLE_RUNNER_UPDATE
+            value: "1"
+
+    # No tolerations/nodeSelector by default; add here to pin to staging nodes.
+    # nodeSelector:
+    #   node-role: staging
+    # tolerations:
+    #   - key: staging
+    #     operator: Exists
+    #     effect: NoSchedule
+
+# ---- ARC controller reference -----------------------------------------------
+controllerServiceAccount:
+  namespace: arc-systems
+  name: arc-gha-runner-scale-set-controller

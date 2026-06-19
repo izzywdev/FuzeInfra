@@ -1,0 +1,57 @@
+# =============================================================================
+# Deployer Role — namespaced, reusable template.
+#
+# Apply this in a consumer's STAGING namespace to grant the shared runner's
+# ServiceAccount (arc-runners/arc-runner-sa) the minimum permissions needed
+# to deploy a workload: Deployments, Services, ConfigMaps, Secrets, Ingresses,
+# HorizontalPodAutoscalers, and Pods (read-only, for health checks).
+#
+# Usage:
+#   # Substitute YOUR_NAMESPACE with the consumer staging namespace, then:
+#   kubectl apply -f deployer-role.yaml -n <YOUR_NAMESPACE>
+#
+# Or use the kustomize overlay pattern (see runners/README.md).
+# =============================================================================
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: deployer
+  # namespace is set by -n flag at apply time (or by the consumer's kustomize overlay)
+  labels:
+    app.kubernetes.io/component: deployer-rbac
+    app.kubernetes.io/part-of: arc-staging
+rules:
+  # Core workload objects
+  - apiGroups: ["apps"]
+    resources: ["deployments", "replicasets", "statefulsets", "daemonsets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+
+  - apiGroups: [""]
+    resources: ["services", "endpoints", "configmaps"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+
+  # Secrets: write-only (runner can inject image pull secrets / env secrets).
+  # Do NOT grant "get" or "list" — runner should never be able to read secrets.
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["create", "update", "patch", "delete"]
+
+  # Pod read-only (for rollout status checks, not exec/logs).
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+
+  # Ingress management
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["ingresses"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+
+  # Autoscaling
+  - apiGroups: ["autoscaling"]
+    resources: ["horizontalpodautoscalers"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+
+  # PersistentVolumeClaims (optional: enable only if the app manages PVCs)
+  # - apiGroups: [""]
+  #   resources: ["persistentvolumeclaims"]
+  #   verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
