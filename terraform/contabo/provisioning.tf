@@ -68,6 +68,11 @@ resource "null_resource" "provision" {
       "kubectl apply -f /tmp/argocd-project.yaml",
       "kubectl apply -f /tmp/argocd-app.yaml",
 
+      # --- ArgoCD Ingress via Traefik (insecure mode: Traefik handles TLS) ---
+      "kubectl -n argocd patch configmap argocd-cmd-params-cm --type merge -p '{\"data\":{\"server.insecure\":\"true\"}}'",
+      "kubectl -n argocd rollout restart deployment/argocd-server",
+      "kubectl apply -f - <<'EOF'\napiVersion: networking.k8s.io/v1\nkind: Ingress\nmetadata:\n  name: argocd\n  namespace: argocd\nspec:\n  ingressClassName: traefik\n  rules:\n    - host: argocd.${replace(local.server_ip, \".\", \"-\")}.nip.io\n      http:\n        paths:\n          - path: /\n            pathType: Prefix\n            backend:\n              service:\n                name: argocd-server\n                port:\n                  number: 80\nEOF",
+
       "echo 'Provisioning complete'",
     ]
   }
