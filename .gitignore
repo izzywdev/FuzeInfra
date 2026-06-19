@@ -12,6 +12,15 @@
 secrets/
 config/secrets/
 
+# Terraform secrets and provider binaries
+terraform.tfvars
+*.tfvars.json
+.terraform/providers/
+.terraform/plugins/
+
+# Downloaded binaries (tools fetched at runtime)
+mkcert-v*
+
 # SSH Keys Directory - track structure but not key files
 keys/*.pem
 keys/*.key

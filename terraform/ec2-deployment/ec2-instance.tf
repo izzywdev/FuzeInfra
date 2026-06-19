@@ -1,10 +1,8 @@
 # EC2 Instance Creation Resources
 # This file handles creating new EC2 instances when they don't exist
 
-# Data source to check if instance exists (may fail)
-data "aws_instance" "fuzeinfra_instance_check" {
-  count = var.create_instance ? 0 : 1
-  
+# Data source to check if instance exists by name/tag
+data "aws_instances" "fuzeinfra_instance_check" {
   filter {
     name   = "tag:Name"
     values = [var.instance_name]
@@ -12,56 +10,37 @@ data "aws_instance" "fuzeinfra_instance_check" {
   
   filter {
     name   = "instance-state-name"
-    values = ["running", "stopped"]
+    values = ["running", "stopped", "pending"]
   }
 }
 
-# Get default VPC if creating new instance
-data "aws_vpc" "default" {
-  count   = var.create_instance ? 1 : 0
-  default = true
+# Local to determine if we should create instance
+locals {
+  # Temporarily force instance creation since data source is timing out
+  instance_exists = false  # Override to force creation
+  should_create_instance = var.create_instance && !local.instance_exists
 }
 
-# Get default subnet if creating new instance
-data "aws_subnet" "default" {
-  count             = var.create_instance ? 1 : 0
-  vpc_id            = data.aws_vpc.default[0].id
-  availability_zone = var.availability_zone
-  default_for_az    = true
+# Hardcoded values to bypass data source timeouts
+locals {
+  # Known default VPC and subnet for us-east-1
+  default_vpc_id = "vpc-03087eb29ab79b8bb"  # Default VPC in us-east-1
+  default_subnet_id = "subnet-023c7dbcdfffa5310"  # Subnet in us-east-1b  
+  ubuntu_ami_id = "ami-0e2c8caa4b6378d8c"  # Ubuntu 22.04 LTS for us-east-1
 }
 
-# Get latest Ubuntu AMI
-data "aws_ami" "ubuntu" {
-  count       = var.create_instance ? 1 : 0
-  most_recent = true
-  owners      = ["099720109477"] # Canonical
-
-  filter {
-    name   = "name"
-    values = ["ubuntu/images/hvm-ssd/ubuntu-jammy-22.04-amd64-server-*"]
-  }
-
-  filter {
-    name   = "virtualization-type"
-    values = ["hvm"]
-  }
-}
-
-# Create new EC2 instance if requested
+# Create new EC2 instance if it doesn't exist
 resource "aws_instance" "fuzeinfra_new" {
-  count                  = var.create_instance ? 1 : 0
-  ami                    = data.aws_ami.ubuntu[0].id
+  count                  = local.should_create_instance ? 1 : 0
+  ami                    = local.ubuntu_ami_id
   instance_type          = var.instance_type
   key_name               = aws_key_pair.fuzeinfra[0].key_name
   vpc_security_group_ids = [aws_security_group.fuzeinfra.id]
-  subnet_id              = data.aws_subnet.default[0].id
+  subnet_id              = local.default_subnet_id
   iam_instance_profile   = aws_iam_instance_profile.fuzeinfra.name
 
-  # User data script for initial setup
-  user_data = base64encode(templatefile("${path.module}/user-data.sh", {
-    instance_name = var.instance_name
-    environment   = var.environment
-  }))
+  # User data script for initial setup (using bootstrap to avoid 16KB limit)
+  user_data = base64encode(file("${path.module}/bootstrap.sh"))
 
   # Enhanced monitoring
   monitoring = true
@@ -110,7 +89,7 @@ resource "aws_instance" "fuzeinfra_new" {
 
 # Create Elastic IP for new instance
 resource "aws_eip" "fuzeinfra_new" {
-  count    = var.create_instance ? 1 : 0
+  count    = local.should_create_instance ? 1 : 0
   instance = aws_instance.fuzeinfra_new[0].id
   domain   = "vpc"
 
@@ -121,20 +100,30 @@ resource "aws_eip" "fuzeinfra_new" {
   depends_on = [aws_instance.fuzeinfra_new]
 }
 
-# Output the correct instance information based on creation mode
+# Additional locals for instance management
 locals {
-  # Use existing instance if not creating, otherwise use new instance
-  instance_id = var.create_instance ? aws_instance.fuzeinfra_new[0].id : data.aws_instance.fuzeinfra_instance_check[0].id
-  instance_public_ip = var.create_instance ? aws_eip.fuzeinfra_new[0].public_ip : data.aws_instance.fuzeinfra_instance_check[0].public_ip
-  instance_private_ip = var.create_instance ? aws_instance.fuzeinfra_new[0].private_ip : data.aws_instance.fuzeinfra_instance_check[0].private_ip
-  vpc_id = var.create_instance ? data.aws_vpc.default[0].id : data.aws_instance.fuzeinfra_instance_check[0].vpc_id
-  subnet_id = var.create_instance ? data.aws_subnet.default[0].id : data.aws_instance.fuzeinfra_instance_check[0].subnet_id
-  availability_zone = var.create_instance ? aws_instance.fuzeinfra_new[0].availability_zone : data.aws_instance.fuzeinfra_instance_check[0].availability_zone
+  # Determine instance details based on whether we created new or using existing
+  instance_id = local.should_create_instance ? aws_instance.fuzeinfra_new[0].id : (
+    local.instance_exists ? data.aws_instances.fuzeinfra_instance_check.ids[0] : ""
+  )
+  
+  instance_public_ip = local.should_create_instance ? aws_eip.fuzeinfra_new[0].public_ip : (
+    local.instance_exists ? data.aws_instances.fuzeinfra_instance_check.public_ips[0] : ""
+  )
+  
+  instance_private_ip = local.should_create_instance ? aws_instance.fuzeinfra_new[0].private_ip : (
+    local.instance_exists ? data.aws_instances.fuzeinfra_instance_check.private_ips[0] : ""
+  )
+  
+  vpc_id = local.should_create_instance ? local.default_vpc_id : ""
+  vpc_cidr = local.should_create_instance ? "172.31.0.0/16" : "10.0.0.0/16"
+  subnet_id = local.should_create_instance ? local.default_subnet_id : ""
+  availability_zone = local.should_create_instance ? "us-east-1b" : ""
 }
 
-# CloudWatch alarms for new instance
+# CloudWatch alarms for instance (new or existing)
 resource "aws_cloudwatch_metric_alarm" "high_cpu" {
-  count               = var.create_instance && var.enable_monitoring ? 1 : 0
+  count               = (local.should_create_instance || local.instance_exists) && var.enable_monitoring ? 1 : 0
   alarm_name          = "${var.instance_name}-cpu-utilization"
   comparison_operator = "GreaterThanThreshold"
   evaluation_periods  = "2"
@@ -147,7 +136,7 @@ resource "aws_cloudwatch_metric_alarm" "high_cpu" {
   alarm_actions       = var.sns_topic_arn != "" ? [var.sns_topic_arn] : []
 
   dimensions = {
-    InstanceId = aws_instance.fuzeinfra_new[0].id
+    InstanceId = local.instance_id
   }
 
   tags = {
@@ -156,7 +145,7 @@ resource "aws_cloudwatch_metric_alarm" "high_cpu" {
 }
 
 resource "aws_cloudwatch_metric_alarm" "instance_status_check" {
-  count               = var.create_instance && var.enable_monitoring ? 1 : 0
+  count               = (local.should_create_instance || local.instance_exists) && var.enable_monitoring ? 1 : 0
   alarm_name          = "${var.instance_name}-status-check"
   comparison_operator = "GreaterThanThreshold"
   evaluation_periods  = "2"
@@ -169,7 +158,7 @@ resource "aws_cloudwatch_metric_alarm" "instance_status_check" {
   alarm_actions       = var.sns_topic_arn != "" ? [var.sns_topic_arn] : []
 
   dimensions = {
-    InstanceId = aws_instance.fuzeinfra_new[0].id
+    InstanceId = local.instance_id
   }
 
   tags = {

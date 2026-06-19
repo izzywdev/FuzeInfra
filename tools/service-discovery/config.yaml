@@ -1,0 +1,20 @@
+consul:
+  host: "localhost"
+  port: 8500
+  scheme: "http"
+  timeout: 10
+  consistency: "default"
+
+service_discovery:
+  default_health_check_interval: "10s"
+  default_health_check_timeout: "5s"
+  default_health_check_path: "/health"
+  service_ttl: 30
+  cleanup_interval: 60
+
+dns:
+  domain_suffix: "dev.local"
+  
+logging:
+  level: "INFO"
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"

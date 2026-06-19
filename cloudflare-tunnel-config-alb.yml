@@ -1,0 +1,112 @@
+# Cloudflare Zero Trust Tunnel Configuration - ALB Version
+# This file routes services through ALB for load balancing and high availability
+
+tunnel: ae01913e-0a00-4a30-a5ec-a348a4e12f65
+credentials-file: /etc/cloudflared/cert.pem
+
+# Ingress rules - order matters, first match wins
+# Route traffic through ALB for load balancing and health checks
+ingress:
+  # Main FuzeInfra landing page - via ALB
+  - hostname: infra.fuzefront.com
+    service: https://internal-fuzeinfra-alb-production-123456789.us-east-1.elb.amazonaws.com
+    originRequest:
+      httpHostHeader: infra.fuzefront.com
+      originServerName: infra.fuzefront.com
+
+  # Monitoring & Observability Services - via ALB
+  - hostname: grafana.infra.fuzefront.com
+    service: https://internal-fuzeinfra-alb-production-123456789.us-east-1.elb.amazonaws.com
+    originRequest:
+      httpHostHeader: grafana.infra.fuzefront.com
+      originServerName: grafana.infra.fuzefront.com
+      
+  - hostname: prometheus.infra.fuzefront.com
+    service: https://internal-fuzeinfra-alb-production-123456789.us-east-1.elb.amazonaws.com
+    originRequest:
+      httpHostHeader: prometheus.infra.fuzefront.com
+      originServerName: prometheus.infra.fuzefront.com
+
+  # Health Dashboard - Service Health Monitoring - via ALB
+  - hostname: argocd.infra.fuzefront.com
+    service: https://internal-fuzeinfra-alb-production-123456789.us-east-1.elb.amazonaws.com
+    originRequest:
+      httpHostHeader: argocd.infra.fuzefront.com
+      originServerName: argocd.infra.fuzefront.com
+
+  # Workflow & Processing Services - via ALB
+  - hostname: airflow.infra.fuzefront.com
+    service: https://internal-fuzeinfra-alb-production-123456789.us-east-1.elb.amazonaws.com
+    originRequest:
+      httpHostHeader: airflow.infra.fuzefront.com
+      originServerName: airflow.infra.fuzefront.com
+
+  # Database Management Interfaces - via ALB
+  - hostname: mongo.infra.fuzefront.com
+    service: https://internal-fuzeinfra-alb-production-123456789.us-east-1.elb.amazonaws.com
+    originRequest:
+      httpHostHeader: mongo.infra.fuzefront.com
+      originServerName: mongo.infra.fuzefront.com
+      
+  - hostname: rabbitmq.infra.fuzefront.com
+    service: https://internal-fuzeinfra-alb-production-123456789.us-east-1.elb.amazonaws.com
+    originRequest:
+      httpHostHeader: rabbitmq.infra.fuzefront.com
+      originServerName: rabbitmq.infra.fuzefront.com
+
+  # Services not yet configured in ALB - direct container access
+  - hostname: alertmanager.infra.fuzefront.com
+    service: http://alertmanager:9093
+    originRequest:
+      httpHostHeader: alertmanager.infra.fuzefront.com
+
+  - hostname: pgadmin.infra.fuzefront.com
+    service: http://pgadmin:80
+    originRequest:
+      httpHostHeader: pgadmin.infra.fuzefront.com
+      
+  - hostname: neo4j.infra.fuzefront.com
+    service: http://neo4j:7474
+    originRequest:
+      httpHostHeader: neo4j.infra.fuzefront.com
+      
+  - hostname: flower.infra.fuzefront.com
+    service: http://airflow-flower:5555
+    originRequest:
+      httpHostHeader: flower.infra.fuzefront.com
+      
+  - hostname: kafka.infra.fuzefront.com
+    service: http://kafka-ui:8080
+    originRequest:
+      httpHostHeader: kafka.infra.fuzefront.com
+
+  - hostname: elastic.infra.fuzefront.com
+    service: http://elasticsearch:9200
+    originRequest:
+      httpHostHeader: elastic.infra.fuzefront.com
+      
+  - hostname: chroma.infra.fuzefront.com
+    service: http://chromadb:8000
+    originRequest:
+      httpHostHeader: chroma.infra.fuzefront.com
+
+  - hostname: dns.infra.fuzefront.com
+    service: http://dnsmasq:8080
+    originRequest:
+      httpHostHeader: dns.infra.fuzefront.com
+
+  - hostname: loki.infra.fuzefront.com
+    service: http://loki:3100
+    originRequest:
+      httpHostHeader: loki.infra.fuzefront.com
+
+  # Catch-all rule (required as last rule)
+  - service: http_status:404
+
+# Global settings
+warp-routing:
+  enabled: true
+
+# Metrics and logging
+metrics: 0.0.0.0:8080
+no-autoupdate: true

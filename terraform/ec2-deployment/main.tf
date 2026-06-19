@@ -111,23 +111,7 @@ resource "aws_security_group" "fuzeinfra" {
   }
 }
 
-# Attach security group to existing instance (only if not creating new instance)
-resource "aws_network_interface_sg_attachment" "fuzeinfra" {
-  count                = var.create_instance ? 0 : 1
-  security_group_id    = aws_security_group.fuzeinfra.id
-  network_interface_id = local.network_interface_id
-}
-
-# Elastic IP for existing instance (if not already assigned and not creating new)
-resource "aws_eip" "fuzeinfra" {
-  count    = var.create_eip && !var.create_instance ? 1 : 0
-  instance = local.instance_id
-  domain   = "vpc"
-
-  tags = {
-    Name = "fuzeinfra-${var.environment}"
-  }
-}
+# Note: Instance management moved to ec2-instance.tf with conditional logic
 
 # DNS configuration has been moved to cloudflare-dns.tf
 # since fuzefront.com is managed by Cloudflare, not Route53
@@ -188,16 +172,8 @@ resource "aws_iam_instance_profile" "fuzeinfra" {
   role = aws_iam_role.fuzeinfra_instance.name
 }
 
-# Attach instance profile to existing instance (if not already attached)
-resource "aws_iam_instance_profile_attachment" "fuzeinfra" {
-  count                = var.attach_iam_profile ? 1 : 0
-  instance_profile     = aws_iam_instance_profile.fuzeinfra.name
-  instance_id          = data.aws_instance.fuzeinfra_instance.id
-  
-  lifecycle {
-    ignore_changes = [instance_profile]
-  }
-}
+# Note: IAM instance profile attachment is handled at instance creation time
+# The iam_instance_profile is specified in the aws_instance resource
 
 # S3 bucket for deployment artifacts (optional)
 resource "aws_s3_bucket" "fuzeinfra_artifacts" {

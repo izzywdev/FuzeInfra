@@ -1,0 +1,56 @@
+# ArgoCD Server Configuration
+# This configures the ArgoCD server for FuzeInfra health monitoring
+
+accounts.admin: login
+accounts.admin.enabled: "true"
+
+# URL configuration for tunnel access
+url: https://argocd.infra.fuzefront.com
+
+# OIDC configuration (optional - can be configured later)
+oidc.config: |
+  name: Cloudflare Access
+  issuer: https://fuzefront.cloudflareaccess.com
+  clientId: your-client-id
+  clientSecret: your-client-secret
+  requestedScopes: ["openid", "profile", "email"]
+
+# Repository configuration
+repositories: |
+  - type: git
+    url: https://github.com/izzywdev/FuzeInfra
+    name: fuzeinfra-config
+    insecure: false
+
+# Resource exclusions for monitoring
+resource.exclusions: |
+  - apiGroups:
+    - cilium.io
+    kinds:
+    - CiliumIdentity
+    clusters:
+    - "*"
+
+# Application settings
+application.instanceLabelKey: argocd.argoproj.io/instance
+
+# Server configuration
+server.insecure: true
+server.grpc.web: true
+server.enable.proxy.extension: true
+
+# Default admin password (change after first login)
+# Password: admin
+admin.enabled: true
+admin.password: $2a$10$rRyBsGSHK6.uc8fntPwVIuLVHgsAhAX7TcdrqW/RADU9TpY4.BN4W
+admin.passwordMtime: "2024-01-01T00:00:00Z"
+
+# Disable dex for now (using basic auth)
+dex.config: |
+  connectors: []
+
+# Health monitoring settings
+controller.status.processors: 20
+controller.operation.processors: 10
+controller.self.heal.timeout.seconds: 5
+controller.repo.server.timeout.seconds: 60

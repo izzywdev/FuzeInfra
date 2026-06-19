@@ -3,10 +3,9 @@
 
 # Cloudflare provider is added to main.tf required_providers block
 
-# Configure Cloudflare provider
+# Configure Cloudflare provider with API token
 provider "cloudflare" {
-  email   = var.cloudflare_email
-  api_key = var.cloudflare_api_key
+  api_token = var.cloudflare_api_token
 }
 
 # Get Cloudflare zone information for fuzefront.com
@@ -16,20 +15,20 @@ data "cloudflare_zones" "fuzefront" {
   }
 }
 
-# Create A record for infra subdomain pointing to EC2 instance
+# Create CNAME record for infra subdomain pointing to ALB
 resource "cloudflare_record" "infra" {
   zone_id = data.cloudflare_zones.fuzefront.zones[0].id
   name    = "infra"
-  value   = local.instance_public_ip
-  type    = "A"
+  content = aws_lb.fuzeinfra_alb.dns_name
+  type    = "CNAME"
   ttl     = 300
-  comment = "FuzeInfra EC2 instance - Managed by Terraform"
+  comment = "FuzeInfra ALB - Managed by Terraform"
   
-  tags = {
-    "managed-by" = "terraform"
-    "project"    = "fuzeinfra"
-    "environment" = var.environment
-  }
+  # tags = [
+  #   "terraform",
+  #   "fuzeinfra", 
+  #   var.environment
+  # ]
 }
 
 # Optional: Create CNAME for alternative access patterns
@@ -37,52 +36,65 @@ resource "cloudflare_record" "infra_www" {
   count   = var.create_www_subdomain ? 1 : 0
   zone_id = data.cloudflare_zones.fuzefront.zones[0].id
   name    = "www.infra"
-  value   = "infra.${var.domain_name}"
+  content = "infra.${var.domain_name}"
   type    = "CNAME"
   ttl     = 300
   comment = "FuzeInfra www subdomain - Managed by Terraform"
   
-  tags = {
-    "managed-by" = "terraform"
-    "project"    = "fuzeinfra"
-    "environment" = var.environment
-  }
+  # tags = [
+  #   "terraform",
+  #   "fuzeinfra",
+  #   var.environment
+  # ]
 }
 
-# Create additional subdomains for specific services if needed
+# Create subdomains for Zero Trust secured services - point to ALB
 resource "cloudflare_record" "infra_services" {
-  for_each = var.create_service_subdomains ? toset([
+  for_each = toset([
     "grafana",
     "prometheus", 
+    "alertmanager",
+    "pgadmin",
+    "mongo",
+    "rabbitmq",
+    "neo4j",
     "airflow",
-    "mongo"
-  ]) : []
+    "flower",
+    "kafka",
+    "elastic",
+    "chroma",
+    "dns",
+    "loki",
+    "argocd"
+  ])
   
   zone_id = data.cloudflare_zones.fuzefront.zones[0].id
   name    = "${each.key}.infra"
-  value   = "infra.${var.domain_name}"
+  content = aws_lb.fuzeinfra_alb.dns_name
   type    = "CNAME"
   ttl     = 300
-  comment = "FuzeInfra ${each.key} service subdomain - Managed by Terraform"
+  comment = "FuzeInfra ${each.key} service via ALB - Managed by Terraform"
   
-  tags = {
-    "managed-by" = "terraform"
-    "project"    = "fuzeinfra"
-    "environment" = var.environment
-    "service"    = each.key
-  }
+  # tags = [
+  #   "terraform",
+  #   "fuzeinfra",
+  #   var.environment,
+  #   each.key
+  # ]
 }
 
 # Output DNS information
 output "dns_info" {
-  description = "DNS configuration information"
+  description = "DNS configuration information"  
   value = {
     zone_id           = data.cloudflare_zones.fuzefront.zones[0].id
     zone_name         = data.cloudflare_zones.fuzefront.zones[0].name
     infra_record_id   = cloudflare_record.infra.id
-    infra_fqdn        = "${cloudflare_record.infra.name}.${cloudflare_record.infra.zone_name}"
-    record_value      = cloudflare_record.infra.value
+    infra_fqdn        = "${cloudflare_record.infra.name}.${var.domain_name}"
+    record_value      = cloudflare_record.infra.content
     dns_provider      = "cloudflare"
+    target_type       = "alb"
+    alb_dns_name      = aws_lb.fuzeinfra_alb.dns_name
   }
 }
 
@@ -127,14 +139,7 @@ resource "cloudflare_page_rule" "infra_security" {
     ssl = "strict"
     always_use_https = true
     
-    # Security headers
-    security_header {
-      enabled = true
-      preload = true
-      max_age = 86400
-      include_subdomains = true
-      nosniff = true
-    }
+    # Note: Security headers are handled via Cloudflare zone settings
   }
 }
 
@@ -143,8 +148,6 @@ output "cloudflare_analytics" {
   description = "Cloudflare zone analytics information"
   value = {
     zone_id = data.cloudflare_zones.fuzefront.zones[0].id
-    zone_status = data.cloudflare_zones.fuzefront.zones[0].status
-    zone_paused = data.cloudflare_zones.fuzefront.zones[0].paused
-    name_servers = data.cloudflare_zones.fuzefront.zones[0].name_servers
+    zone_name = data.cloudflare_zones.fuzefront.zones[0].name
   }
 }

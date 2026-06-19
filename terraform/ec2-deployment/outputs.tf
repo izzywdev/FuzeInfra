@@ -44,12 +44,12 @@ output "artifacts_bucket" {
 output "service_urls" {
   description = "URLs for FuzeInfra services"
   value = {
-    main_url           = "https://${aws_route53_record.infra.fqdn}"
-    grafana_url        = "https://${aws_route53_record.infra.fqdn}:${var.fuzeinfra_config.grafana_port}"
-    prometheus_url     = "https://${aws_route53_record.infra.fqdn}:${var.fuzeinfra_config.prometheus_port}"
-    airflow_url        = "https://${aws_route53_record.infra.fqdn}:${var.fuzeinfra_config.airflow_port}"
-    mongo_express_url  = "https://${aws_route53_record.infra.fqdn}:8081"
-    rabbitmq_url       = "https://${aws_route53_record.infra.fqdn}:15672"
+    main_url           = "https://infra.${var.domain_name}"
+    grafana_url        = "https://infra.${var.domain_name}:${var.fuzeinfra_config.grafana_port}"
+    prometheus_url     = "https://infra.${var.domain_name}:${var.fuzeinfra_config.prometheus_port}"
+    airflow_url        = "https://infra.${var.domain_name}:${var.fuzeinfra_config.airflow_port}"
+    mongo_express_url  = "https://infra.${var.domain_name}:8081"
+    rabbitmq_url       = "https://infra.${var.domain_name}:15672"
   }
 }
 
@@ -123,7 +123,7 @@ output "monitoring_info" {
 output "connection_info" {
   description = "Connection information for CI/CD pipelines"
   value = {
-    ssh_host         = aws_route53_record.infra.fqdn
+    ssh_host         = "infra.${var.domain_name}"
     ssh_user         = "ubuntu" # Adjust based on your AMI
     deployment_path  = "/opt/fuzeinfra"
     docker_socket    = "/var/run/docker.sock"

@@ -1,0 +1,106 @@
+# Cloudflare Zero Trust Tunnel Configuration
+# This file defines how services are routed through the secure tunnel
+
+tunnel: ae01913e-0a00-4a30-a5ec-a348a4e12f65
+credentials-file: /etc/cloudflared/cert.pem
+
+# Ingress rules - order matters, first match wins
+ingress:
+  # Main FuzeInfra landing page
+  - hostname: infra.fuzefront.com
+    service: http://nginx:80
+    originRequest:
+      httpHostHeader: infra.fuzefront.com
+
+  # Monitoring & Observability Services
+  - hostname: grafana.infra.fuzefront.com
+    service: http://grafana:3000
+    originRequest:
+      httpHostHeader: grafana.infra.fuzefront.com
+      
+  - hostname: prometheus.infra.fuzefront.com
+    service: http://prometheus:9090
+    originRequest:
+      httpHostHeader: prometheus.infra.fuzefront.com
+      
+  - hostname: alertmanager.infra.fuzefront.com
+    service: http://alertmanager:9093
+    originRequest:
+      httpHostHeader: alertmanager.infra.fuzefront.com
+
+  # Database Management Interfaces
+  - hostname: pgadmin.infra.fuzefront.com
+    service: http://pgadmin:80
+    originRequest:
+      httpHostHeader: pgadmin.infra.fuzefront.com
+      
+  - hostname: mongo.infra.fuzefront.com
+    service: http://mongo-express:8081
+    originRequest:
+      httpHostHeader: mongo.infra.fuzefront.com
+      
+  - hostname: rabbitmq.infra.fuzefront.com
+    service: http://rabbitmq:15672
+    originRequest:
+      httpHostHeader: rabbitmq.infra.fuzefront.com
+      
+  - hostname: neo4j.infra.fuzefront.com
+    service: http://neo4j:7474
+    originRequest:
+      httpHostHeader: neo4j.infra.fuzefront.com
+
+  # Workflow & Processing Services
+  - hostname: airflow.infra.fuzefront.com
+    service: http://airflow-webserver:8080
+    originRequest:
+      httpHostHeader: airflow.infra.fuzefront.com
+      
+  - hostname: flower.infra.fuzefront.com
+    service: http://airflow-flower:5555
+    originRequest:
+      httpHostHeader: flower.infra.fuzefront.com
+      
+  - hostname: kafka.infra.fuzefront.com
+    service: http://kafka-ui:8080
+    originRequest:
+      httpHostHeader: kafka.infra.fuzefront.com
+
+  # Search & Vector Services
+  - hostname: elastic.infra.fuzefront.com
+    service: http://elasticsearch:9200
+    originRequest:
+      httpHostHeader: elastic.infra.fuzefront.com
+      
+  - hostname: chroma.infra.fuzefront.com
+    service: http://chromadb:8000
+    originRequest:
+      httpHostHeader: chroma.infra.fuzefront.com
+
+  # DNS Management
+  - hostname: dns.infra.fuzefront.com
+    service: http://dnsmasq:8080
+    originRequest:
+      httpHostHeader: dns.infra.fuzefront.com
+
+  # Logging Service
+  - hostname: loki.infra.fuzefront.com
+    service: http://loki:3100
+    originRequest:
+      httpHostHeader: loki.infra.fuzefront.com
+
+  # Health Dashboard - Service Health Monitoring
+  - hostname: argocd.infra.fuzefront.com
+    service: http://health-dashboard:80
+    originRequest:
+      httpHostHeader: argocd.infra.fuzefront.com
+
+  # Catch-all rule (required as last rule)
+  - service: http_status:404
+
+# Global settings
+warp-routing:
+  enabled: true
+
+# Metrics and logging
+metrics: 0.0.0.0:8080
+no-autoupdate: true

@@ -4,6 +4,7 @@ A comprehensive containerized shared infrastructure platform providing databases
 
 ## ✨ New Features
 
+- 🔍 **Service Discovery** (Consul) - Industry-standard service registration and discovery
 - 🌐 **Local DNS Server** (dnsmasq) with wildcard `*.dev.local` support
 - 🔒 **HTTPS Certificates** (mkcert) for all services with browser trust
 - 🚇 **Cloudflare Tunnel** integration for secure external access
@@ -75,6 +76,10 @@ See `environment.template` for all available options.
 - **Neo4j**: `localhost:7474` - Graph database
 - **ChromaDB**: `localhost:8003` - Vector database for AI/ML applications
 
+### Service Discovery
+- **Consul**: `http://localhost:8500` - Service registry with health checking and Web UI
+- **Consul DNS**: `localhost:8600` - DNS interface for service queries
+
 ### Monitoring & Observability
 - **Grafana**: `http://localhost:3001` - Dashboards and visualization
 - **Prometheus**: `http://localhost:9090` - Metrics collection
@@ -89,6 +94,7 @@ See `environment.template` for all available options.
 - **Airflow**: `localhost:8082` - Workflow orchestration and scheduling
 
 ### Management UIs (HTTP & HTTPS)
+- **Consul UI**: http://localhost:8500 | https://consul.dev.local (Service discovery and configuration)
 - **Airflow UI**: http://localhost:8082 | https://airflow.dev.local (admin/[generated])
 - **Flower (Celery Monitor)**: http://localhost:5555
 - **Grafana**: http://localhost:3001 | https://grafana.dev.local (admin/[generated])
@@ -101,6 +107,7 @@ See `environment.template` for all available options.
 - **RabbitMQ Management**: http://localhost:15672 | https://rabbitmq.dev.local
 
 ### New Service Features
+- 🔍 **Service Discovery**: Register and discover services dynamically with Consul
 - 🌐 **DNS Server**: Automatic `*.dev.local` domain resolution
 - 🔒 **HTTPS Support**: Trusted certificates for all services
 - 🚇 **Tunnel Access**: External webhook endpoints via Cloudflare
@@ -148,6 +155,50 @@ services:
       - CHROMADB_HOST=chromadb
 ```
 
+### 4. Service Discovery Integration
+
+**Register your service** for discovery by other applications:
+```bash
+# Register your service with health checks
+python tools/service-discovery/service-discovery.py register myproject \
+  --port 3000 \
+  --health-check /health \
+  --tags api,web \
+  --meta version=1.0.0
+
+# Verify registration
+python tools/service-discovery/service-discovery.py list
+```
+
+**Discover other services** dynamically (no hardcoded URLs):
+```javascript
+// Node.js example - fuzereach discovering fuzeagent
+const FuzeInfraServiceDiscovery = require('../FuzeInfra/tools/service-discovery/client-examples/nodejs-example.js');
+const serviceDiscovery = new FuzeInfraServiceDiscovery();
+
+// Dynamic service discovery
+const fuzeagentUrl = await serviceDiscovery.getServiceUrl('fuzeagent');
+const response = await fetch(`${fuzeagentUrl}/api/process`, { ... });
+```
+
+```python
+# Python example - FastAPI service discovery
+from consul_helper import ConsulHelper
+service_discovery = ConsulHelper()
+
+# Discover service dynamically
+fuzeagent_url = service_discovery.get_service_url('fuzeagent')
+response = requests.post(f"{fuzeagent_url}/api/process", json=data)
+```
+
+**Benefits:**
+- ✅ No hardcoded service URLs
+- 🏥 Automatic health checking
+- ⚖️ Load balancing across instances
+- 🌍 Works in Docker, local dev, and production
+
+See [tools/service-discovery/README.md](tools/service-discovery/README.md) for complete integration guide.
+
 See [docs/PROJECT_TEMPLATES.md](docs/PROJECT_TEMPLATES.md) and [docs/PROJECT_INTEGRATION_GUIDE.md](docs/PROJECT_INTEGRATION_GUIDE.md) for detailed instructions.
 
 ## 🛠️ Management Tools
@@ -164,6 +215,11 @@ See [docs/PROJECT_TEMPLATES.md](docs/PROJECT_TEMPLATES.md) and [docs/PROJECT_INT
 ### Version Management
 - `scripts-tools/version_manager.py` - Semantic versioning
 - `scripts-tools/ci_cd_manager.py` - CI/CD utilities
+
+### Service Discovery Management
+- `tools/service-discovery/service-discovery.py` - Service registration and discovery
+- `tools/service-discovery/consul-helper.py` - Consul wrapper for programmatic access
+- Client libraries: `tools/service-discovery/client-examples/` - Node.js and Python integration
 
 ### DNS and Network Management
 - `tools/dns-manager/dns-manager.py` - Local DNS management

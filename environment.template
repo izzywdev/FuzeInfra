@@ -181,6 +181,14 @@ WEBHOOK_REGISTRY_KEY=your_webhook_registry_encryption_key_here
 # DNS & NETWORK SERVICES
 # =============================================================================
 
+# Consul Service Discovery Configuration
+CONSUL_HOST=localhost
+CONSUL_PORT=8500
+CONSUL_DNS_PORT=8600
+CONSUL_DATACENTER=fuzeinfra
+CONSUL_NODE_NAME=fuzeinfra-consul
+CONSUL_LOG_LEVEL=INFO
+
 # dnsmasq DNS Server Configuration
 DNSMASQ_ADMIN_PASSWORD=dnsmasq_secure_password
 

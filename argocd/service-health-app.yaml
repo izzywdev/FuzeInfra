@@ -1,0 +1,132 @@
+# ArgoCD Application for monitoring FuzeInfra service health
+# This creates a health dashboard application in ArgoCD
+
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: fuzeinfra-service-health
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: fuzeinfra
+  
+  source:
+    repoURL: 'https://github.com/izzywdev/FuzeInfra'
+    path: argocd/health-monitoring
+    targetRevision: main
+    
+  destination:
+    server: 'https://kubernetes.default.svc'
+    namespace: fuzeinfra-health
+    
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - PrunePropagationPolicy=foreground
+      - PruneLast=true
+      
+  # Health check configuration
+  ignoreDifferences:
+  - group: apps
+    kind: Deployment
+    jsonPointers:
+    - /spec/replicas
+    
+  info:
+  - name: Description
+    value: 'FuzeInfra Docker Services Health Monitoring Dashboard'
+  - name: Services Monitored
+    value: 'PostgreSQL, MongoDB, Redis, ChromaDB, Prometheus, Grafana, Airflow, Kafka, RabbitMQ, Elasticsearch, Neo4j'
+  - name: Access URL
+    value: 'https://argocd.infra.fuzefront.com'
+
+---
+# Resource Health Status for Docker Services (Custom Resource)
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: fuzeinfra-service-health-config
+  namespace: argocd
+data:
+  services.yaml: |
+    services:
+      databases:
+        - name: PostgreSQL
+          type: database
+          endpoint: fuzeinfra-postgres:5432
+          healthcheck: "pg_isready -h fuzeinfra-postgres -p 5432"
+          critical: true
+          
+        - name: MongoDB  
+          type: database
+          endpoint: fuzeinfra-mongodb:27017
+          healthcheck: "mongosh --host fuzeinfra-mongodb:27017 --eval 'db.adminCommand(\"ping\")'"
+          critical: true
+          
+        - name: Redis
+          type: cache
+          endpoint: fuzeinfra-redis:6379
+          healthcheck: "redis-cli -h fuzeinfra-redis ping"
+          critical: true
+          
+        - name: ChromaDB
+          type: vector-db
+          endpoint: fuzeinfra-chromadb:8000
+          healthcheck: "curl -f http://fuzeinfra-chromadb:8000/api/v1/heartbeat"
+          critical: false
+          
+      monitoring:
+        - name: Prometheus
+          type: monitoring
+          endpoint: fuzeinfra-prometheus:9090
+          healthcheck: "curl -f http://fuzeinfra-prometheus:9090/-/healthy"
+          critical: true
+          
+        - name: Grafana
+          type: visualization
+          endpoint: fuzeinfra-grafana:3000
+          healthcheck: "curl -f http://fuzeinfra-grafana:3000/api/health"
+          critical: false
+          
+        - name: Alertmanager
+          type: alerting
+          endpoint: fuzeinfra-alertmanager:9093
+          healthcheck: "curl -f http://fuzeinfra-alertmanager:9093/-/healthy"
+          critical: true
+          
+      workflow:
+        - name: Airflow Webserver
+          type: workflow
+          endpoint: fuzeinfra-airflow-webserver:8080
+          healthcheck: "curl -f http://fuzeinfra-airflow-webserver:8080/health"
+          critical: true
+          
+        - name: Airflow Scheduler
+          type: workflow
+          endpoint: fuzeinfra-airflow-scheduler
+          healthcheck: "docker ps --filter name=fuzeinfra-airflow-scheduler --filter status=running"
+          critical: true
+          
+      messaging:
+        - name: Kafka
+          type: streaming
+          endpoint: fuzeinfra-kafka:9092
+          healthcheck: "kafka-broker-api-versions --bootstrap-server fuzeinfra-kafka:9092"
+          critical: false
+          
+        - name: RabbitMQ
+          type: messaging
+          endpoint: fuzeinfra-rabbitmq:5672
+          healthcheck: "rabbitmq-diagnostics ping -h fuzeinfra-rabbitmq"
+          critical: false
+          
+      search:
+        - name: Elasticsearch
+          type: search
+          endpoint: fuzeinfra-elasticsearch:9200
+          healthcheck: "curl -f http://fuzeinfra-elasticsearch:9200/_cluster/health"
+          critical: false

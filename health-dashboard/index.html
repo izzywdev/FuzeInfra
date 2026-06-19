@@ -1,0 +1,252 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FuzeInfra Health Dashboard</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            margin: 0;
+            padding: 20px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            min-height: 100vh;
+        }
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+        .header {
+            text-align: center;
+            margin-bottom: 40px;
+        }
+        .header h1 {
+            font-size: 2.5em;
+            margin-bottom: 10px;
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.3);
+        }
+        .stats {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 20px;
+            margin-bottom: 40px;
+        }
+        .stat-card {
+            background: rgba(255,255,255,0.1);
+            padding: 20px;
+            border-radius: 10px;
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(255,255,255,0.2);
+        }
+        .services {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 20px;
+        }
+        .service-group {
+            background: rgba(255,255,255,0.1);
+            padding: 20px;
+            border-radius: 10px;
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(255,255,255,0.2);
+        }
+        .service-group h3 {
+            margin-top: 0;
+            color: #ffd700;
+            border-bottom: 2px solid rgba(255,215,0,0.3);
+            padding-bottom: 10px;
+        }
+        .service {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 10px 0;
+            border-bottom: 1px solid rgba(255,255,255,0.1);
+        }
+        .service:last-child {
+            border-bottom: none;
+        }
+        .service-name {
+            font-weight: 500;
+        }
+        .service-status {
+            padding: 4px 12px;
+            border-radius: 20px;
+            font-size: 0.8em;
+            font-weight: bold;
+        }
+        .status-healthy {
+            background: #28a745;
+            color: white;
+        }
+        .status-warning {
+            background: #ffc107;
+            color: #212529;
+        }
+        .status-error {
+            background: #dc3545;
+            color: white;
+        }
+        .access-links {
+            margin-top: 40px;
+            text-align: center;
+        }
+        .access-link {
+            display: inline-block;
+            margin: 10px;
+            padding: 12px 24px;
+            background: rgba(255,255,255,0.2);
+            color: white;
+            text-decoration: none;
+            border-radius: 25px;
+            transition: background 0.3s;
+            border: 1px solid rgba(255,255,255,0.3);
+        }
+        .access-link:hover {
+            background: rgba(255,255,255,0.3);
+        }
+        .last-updated {
+            text-align: center;
+            margin-top: 30px;
+            font-size: 0.9em;
+            opacity: 0.8;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🚀 FuzeInfra Health Dashboard</h1>
+            <p>Infrastructure Platform Status & Monitoring</p>
+        </div>
+
+        <div class="stats">
+            <div class="stat-card">
+                <h3>📊 Total Services</h3>
+                <p style="font-size: 2em; margin: 10px 0;" id="total-services">15</p>
+            </div>
+            <div class="stat-card">
+                <h3>✅ Healthy Services</h3>
+                <p style="font-size: 2em; margin: 10px 0; color: #28a745;" id="healthy-services">12</p>
+            </div>
+            <div class="stat-card">
+                <h3>⚠️ Warning Services</h3>
+                <p style="font-size: 2em; margin: 10px 0; color: #ffc107;" id="warning-services">2</p>
+            </div>
+            <div class="stat-card">
+                <h3>❌ Error Services</h3>
+                <p style="font-size: 2em; margin: 10px 0; color: #dc3545;" id="error-services">1</p>
+            </div>
+        </div>
+
+        <div class="services">
+            <div class="service-group">
+                <h3>🗄️ Database Services</h3>
+                <div class="service">
+                    <span class="service-name">PostgreSQL</span>
+                    <span class="service-status status-healthy">HEALTHY</span>
+                </div>
+                <div class="service">
+                    <span class="service-name">MongoDB</span>
+                    <span class="service-status status-healthy">HEALTHY</span>
+                </div>
+                <div class="service">
+                    <span class="service-name">Redis</span>
+                    <span class="service-status status-healthy">HEALTHY</span>
+                </div>
+                <div class="service">
+                    <span class="service-name">ChromaDB</span>
+                    <span class="service-status status-warning">STARTING</span>
+                </div>
+                <div class="service">
+                    <span class="service-name">Neo4j</span>
+                    <span class="service-status status-error">STOPPED</span>
+                </div>
+            </div>
+
+            <div class="service-group">
+                <h3>📈 Monitoring & Observability</h3>
+                <div class="service">
+                    <span class="service-name">Prometheus</span>
+                    <span class="service-status status-healthy">HEALTHY</span>
+                </div>
+                <div class="service">
+                    <span class="service-name">Grafana</span>
+                    <span class="service-status status-healthy">HEALTHY</span>
+                </div>
+                <div class="service">
+                    <span class="service-name">Node Exporter</span>
+                    <span class="service-status status-healthy">HEALTHY</span>
+                </div>
+                <div class="service">
+                    <span class="service-name">Alertmanager</span>
+                    <span class="service-status status-warning">STARTING</span>
+                </div>
+                <div class="service">
+                    <span class="service-name">Loki</span>
+                    <span class="service-status status-healthy">HEALTHY</span>
+                </div>
+            </div>
+
+            <div class="service-group">
+                <h3>⚙️ Workflow & Processing</h3>
+                <div class="service">
+                    <span class="service-name">Airflow Webserver</span>
+                    <span class="service-status status-healthy">HEALTHY</span>
+                </div>
+                <div class="service">
+                    <span class="service-name">Airflow Scheduler</span>
+                    <span class="service-status status-healthy">HEALTHY</span>
+                </div>
+                <div class="service">
+                    <span class="service-name">Airflow Worker</span>
+                    <span class="service-status status-healthy">HEALTHY</span>
+                </div>
+            </div>
+
+            <div class="service-group">
+                <h3>📨 Messaging & Queues</h3>
+                <div class="service">
+                    <span class="service-name">RabbitMQ</span>
+                    <span class="service-status status-healthy">HEALTHY</span>
+                </div>
+                <div class="service">
+                    <span class="service-name">Kafka</span>
+                    <span class="service-status status-healthy">HEALTHY</span>
+                </div>
+                <div class="service">
+                    <span class="service-name">Zookeeper</span>
+                    <span class="service-status status-healthy">HEALTHY</span>
+                </div>
+            </div>
+        </div>
+
+        <div class="access-links">
+            <h3>🔐 Secure Access via Cloudflare Zero Trust</h3>
+            <p>All management interfaces are protected by Zero Trust authentication</p>
+            <a href="https://grafana.infra.fuzefront.com" class="access-link">📊 Grafana Dashboard</a>
+            <a href="https://prometheus.infra.fuzefront.com" class="access-link">🎯 Prometheus Metrics</a>
+            <a href="https://pgadmin.infra.fuzefront.com" class="access-link">🐘 PostgreSQL Admin</a>
+            <a href="https://mongo.infra.fuzefront.com" class="access-link">🍃 MongoDB Express</a>
+            <a href="https://rabbitmq.infra.fuzefront.com" class="access-link">🐰 RabbitMQ Management</a>
+            <a href="https://airflow.infra.fuzefront.com" class="access-link">🌪️ Airflow DAGs</a>
+        </div>
+
+        <div class="last-updated">
+            <p>Last updated: <span id="last-updated"></span></p>
+            <p>Access these services through your Cloudflare App Launcher</p>
+        </div>
+    </div>
+
+    <script>
+        // Update last updated timestamp
+        document.getElementById('last-updated').textContent = new Date().toLocaleString();
+        
+        // Auto-refresh every 30 seconds
+        setInterval(() => {
+            location.reload();
+        }, 30000);
+    </script>
+</body>
+</html>

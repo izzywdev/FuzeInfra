@@ -1,0 +1,80 @@
+# ArgoCD Applications for FuzeInfra Service Health Monitoring
+# These applications monitor the health of Docker services
+
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: fuzeinfra-health-dashboard
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: 'https://github.com/izzywdev/FuzeInfra'
+    path: monitoring/health-dashboard
+    targetRevision: main
+  destination:
+    server: 'https://kubernetes.default.svc'
+    namespace: default
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+
+---
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: fuzeinfra
+  namespace: argocd
+spec:
+  description: FuzeInfra Infrastructure Monitoring Project
+  
+  # Source repositories
+  sourceRepos:
+  - 'https://github.com/izzywdev/FuzeInfra'
+  - 'https://charts.bitnami.com/bitnami'
+  - 'https://prometheus-community.github.io/helm-charts'
+  
+  # Destinations
+  destinations:
+  - namespace: '*'
+    server: 'https://kubernetes.default.svc'
+  
+  # Allowed cluster resources
+  clusterResourceWhitelist:
+  - group: ''
+    kind: Namespace
+  - group: ''
+    kind: PersistentVolume
+  - group: 'rbac.authorization.k8s.io'
+    kind: ClusterRole
+  - group: 'rbac.authorization.k8s.io'
+    kind: ClusterRoleBinding
+  
+  # Namespace resources
+  namespaceResourceWhitelist:
+  - group: ''
+    kind: '*'
+  - group: 'apps'
+    kind: '*'
+  - group: 'extensions'
+    kind: '*'
+    
+  roles:
+  - name: admin
+    description: Admin role for FuzeInfra project
+    policies:
+    - p, proj:fuzeinfra:admin, applications, *, fuzeinfra/*, allow
+    - p, proj:fuzeinfra:admin, repositories, *, *, allow
+    groups:
+    - admin
+    
+  - name: developer
+    description: Developer role for FuzeInfra project  
+    policies:
+    - p, proj:fuzeinfra:developer, applications, get, fuzeinfra/*, allow
+    - p, proj:fuzeinfra:developer, applications, sync, fuzeinfra/*, allow
+    groups:
+    - developer
