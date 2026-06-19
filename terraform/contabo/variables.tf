@@ -102,23 +102,64 @@ variable "github_repo" {
 }
 
 # ---------------------------------------------------------------------------
-# Cloudflare Tunnel (optional — set after running terraform/cloudflare)
+# Cloudflare Zero Trust (optional — leave api_token empty to skip)
+#
+# When cloudflare_api_token is set, a single `terraform apply` in this
+# directory creates the Named Tunnel, DNS records, and Access policies
+# AND injects the computed token into the cluster — no manual steps.
+#
+# Obtain a Cloudflare API token with these permissions:
+#   Zone > DNS > Edit
+#   Account > Cloudflare Tunnel > Edit
+#   Account > Access: Apps and Policies > Edit
+# Create at: https://dash.cloudflare.com/profile/api-tokens
 # ---------------------------------------------------------------------------
-variable "cloudflare_tunnel_token" {
-  description = <<-EOT
-    Token for cloudflared (output of terraform/cloudflare).
-    If set, provisioning stores it in the fuzeinfra-secrets k8s Secret so that
-    the cloudflared pod can connect to the Named Tunnel immediately.
-    Leave empty to skip; populate later via scripts/setup-cloudflare-tunnel.sh.
-  EOT
-  type      = string
-  default   = ""
-  sensitive = true
-}
-
-variable "cloudflare_acme_email" {
-  description = "Email for future cert-manager / Let's Encrypt integration (informational only)"
+variable "cloudflare_api_token" {
+  description = "Cloudflare API token. Leave empty to skip all Cloudflare resources."
   type        = string
   default     = ""
+  sensitive   = true
+}
+
+variable "cloudflare_account_id" {
+  description = "Cloudflare account ID (from https://dash.cloudflare.com → account settings)"
+  type        = string
+  default     = ""
+}
+
+variable "cloudflare_zone_id" {
+  description = "Cloudflare Zone ID for the domain (from the zone overview page)"
+  type        = string
+  default     = ""
+}
+
+variable "tunnel_name" {
+  description = "Name of the Named Tunnel in Cloudflare Zero Trust dashboard"
+  type        = string
+  default     = "fuzeinfra-prod"
+}
+
+variable "prod_subdomain" {
+  description = "Subdomain under zone_name that points to this cluster (e.g. 'prod' → prod.fuzefront.com)"
+  type        = string
+  default     = "prod"
+}
+
+variable "zone_name" {
+  description = "Root DNS zone managed in Cloudflare (e.g. fuzefront.com)"
+  type        = string
+  default     = "fuzefront.com"
+}
+
+variable "allowed_admin_emails" {
+  description = "Email addresses allowed through Cloudflare Access (receives email OTP)"
+  type        = list(string)
+  default     = ["izzy.weinberg@gmail.com"]
+}
+
+variable "access_session_duration" {
+  description = "How long a Cloudflare Access session lasts before re-auth is required"
+  type        = string
+  default     = "24h"
 }
 

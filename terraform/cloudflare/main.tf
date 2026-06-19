@@ -1,3 +1,13 @@
+# ---------------------------------------------------------------------------
+# Standalone Cloudflare module
+#
+# For CONTABO DEPLOYMENTS: use terraform/contabo/ instead.
+# That module bundles these Cloudflare resources so a single `terraform apply`
+# provisions the VPS, k3s, ArgoCD, tunnel, DNS, Access, and token injection.
+#
+# Use this standalone module only when managing Cloudflare resources
+# independently of a Contabo server (e.g. for a different cluster).
+# ---------------------------------------------------------------------------
 terraform {
   required_version = ">= 1.6"
 

@@ -1,5 +1,11 @@
 # Copy to terraform.tfvars and fill in real values.
 # NEVER commit terraform.tfvars — it contains secrets.
+#
+# A single `terraform apply` in this directory provisions:
+#   1. Contabo VPS + k3s + ArgoCD
+#   2. Cloudflare Named Tunnel + DNS records + Zero Trust Access  (if api_token set)
+#   3. GitHub KUBE_CONFIG secret for CI/CD  (if github_token set)
+#   4. Tunnel token injected into the cluster secret automatically
 
 # -----------------------------------------------------------------------
 # Contabo API credentials
@@ -21,19 +27,19 @@ contabo_api_password  = ""   # your Contabo account password
 image_id              = ""   # e.g. Ubuntu 24.04 LTS image UUID
 product_id            = ""   # e.g. VPS S (4 vCPU / 8 GB) product UUID
 instance_display_name = "fuzeinfra-prod"
-ssh_key_name          = "fuzeinfra-key"   # must be registered in Contabo: Settings → SSH Keys
 
 # -----------------------------------------------------------------------
 # SSH access
-# Must match the key registered in Contabo above
+# ssh_public_key: contents of ~/.ssh/id_ed25519.pub (multi-line is fine)
 # -----------------------------------------------------------------------
+ssh_public_key       = "ssh-ed25519 AAAA..."
 ssh_private_key_path = "~/.ssh/id_ed25519"
 server_user          = "root"
 
 # -----------------------------------------------------------------------
-# Domain (optional)
-# Leave blank to use <server-ip>.nip.io (free wildcard DNS, no setup needed)
-# Set to your real domain if you have *.infra.yourdomain.com pointed at the server
+# Domain (optional — leave blank to skip Traefik Ingress hostnames)
+# When cloudflare_api_token is set, prod.fuzefront.com is auto-created.
+# This var is for additional custom domain Ingress rules (rarely needed).
 # -----------------------------------------------------------------------
 domain = ""
 
@@ -47,10 +53,30 @@ github_owner = "izzywdev"
 github_repo  = "FuzeInfra"
 
 # -----------------------------------------------------------------------
-# Cloudflare tunnel token (optional — set after running terraform/cloudflare)
-# Get from: cd terraform/cloudflare && terraform output -raw tunnel_token
+# Cloudflare Zero Trust (leave cloudflare_api_token empty to skip all of this)
+#
+# When set, terraform apply will automatically:
+#   - Create a Named Tunnel ("fuzeinfra-prod") in your Cloudflare account
+#   - Add DNS records: prod.fuzefront.com + *.prod.fuzefront.com
+#   - Create Access app protecting *.prod.fuzefront.com with email OTP
+#   - Inject the tunnel token into the k3s cluster — no manual step
+#
+# Required token permissions:
+#   Zone > DNS > Edit
+#   Account > Cloudflare Tunnel > Edit
+#   Account > Access: Apps and Policies > Edit
+# Create at: https://dash.cloudflare.com/profile/api-tokens
 # -----------------------------------------------------------------------
-cloudflare_tunnel_token = ""   # paste output of `terraform output -raw tunnel_token`
+cloudflare_api_token  = ""   # leave empty to skip
+cloudflare_account_id = ""   # from https://dash.cloudflare.com → account settings URL
+cloudflare_zone_id    = ""   # from zone overview page in Cloudflare dashboard
+
+# Defaults below are correct for fuzefront.com — adjust only if different:
+# tunnel_name           = "fuzeinfra-prod"
+# prod_subdomain        = "prod"        # → prod.fuzefront.com
+# zone_name             = "fuzefront.com"
+# allowed_admin_emails  = ["izzy.weinberg@gmail.com"]
+# access_session_duration = "24h"
 
 # -----------------------------------------------------------------------
 # To import the existing Contabo server (do this BEFORE terraform apply):

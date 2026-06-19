@@ -6,6 +6,14 @@ terraform {
       source  = "contabo/contabo"
       version = "~> 0.1"
     }
+    cloudflare = {
+      source  = "cloudflare/cloudflare"
+      version = "~> 4.0"
+    }
+    random = {
+      source  = "hashicorp/random"
+      version = "~> 3.0"
+    }
     null = {
       source  = "hashicorp/null"
       version = "~> 3.0"
@@ -31,6 +39,13 @@ provider "contabo" {
   oauth2_pass          = var.contabo_api_password
 }
 
+# Cloudflare provider is active only when cloudflare_api_token is set.
+# All cloudflare_* resources in cloudflare.tf are gated on local.cloudflare_enabled.
+provider "cloudflare" {
+  api_token = var.cloudflare_api_token
+}
+
 provider "null" {}
 provider "local" {}
+provider "random" {}
 

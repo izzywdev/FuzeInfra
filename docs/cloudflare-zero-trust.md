@@ -54,74 +54,81 @@ email One-Time PIN before forwarding the request to the tunnel.
 
 ## First-time setup (new deployment)
 
-### Step 1 — Create Cloudflare resources
+Cloudflare resources are bundled into the Contabo Terraform module.
+**One `terraform apply` provisions everything** — VPS, k3s, ArgoCD,
+Cloudflare tunnel, DNS, Access, and token injection:
 
 ```bash
-cd terraform/cloudflare
+cd terraform/contabo
 cp terraform.tfvars.example terraform.tfvars
-# Fill in: cloudflare_api_token, cloudflare_account_id, cloudflare_zone_id
+
+# Fill in Contabo credentials + SSH key + GitHub token, then add:
+#   cloudflare_api_token  = "<your CF API token>"
+#   cloudflare_account_id = "<your CF account ID>"
+#   cloudflare_zone_id    = "<fuzefront.com zone ID>"
 vim terraform.tfvars
 
 terraform init
 terraform apply
 ```
 
-This creates:
-- Named Tunnel `fuzeinfra-prod`
-- DNS CNAME records: `prod.fuzefront.com` and `*.prod.fuzefront.com`
-- Cloudflare Access app protecting `*.prod.fuzefront.com` (email OTP)
-- Outputs the `tunnel_token` needed by cloudflared
+Terraform will (in dependency order):
+1. Create the Contabo VPS
+2. Install k3s + ArgoCD via SSH
+3. Create the Cloudflare Named Tunnel, DNS records, and Access policy
+4. Extract the kubeconfig locally
+5. Wait for `fuzeinfra-secrets` to appear (ArgoCD syncs it)
+6. Patch the tunnel token into the cluster secret
+7. cloudflared restarts and connects — the tunnel is live
 
-### Step 2 — Provision the cluster with the tunnel token
+```
+terraform output argocd_url_public
+# → https://argocd.prod.fuzefront.com
+```
+
+---
+
+## Existing deployment (apply Cloudflare to a running cluster)
+
+The contabo Terraform state already exists and the VPS is up.
+Add the Cloudflare variables to your `terraform.tfvars` and re-apply:
 
 ```bash
-cd ../contabo
+cd terraform/contabo
 # Add to terraform.tfvars:
-#   cloudflare_tunnel_token = "<paste tunnel_token from step 1>"
-#
-# Get it with:
-#   terraform -chdir=../cloudflare output -raw tunnel_token
-echo "cloudflare_tunnel_token = \"$(terraform -chdir=../cloudflare output -raw tunnel_token)\"" \
-  >> terraform.tfvars
+#   cloudflare_api_token  = "..."
+#   cloudflare_account_id = "..."
+#   cloudflare_zone_id    = "..."
 
 terraform apply
 ```
 
-Provisioning will:
-- Install k3s, ArgoCD
-- Deploy the Helm chart (with `cloudflareTunnel.enabled: true`)
-- Store the tunnel token in `fuzeinfra-secrets`
-- Apply the ArgoCD Ingress for `argocd.prod.fuzefront.com`
+Terraform will create only the new Cloudflare resources (the VPS and
+k3s steps are idempotent — they no-op because triggers haven't changed).
+The token is automatically injected into the running cluster.
+
+ArgoCD auto-syncs and starts the cloudflared Deployment.
 
 ---
 
-## Existing deployment (token injection only)
+## Standalone Cloudflare module
 
-If k3s is already running (as it is today):
+`terraform/cloudflare/` is a standalone Terraform module for creating
+Cloudflare resources without the full Contabo provisioning. Use it if
+you need to point an existing cluster (non-Contabo) at a new tunnel, or
+to manage Cloudflare resources independently.
 
 ```bash
-# 1. Apply Cloudflare resources
 cd terraform/cloudflare
+cp terraform.tfvars.example terraform.tfvars
 terraform init && terraform apply
-
-# 2. Inject token into the running cluster
-cd ../../
-KUBECONFIG=terraform/contabo/k3s-kubeconfig.yaml \
-  TOKEN=$(cd terraform/cloudflare && terraform output -raw tunnel_token) \
+# then inject the token manually:
+TOKEN=$(terraform output -raw tunnel_token)
+KUBECONFIG=../contabo/k3s-kubeconfig.yaml \
   scripts/setup-cloudflare-tunnel.sh "$TOKEN"
-
-# 3. Apply ArgoCD ingress for the new hostname
-export KUBECONFIG=terraform/contabo/k3s-kubeconfig.yaml
-kubectl apply -f argocd/argocd-ingress-prod.yaml
-
-# 4. Update ArgoCD external URL
-kubectl -n argocd patch configmap argocd-cm --type merge \
-  -p '{"data":{"url":"https://argocd.prod.fuzefront.com"}}'
-kubectl -n argocd rollout restart deployment/argocd-server
 ```
 
-ArgoCD auto-syncs and starts the cloudflared Deployment (it was previously
-disabled with `cloudflareTunnel.enabled: false` in values-contabo.yaml).
+For Contabo deployments, prefer the bundled approach above.
 
 ---
 

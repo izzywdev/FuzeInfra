@@ -22,3 +22,18 @@ output "kubeconfig_path" {
   description = "Local path to the extracted kubeconfig"
   value       = "${path.root}/k3s-kubeconfig.yaml"
 }
+
+output "cloudflare_tunnel_id" {
+  description = "Cloudflare Named Tunnel ID (empty when cloudflare_api_token not set)"
+  value       = local.cloudflare_enabled ? cloudflare_tunnel.fuzeinfra[0].id : ""
+}
+
+output "prod_domain" {
+  description = "Public domain pointing to this cluster via Cloudflare tunnel"
+  value       = local.cloudflare_enabled ? local.prod_domain : ""
+}
+
+output "argocd_url_public" {
+  description = "ArgoCD public URL (available after Cloudflare tunnel is wired)"
+  value       = local.cloudflare_enabled ? "https://argocd.${local.prod_domain}" : "https://${local.server_ip}:8080 (via port-forward)"
+}

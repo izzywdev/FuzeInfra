@@ -96,39 +96,6 @@ resource "null_resource" "provision" {
 }
 
 # ---------------------------------------------------------------------------
-# Push Cloudflare tunnel token into the cluster secret (if provided).
-# The cloudflared Deployment reads CLOUDFLARE_TUNNEL_TOKEN from fuzeinfra-secrets.
-# Run terraform/cloudflare first, then set cloudflare_tunnel_token in tfvars.
-# ---------------------------------------------------------------------------
-resource "null_resource" "cloudflare_tunnel_token" {
-  count      = var.cloudflare_tunnel_token != "" ? 1 : 0
-  depends_on = [null_resource.extract_kubeconfig]
-
-  triggers = {
-    # Re-run whenever the token changes.
-    token_hash = sha256(var.cloudflare_tunnel_token)
-  }
-
-  provisioner "local-exec" {
-    interpreter = ["bash", "-c"]
-    command     = <<-EOT
-      export KUBECONFIG="${path.root}/k3s-kubeconfig.yaml"
-      # Wait for the fuzeinfra namespace and secret to exist (ArgoCD syncs them).
-      for i in $(seq 1 30); do
-        kubectl get secret fuzeinfra-secrets -n fuzeinfra &>/dev/null && break
-        echo "Waiting for fuzeinfra-secrets ($i/30)..."
-        sleep 10
-      done
-      TOKEN_B64=$(printf '%s' '${var.cloudflare_tunnel_token}' | base64 -w0)
-      kubectl patch secret fuzeinfra-secrets -n fuzeinfra \
-        --type=merge \
-        -p "{\"data\":{\"CLOUDFLARE_TUNNEL_TOKEN\":\"$${TOKEN_B64}\"}}"
-      echo "Cloudflare tunnel token stored in fuzeinfra-secrets."
-    EOT
-  }
-}
-
-# ---------------------------------------------------------------------------
 # Extract kubeconfig from k3s, rewrite 127.0.0.1 → server IP, store locally
 # Used by the github secret resource below
 # ---------------------------------------------------------------------------
