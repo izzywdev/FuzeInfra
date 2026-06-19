@@ -3,7 +3,7 @@
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: dnsmasq-config
+  name: fuzeinfra-dnsmasq-config
   labels:
     {{- include "fuzeinfra.labels" . | nindent 4 }}
 data:
@@ -26,7 +26,7 @@ data:
 apiVersion: v1
 kind: Service
 metadata:
-  name: dnsmasq
+  name: fuzeinfra-dnsmasq
   labels:
     {{- include "fuzeinfra.labels" . | nindent 4 }}
     {{- include "fuzeinfra.selectorLabels" (dict "component" "dnsmasq") | nindent 4 }}
@@ -51,7 +51,7 @@ spec:
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: dnsmasq
+  name: fuzeinfra-dnsmasq
   labels:
     {{- include "fuzeinfra.labels" . | nindent 4 }}
 spec:
@@ -99,7 +99,7 @@ spec:
       volumes:
         - name: config
           configMap:
-            name: dnsmasq-config
+            name: fuzeinfra-dnsmasq-config
 {{- end }}
 
 {{- /* ===================== cloudflare-tunnel (optional) ===================== */ -}}
@@ -108,7 +108,7 @@ spec:
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: cloudflare-tunnel
+  name: fuzeinfra-cloudflare-tunnel
   labels:
     {{- include "fuzeinfra.labels" . | nindent 4 }}
 spec:

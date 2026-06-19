@@ -3,7 +3,7 @@
 apiVersion: v1
 kind: Service
 metadata:
-  name: kafka
+  name: fuzeinfra-kafka
   labels:
     {{- include "fuzeinfra.labels" . | nindent 4 }}
     {{- include "fuzeinfra.selectorLabels" (dict "component" "kafka") | nindent 4 }}
@@ -22,11 +22,11 @@ spec:
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
-  name: kafka
+  name: fuzeinfra-kafka
   labels:
     {{- include "fuzeinfra.labels" . | nindent 4 }}
 spec:
-  serviceName: kafka
+  serviceName: fuzeinfra-kafka
   replicas: 1
   selector:
     matchLabels:
@@ -47,12 +47,13 @@ spec:
               value: "1"
             - name: KAFKA_PROCESS_ROLES
               value: "broker,controller"
+            # Pod DNS: <pod>.<headless-svc>.<namespace>.svc.cluster.local
             - name: KAFKA_CONTROLLER_QUORUM_VOTERS
-              value: "1@kafka-0.kafka:9093"
+              value: "1@fuzeinfra-kafka-0.fuzeinfra-kafka:9093"
             - name: KAFKA_LISTENERS
               value: "PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093"
             - name: KAFKA_ADVERTISED_LISTENERS
-              value: "PLAINTEXT://kafka:9092"
+              value: "PLAINTEXT://fuzeinfra-kafka:9092"
             - name: KAFKA_LISTENER_SECURITY_PROTOCOL_MAP
               value: "CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT"
             - name: KAFKA_CONTROLLER_LISTENER_NAMES
@@ -106,7 +107,7 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: kafka-ui
+  name: fuzeinfra-kafka-ui
   labels:
     {{- include "fuzeinfra.labels" . | nindent 4 }}
     {{- include "fuzeinfra.selectorLabels" (dict "component" "kafka-ui") | nindent 4 }}
@@ -121,7 +122,7 @@ spec:
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: kafka-ui
+  name: fuzeinfra-kafka-ui
   labels:
     {{- include "fuzeinfra.labels" . | nindent 4 }}
 spec:
@@ -144,7 +145,7 @@ spec:
               value: "local"
             # KRaft mode: bootstrap servers only, no ZooKeeper.
             - name: KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS
-              value: "kafka:9092"
+              value: "fuzeinfra-kafka:9092"
             - name: DYNAMIC_CONFIG_ENABLED
               value: "true"
           ports:
@@ -165,7 +166,7 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: rabbitmq
+  name: fuzeinfra-rabbitmq
   labels:
     {{- include "fuzeinfra.labels" . | nindent 4 }}
     {{- include "fuzeinfra.selectorLabels" (dict "component" "rabbitmq") | nindent 4 }}
@@ -183,11 +184,11 @@ spec:
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
-  name: rabbitmq
+  name: fuzeinfra-rabbitmq
   labels:
     {{- include "fuzeinfra.labels" . | nindent 4 }}
 spec:
-  serviceName: rabbitmq
+  serviceName: fuzeinfra-rabbitmq
   replicas: 1
   selector:
     matchLabels:
@@ -247,7 +248,7 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: mongo-express
+  name: fuzeinfra-mongo-express
   labels:
     {{- include "fuzeinfra.labels" . | nindent 4 }}
     {{- include "fuzeinfra.selectorLabels" (dict "component" "mongo-express") | nindent 4 }}
@@ -262,7 +263,7 @@ spec:
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: mongo-express
+  name: fuzeinfra-mongo-express
   labels:
     {{- include "fuzeinfra.labels" . | nindent 4 }}
 spec:
@@ -292,7 +293,7 @@ spec:
                   name: {{ include "fuzeinfra.secretName" . }}
                   key: MONGODB_PASSWORD
             - name: ME_CONFIG_MONGODB_URL
-              value: "mongodb://$(ME_CONFIG_MONGODB_ADMINUSERNAME):$(ME_CONFIG_MONGODB_ADMINPASSWORD)@mongodb:27017/"
+              value: "mongodb://$(ME_CONFIG_MONGODB_ADMINUSERNAME):$(ME_CONFIG_MONGODB_ADMINPASSWORD)@fuzeinfra-mongodb:27017/"
             - name: ME_CONFIG_BASICAUTH_USERNAME
               value: "admin"
             - name: ME_CONFIG_BASICAUTH_PASSWORD

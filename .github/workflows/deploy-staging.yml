@@ -1,0 +1,97 @@
+name: Deploy FuzeInfra – Staging
+
+# Triggers on every push to the `staging` branch.
+# The `staging` branch is the stable deploy target for the local k8s cluster.
+# Merge main -> staging to kick off a staging rollout.
+on:
+  push:
+    branches: [staging]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Print the rendered manifests without applying (helm upgrade --dry-run)"
+        type: boolean
+        default: false
+
+jobs:
+  deploy:
+    name: Helm upgrade – staging
+    # -----------------------------------------------------------------------
+    # Preferred runner: a self-hosted pod inside the local cluster labelled
+    # `self-hosted` + `staging` (see k8s/runner/ for the manifest).
+    # That pod uses its in-cluster ServiceAccount kubeconfig automatically.
+    #
+    # Fallback: if no such runner is registered, set the repo secret
+    # KUBE_CONFIG_STAGING (base64-encoded kubeconfig) and re-run on any
+    # runner – the configure-kubeconfig step will pick it up.
+    #
+    # No-op behaviour: if neither in-cluster access nor the secret is
+    # available the deploy step is skipped and the job exits successfully
+    # with a warning notice.
+    # -----------------------------------------------------------------------
+    runs-on: [self-hosted, staging]
+
+    environment: staging
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: v3.16.4
+
+      # When running on the in-cluster runner pod there is already an
+      # ambient kubeconfig via the pod's ServiceAccount projection.
+      # When KUBE_CONFIG_STAGING is set (e.g. a remote runner), write it out.
+      - name: Configure kubeconfig
+        run: |
+          if [ -n "${KUBE_CONFIG_STAGING:-}" ]; then
+            mkdir -p ~/.kube
+            printf '%s' "$KUBE_CONFIG_STAGING" | base64 -d > ~/.kube/config
+            chmod 600 ~/.kube/config
+            echo "Kubeconfig written from KUBE_CONFIG_STAGING secret."
+          else
+            echo "KUBE_CONFIG_STAGING not set – relying on in-cluster / ambient config."
+          fi
+        env:
+          KUBE_CONFIG_STAGING: ${{ secrets.KUBE_CONFIG_STAGING }}
+
+      - name: Verify cluster access
+        id: check
+        run: |
+          if kubectl cluster-info --request-timeout=10s 2>/dev/null; then
+            echo "connected=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "connected=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::No cluster access (neither in-cluster ServiceAccount nor KUBE_CONFIG_STAGING resolved). Deploy skipped."
+          fi
+
+      - name: Helm lint
+        if: steps.check.outputs.connected == 'true'
+        run: |
+          helm lint helm/fuzeinfra -f helm/fuzeinfra/values-local.yaml
+
+      - name: Deploy FuzeInfra
+        if: steps.check.outputs.connected == 'true'
+        run: |
+          FLAGS=""
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            FLAGS="--dry-run"
+          fi
+          helm upgrade --install fuzeinfra helm/fuzeinfra \
+            --namespace fuzeinfra \
+            --create-namespace \
+            -f helm/fuzeinfra/values-local.yaml \
+            --atomic \
+            --timeout 10m \
+            $FLAGS
+
+      - name: Verify rollout
+        if: steps.check.outputs.connected == 'true' && inputs.dry_run != 'true'
+        run: |
+          echo "=== Pods ==="
+          kubectl -n fuzeinfra get pods
+          echo "=== Services ==="
+          kubectl -n fuzeinfra get svc

@@ -1,0 +1,191 @@
+# =============================================================================
+# Generic GitHub Actions self-hosted runner for the FuzeInfra staging cluster.
+#
+# This manifest is CONSUMER-AGNOSTIC: it deploys a runner that can execute
+# any workflow routed to labels [self-hosted, staging]. No knowledge of any
+# specific application or consumer is encoded here.
+#
+# Prerequisites:
+#   1. Create repo/org secret RUNNER_TOKEN containing a GitHub Actions runner
+#      registration token (Settings → Actions → Runners → New self-hosted runner
+#      → copy the token value).
+#   2. Set RUNNER_REPO_URL to the GitHub repo or org URL, e.g.:
+#        https://github.com/my-org  (org-level)
+#        https://github.com/my-org/my-repo  (repo-level)
+#
+# Apply:
+#   kubectl apply -f k8s/runner/runner.yaml
+#
+# The runner registers itself on startup and deregisters gracefully on shutdown.
+# =============================================================================
+
+# ---- Namespace ---------------------------------------------------------------
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: fuzeinfra-runners
+  labels:
+    app.kubernetes.io/part-of: fuzeinfra
+---
+# ---- Secret (placeholder – owner must patch with real values) ----------------
+# kubectl create secret generic fuzeinfra-runner-secret \
+#   --namespace fuzeinfra-runners \
+#   --from-literal=RUNNER_TOKEN=<registration-token> \
+#   --from-literal=RUNNER_REPO_URL=https://github.com/my-org
+#
+# OR apply this manifest and patch:
+#   kubectl -n fuzeinfra-runners patch secret fuzeinfra-runner-secret \
+#     -p '{"stringData":{"RUNNER_TOKEN":"<token>","RUNNER_REPO_URL":"<url>"}}'
+apiVersion: v1
+kind: Secret
+metadata:
+  name: fuzeinfra-runner-secret
+  namespace: fuzeinfra-runners
+  labels:
+    app.kubernetes.io/part-of: fuzeinfra
+type: Opaque
+stringData:
+  RUNNER_TOKEN: "REPLACE_ME"
+  RUNNER_REPO_URL: "REPLACE_ME"
+---
+# ---- ServiceAccount ----------------------------------------------------------
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: fuzeinfra-runner
+  namespace: fuzeinfra-runners
+  labels:
+    app.kubernetes.io/part-of: fuzeinfra
+---
+# ---- ClusterRole: deploy access for the fuzeinfra namespace ------------------
+# Grants the runner enough rights to run `helm upgrade` and `kubectl` against
+# the fuzeinfra namespace. Extend verbs/resources as needed for other namespaces.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: fuzeinfra-runner-deploy
+  labels:
+    app.kubernetes.io/part-of: fuzeinfra
+rules:
+  # Core workload types
+  - apiGroups: ["", "apps", "batch"]
+    resources:
+      - pods
+      - services
+      - endpoints
+      - configmaps
+      - secrets
+      - persistentvolumeclaims
+      - serviceaccounts
+      - deployments
+      - statefulsets
+      - daemonsets
+      - replicasets
+      - jobs
+      - cronjobs
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # Namespace management (create fuzeinfra if it doesn't exist)
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["get", "list", "create"]
+  # Networking
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["ingresses"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # RBAC (for Helm charts that create ServiceAccounts / Roles)
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["clusterroles", "clusterrolebindings", "roles", "rolebindings"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # Storage
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["storageclasses"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: fuzeinfra-runner-deploy
+  labels:
+    app.kubernetes.io/part-of: fuzeinfra
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: fuzeinfra-runner-deploy
+subjects:
+  - kind: ServiceAccount
+    name: fuzeinfra-runner
+    namespace: fuzeinfra-runners
+---
+# ---- Runner Deployment -------------------------------------------------------
+# Image: myoung34/github-runner is a well-maintained ephemeral runner image.
+# See https://github.com/myoung34/docker-github-actions-runner for options.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fuzeinfra-runner
+  namespace: fuzeinfra-runners
+  labels:
+    app.kubernetes.io/name: fuzeinfra-runner
+    app.kubernetes.io/part-of: fuzeinfra
+spec:
+  # Scale up for parallelism; each pod registers as a separate ephemeral runner.
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: fuzeinfra-runner
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: fuzeinfra-runner
+        app.kubernetes.io/part-of: fuzeinfra
+    spec:
+      serviceAccountName: fuzeinfra-runner
+      # Graceful shutdown: runner deregisters before pod is killed.
+      terminationGracePeriodSeconds: 60
+      containers:
+        - name: runner
+          # Pin to a specific tag in production to avoid unexpected upgrades.
+          image: myoung34/github-runner:latest
+          imagePullPolicy: Always
+          env:
+            - name: RUNNER_NAME_PREFIX
+              value: "fuzeinfra-staging"
+            # Labels used to route jobs: must include self-hosted + staging
+            - name: LABELS
+              value: "self-hosted,staging"
+            - name: EPHEMERAL
+              value: "true"
+            - name: RUNNER_WORKDIR
+              value: /tmp/runner
+            - name: ACCESS_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: fuzeinfra-runner-secret
+                  key: RUNNER_TOKEN
+            - name: REPO_URL
+              valueFrom:
+                secretKeyRef:
+                  name: fuzeinfra-runner-secret
+                  key: RUNNER_REPO_URL
+          # Mount the in-cluster ServiceAccount token so kubectl/helm work
+          # without an explicit kubeconfig inside workflow steps.
+          volumeMounts:
+            - name: work
+              mountPath: /tmp/runner
+          resources:
+            requests:
+              cpu: 200m
+              memory: 512Mi
+            limits:
+              cpu: "2"
+              memory: 2Gi
+          # Liveness: runner process must be alive
+          livenessProbe:
+            exec:
+              command: ["pgrep", "-f", "Runner.Listener"]
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            failureThreshold: 3
+      volumes:
+        - name: work
+          emptyDir: {}

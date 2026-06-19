@@ -16,11 +16,11 @@ referenced via $(VAR) interpolation to build the SQLAlchemy/Celery URLs.
 - name: AIRFLOW__CORE__EXECUTOR
   value: CeleryExecutor
 - name: AIRFLOW__DATABASE__SQL_ALCHEMY_CONN
-  value: "postgresql+psycopg2://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@postgres:5432/airflow"
+  value: "postgresql+psycopg2://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@fuzeinfra-postgres:5432/airflow"
 - name: AIRFLOW__CELERY__RESULT_BACKEND
-  value: "db+postgresql://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@postgres:5432/airflow"
+  value: "db+postgresql://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@fuzeinfra-postgres:5432/airflow"
 - name: AIRFLOW__CELERY__BROKER_URL
-  value: "redis://redis:6379/0"
+  value: "redis://fuzeinfra-redis:6379/0"
 - name: AIRFLOW__CORE__FERNET_KEY
   valueFrom:
     secretKeyRef:
@@ -40,7 +40,7 @@ referenced via $(VAR) interpolation to build the SQLAlchemy/Celery URLs.
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: airflow-dags
+  name: fuzeinfra-airflow-dags
   labels:
     {{- include "fuzeinfra.labels" . | nindent 4 }}
 data:
@@ -65,7 +65,7 @@ data:
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: airflow-init
+  name: fuzeinfra-airflow-init
   labels:
     {{- include "fuzeinfra.labels" . | nindent 4 }}
   annotations:
@@ -103,13 +103,13 @@ spec:
             - |
               set -e
               echo "Waiting for PostgreSQL..."
-              until PGPASSWORD="$POSTGRES_PASSWORD" psql -h postgres -U "$POSTGRES_USER" -d postgres -c '\q' 2>/dev/null; do
+              until PGPASSWORD="$POSTGRES_PASSWORD" psql -h fuzeinfra-postgres -U "$POSTGRES_USER" -d postgres -c '\q' 2>/dev/null; do
                 sleep 2
               done
               echo "Ensuring 'airflow' database exists..."
-              PGPASSWORD="$POSTGRES_PASSWORD" psql -h postgres -U "$POSTGRES_USER" -d postgres -tc \
+              PGPASSWORD="$POSTGRES_PASSWORD" psql -h fuzeinfra-postgres -U "$POSTGRES_USER" -d postgres -tc \
                 "SELECT 1 FROM pg_database WHERE datname = 'airflow'" | grep -q 1 || \
-                PGPASSWORD="$POSTGRES_PASSWORD" psql -h postgres -U "$POSTGRES_USER" -d postgres -c "CREATE DATABASE airflow"
+                PGPASSWORD="$POSTGRES_PASSWORD" psql -h fuzeinfra-postgres -U "$POSTGRES_USER" -d postgres -c "CREATE DATABASE airflow"
               echo "Running airflow db migrate..."
               airflow db migrate
               echo "Creating admin user (idempotent)..."
@@ -121,7 +121,7 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: airflow-webserver
+  name: fuzeinfra-airflow-webserver
   labels:
     {{- include "fuzeinfra.labels" . | nindent 4 }}
     {{- include "fuzeinfra.selectorLabels" (dict "component" "airflow-webserver") | nindent 4 }}
@@ -136,7 +136,7 @@ spec:
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: airflow-webserver
+  name: fuzeinfra-airflow-webserver
   labels:
     {{- include "fuzeinfra.labels" . | nindent 4 }}
 spec:
@@ -175,13 +175,13 @@ spec:
       volumes:
         - name: dags
           configMap:
-            name: airflow-dags
+            name: fuzeinfra-airflow-dags
 ---
 {{- /* ===================== Airflow Scheduler ===================== */}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: airflow-scheduler
+  name: fuzeinfra-airflow-scheduler
   labels:
     {{- include "fuzeinfra.labels" . | nindent 4 }}
 spec:
@@ -208,13 +208,13 @@ spec:
       volumes:
         - name: dags
           configMap:
-            name: airflow-dags
+            name: fuzeinfra-airflow-dags
 ---
 {{- /* ===================== Airflow Celery Worker ===================== */}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: airflow-worker
+  name: fuzeinfra-airflow-worker
   labels:
     {{- include "fuzeinfra.labels" . | nindent 4 }}
 spec:
@@ -241,13 +241,13 @@ spec:
       volumes:
         - name: dags
           configMap:
-            name: airflow-dags
+            name: fuzeinfra-airflow-dags
 ---
 {{- /* ===================== Airflow Flower (Celery monitoring) ===================== */}}
 apiVersion: v1
 kind: Service
 metadata:
-  name: airflow-flower
+  name: fuzeinfra-airflow-flower
   labels:
     {{- include "fuzeinfra.labels" . | nindent 4 }}
     {{- include "fuzeinfra.selectorLabels" (dict "component" "airflow-flower") | nindent 4 }}
@@ -262,7 +262,7 @@ spec:
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: airflow-flower
+  name: fuzeinfra-airflow-flower
   labels:
     {{- include "fuzeinfra.labels" . | nindent 4 }}
 spec:

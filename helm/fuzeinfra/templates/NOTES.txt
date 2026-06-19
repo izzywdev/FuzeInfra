@@ -19,9 +19,18 @@ Web UIs (via Ingress, class "{{ .Values.ingress.className }}"):
 For local (kind), ensure these hostnames resolve to 127.0.0.1, e.g. add to
 /etc/hosts or use the dnsmasq wildcard for *.{{ .Values.global.domain }}.
 
-In-cluster service DNS (use these from your apps):
-  postgres:5432  redis:6379  mongodb:27017  kafka:9092  rabbitmq:5672
-  elasticsearch:9200  neo4j:7687  chromadb:8000
+In-cluster service contract (stable DNS — use these from consumer workloads):
+  fuzeinfra-postgres.{{ .Release.Namespace }}.svc.cluster.local:5432
+  fuzeinfra-mongodb.{{ .Release.Namespace }}.svc.cluster.local:27017
+  fuzeinfra-redis.{{ .Release.Namespace }}.svc.cluster.local:6379
+  fuzeinfra-kafka.{{ .Release.Namespace }}.svc.cluster.local:9092
+  fuzeinfra-rabbitmq.{{ .Release.Namespace }}.svc.cluster.local:5672
+  fuzeinfra-elasticsearch.{{ .Release.Namespace }}.svc.cluster.local:9200
+  fuzeinfra-neo4j.{{ .Release.Namespace }}.svc.cluster.local:7687   (Bolt)
+  fuzeinfra-neo4j.{{ .Release.Namespace }}.svc.cluster.local:7474   (HTTP)
+  fuzeinfra-chromadb.{{ .Release.Namespace }}.svc.cluster.local:8000
+
+See CONTRACT.md in the repository root for the full consumer API reference.
 
 Check status:
   kubectl -n {{ .Release.Namespace }} get pods
