@@ -30,6 +30,13 @@ python scripts-tools/version_manager.py bump patch|minor|major  # Bump version
 python tools/dns-manager/dns-manager.py status          # Check DNS server status
 python tools/dns-manager/dns-manager.py add myproject   # Add project DNS entry
 
+# Service discovery and registration
+python tools/service-discovery/service-discovery.py status           # Check Consul status
+python tools/service-discovery/service-discovery.py list             # List all registered services
+python tools/service-discovery/service-discovery.py register myservice --port 3000 --health-check /health --tags api,backend
+python tools/service-discovery/service-discovery.py discover myservice # Discover service instances
+python tools/service-discovery/service-discovery.py health myservice   # Check service health
+
 # Tunnel and webhook management
 python tools/tunnel-manager/tunnel-manager.py status    # Check tunnel status
 python tools/tunnel-manager/webhook_sync.py monitor     # Start webhook monitoring
@@ -72,6 +79,13 @@ FuzeInfra provides a complete infrastructure stack via Docker Compose:
 **DNS & Network Services:**
 - dnsmasq (port 53) - Local DNS server with wildcard `*.dev.local` support
 - Web UI (port 8053) - DNS management interface
+- Consul (ports 8500/8600) - Service discovery and configuration management
+
+**Service Discovery:**
+- Consul HTTP API (port 8500) - Service registration and discovery with Web UI
+- Consul DNS (port 8600) - DNS interface for service discovery queries
+- Automatic service health checking and monitoring
+- Dynamic service registration and deregistration
 
 **Monitoring Stack:**
 - Prometheus (port 9090) - Metrics collection
@@ -369,7 +383,20 @@ python ../FuzeInfra/tools/tunnel-manager/tunnel-manager.py register myproject gi
 # - https://myproject.webhook.your-domain.com/github (tunnel endpoint)
 ```
 
-3. **Environment Configuration**:
+3. **Register Service for Discovery**:
+```bash
+# Register your service with Consul for inter-service communication
+python ../FuzeInfra/tools/service-discovery/service-discovery.py register myproject \
+  --port 3000 \
+  --health-check /health \
+  --tags api,web \
+  --meta version=1.0.0,environment=development
+
+# Verify registration
+python ../FuzeInfra/tools/service-discovery/service-discovery.py list
+```
+
+4. **Environment Configuration**:
 ```bash
 # Copy FuzeInfra environment template
 cp ../FuzeInfra/environment.template .env.fuzeinfra
@@ -434,6 +461,19 @@ const redisClient = redis.createClient({
 });
 
 const mongoClient = new MongoClient(process.env.MONGODB_URL);
+
+// Service discovery integration
+const FuzeInfraServiceDiscovery = require('../FuzeInfra/tools/service-discovery/client-examples/nodejs-example.js');
+const serviceDiscovery = new FuzeInfraServiceDiscovery();
+
+// Register this service on startup
+await serviceDiscovery.registerService('myproject', 3000, {
+  healthCheck: '/health',
+  tags: ['api', 'nodejs']
+});
+
+// Discover other services
+const fuzeagentUrl = await serviceDiscovery.getServiceUrl('fuzeagent');
 ```
 
 **Python/FastAPI**:
@@ -443,6 +483,7 @@ psycopg2-binary
 redis
 pymongo
 elasticsearch
+python-consul
 
 # Database connections
 import psycopg2
@@ -455,6 +496,24 @@ pg_conn = psycopg2.connect(os.getenv('DATABASE_URL'))
 redis_client = redis.from_url(os.getenv('REDIS_URL'))
 mongo_client = MongoClient(os.getenv('MONGODB_URL'))
 es_client = Elasticsearch([os.getenv('ELASTICSEARCH_URL')])
+
+# Service discovery integration
+import sys
+sys.path.append('../FuzeInfra/tools/service-discovery')
+from consul_helper import ConsulHelper
+
+service_discovery = ConsulHelper()
+
+# Register this service on startup
+service_discovery.register_service(
+    name='myproject',
+    port=8000,
+    health_check_path='/health',
+    tags=['api', 'python', 'fastapi']
+)
+
+# Discover other services
+fuzeagent_url = service_discovery.get_service_url('fuzeagent')
 ```
 
 **React/Frontend**:
@@ -487,12 +546,71 @@ curl -X POST https://myproject.webhook.your-domain.com/github \
   -d '{"action": "opened", "pull_request": {...}}'
 ```
 
+#### **Service-to-Service Communication**
+
+**fuzereach → fuzeagent Example** (Dynamic Service Discovery):
+
+```javascript
+// In fuzereach - No hardcoded URLs!
+const serviceDiscovery = new FuzeInfraServiceDiscovery();
+
+class FuzeReachService {
+    async callFuzeAgent(data) {
+        try {
+            // Discover fuzeagent dynamically
+            const fuzeagentUrl = await serviceDiscovery.getServiceUrl('fuzeagent');
+            
+            // Make API call to discovered service
+            const response = await fetch(`${fuzeagentUrl}/api/process`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(data)
+            });
+            
+            return await response.json();
+        } catch (error) {
+            console.error('fuzeagent unavailable:', error.message);
+            throw error;
+        }
+    }
+}
+```
+
+```python
+# In fuzeagent - Register for discovery
+from consul_helper import ConsulHelper
+
+@app.on_event("startup")
+async def startup():
+    service_discovery = ConsulHelper()
+    service_discovery.register_service(
+        name='fuzeagent',
+        port=3000,
+        health_check_path='/api/health',
+        tags=['api', 'agent']
+    )
+
+@app.post("/api/process")
+async def process_data(data: dict):
+    return {"processed": True, "result": data}
+```
+
+**Benefits:**
+- No hardcoded service URLs
+- Automatic health checking
+- Load balancing across multiple instances
+- Environment-agnostic (works in Docker, local, production)
+
 #### **Testing with FuzeInfra**
 
 ```bash
 # Integration tests with real services
 export TEST_DATABASE_URL=postgresql://fuzeinfra:password@localhost:5432/test_db
 export TEST_REDIS_URL=redis://localhost:6379/1
+
+# Test service discovery integration
+python ../FuzeInfra/tools/service-discovery/service-discovery.py list
+python ../FuzeInfra/tools/service-discovery/service-discovery.py health myservice
 
 # Run tests against FuzeInfra services
 npm test

@@ -1,0 +1,24 @@
+{
+  "name": "fuzeinfra-service-discovery-examples",
+  "version": "1.0.0",
+  "description": "Client examples for FuzeInfra Service Discovery using Consul",
+  "main": "nodejs-example.js",
+  "scripts": {
+    "example": "node nodejs-example.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "dependencies": {
+    "consul": "^0.40.0"
+  },
+  "devDependencies": {
+    "@types/node": "^18.0.0"
+  },
+  "keywords": [
+    "fuzeinfra",
+    "service-discovery",
+    "consul",
+    "microservices"
+  ],
+  "author": "FuzeInfra",
+  "license": "MIT"
+}

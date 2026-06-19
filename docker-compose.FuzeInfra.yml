@@ -31,6 +31,25 @@ services:
       timeout: 5s
       retries: 5
 
+  # pgAdmin - Web-based PostgreSQL administration
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    container_name: fuzeinfra-pgadmin
+    environment:
+      PGADMIN_DEFAULT_EMAIL: ${PGADMIN_DEFAULT_EMAIL:-admin@fuzeinfra.local}
+      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_DEFAULT_PASSWORD:-admin123}
+      PGADMIN_CONFIG_SERVER_MODE: 'False'
+      PGADMIN_CONFIG_MASTER_PASSWORD_REQUIRED: 'False'
+    ports:
+      - "${PGADMIN_PORT:-5050}:80"
+    volumes:
+      - pgadmin_data:/var/lib/pgadmin
+    depends_on:
+      - postgres
+    networks:
+      - FuzeInfra
+    restart: unless-stopped
+
   # MongoDB
   mongodb:
     image: mongo:7
@@ -241,6 +260,41 @@ services:
     environment:
       - HTTP_USER=admin
       - HTTP_PASS=${DNSMASQ_ADMIN_PASSWORD:-admin123}
+
+  # Consul - Service discovery and configuration management
+  consul:
+    image: hashicorp/consul:1.19
+    container_name: fuzeinfra-consul
+    command: >
+      consul agent
+      -dev
+      -ui
+      -client=0.0.0.0
+      -bind=0.0.0.0
+      -log-level=INFO
+      -datacenter=fuzeinfra
+      -node=fuzeinfra-consul
+    ports:
+      - "${CONSUL_HTTP_PORT:-8500}:8500"   # HTTP API and Web UI
+      - "${CONSUL_DNS_PORT:-8600}:8600/udp" # DNS interface
+    volumes:
+      - consul_data:/consul/data
+      - consul_config:/consul/config
+    networks:
+      - FuzeInfra
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "consul", "members"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    environment:
+      - CONSUL_BIND_INTERFACE=eth0
+      - CONSUL_CLIENT_INTERFACE=eth0
+    labels:
+      - "com.fuzeinfra.service=consul"
+      - "com.fuzeinfra.description=Service Discovery and Configuration Management"
 
   # Cloudflare Tunnel - Secure tunneling for webhooks and external access
   cloudflare-tunnel:
@@ -587,4 +641,14 @@ volumes:
   
   # Tunnel volumes
   cloudflare_tunnel_data:
-    name: fuzeinfra_cloudflare_tunnel_data 
+    name: fuzeinfra_cloudflare_tunnel_data
+
+  # pgAdmin volumes
+  pgadmin_data:
+    name: fuzeinfra_pgadmin_data
+
+  # Service discovery volumes
+  consul_data:
+    name: fuzeinfra_consul_data
+  consul_config:
+    name: fuzeinfra_consul_config

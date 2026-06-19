@@ -79,14 +79,8 @@ variable "sns_topic_arn" {
 }
 
 # Cloudflare DNS Configuration
-variable "cloudflare_email" {
-  description = "Cloudflare account email"
-  type        = string
-  sensitive   = true
-}
-
-variable "cloudflare_api_key" {
-  description = "Cloudflare API key"
+variable "cloudflare_api_token" {
+  description = "Cloudflare API token with Zone:Read, Zone:Edit, Zone Settings:Edit, Access:Edit permissions"
   type        = string
   sensitive   = true
 }
