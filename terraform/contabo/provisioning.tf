@@ -70,7 +70,10 @@ resource "null_resource" "provision" {
 
       # --- ArgoCD Ingress via Traefik (insecure mode: Traefik handles TLS) ---
       "kubectl -n argocd patch configmap argocd-cmd-params-cm --type merge -p '{\"data\":{\"server.insecure\":\"true\"}}'",
+      # Set external URL so ArgoCD sends correct CORS headers from the UI
+      "kubectl -n argocd patch configmap argocd-cm --type merge -p '{\"data\":{\"url\":\"http://argocd.${replace(local.server_ip, \".\", \"-\")}.nip.io\"}}'",
       "kubectl -n argocd rollout restart deployment/argocd-server",
+      "kubectl -n argocd rollout status deployment/argocd-server --timeout=60s",
       "kubectl apply -f - <<'EOF'\napiVersion: networking.k8s.io/v1\nkind: Ingress\nmetadata:\n  name: argocd\n  namespace: argocd\nspec:\n  ingressClassName: traefik\n  rules:\n    - host: argocd.${replace(local.server_ip, \".\", \"-\")}.nip.io\n      http:\n        paths:\n          - path: /\n            pathType: Prefix\n            backend:\n              service:\n                name: argocd-server\n                port:\n                  number: 80\nEOF",
 
       "echo 'Provisioning complete'",
