@@ -1,0 +1,33 @@
+# =============================================================================
+# Deployer RoleBinding — binds the shared runner's SA to the deployer Role.
+#
+# This RoleBinding lives in the CONSUMER's staging namespace and grants
+# the runner's ServiceAccount (arc-runners/arc-runner-sa) deploy access
+# scoped entirely to that namespace.
+#
+# The runner's cluster-level identity never changes; only namespaces where this
+# RoleBinding is applied become reachable.  This is the onboarding step.
+#
+# Usage:
+#   kubectl apply -f deployer-rolebinding.yaml -n <YOUR_NAMESPACE>
+#
+# Or with inline substitution:
+#   NAMESPACE=myapp-staging
+#   sed "s/YOUR_NAMESPACE/$NAMESPACE/" deployer-rolebinding.yaml | kubectl apply -f - -n $NAMESPACE
+# =============================================================================
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: arc-runner-deployer
+  # namespace is set by -n flag at apply time
+  labels:
+    app.kubernetes.io/component: deployer-rbac
+    app.kubernetes.io/part-of: arc-staging
+subjects:
+  - kind: ServiceAccount
+    name: arc-runner-sa
+    namespace: arc-runners   # the runner's home namespace — DO NOT change
+roleRef:
+  kind: Role
+  name: deployer
+  apiGroup: rbac.authorization.k8s.io

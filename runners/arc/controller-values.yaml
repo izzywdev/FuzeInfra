@@ -1,0 +1,28 @@
+# =============================================================================
+# ARC Controller Helm values
+# Chart: oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set-controller
+# Namespace: arc-systems
+#
+# The controller watches for RunnerScaleSets across the cluster and manages
+# ephemeral runner pods on behalf of GitHub Actions.
+# =============================================================================
+
+replicaCount: 1
+
+image:
+  pullPolicy: IfNotPresent
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 64Mi
+  limits:
+    cpu: 500m
+    memory: 128Mi
+
+# Leader election keeps exactly one controller active when replicaCount > 1.
+leaderElectionEnabled: true
+
+# Restrict the controller to runner namespaces rather than cluster-wide.
+# Set to "" to watch all namespaces (not recommended for least-privilege).
+watchSingleNamespace: "arc-runners"

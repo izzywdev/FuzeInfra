@@ -1,0 +1,65 @@
+# =============================================================================
+# Optional: ArgoCD Application for the ARC runner scale set (GitOps management).
+#
+# IMPORTANT: The ARC *controller* must be bootstrapped first via install.sh
+# (Helm + CRD install).  Only the runner scale set is managed here by ArgoCD.
+#
+# Apply after bootstrap:
+#   kubectl apply -f argocd/applications/arc-runners.yaml
+# =============================================================================
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: arc-runners-staging
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+  annotations:
+    # Remind operators not to register against GitHub from CI without approval.
+    platform.izzywdev/registration-note: >
+      GitHub runner registration is triggered automatically when the
+      arc-runner-github-app Secret exists in arc-runners.  Do not apply this
+      Application in a new environment without first creating that Secret.
+spec:
+  project: fuzeinfra
+  source:
+    repoURL: https://github.com/izzywdev/FuzeInfra.git
+    targetRevision: main
+    chart: gha-runner-scale-set
+    # Helm chart pulled directly from OCI registry via ArgoCD's Helm OCI support.
+    # Requires ArgoCD >= 2.8 with HELM_ENABLE_OCI=1 (set in argocd-cm or env).
+    helm:
+      releaseName: staging
+      valueFiles:
+        # ArgoCD resolves this relative path against the source repo root.
+        - runners/arc/runner-scale-set-values.yaml
+  # Alternate source using the OCI chart directly (ArgoCD Helm OCI mode):
+  # source:
+  #   repoURL: ghcr.io/actions/actions-runner-controller-charts
+  #   chart: gha-runner-scale-set
+  #   targetRevision: "0.9.*"
+  #   helm:
+  #     releaseName: staging
+  #     values: |
+  #       githubConfigUrl: "https://github.com/izzywdev"
+  #       githubConfigSecret: arc-runner-github-app
+  #       runnerGroup: staging-runners
+  #       runnerScaleSetName: staging
+  #       minRunners: 0
+  #       maxRunners: 5
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: arc-runners
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 3m
