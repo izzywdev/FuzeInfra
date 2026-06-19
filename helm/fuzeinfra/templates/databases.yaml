@@ -3,7 +3,7 @@
 apiVersion: v1
 kind: Service
 metadata:
-  name: postgres
+  name: fuzeinfra-postgres
   labels:
     {{- include "fuzeinfra.labels" . | nindent 4 }}
     {{- include "fuzeinfra.selectorLabels" (dict "component" "postgres") | nindent 4 }}
@@ -19,11 +19,11 @@ spec:
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
-  name: postgres
+  name: fuzeinfra-postgres
   labels:
     {{- include "fuzeinfra.labels" . | nindent 4 }}
 spec:
-  serviceName: postgres
+  serviceName: fuzeinfra-postgres
   replicas: 1
   selector:
     matchLabels:
@@ -81,7 +81,7 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: mongodb
+  name: fuzeinfra-mongodb
   labels:
     {{- include "fuzeinfra.labels" . | nindent 4 }}
     {{- include "fuzeinfra.selectorLabels" (dict "component" "mongodb") | nindent 4 }}
@@ -97,11 +97,11 @@ spec:
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
-  name: mongodb
+  name: fuzeinfra-mongodb
   labels:
     {{- include "fuzeinfra.labels" . | nindent 4 }}
 spec:
-  serviceName: mongodb
+  serviceName: fuzeinfra-mongodb
   replicas: 1
   selector:
     matchLabels:
@@ -159,7 +159,7 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: redis
+  name: fuzeinfra-redis
   labels:
     {{- include "fuzeinfra.labels" . | nindent 4 }}
     {{- include "fuzeinfra.selectorLabels" (dict "component" "redis") | nindent 4 }}
@@ -175,11 +175,11 @@ spec:
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
-  name: redis
+  name: fuzeinfra-redis
   labels:
     {{- include "fuzeinfra.labels" . | nindent 4 }}
 spec:
-  serviceName: redis
+  serviceName: fuzeinfra-redis
   replicas: 1
   selector:
     matchLabels:
@@ -227,7 +227,7 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: neo4j
+  name: fuzeinfra-neo4j
   labels:
     {{- include "fuzeinfra.labels" . | nindent 4 }}
     {{- include "fuzeinfra.selectorLabels" (dict "component" "neo4j") | nindent 4 }}
@@ -245,11 +245,11 @@ spec:
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
-  name: neo4j
+  name: fuzeinfra-neo4j
   labels:
     {{- include "fuzeinfra.labels" . | nindent 4 }}
 spec:
-  serviceName: neo4j
+  serviceName: fuzeinfra-neo4j
   replicas: 1
   selector:
     matchLabels:
@@ -315,7 +315,7 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: elasticsearch
+  name: fuzeinfra-elasticsearch
   labels:
     {{- include "fuzeinfra.labels" . | nindent 4 }}
     {{- include "fuzeinfra.selectorLabels" (dict "component" "elasticsearch") | nindent 4 }}
@@ -330,11 +330,11 @@ spec:
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
-  name: elasticsearch
+  name: fuzeinfra-elasticsearch
   labels:
     {{- include "fuzeinfra.labels" . | nindent 4 }}
 spec:
-  serviceName: elasticsearch
+  serviceName: fuzeinfra-elasticsearch
   replicas: 1
   selector:
     matchLabels:
@@ -397,7 +397,7 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: chromadb
+  name: fuzeinfra-chromadb
   labels:
     {{- include "fuzeinfra.labels" . | nindent 4 }}
     {{- include "fuzeinfra.selectorLabels" (dict "component" "chromadb") | nindent 4 }}
@@ -412,11 +412,11 @@ spec:
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
-  name: chromadb
+  name: fuzeinfra-chromadb
   labels:
     {{- include "fuzeinfra.labels" . | nindent 4 }}
 spec:
-  serviceName: chromadb
+  serviceName: fuzeinfra-chromadb
   replicas: 1
   selector:
     matchLabels:

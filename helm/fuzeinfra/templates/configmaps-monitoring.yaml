@@ -2,7 +2,7 @@
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: prometheus-config
+  name: fuzeinfra-prometheus-config
   labels:
     {{- include "fuzeinfra.labels" . | nindent 4 }}
 data:
@@ -17,7 +17,7 @@ data:
         - static_configs:
             - targets:
               {{- if .Values.alertmanager.enabled }}
-                - alertmanager:{{ .Values.alertmanager.port }}
+                - fuzeinfra-alertmanager:{{ .Values.alertmanager.port }}
               {{- end }}
     scrape_configs:
       - job_name: prometheus
@@ -30,7 +30,7 @@ data:
         relabel_configs:
           - source_labels: [__meta_kubernetes_service_name]
             action: keep
-            regex: node-exporter
+            regex: fuzeinfra-node-exporter
       {{- end }}
       # Scrape any pod annotated with prometheus.io/scrape: "true".
       - job_name: kubernetes-pods
@@ -59,7 +59,7 @@ data:
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: alertmanager-config
+  name: fuzeinfra-alertmanager-config
   labels:
     {{- include "fuzeinfra.labels" . | nindent 4 }}
 data:
@@ -80,7 +80,7 @@ data:
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: loki-config
+  name: fuzeinfra-loki-config
   labels:
     {{- include "fuzeinfra.labels" . | nindent 4 }}
 data:
@@ -116,7 +116,7 @@ data:
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: promtail-config
+  name: fuzeinfra-promtail-config
   labels:
     {{- include "fuzeinfra.labels" . | nindent 4 }}
 data:
@@ -126,7 +126,7 @@ data:
     positions:
       filename: /run/promtail/positions.yaml
     clients:
-      - url: http://loki:{{ .Values.loki.port }}/loki/api/v1/push
+      - url: http://fuzeinfra-loki:{{ .Values.loki.port }}/loki/api/v1/push
     scrape_configs:
       - job_name: kubernetes-pods
         kubernetes_sd_configs:
@@ -150,7 +150,7 @@ data:
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: grafana-datasources
+  name: fuzeinfra-grafana-datasources
   labels:
     {{- include "fuzeinfra.labels" . | nindent 4 }}
 data:
@@ -161,13 +161,13 @@ data:
       - name: Prometheus
         type: prometheus
         access: proxy
-        url: http://prometheus:{{ .Values.prometheus.port }}
+        url: http://fuzeinfra-prometheus:{{ .Values.prometheus.port }}
         isDefault: true
       {{- end }}
       {{- if .Values.loki.enabled }}
       - name: Loki
         type: loki
         access: proxy
-        url: http://loki:{{ .Values.loki.port }}
+        url: http://fuzeinfra-loki:{{ .Values.loki.port }}
       {{- end }}
 {{- end }}

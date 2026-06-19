@@ -45,7 +45,7 @@ subjects:
 apiVersion: v1
 kind: Service
 metadata:
-  name: prometheus
+  name: fuzeinfra-prometheus
   labels:
     {{- include "fuzeinfra.labels" . | nindent 4 }}
     {{- include "fuzeinfra.selectorLabels" (dict "component" "prometheus") | nindent 4 }}
@@ -60,11 +60,11 @@ spec:
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
-  name: prometheus
+  name: fuzeinfra-prometheus
   labels:
     {{- include "fuzeinfra.labels" . | nindent 4 }}
 spec:
-  serviceName: prometheus
+  serviceName: fuzeinfra-prometheus
   replicas: 1
   selector:
     matchLabels:
@@ -103,7 +103,7 @@ spec:
       volumes:
         - name: config
           configMap:
-            name: prometheus-config
+            name: fuzeinfra-prometheus-config
   volumeClaimTemplates:
     - metadata:
         name: data
@@ -121,7 +121,7 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: alertmanager
+  name: fuzeinfra-alertmanager
   labels:
     {{- include "fuzeinfra.labels" . | nindent 4 }}
     {{- include "fuzeinfra.selectorLabels" (dict "component" "alertmanager") | nindent 4 }}
@@ -136,11 +136,11 @@ spec:
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
-  name: alertmanager
+  name: fuzeinfra-alertmanager
   labels:
     {{- include "fuzeinfra.labels" . | nindent 4 }}
 spec:
-  serviceName: alertmanager
+  serviceName: fuzeinfra-alertmanager
   replicas: 1
   selector:
     matchLabels:
@@ -169,7 +169,7 @@ spec:
       volumes:
         - name: config
           configMap:
-            name: alertmanager-config
+            name: fuzeinfra-alertmanager-config
   volumeClaimTemplates:
     - metadata:
         name: data
@@ -187,7 +187,7 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: grafana
+  name: fuzeinfra-grafana
   labels:
     {{- include "fuzeinfra.labels" . | nindent 4 }}
     {{- include "fuzeinfra.selectorLabels" (dict "component" "grafana") | nindent 4 }}
@@ -202,11 +202,11 @@ spec:
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
-  name: grafana
+  name: fuzeinfra-grafana
   labels:
     {{- include "fuzeinfra.labels" . | nindent 4 }}
 spec:
-  serviceName: grafana
+  serviceName: fuzeinfra-grafana
   replicas: 1
   selector:
     matchLabels:
@@ -248,7 +248,7 @@ spec:
       volumes:
         - name: datasources
           configMap:
-            name: grafana-datasources
+            name: fuzeinfra-grafana-datasources
   volumeClaimTemplates:
     - metadata:
         name: data
@@ -266,7 +266,7 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: loki
+  name: fuzeinfra-loki
   labels:
     {{- include "fuzeinfra.labels" . | nindent 4 }}
     {{- include "fuzeinfra.selectorLabels" (dict "component" "loki") | nindent 4 }}
@@ -281,11 +281,11 @@ spec:
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
-  name: loki
+  name: fuzeinfra-loki
   labels:
     {{- include "fuzeinfra.labels" . | nindent 4 }}
 spec:
-  serviceName: loki
+  serviceName: fuzeinfra-loki
   replicas: 1
   selector:
     matchLabels:
@@ -320,7 +320,7 @@ spec:
       volumes:
         - name: config
           configMap:
-            name: loki-config
+            name: fuzeinfra-loki-config
   volumeClaimTemplates:
     - metadata:
         name: data
@@ -338,7 +338,7 @@ spec:
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
-  name: promtail
+  name: fuzeinfra-promtail
   labels:
     {{- include "fuzeinfra.labels" . | nindent 4 }}
 spec:
@@ -376,7 +376,7 @@ spec:
       volumes:
         - name: config
           configMap:
-            name: promtail-config
+            name: fuzeinfra-promtail-config
         - name: run
           hostPath:
             path: /run/promtail
@@ -394,7 +394,7 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: node-exporter
+  name: fuzeinfra-node-exporter
   labels:
     {{- include "fuzeinfra.labels" . | nindent 4 }}
     {{- include "fuzeinfra.selectorLabels" (dict "component" "node-exporter") | nindent 4 }}
@@ -410,7 +410,7 @@ spec:
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
-  name: node-exporter
+  name: fuzeinfra-node-exporter
   labels:
     {{- include "fuzeinfra.labels" . | nindent 4 }}
 spec:

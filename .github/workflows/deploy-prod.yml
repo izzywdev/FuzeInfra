@@ -1,0 +1,72 @@
+name: Deploy FuzeInfra – Production
+
+# Triggers on every push to `main`.
+# Production credentials live in the repo secret KUBE_CONFIG (base64-encoded).
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'helm/**'
+      - '.github/workflows/deploy-prod.yml'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Print the rendered manifests without applying (helm upgrade --dry-run)"
+        type: boolean
+        default: false
+
+jobs:
+  deploy:
+    name: Helm upgrade – production
+    runs-on: ubuntu-latest
+
+    environment: production
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: v3.16.4
+
+      - name: Configure kubeconfig
+        run: |
+          if [ -z "${KUBE_CONFIG:-}" ]; then
+            echo "::warning::KUBE_CONFIG secret is not set. Deploy skipped."
+            echo "SKIP=true" >> "$GITHUB_ENV"
+            exit 0
+          fi
+          mkdir -p ~/.kube
+          printf '%s' "$KUBE_CONFIG" | base64 -d > ~/.kube/config
+          chmod 600 ~/.kube/config
+        env:
+          KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
+
+      - name: Helm lint
+        if: env.SKIP != 'true'
+        run: |
+          helm lint helm/fuzeinfra
+
+      - name: Deploy FuzeInfra
+        if: env.SKIP != 'true'
+        run: |
+          FLAGS=""
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            FLAGS="--dry-run"
+          fi
+          helm upgrade --install fuzeinfra helm/fuzeinfra \
+            --namespace fuzeinfra \
+            --create-namespace \
+            --atomic \
+            --timeout 15m \
+            $FLAGS
+
+      - name: Verify rollout
+        if: env.SKIP != 'true' && inputs.dry_run != 'true'
+        run: |
+          echo "=== Pods ==="
+          kubectl -n fuzeinfra get pods
+          echo "=== Services ==="
+          kubectl -n fuzeinfra get svc
