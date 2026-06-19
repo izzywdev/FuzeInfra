@@ -194,7 +194,7 @@ nodeExporter:
 # -----------------------------------------------------------------------------
 airflow:
   enabled: true
-  image: apache/airflow:2.7.0
+  image: apache/airflow:2.9.1
   webPort: 8080
   flowerPort: 5555
   # Number of Celery workers (scale data pipeline throughput here).
