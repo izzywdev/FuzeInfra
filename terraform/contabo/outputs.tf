@@ -25,15 +25,17 @@ output "kubeconfig_path" {
 
 output "cloudflare_tunnel_id" {
   description = "Cloudflare Named Tunnel ID (empty when cloudflare_api_token not set)"
-  value       = local.cloudflare_enabled ? cloudflare_tunnel.fuzeinfra[0].id : ""
+  value       = local.cloudflare_enabled ? cloudflare_zero_trust_tunnel_cloudflared.fuzeinfra[0].id : ""
+  sensitive   = true
 }
 
 output "prod_domain" {
   description = "Public domain pointing to this cluster via Cloudflare tunnel"
-  value       = local.cloudflare_enabled ? local.prod_domain : ""
+  # Derived only from non-sensitive vars so it's always visible in plan output.
+  value = "${var.prod_subdomain}.${var.zone_name}"
 }
 
 output "argocd_url_public" {
-  description = "ArgoCD public URL (available after Cloudflare tunnel is wired)"
-  value       = local.cloudflare_enabled ? "https://argocd.${local.prod_domain}" : "https://${local.server_ip}:8080 (via port-forward)"
+  description = "ArgoCD public URL (public once Cloudflare tunnel is wired)"
+  value       = "https://argocd.${var.prod_subdomain}.${var.zone_name}"
 }

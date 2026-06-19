@@ -43,7 +43,7 @@ resource "random_bytes" "tunnel_secret" {
   length = 32
 }
 
-resource "cloudflare_tunnel" "fuzeinfra" {
+resource "cloudflare_zero_trust_tunnel_cloudflared" "fuzeinfra" {
   account_id = var.cloudflare_account_id
   name       = var.tunnel_name
 
@@ -62,9 +62,9 @@ locals {
   prod_domain = "${var.prod_subdomain}.${var.zone_name}"
 }
 
-resource "cloudflare_tunnel_config" "fuzeinfra" {
+resource "cloudflare_zero_trust_tunnel_cloudflared_config" "fuzeinfra" {
   account_id = var.cloudflare_account_id
-  tunnel_id  = cloudflare_tunnel.fuzeinfra.id
+  tunnel_id  = cloudflare_zero_trust_tunnel_cloudflared.fuzeinfra.id
 
   config {
     # ArgoCD lives in the 'argocd' namespace — route directly to skip Traefik.
@@ -100,18 +100,20 @@ resource "cloudflare_tunnel_config" "fuzeinfra" {
 resource "cloudflare_record" "prod_apex" {
   zone_id = var.cloudflare_zone_id
   name    = var.prod_subdomain
-  value   = cloudflare_tunnel.fuzeinfra.cname
+  value   = cloudflare_zero_trust_tunnel_cloudflared.fuzeinfra.cname
   type    = "CNAME"
   proxied = true
+  ttl     = 1
 }
 
 # *.prod.fuzefront.com  →  same tunnel
 resource "cloudflare_record" "prod_wildcard" {
   zone_id = var.cloudflare_zone_id
   name    = "*.${var.prod_subdomain}"
-  value   = cloudflare_tunnel.fuzeinfra.cname
+  value   = cloudflare_zero_trust_tunnel_cloudflared.fuzeinfra.cname
   type    = "CNAME"
   proxied = true
+  ttl     = 1
 }
 
 # ---------------------------------------------------------------------------
@@ -120,7 +122,7 @@ resource "cloudflare_record" "prod_wildcard" {
 # One Access Application covers all subdomains (not the apex).
 # *.prod.fuzefront.com matches argocd., grafana., airflow., etc.
 # The apex prod.fuzefront.com is NOT covered → public (FuzeFront app).
-resource "cloudflare_access_application" "admin_services" {
+resource "cloudflare_zero_trust_access_application" "admin_services" {
   account_id       = var.cloudflare_account_id
   name             = "FuzeInfra Admin Services"
   domain           = "*.${local.prod_domain}"
@@ -132,9 +134,9 @@ resource "cloudflare_access_application" "admin_services" {
 }
 
 # Allow specific admin email addresses via One-Time PIN.
-resource "cloudflare_access_policy" "admin_email_otp" {
+resource "cloudflare_zero_trust_access_policy" "admin_email_otp" {
   account_id     = var.cloudflare_account_id
-  application_id = cloudflare_access_application.admin_services.id
+  application_id = cloudflare_zero_trust_access_application.admin_services.id
   name           = "Admin email allowlist (OTP)"
   precedence     = 1
   decision       = "allow"
@@ -154,7 +156,7 @@ locals {
   # cloudflared token format: base64(JSON{a: account, t: tunnel_id, s: b64_secret})
   tunnel_token = base64encode(jsonencode({
     a = var.cloudflare_account_id
-    t = cloudflare_tunnel.fuzeinfra.id
+    t = cloudflare_zero_trust_tunnel_cloudflared.fuzeinfra.id
     s = random_bytes.tunnel_secret.base64
   }))
 }

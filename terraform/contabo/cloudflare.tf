@@ -27,7 +27,7 @@ resource "random_bytes" "tunnel_secret" {
 }
 
 # Named Tunnel (shows in Zero Trust dashboard as var.tunnel_name)
-resource "cloudflare_tunnel" "fuzeinfra" {
+resource "cloudflare_zero_trust_tunnel_cloudflared" "fuzeinfra" {
   count      = local.cloudflare_enabled ? 1 : 0
   account_id = var.cloudflare_account_id
   name       = var.tunnel_name
@@ -36,10 +36,10 @@ resource "cloudflare_tunnel" "fuzeinfra" {
 
 # Routing rules — managed on Cloudflare's side, fetched by cloudflared at startup.
 # cloudflared runs as a pod inside k3s, so it can reach any k8s service by DNS.
-resource "cloudflare_tunnel_config" "fuzeinfra" {
+resource "cloudflare_zero_trust_tunnel_cloudflared_config" "fuzeinfra" {
   count      = local.cloudflare_enabled ? 1 : 0
   account_id = var.cloudflare_account_id
-  tunnel_id  = cloudflare_tunnel.fuzeinfra[0].id
+  tunnel_id  = cloudflare_zero_trust_tunnel_cloudflared.fuzeinfra[0].id
 
   config {
     # ArgoCD is in the 'argocd' namespace — route directly, bypassing Traefik.
@@ -69,9 +69,10 @@ resource "cloudflare_record" "prod_apex" {
   count   = local.cloudflare_enabled ? 1 : 0
   zone_id = var.cloudflare_zone_id
   name    = var.prod_subdomain
-  value   = cloudflare_tunnel.fuzeinfra[0].cname
+  value   = cloudflare_zero_trust_tunnel_cloudflared.fuzeinfra[0].cname
   type    = "CNAME"
   proxied = true
+  ttl     = 1
 }
 
 # DNS: *.prod.fuzefront.com → same tunnel
@@ -79,14 +80,15 @@ resource "cloudflare_record" "prod_wildcard" {
   count   = local.cloudflare_enabled ? 1 : 0
   zone_id = var.cloudflare_zone_id
   name    = "*.${var.prod_subdomain}"
-  value   = cloudflare_tunnel.fuzeinfra[0].cname
+  value   = cloudflare_zero_trust_tunnel_cloudflared.fuzeinfra[0].cname
   type    = "CNAME"
   proxied = true
+  ttl     = 1
 }
 
 # Cloudflare Access: protect *.prod.fuzefront.com with email OTP.
 # The apex prod.fuzefront.com is NOT matched by *.prod — it stays public.
-resource "cloudflare_access_application" "admin_services" {
+resource "cloudflare_zero_trust_access_application" "admin_services" {
   count            = local.cloudflare_enabled ? 1 : 0
   account_id       = var.cloudflare_account_id
   name             = "FuzeInfra Admin Services"
@@ -97,10 +99,10 @@ resource "cloudflare_access_application" "admin_services" {
   app_launcher_visible = false
 }
 
-resource "cloudflare_access_policy" "admin_email_otp" {
+resource "cloudflare_zero_trust_access_policy" "admin_email_otp" {
   count          = local.cloudflare_enabled ? 1 : 0
   account_id     = var.cloudflare_account_id
-  application_id = cloudflare_access_application.admin_services[0].id
+  application_id = cloudflare_zero_trust_access_application.admin_services[0].id
   name           = "Admin email allowlist (OTP)"
   precedence     = 1
   decision       = "allow"
@@ -115,7 +117,7 @@ resource "cloudflare_access_policy" "admin_email_otp" {
 locals {
   tunnel_token = local.cloudflare_enabled ? base64encode(jsonencode({
     a = var.cloudflare_account_id
-    t = cloudflare_tunnel.fuzeinfra[0].id
+    t = cloudflare_zero_trust_tunnel_cloudflared.fuzeinfra[0].id
     s = random_bytes.tunnel_secret[0].base64
   })) : ""
 }
@@ -130,8 +132,8 @@ resource "null_resource" "cloudflare_tunnel_token" {
 
   triggers = {
     # Re-run whenever tunnel ID or secret changes (e.g. after taint + rotate).
-    tunnel_id   = cloudflare_tunnel.fuzeinfra[0].id
-    token_hash  = sha256(local.tunnel_token)
+    tunnel_id  = cloudflare_zero_trust_tunnel_cloudflared.fuzeinfra[0].id
+    token_hash = sha256(local.tunnel_token)
   }
 
   provisioner "local-exec" {
