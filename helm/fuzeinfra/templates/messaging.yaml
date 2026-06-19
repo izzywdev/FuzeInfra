@@ -227,6 +227,7 @@ spec:
               command: ["rabbitmq-diagnostics", "-q", "ping"]
             initialDelaySeconds: 20
             periodSeconds: 15
+            timeoutSeconds: 10
             failureThreshold: 6
           resources:
             requests: { cpu: 100m, memory: 256Mi }
