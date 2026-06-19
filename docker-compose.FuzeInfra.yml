@@ -263,7 +263,7 @@ services:
 
   # Consul - Service discovery and configuration management
   consul:
-    image: consul:1.16
+    image: hashicorp/consul:1.16
     container_name: fuzeinfra-consul
     command: >
       consul agent
