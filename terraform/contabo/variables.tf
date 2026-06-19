@@ -136,7 +136,7 @@ variable "cloudflare_zone_id" {
 variable "tunnel_name" {
   description = "Name of the Named Tunnel in Cloudflare Zero Trust dashboard"
   type        = string
-  default     = "fuzeinfra-prod"
+  default     = "fuzeinfra"
 }
 
 variable "prod_subdomain" {
