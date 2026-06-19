@@ -20,10 +20,10 @@ resource "contabo_instance" "prod" {
         ssh_authorized_keys:
           - ${var.ssh_public_key}
     runcmd:
+      # Ports 80/443 are intentionally omitted — all HTTP(S) traffic flows through
+      # the Cloudflare Named Tunnel (outbound-only from cloudflared).
       - ufw allow 22/tcp
       - ufw allow 6443/tcp
-      - ufw allow 80/tcp
-      - ufw allow 443/tcp
       - ufw --force enable
   EOT
 }

@@ -13,7 +13,9 @@
 # =============================================================================
 global:
   storageClass: "local-path"
-  domain: "161.97.118.134.nip.io"   # UPDATE if domain changes
+  # Cloudflare tunnel routes *.prod.fuzefront.com → Traefik → these Ingress rules.
+  # Change back to <ip>.nip.io if the tunnel is disabled for debugging.
+  domain: "prod.fuzefront.com"
   imagePullPolicy: IfNotPresent
 
 ingress:
@@ -58,10 +60,13 @@ prometheus:
 airflow:
   workerReplicas: 1
 
-# Cloudflare tunnel gives external HTTPS without exposing ports or needing
-# cert-manager. Set enabled=true and provide the tunnel token to activate.
+# Cloudflare tunnel: all traffic enters via the named tunnel; no host-level
+# ports 80/443 need to be open.  The tunnel token lives in fuzeinfra-secrets
+# (key: CLOUDFLARE_TUNNEL_TOKEN) which is patched by terraform/cloudflare or
+# scripts/setup-cloudflare-tunnel.sh — it is NEVER committed to git.
+# Routing rules (hostname → service) are managed via terraform/cloudflare.
 cloudflareTunnel:
-  enabled: false
+  enabled: true
 
 # dnsmasq not needed on a remote server (use real DNS / nip.io)
 dnsmasq:

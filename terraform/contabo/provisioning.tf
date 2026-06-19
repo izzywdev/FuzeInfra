@@ -13,15 +13,16 @@
 # ---------------------------------------------------------------------------
 
 locals {
-  argocd_project_path = "${path.root}/../../argocd/projects/fuzeinfra.yaml"
-  argocd_app_path     = "${path.root}/../../argocd/applications/fuzeinfra-prod.yaml"
-  values_path         = "${path.root}/../../helm/fuzeinfra/values-contabo.yaml"
+  argocd_project_path       = "${path.root}/../../argocd/projects/fuzeinfra.yaml"
+  argocd_app_path           = "${path.root}/../../argocd/applications/fuzeinfra-prod.yaml"
+  argocd_ingress_prod_path  = "${path.root}/../../argocd/argocd-ingress-prod.yaml"
+  values_path               = "${path.root}/../../helm/fuzeinfra/values-contabo.yaml"
 }
 
 resource "null_resource" "provision" {
   triggers = {
-    server_ip  = local.server_ip
-    app_sha    = filesha256(local.argocd_app_path)
+    server_ip   = local.server_ip
+    app_sha     = filesha256(local.argocd_app_path)
     project_sha = filesha256(local.argocd_project_path)
   }
 
@@ -44,10 +45,21 @@ resource "null_resource" "provision" {
     destination = "/tmp/argocd-app.yaml"
   }
 
+  provisioner "file" {
+    source      = local.argocd_ingress_prod_path
+    destination = "/tmp/argocd-ingress-prod.yaml"
+  }
+
   provisioner "remote-exec" {
     inline = [
       # --- firewall ---
-      "ufw allow 22/tcp && ufw allow 6443/tcp && ufw allow 80/tcp && ufw allow 443/tcp && ufw --force enable 2>/dev/null || true",
+      # Ports 80/443 are intentionally CLOSED from the public internet.
+      # All HTTP(S) traffic enters exclusively through the Cloudflare Named Tunnel,
+      # which cloudflared initiates as outbound-only connections — no inbound port needed.
+      # Blocking 80/443 externally prevents direct VPS access bypassing WAF + Access.
+      "ufw allow 22/tcp && ufw allow 6443/tcp && ufw --force enable 2>/dev/null || true",
+      "ufw delete allow 80/tcp 2>/dev/null || true",
+      "ufw delete allow 443/tcp 2>/dev/null || true",
 
       # --- k3s ---
       "if ! command -v k3s &>/dev/null; then",
@@ -68,16 +80,51 @@ resource "null_resource" "provision" {
       "kubectl apply -f /tmp/argocd-project.yaml",
       "kubectl apply -f /tmp/argocd-app.yaml",
 
-      # --- ArgoCD Ingress via Traefik (insecure mode: Traefik handles TLS) ---
+      # --- ArgoCD Ingress via Traefik (insecure mode: Cloudflare handles TLS) ---
       "kubectl -n argocd patch configmap argocd-cmd-params-cm --type merge -p '{\"data\":{\"server.insecure\":\"true\"}}'",
-      # Set external URL so ArgoCD sends correct CORS headers from the UI
-      "kubectl -n argocd patch configmap argocd-cm --type merge -p '{\"data\":{\"url\":\"http://argocd.${replace(local.server_ip, \".\", \"-\")}.nip.io\"}}'",
+      # External URL used by ArgoCD for CORS headers and OAuth callbacks.
+      # Uses prod.fuzefront.com — the Cloudflare tunnel domain.
+      "kubectl -n argocd patch configmap argocd-cm --type merge -p '{\"data\":{\"url\":\"https://argocd.prod.fuzefront.com\"}}'",
       "kubectl -n argocd rollout restart deployment/argocd-server",
       "kubectl -n argocd rollout status deployment/argocd-server --timeout=60s",
-      "kubectl apply -f - <<'EOF'\napiVersion: networking.k8s.io/v1\nkind: Ingress\nmetadata:\n  name: argocd\n  namespace: argocd\nspec:\n  ingressClassName: traefik\n  rules:\n    - host: argocd.${replace(local.server_ip, \".\", \"-\")}.nip.io\n      http:\n        paths:\n          - path: /\n            pathType: Prefix\n            backend:\n              service:\n                name: argocd-server\n                port:\n                  number: 80\nEOF",
+      # Ingress for argocd.prod.fuzefront.com (Cloudflare tunnel → Traefik → ArgoCD)
+      "kubectl apply -f /tmp/argocd-ingress-prod.yaml",
 
       "echo 'Provisioning complete'",
     ]
+  }
+}
+
+# ---------------------------------------------------------------------------
+# Push Cloudflare tunnel token into the cluster secret (if provided).
+# The cloudflared Deployment reads CLOUDFLARE_TUNNEL_TOKEN from fuzeinfra-secrets.
+# Run terraform/cloudflare first, then set cloudflare_tunnel_token in tfvars.
+# ---------------------------------------------------------------------------
+resource "null_resource" "cloudflare_tunnel_token" {
+  count      = var.cloudflare_tunnel_token != "" ? 1 : 0
+  depends_on = [null_resource.extract_kubeconfig]
+
+  triggers = {
+    # Re-run whenever the token changes.
+    token_hash = sha256(var.cloudflare_tunnel_token)
+  }
+
+  provisioner "local-exec" {
+    interpreter = ["bash", "-c"]
+    command     = <<-EOT
+      export KUBECONFIG="${path.root}/k3s-kubeconfig.yaml"
+      # Wait for the fuzeinfra namespace and secret to exist (ArgoCD syncs them).
+      for i in $(seq 1 30); do
+        kubectl get secret fuzeinfra-secrets -n fuzeinfra &>/dev/null && break
+        echo "Waiting for fuzeinfra-secrets ($i/30)..."
+        sleep 10
+      done
+      TOKEN_B64=$(printf '%s' '${var.cloudflare_tunnel_token}' | base64 -w0)
+      kubectl patch secret fuzeinfra-secrets -n fuzeinfra \
+        --type=merge \
+        -p "{\"data\":{\"CLOUDFLARE_TUNNEL_TOKEN\":\"$${TOKEN_B64}\"}}"
+      echo "Cloudflare tunnel token stored in fuzeinfra-secrets."
+    EOT
   }
 }
 

@@ -47,6 +47,12 @@ github_owner = "izzywdev"
 github_repo  = "FuzeInfra"
 
 # -----------------------------------------------------------------------
+# Cloudflare tunnel token (optional — set after running terraform/cloudflare)
+# Get from: cd terraform/cloudflare && terraform output -raw tunnel_token
+# -----------------------------------------------------------------------
+cloudflare_tunnel_token = ""   # paste output of `terraform output -raw tunnel_token`
+
+# -----------------------------------------------------------------------
 # To import the existing Contabo server (do this BEFORE terraform apply):
 #   terraform import contabo_compute_instance.prod <your-instance-uuid>
 #

@@ -51,6 +51,7 @@ Usage:
 {{- if .Values.global.storageClass }}
 storageClassName: {{ .Values.global.storageClass | quote }}
 {{- end }}
+volumeMode: Filesystem
 {{- end -}}
 
 {{/*

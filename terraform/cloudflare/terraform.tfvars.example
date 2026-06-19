@@ -1,0 +1,25 @@
+# Copy to terraform.tfvars and fill in real values.
+# NEVER commit terraform.tfvars — it contains secrets.
+
+# ---------------------------------------------------------------------------
+# Cloudflare credentials
+# Create an API token at https://dash.cloudflare.com/profile/api-tokens with:
+#   - Zone > DNS > Edit
+#   - Account > Cloudflare Tunnel > Edit
+#   - Account > Access: Apps and Policies > Edit
+# ---------------------------------------------------------------------------
+cloudflare_api_token  = ""
+cloudflare_account_id = ""   # visible in Cloudflare dashboard URL
+cloudflare_zone_id    = ""   # Zone ID in fuzefront.com's Overview tab
+
+# ---------------------------------------------------------------------------
+# Domain config
+# ---------------------------------------------------------------------------
+zone_name      = "fuzefront.com"
+prod_subdomain = "prod"    # cluster is reachable at prod.fuzefront.com
+
+# ---------------------------------------------------------------------------
+# Zero Trust Access — who may access admin UIs (*.prod.fuzefront.com)
+# ---------------------------------------------------------------------------
+allowed_admin_emails    = ["izzy.weinberg@gmail.com"]
+access_session_duration = "24h"

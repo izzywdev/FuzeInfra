@@ -100,3 +100,25 @@ variable "github_repo" {
   type        = string
   default     = "FuzeInfra"
 }
+
+# ---------------------------------------------------------------------------
+# Cloudflare Tunnel (optional — set after running terraform/cloudflare)
+# ---------------------------------------------------------------------------
+variable "cloudflare_tunnel_token" {
+  description = <<-EOT
+    Token for cloudflared (output of terraform/cloudflare).
+    If set, provisioning stores it in the fuzeinfra-secrets k8s Secret so that
+    the cloudflared pod can connect to the Named Tunnel immediately.
+    Leave empty to skip; populate later via scripts/setup-cloudflare-tunnel.sh.
+  EOT
+  type      = string
+  default   = ""
+  sensitive = true
+}
+
+variable "cloudflare_acme_email" {
+  description = "Email for future cert-manager / Let's Encrypt integration (informational only)"
+  type        = string
+  default     = ""
+}
+

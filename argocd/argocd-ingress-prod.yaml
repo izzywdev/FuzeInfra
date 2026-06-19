@@ -1,0 +1,32 @@
+# ArgoCD Ingress for the prod.fuzefront.com domain.
+# Applied by terraform/contabo/provisioning.tf during provisioning, or manually:
+#   kubectl apply -f argocd/argocd-ingress-prod.yaml
+#
+# Traffic path:
+#   Cloudflare Access (email OTP) → Tunnel → argocd-server.argocd:80 (tunnel direct)
+#   OR: Tunnel → Traefik → this Ingress → argocd-server:80
+#
+# The Cloudflare tunnel routes argocd.prod.fuzefront.com directly to
+# http://argocd-server.argocd:80, bypassing Traefik. This Ingress is a fallback
+# and for any path through Traefik in case routing changes.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: argocd-prod
+  namespace: argocd
+  annotations:
+    # ArgoCD runs in insecure mode; Traefik terminates TLS via Cloudflare.
+    traefik.ingress.kubernetes.io/router.entrypoints: web
+spec:
+  ingressClassName: traefik
+  rules:
+    - host: argocd.prod.fuzefront.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: argocd-server
+                port:
+                  number: 80

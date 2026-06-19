@@ -140,6 +140,9 @@ spec:
                 secretKeyRef:
                   name: {{ include "fuzeinfra.secretName" . }}
                   key: CLOUDFLARE_TUNNEL_TOKEN
+                  # optional: token is injected post-deploy by terraform/scripts.
+                  # Pod starts but fails auth until the key is populated.
+                  optional: true
           ports:
             - containerPort: {{ .Values.cloudflareTunnel.metricsPort }}
               name: metrics
