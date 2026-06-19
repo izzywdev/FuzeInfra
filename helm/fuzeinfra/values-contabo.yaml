@@ -67,6 +67,9 @@ airflow:
 # Routing rules (hostname → service) are managed via terraform/cloudflare.
 cloudflareTunnel:
   enabled: true
+  # Named Tunnel UUID — switches to local-config mode (ingress rules in ConfigMap,
+  # credentials from CLOUDFLARE_TUNNEL_CREDENTIALS in fuzeinfra-secrets).
+  tunnelId: "ae01913e-0a00-4a30-a5ec-a348a4e12f65"
 
 # dnsmasq not needed on a remote server (use real DNS / nip.io)
 dnsmasq:

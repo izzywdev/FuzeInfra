@@ -223,12 +223,19 @@ dnsmasq:
   # an actual DNS server from outside the cluster.
   serviceType: ClusterIP
 
-# cloudflare-tunnel: optional cloudflared Deployment for secure external access /
-# webhook endpoints. OFF by default; requires credentials.cloudflare.tunnelToken
-# (or an existing Secret). Ingress routing is configured in the Cloudflare
-# Zero Trust dashboard (token-based tunnel), mirroring the docker-compose setup.
+# cloudflare-tunnel: optional cloudflared Deployment for secure external access.
+# Two modes:
+#   Local-config (preferred): set tunnelId to the Named Tunnel UUID.
+#     cloudflared uses CLOUDFLARE_TUNNEL_CREDENTIALS from the cluster secret and
+#     a generated config.yaml with ingress rules — no dashboard config needed.
+#   Token mode (legacy): leave tunnelId empty.
+#     cloudflared uses CLOUDFLARE_TUNNEL_TOKEN from the cluster secret and
+#     fetches routing from the Cloudflare Zero Trust dashboard.
 cloudflareTunnel:
   enabled: false
   image: cloudflare/cloudflared:latest
   metricsPort: 2000
   replicas: 1
+  # Named Tunnel UUID (from `cloudflared tunnel list` or Terraform output).
+  # When set, switches to local-config mode with inline ingress rules.
+  tunnelId: ""

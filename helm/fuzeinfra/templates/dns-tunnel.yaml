@@ -104,6 +104,29 @@ spec:
 
 {{- /* ===================== cloudflare-tunnel (optional) ===================== */ -}}
 {{- if .Values.cloudflareTunnel.enabled }}
+{{- if .Values.cloudflareTunnel.tunnelId }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: fuzeinfra-cloudflared-config
+  labels:
+    {{- include "fuzeinfra.labels" . | nindent 4 }}
+data:
+  config.yaml: |
+    tunnel: {{ .Values.cloudflareTunnel.tunnelId }}
+    credentials-file: /etc/cloudflared/creds.json
+    metrics: 0.0.0.0:{{ .Values.cloudflareTunnel.metricsPort }}
+    no-autoupdate: true
+    ingress:
+      - hostname: argocd.{{ .Values.global.domain }}
+        service: http://argocd-server.argocd.svc.cluster.local:80
+      - hostname: "*.{{ .Values.global.domain }}"
+        service: http://traefik.kube-system.svc.cluster.local:80
+      - hostname: {{ .Values.global.domain }}
+        service: http://traefik.kube-system.svc.cluster.local:80
+      - service: http_status:404
+{{- end }}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -121,13 +144,23 @@ spec:
       labels:
         {{- include "fuzeinfra.labels" . | nindent 8 }}
         {{- include "fuzeinfra.selectorLabels" (dict "component" "cloudflare-tunnel") | nindent 8 }}
+      annotations:
+        checksum/tunnel-id: {{ .Values.cloudflareTunnel.tunnelId | sha256sum }}
     spec:
       containers:
         - name: cloudflared
           image: {{ .Values.cloudflareTunnel.image }}
           imagePullPolicy: {{ include "fuzeinfra.pullPolicy" . }}
-          # Token-based tunnel: ingress routes are managed in the Cloudflare
-          # Zero Trust dashboard (mirrors the docker-compose `tunnel run --token`).
+          {{- if .Values.cloudflareTunnel.tunnelId }}
+          # Local-config mode: ingress rules are in the ConfigMap above.
+          # Credentials (tunnel secret) come from CLOUDFLARE_TUNNEL_CREDENTIALS in the cluster secret.
+          args:
+            - tunnel
+            - --config
+            - /etc/cloudflared/config.yaml
+            - run
+          {{- else }}
+          # Token mode: ingress routes are managed in the Cloudflare Zero Trust dashboard.
           args:
             - tunnel
             - --no-autoupdate
@@ -140,13 +173,11 @@ spec:
                 secretKeyRef:
                   name: {{ include "fuzeinfra.secretName" . }}
                   key: CLOUDFLARE_TUNNEL_TOKEN
-                  # optional: token is injected post-deploy by terraform/scripts.
-                  # Pod starts but fails auth until the key is populated.
                   optional: true
+          {{- end }}
           ports:
             - containerPort: {{ .Values.cloudflareTunnel.metricsPort }}
               name: metrics
-          # cloudflared exposes a readiness endpoint on the metrics port.
           readinessProbe:
             httpGet:
               path: /ready
@@ -159,4 +190,25 @@ spec:
               port: metrics
             initialDelaySeconds: 30
             periodSeconds: 30
+          {{- if .Values.cloudflareTunnel.tunnelId }}
+          volumeMounts:
+            - name: config
+              mountPath: /etc/cloudflared/config.yaml
+              subPath: config.yaml
+            - name: credentials
+              mountPath: /etc/cloudflared/creds.json
+              subPath: creds.json
+          {{- end }}
+      {{- if .Values.cloudflareTunnel.tunnelId }}
+      volumes:
+        - name: config
+          configMap:
+            name: fuzeinfra-cloudflared-config
+        - name: credentials
+          secret:
+            secretName: {{ include "fuzeinfra.secretName" . }}
+            items:
+              - key: CLOUDFLARE_TUNNEL_CREDENTIALS
+                path: creds.json
+      {{- end }}
 {{- end }}
