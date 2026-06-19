@@ -20,6 +20,14 @@ spec:
   destination:
     server: https://kubernetes.default.svc
     namespace: fuzeinfra
+  # StatefulSet volumeClaimTemplates are immutable — k3s injects volumeMode:Filesystem
+  # as a server-side default that is never in the Helm template, causing permanent drift.
+  # Ignoring the whole VCT block is safe because SSA can never mutate it anyway.
+  ignoreDifferences:
+    - group: apps
+      kind: StatefulSet
+      jsonPointers:
+        - /spec/volumeClaimTemplates
   syncPolicy:
     automated:
       prune: true
