@@ -18,6 +18,14 @@ terraform.tfvars
 .terraform/providers/
 .terraform/plugins/
 
+# Extracted kubeconfig from terraform/contabo provisioning
+terraform/contabo/k3s-kubeconfig.yaml
+
+# Terraform state and provider cache (contabo)
+terraform/contabo/terraform.tfstate
+terraform/contabo/terraform.tfstate.backup
+terraform/contabo/.terraform/
+
 # Downloaded binaries (tools fetched at runtime)
 mkcert-v*
 

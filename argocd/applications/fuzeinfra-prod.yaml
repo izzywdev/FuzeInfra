@@ -1,0 +1,35 @@
+# ArgoCD Application — Contabo production server (k3s)
+# Applied by terraform/contabo/provisioning.tf during `terraform apply`.
+# ArgoCD auto-syncs helm/fuzeinfra from the main branch whenever it changes.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: fuzeinfra-prod
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: fuzeinfra
+  source:
+    repoURL: https://github.com/izzywdev/FuzeInfra.git
+    targetRevision: main
+    path: helm/fuzeinfra
+    helm:
+      valueFiles:
+        - values-contabo.yaml
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: fuzeinfra
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 15s
+        factor: 2
+        maxDuration: 5m

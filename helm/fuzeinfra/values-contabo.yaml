@@ -1,0 +1,68 @@
+# =============================================================================
+# Contabo VPS (k3s single-node) overlay
+#
+#   helm upgrade --install fuzeinfra helm/fuzeinfra \
+#     -n fuzeinfra --create-namespace -f helm/fuzeinfra/values-contabo.yaml
+#
+# k3s ships with:
+#   - local-path provisioner as default StorageClass
+#   - Traefik as the default ingress controller (className: traefik)
+#
+# Domain: defaults to <server-ip>.nip.io (free wildcard DNS).
+# Replace with a real domain once you have DNS pointing at the server.
+# =============================================================================
+global:
+  storageClass: "local-path"
+  domain: "161.97.118.134.nip.io"   # UPDATE if domain changes
+  imagePullPolicy: IfNotPresent
+
+ingress:
+  enabled: true
+  className: traefik
+  tls:
+    enabled: false   # enable once cert-manager is wired up
+
+# Sizing for 4 vCPU / 8 GB RAM single node.
+# Leave headroom for k3s, ArgoCD, and system processes (~2 GB).
+postgres:
+  storage: 20Gi
+  resources:
+    requests: { cpu: 250m, memory: 512Mi }
+    limits:   { cpu: "1",  memory: 1Gi }
+
+mongodb:
+  storage: 10Gi
+  resources:
+    requests: { cpu: 100m, memory: 256Mi }
+    limits:   { cpu: "1",  memory: 512Mi }
+
+redis:
+  storage: 2Gi
+  resources:
+    requests: { cpu: 50m,  memory: 128Mi }
+    limits:   { cpu: 500m, memory: 256Mi }
+
+elasticsearch:
+  storage: 20Gi
+  javaOpts: "-Xms512m -Xmx512m"
+  resources:
+    requests: { cpu: 250m, memory: 1Gi }
+    limits:   { cpu: "1",  memory: 1536Mi }
+
+kafka:
+  storage: 10Gi
+
+prometheus:
+  storage: 20Gi
+
+airflow:
+  workerReplicas: 1
+
+# Cloudflare tunnel gives external HTTPS without exposing ports or needing
+# cert-manager. Set enabled=true and provide the tunnel token to activate.
+cloudflareTunnel:
+  enabled: false
+
+# dnsmasq not needed on a remote server (use real DNS / nip.io)
+dnsmasq:
+  enabled: false

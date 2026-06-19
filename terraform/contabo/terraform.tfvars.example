@@ -1,0 +1,56 @@
+# Copy to terraform.tfvars and fill in real values.
+# NEVER commit terraform.tfvars — it contains secrets.
+
+# -----------------------------------------------------------------------
+# Contabo API credentials
+# 1. Log in to https://new.contabo.com
+# 2. Go to Account → API Credentials → Create credentials
+# -----------------------------------------------------------------------
+contabo_client_id     = ""   # shown after creating API credentials
+contabo_client_secret = ""   # shown after creating API credentials
+contabo_api_user      = "your-email@example.com"
+contabo_api_password  = ""   # your Contabo account password
+
+# -----------------------------------------------------------------------
+# VPS configuration
+# Find image and product IDs:
+#   Images: https://new.contabo.com/cloud/compute/images
+#           or GET https://api.contabo.com/v1/compute/images
+#   Products: visible in the pricing page or via Contabo API
+# -----------------------------------------------------------------------
+image_id              = ""   # e.g. Ubuntu 24.04 LTS image UUID
+product_id            = ""   # e.g. VPS S (4 vCPU / 8 GB) product UUID
+instance_display_name = "fuzeinfra-prod"
+ssh_key_name          = "fuzeinfra-key"   # must be registered in Contabo: Settings → SSH Keys
+
+# -----------------------------------------------------------------------
+# SSH access
+# Must match the key registered in Contabo above
+# -----------------------------------------------------------------------
+ssh_private_key_path = "~/.ssh/id_ed25519"
+server_user          = "root"
+
+# -----------------------------------------------------------------------
+# Domain (optional)
+# Leave blank to use <server-ip>.nip.io (free wildcard DNS, no setup needed)
+# Set to your real domain if you have *.infra.yourdomain.com pointed at the server
+# -----------------------------------------------------------------------
+domain = ""
+
+# -----------------------------------------------------------------------
+# GitHub
+# Token needs: repo (full), admin:repo_hook, secrets (write)
+# Create at: https://github.com/settings/tokens
+# -----------------------------------------------------------------------
+github_token = ""
+github_owner = "izzywdev"
+github_repo  = "FuzeInfra"
+
+# -----------------------------------------------------------------------
+# To import the existing Contabo server (do this BEFORE terraform apply):
+#   terraform import contabo_compute_instance.prod <your-instance-uuid>
+#
+# Find your instance UUID:
+#   curl -s -H "Authorization: Bearer <token>" \
+#     https://api.contabo.com/v1/compute/instances | jq '.data[].instanceId'
+# -----------------------------------------------------------------------
