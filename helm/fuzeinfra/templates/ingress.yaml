@@ -10,8 +10,6 @@
   "kafka-ui"          (dict "svc" "fuzeinfra-kafka-ui"          "port" $root.Values.kafkaUi.port           "enabled" (and $root.Values.kafkaUi.enabled $root.Values.kafka.enabled))
   "mongo-express"     (dict "svc" "fuzeinfra-mongo-express"     "port" $root.Values.mongoExpress.port      "enabled" (and $root.Values.mongoExpress.enabled $root.Values.mongodb.enabled))
   "rabbitmq"          (dict "svc" "fuzeinfra-rabbitmq"          "port" $root.Values.rabbitmq.managementPort "enabled" $root.Values.rabbitmq.enabled)
-  "neo4j"             (dict "svc" "fuzeinfra-neo4j"             "port" $root.Values.neo4j.httpPort         "enabled" $root.Values.neo4j.enabled)
-  "neo4j-bolt"        (dict "svc" "fuzeinfra-neo4j"             "port" $root.Values.neo4j.boltPort         "enabled" $root.Values.neo4j.enabled)
   "elasticsearch"     (dict "svc" "fuzeinfra-elasticsearch"     "port" $root.Values.elasticsearch.port     "enabled" $root.Values.elasticsearch.enabled)
   "chromadb"          (dict "svc" "fuzeinfra-chromadb"          "port" $root.Values.chromadb.port          "enabled" $root.Values.chromadb.enabled)
 -}}

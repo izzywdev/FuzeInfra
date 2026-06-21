@@ -1,0 +1,63 @@
+{{- if and .Values.ingress.enabled .Values.neo4j.enabled }}
+---
+# Traefik retry middleware for Neo4j's HTTP server.
+#
+# Neo4j's Jetty HTTP server returns 503 when it receives more concurrent
+# connections than its thread pool can handle during the initial Vite asset
+# burst (~30 parallel modulepreload requests on first page load).
+# Traefik retries the failed request so Neo4j returns 200 once a thread
+# frees up, which lets Cloudflare then cache the response for 1h.
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: neo4j-retry
+  labels:
+    {{- include "fuzeinfra.labels" . | nindent 4 }}
+spec:
+  retry:
+    attempts: 4
+    initialInterval: 150ms
+
+---
+# Dedicated Ingress for Neo4j (HTTP UI + Bolt WebSocket) with the retry
+# middleware wired in.  Kept separate from the shared fuzeinfra Ingress so
+# the middleware annotation applies only to these two routes.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: fuzeinfra-neo4j
+  labels:
+    {{- include "fuzeinfra.labels" . | nindent 4 }}
+  annotations:
+    traefik.ingress.kubernetes.io/router.middlewares: {{ .Release.Namespace }}-neo4j-retry@kubernetescrd
+spec:
+  ingressClassName: {{ .Values.ingress.className }}
+  {{- if .Values.ingress.tls.enabled }}
+  tls:
+    - hosts:
+        - {{ include "fuzeinfra.host" (dict "root" . "sub" "neo4j") }}
+        - {{ include "fuzeinfra.host" (dict "root" . "sub" "neo4j-bolt") }}
+      secretName: fuzeinfra-tls
+  {{- end }}
+  rules:
+    - host: {{ include "fuzeinfra.host" (dict "root" . "sub" "neo4j") }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: fuzeinfra-neo4j
+                port:
+                  number: {{ .Values.neo4j.httpPort }}
+    - host: {{ include "fuzeinfra.host" (dict "root" . "sub" "neo4j-bolt") }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: fuzeinfra-neo4j
+                port:
+                  number: {{ .Values.neo4j.boltPort }}
+{{- end }}
