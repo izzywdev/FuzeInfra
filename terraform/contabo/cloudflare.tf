@@ -112,6 +112,29 @@ resource "cloudflare_zero_trust_access_policy" "admin_email_otp" {
   }
 }
 
+# Cloudflare App Launcher — the portal itself at <team>.cloudflareaccess.com
+# Needs its own access application + policy or CF shows "contact your admin".
+resource "cloudflare_zero_trust_access_application" "app_launcher" {
+  count            = local.cloudflare_enabled ? 1 : 0
+  account_id       = var.cloudflare_account_id
+  name             = "App Launcher"
+  type             = "app_launcher"
+  session_duration = var.access_session_duration
+}
+
+resource "cloudflare_zero_trust_access_policy" "app_launcher" {
+  count          = local.cloudflare_enabled ? 1 : 0
+  account_id     = var.cloudflare_account_id
+  application_id = cloudflare_zero_trust_access_application.app_launcher[0].id
+  name           = "Admin email allowlist (OTP)"
+  precedence     = 1
+  decision       = "allow"
+
+  include {
+    email = var.allowed_admin_emails
+  }
+}
+
 # ---------------------------------------------------------------------------
 # Cloudflare App Launcher bookmarks
 #
