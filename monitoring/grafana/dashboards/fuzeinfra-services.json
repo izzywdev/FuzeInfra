@@ -134,8 +134,8 @@
         "defaults": {"unit": "bytes"},
         "overrides": [
           {"matcher": {"id": "byName", "options": "PVC"}, "properties": [{"id": "custom.width", "value": 250}]},
-          {"matcher": {"id": "byName", "options": "Used"}, "properties": [{"id": "custom.displayMode", "value": "color-background"}]},
-          {"matcher": {"id": "byName", "options": "Free"}, "properties": [{"id": "custom.displayMode", "value": "color-background"}]}
+          {"matcher": {"id": "byName", "options": "Used"}, "properties": [{"id": "custom.cellOptions", "value": {"type": "color-background"}}]},
+          {"matcher": {"id": "byName", "options": "Free"}, "properties": [{"id": "custom.cellOptions", "value": {"type": "color-background"}}]}
         ]
       },
       "gridPos": {"h": 8, "w": 24, "x": 0, "y": 21},
@@ -205,7 +205,7 @@
     }
   ],
   "refresh": "30s",
-  "schemaVersion": 38,
+  "schemaVersion": 39,
   "tags": ["fuzeinfra", "services", "kubernetes"],
   "templating": {
     "list": [
