@@ -1,0 +1,74 @@
+groups:
+  - name: nodes
+    rules:
+      - alert: NodeDown
+        expr: up{job="node-exporter"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Node exporter {{ $labels.instance }} unreachable"
+          description: "Node exporter has been unreachable for more than 2 minutes."
+
+      - alert: NodeHighCPU
+        expr: 1 - avg by (instance) (rate(node_cpu_seconds_total{mode="idle"}[5m])) > 0.85
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High CPU on {{ $labels.instance }} ({{ $value | humanizePercentage }})"
+          description: "CPU usage above 85% for 10 minutes."
+
+      - alert: NodeCriticalCPU
+        expr: 1 - avg by (instance) (rate(node_cpu_seconds_total{mode="idle"}[5m])) > 0.95
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Critical CPU on {{ $labels.instance }} ({{ $value | humanizePercentage }})"
+          description: "CPU usage above 95% for 5 minutes."
+
+      - alert: NodeHighMemory
+        expr: 1 - node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes > 0.90
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High memory on {{ $labels.instance }} ({{ $value | humanizePercentage }})"
+          description: "Memory usage above 90%."
+
+      - alert: NodeCriticalMemory
+        expr: 1 - node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes > 0.95
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Critical memory on {{ $labels.instance }} ({{ $value | humanizePercentage }})"
+          description: "Memory usage above 95% — OOM kill risk."
+
+      - alert: NodeDiskWarning
+        expr: node_filesystem_avail_bytes{fstype!~"tmpfs|fuse.lxcfs|overlay"} / node_filesystem_size_bytes < 0.15
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Disk space low on {{ $labels.instance }}:{{ $labels.mountpoint }}"
+          description: "Less than 15% disk space available."
+
+      - alert: NodeDiskCritical
+        expr: node_filesystem_avail_bytes{fstype!~"tmpfs|fuse.lxcfs|overlay"} / node_filesystem_size_bytes < 0.05
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Critical disk space on {{ $labels.instance }}:{{ $labels.mountpoint }}"
+          description: "Less than 5% disk space — writes may fail."
+
+      - alert: NodeClockSkew
+        expr: abs(node_timex_offset_seconds) > 0.05
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Clock skew on {{ $labels.instance }}"
+          description: "System clock offset is {{ $value }}s. TLS and logs may be affected."

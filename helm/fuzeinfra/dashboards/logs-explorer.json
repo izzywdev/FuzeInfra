@@ -1,0 +1,175 @@
+{
+  "annotations": {"list": []},
+  "editable": true,
+  "graphTooltip": 1,
+  "id": null,
+  "panels": [
+    {
+      "datasource": {"type": "loki", "uid": "${loki_datasource}"},
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {"fillOpacity": 8, "lineWidth": 1},
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 6, "w": 12, "x": 0, "y": 0},
+      "id": 1,
+      "options": {
+        "legend": {"calcs": [], "displayMode": "list", "placement": "bottom"},
+        "tooltip": {"mode": "multi"}
+      },
+      "title": "Log Volume by Pod",
+      "type": "timeseries",
+      "targets": [
+        {
+          "datasource": {"type": "loki", "uid": "${loki_datasource}"},
+          "expr": "sum by (pod) (rate({namespace=~\"$namespace\", pod=~\"$pod\"}[$__interval]))",
+          "legendFormat": "{{ pod }}"
+        }
+      ]
+    },
+    {
+      "datasource": {"type": "loki", "uid": "${loki_datasource}"},
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {"fillOpacity": 12, "lineWidth": 2},
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 6, "w": 12, "x": 12, "y": 0},
+      "id": 2,
+      "options": {
+        "legend": {"calcs": [], "displayMode": "list", "placement": "bottom"},
+        "tooltip": {"mode": "multi"}
+      },
+      "title": "Error / Warn Rate by Pod",
+      "type": "timeseries",
+      "targets": [
+        {
+          "datasource": {"type": "loki", "uid": "${loki_datasource}"},
+          "expr": "sum by (pod) (rate({namespace=~\"$namespace\", pod=~\"$pod\"} |~ \"(?i)(error|exception|fatal|panic)\" [$__interval]))",
+          "legendFormat": "{{ pod }} errors"
+        },
+        {
+          "datasource": {"type": "loki", "uid": "${loki_datasource}"},
+          "expr": "sum by (pod) (rate({namespace=~\"$namespace\", pod=~\"$pod\"} |~ \"(?i)(warn|warning)\" [$__interval]))",
+          "legendFormat": "{{ pod }} warnings"
+        }
+      ]
+    },
+    {
+      "datasource": {"type": "loki", "uid": "${loki_datasource}"},
+      "fieldConfig": {"defaults": {}, "overrides": []},
+      "gridPos": {"h": 18, "w": 24, "x": 0, "y": 6},
+      "id": 3,
+      "options": {
+        "dedupStrategy": "none",
+        "enableLogDetails": true,
+        "prettifyLogMessage": false,
+        "showCommonLabels": false,
+        "showLabels": false,
+        "showTime": true,
+        "sortOrder": "Descending",
+        "wrapLogMessage": true
+      },
+      "title": "Logs",
+      "type": "logs",
+      "targets": [
+        {
+          "datasource": {"type": "loki", "uid": "${loki_datasource}"},
+          "expr": "{namespace=~\"$namespace\", pod=~\"$pod\"} |~ \"(?i)$search\"",
+          "legendFormat": ""
+        }
+      ]
+    },
+    {
+      "datasource": {"type": "loki", "uid": "${loki_datasource}"},
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {"fillOpacity": 8, "lineWidth": 1},
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 6, "w": 24, "x": 0, "y": 24},
+      "id": 4,
+      "options": {
+        "legend": {"calcs": [], "displayMode": "list", "placement": "bottom"},
+        "tooltip": {"mode": "multi"}
+      },
+      "title": "Log Volume by Namespace",
+      "type": "timeseries",
+      "targets": [
+        {
+          "datasource": {"type": "loki", "uid": "${loki_datasource}"},
+          "expr": "sum by (namespace) (rate({namespace=~\"$namespace\"}[$__interval]))",
+          "legendFormat": "{{ namespace }}"
+        }
+      ]
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 38,
+  "tags": ["logs", "loki", "fuzeinfra"],
+  "templating": {
+    "list": [
+      {
+        "current": {},
+        "hide": 0,
+        "label": "Loki",
+        "multi": false,
+        "name": "loki_datasource",
+        "query": "loki",
+        "refresh": 1,
+        "type": "datasource"
+      },
+      {
+        "current": {"selected": true, "text": ["All"], "value": ["$__all"]},
+        "datasource": {"type": "loki", "uid": "${loki_datasource}"},
+        "definition": "label_values(namespace)",
+        "hide": 0,
+        "includeAll": true,
+        "allValue": ".*",
+        "label": "Namespace",
+        "multi": true,
+        "name": "namespace",
+        "query": "label_values(namespace)",
+        "refresh": 2,
+        "type": "query"
+      },
+      {
+        "current": {"selected": true, "text": ["All"], "value": ["$__all"]},
+        "datasource": {"type": "loki", "uid": "${loki_datasource}"},
+        "definition": "label_values({namespace=~\"$namespace\"}, pod)",
+        "hide": 0,
+        "includeAll": true,
+        "allValue": ".*",
+        "label": "Pod",
+        "multi": true,
+        "name": "pod",
+        "query": "label_values({namespace=~\"$namespace\"}, pod)",
+        "refresh": 2,
+        "type": "query"
+      },
+      {
+        "current": {"value": ""},
+        "hide": 0,
+        "label": "Search",
+        "name": "search",
+        "query": "",
+        "type": "textbox"
+      }
+    ]
+  },
+  "time": {"from": "now-1h", "to": "now"},
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "Logs Explorer",
+  "uid": "fuzeinfra-logs",
+  "version": 1
+}
