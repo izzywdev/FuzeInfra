@@ -144,18 +144,18 @@ resource "cloudflare_zero_trust_access_policy" "app_launcher" {
 # ---------------------------------------------------------------------------
 locals {
   launcher_services = {
-    "argocd"        = { name = "ArgoCD",       logo = "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/argocd.png" }
-    "grafana"       = { name = "Grafana",       logo = "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/grafana.png" }
-    "prometheus"    = { name = "Prometheus",    logo = "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/prometheus.png" }
-    "alertmanager"  = { name = "Alertmanager",  logo = "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/alertmanager.png" }
-    "airflow"       = { name = "Airflow",       logo = "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/apache-airflow.png" }
-    "flower"        = { name = "Flower",        logo = "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/celery.png" }
-    "kafka-ui"      = { name = "Kafka UI",      logo = "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/kafka.png" }
-    "mongo-express" = { name = "Mongo Express", logo = "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/mongodb.png" }
-    "rabbitmq"      = { name = "RabbitMQ",      logo = "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/rabbitmq.png" }
-    "neo4j"         = { name = "Neo4j",         logo = "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/neo4j.png" }
-    "elasticsearch" = { name = "Elasticsearch", logo = "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/elasticsearch.png" }
-    "chromadb"      = { name = "ChromaDB",      logo = "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/chroma.png" }
+    "argocd"        = { name = "ArgoCD",       logo = "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/argo-cd.png",       path = "" }
+    "grafana"       = { name = "Grafana",       logo = "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/grafana.png",       path = "" }
+    "prometheus"    = { name = "Prometheus",    logo = "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/prometheus.png",    path = "" }
+    "alertmanager"  = { name = "Alertmanager",  logo = "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/alertmanager.png",  path = "" }
+    "airflow"       = { name = "Airflow",       logo = "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/apache-airflow.png",path = "" }
+    "flower"        = { name = "Flower",        logo = "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/celery.png",        path = "" }
+    "kafka-ui"      = { name = "Kafka UI",      logo = "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/kafka.png",         path = "" }
+    "mongo-express" = { name = "Mongo Express", logo = "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/mongodb.png",       path = "" }
+    "rabbitmq"      = { name = "RabbitMQ",      logo = "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/rabbitmq.png",      path = "" }
+    "neo4j"         = { name = "Neo4j",         logo = "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/neo4j.png",         path = "" }
+    "elasticsearch" = { name = "Elasticsearch", logo = "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/elasticsearch.png", path = "" }
+    "chromadb"      = { name = "ChromaDB",      logo = "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/chroma.png",        path = "/api/v2/heartbeat" }
   }
 }
 
@@ -163,7 +163,7 @@ resource "cloudflare_zero_trust_access_application" "launcher_bookmark" {
   for_each         = nonsensitive(local.cloudflare_enabled) ? local.launcher_services : {}
   account_id       = var.cloudflare_account_id
   name             = each.value.name
-  domain           = "https://${each.key}.${local.prod_domain}"
+  domain           = "https://${each.key}.${local.prod_domain}${each.value.path}"
   type             = "bookmark"
   app_launcher_visible = true
   logo_url         = each.value.logo
