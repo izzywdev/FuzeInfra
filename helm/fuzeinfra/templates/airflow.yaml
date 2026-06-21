@@ -34,6 +34,35 @@ referenced via $(VAR) interpolation to build the SQLAlchemy/Celery URLs.
   value: "airflow.api.auth.backend.basic_auth"
 {{- end -}}
 
+{{- /*
+  Shared DAG volumes/initContainer block.
+  Kubernetes ConfigMap directory mounts create a timestamped directory (e.g.
+  ..2026_06_21_17_06_42.3303819634) plus a ..data symlink pointing to it.
+  Airflow's list_py_file_paths walks with followlinks=True and tracks
+  os.path.realpath per directory; both entries resolve to the same real path,
+  triggering "Detected recursive loop when walking DAG directory".
+  Fix: copy DAG files from the ConfigMap mount into a plain emptyDir — no
+  symlinks, no loop.
+*/ -}}
+{{- define "fuzeinfra.dagInitContainer" -}}
+- name: dag-sync
+  image: busybox
+  command: ["sh", "-c", "cp /configmap-dags/*.py /dags/ 2>/dev/null || true"]
+  volumeMounts:
+    - name: dags-cm
+      mountPath: /configmap-dags
+    - name: dags
+      mountPath: /dags
+{{- end -}}
+
+{{- define "fuzeinfra.dagVolumes" -}}
+- name: dags
+  emptyDir: {}
+- name: dags-cm
+  configMap:
+    name: fuzeinfra-airflow-dags
+{{- end -}}
+
 {{- if .Values.airflow.enabled }}
 {{- /* Example DAG shipped as a ConfigMap so the stack works out of the box.
      For production, replace with git-sync or a baked image. */ -}}
@@ -119,35 +148,6 @@ spec:
                 --username "$AIRFLOW_ADMIN_USER" --firstname Admin --lastname User \
                 --role Admin --email admin@example.com --password "$AIRFLOW_ADMIN_PASSWORD" || true
 ---
-{{- /*
-  Shared DAG volumes/initContainer block.
-  Kubernetes ConfigMap directory mounts create a timestamped directory (e.g.
-  ..2026_06_21_17_06_42.3303819634) plus a ..data symlink pointing to it.
-  Airflow's list_py_file_paths walks with followlinks=True and tracks
-  os.path.realpath per directory; both entries resolve to the same real path,
-  triggering "Detected recursive loop when walking DAG directory".
-  Fix: copy DAG files from the ConfigMap mount into a plain emptyDir — no
-  symlinks, no loop.
-*/ -}}
-{{- define "fuzeinfra.dagInitContainer" -}}
-- name: dag-sync
-  image: busybox
-  command: ["sh", "-c", "cp /configmap-dags/*.py /dags/ 2>/dev/null || true"]
-  volumeMounts:
-    - name: dags-cm
-      mountPath: /configmap-dags
-    - name: dags
-      mountPath: /dags
-{{- end -}}
-
-{{- define "fuzeinfra.dagVolumes" -}}
-- name: dags
-  emptyDir: {}
-- name: dags-cm
-  configMap:
-    name: fuzeinfra-airflow-dags
-{{- end -}}
-
 {{- /* ===================== Airflow Webserver ===================== */}}
 apiVersion: v1
 kind: Service
