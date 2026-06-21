@@ -402,62 +402,67 @@ resource "cloudflare_zero_trust_access_policy" "crit_alert_bridge_bypass" {
   }
 }
 
-# Inject CRIT_BRIDGE_TOKEN into the cluster secret so Grafana can read it via env var.
-# Runs after the tunnel token is already in place (depends on the extract_kubeconfig step).
-resource "null_resource" "crit_bridge_token_secret" {
-  count      = local.cloudflare_enabled && var.crit_bridge_token != "" ? 1 : 0
-  depends_on = [null_resource.extract_kubeconfig]
-
-  triggers = {
-    token_hash   = sha256(var.crit_bridge_token)
-    provision_id = null_resource.provision.id
-  }
-
-  provisioner "local-exec" {
-    interpreter = ["bash", "-c"]
-    command     = <<-EOT
-      export KUBECONFIG="${path.root}/k3s-kubeconfig.yaml"
-      for i in $(seq 1 30); do
-        kubectl get secret fuzeinfra-secrets -n fuzeinfra &>/dev/null && break
-        echo "  Waiting for fuzeinfra-secrets ($i/30)..."
-        sleep 10
-      done
-      TOKEN_B64=$(printf '%s' '${var.crit_bridge_token}' | base64 -w0 2>/dev/null || printf '%s' '${var.crit_bridge_token}' | base64)
-      kubectl patch secret fuzeinfra-secrets -n fuzeinfra \
-        --type=merge \
-        -p "{\"data\":{\"CRIT_BRIDGE_TOKEN\":\"$${TOKEN_B64}\"}}"
-      echo "CRIT_BRIDGE_TOKEN stored in fuzeinfra-secrets."
-    EOT
-  }
+# ---------------------------------------------------------------------------
+# fuzeinfra-tunnel-secrets — Terraform-owned Secret (ArgoCD never touches it)
+#
+# Separate from fuzeinfra-secrets (Helm/ArgoCD-owned) so that ArgoCD resyncs
+# and full cluster wipes never wipe these keys. Any `terraform apply` after a
+# fresh provision recreates this secret automatically via provision_id trigger.
+#
+# Keys:
+#   CLOUDFLARE_TUNNEL_TOKEN       — bearer token for cloudflared token mode
+#   CLOUDFLARE_TUNNEL_CREDENTIALS — JSON credentials for local-config mode
+#   CRIT_BRIDGE_TOKEN             — shared secret for the CF Worker webhook bridge
+# ---------------------------------------------------------------------------
+locals {
+  tunnel_credentials_json = local.cloudflare_enabled ? jsonencode({
+    AccountTag   = var.cloudflare_account_id
+    TunnelID     = cloudflare_zero_trust_tunnel_cloudflared.fuzeinfra[0].id
+    TunnelSecret = random_bytes.tunnel_secret[0].base64
+  }) : ""
 }
 
-resource "null_resource" "cloudflare_tunnel_token" {
+resource "null_resource" "tunnel_secrets" {
   count      = local.cloudflare_enabled ? 1 : 0
   depends_on = [null_resource.extract_kubeconfig]
 
   triggers = {
-    # Re-run whenever tunnel ID or secret changes (e.g. after taint + rotate),
-    # or after a full re-provision (which wipes the secret out of the cluster).
-    tunnel_id    = cloudflare_zero_trust_tunnel_cloudflared.fuzeinfra[0].id
-    token_hash   = sha256(local.tunnel_token)
-    provision_id = null_resource.provision.id
+    # Re-run on: new provision, tunnel rotation, or crit-bridge token change.
+    provision_id  = null_resource.provision.id
+    tunnel_id     = cloudflare_zero_trust_tunnel_cloudflared.fuzeinfra[0].id
+    token_hash    = sha256(local.tunnel_token)
+    crit_hash     = sha256(var.crit_bridge_token)
   }
 
   provisioner "local-exec" {
     interpreter = ["bash", "-c"]
     command     = <<-EOT
       export KUBECONFIG="${path.root}/k3s-kubeconfig.yaml"
-      # Wait for the secret to exist (ArgoCD must have synced the Helm release).
+
+      # Wait for the namespace to exist (ArgoCD PreSync must have run).
       for i in $(seq 1 30); do
-        kubectl get secret fuzeinfra-secrets -n fuzeinfra &>/dev/null && break
-        echo "  Waiting for fuzeinfra-secrets ($i/30)..."
+        kubectl get namespace fuzeinfra &>/dev/null && break
+        echo "  Waiting for fuzeinfra namespace ($i/30)..."
         sleep 10
       done
+
       TOKEN_B64=$(printf '%s' '${local.tunnel_token}' | base64 -w0 2>/dev/null || printf '%s' '${local.tunnel_token}' | base64)
-      kubectl patch secret fuzeinfra-secrets -n fuzeinfra \
+      CREDS_B64=$(printf '%s' '${local.tunnel_credentials_json}' | base64 -w0 2>/dev/null || printf '%s' '${local.tunnel_credentials_json}' | base64)
+      CRIT_B64=$(printf '%s' '${var.crit_bridge_token}' | base64 -w0 2>/dev/null || printf '%s' '${var.crit_bridge_token}' | base64)
+
+      kubectl create secret generic fuzeinfra-tunnel-secrets \
+        -n fuzeinfra \
+        --from-literal=CLOUDFLARE_TUNNEL_TOKEN=placeholder \
+        --from-literal=CLOUDFLARE_TUNNEL_CREDENTIALS=placeholder \
+        --from-literal=CRIT_BRIDGE_TOKEN=placeholder \
+        --dry-run=client -o yaml \
+      | kubectl apply -f -
+
+      kubectl patch secret fuzeinfra-tunnel-secrets -n fuzeinfra \
         --type=merge \
-        -p "{\"data\":{\"CLOUDFLARE_TUNNEL_TOKEN\":\"$${TOKEN_B64}\"}}"
-      echo "Cloudflare tunnel token stored in fuzeinfra-secrets."
+        -p "{\"data\":{\"CLOUDFLARE_TUNNEL_TOKEN\":\"$${TOKEN_B64}\",\"CLOUDFLARE_TUNNEL_CREDENTIALS\":\"$${CREDS_B64}\",\"CRIT_BRIDGE_TOKEN\":\"$${CRIT_B64}\"}}"
+
+      echo "fuzeinfra-tunnel-secrets created/updated."
     EOT
   }
 }

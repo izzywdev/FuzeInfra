@@ -171,7 +171,7 @@ spec:
             - name: TUNNEL_TOKEN
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "fuzeinfra.secretName" . }}
+                  name: fuzeinfra-tunnel-secrets
                   key: CLOUDFLARE_TUNNEL_TOKEN
                   optional: true
           {{- end }}
@@ -206,7 +206,7 @@ spec:
             name: fuzeinfra-cloudflared-config
         - name: credentials
           secret:
-            secretName: {{ include "fuzeinfra.secretName" . }}
+            secretName: fuzeinfra-tunnel-secrets
             items:
               - key: CLOUDFLARE_TUNNEL_CREDENTIALS
                 path: creds.json

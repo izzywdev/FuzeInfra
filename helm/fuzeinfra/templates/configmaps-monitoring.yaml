@@ -410,7 +410,7 @@ data:
   # ---------------------------------------------------------------------------
   # Contact point — webhook to the CF Worker bridge that forwards to GHA.
   # CRIT_BRIDGE_TOKEN env var is injected into the Grafana pod from
-  # fuzeinfra-secrets (patched by terraform after first apply).
+  # fuzeinfra-tunnel-secrets (created by terraform/contabo — ArgoCD never touches it).
   # If the var is empty, no Authorization header is sent (acceptable for
   # internal-only Worker URLs).
   # ---------------------------------------------------------------------------

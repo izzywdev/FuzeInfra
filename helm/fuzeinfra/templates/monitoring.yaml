@@ -245,7 +245,7 @@ spec:
             - name: CRIT_BRIDGE_TOKEN
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "fuzeinfra.secretName" . }}
+                  name: fuzeinfra-tunnel-secrets
                   key: CRIT_BRIDGE_TOKEN
                   optional: true
           ports:
