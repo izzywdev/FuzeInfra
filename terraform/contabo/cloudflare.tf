@@ -33,11 +33,6 @@ resource "cloudflare_zero_trust_tunnel_cloudflared" "fuzeinfra" {
   name       = var.tunnel_name
   secret     = random_bytes.tunnel_secret[0].base64
 
-  lifecycle {
-    # random_bytes.tunnel_secret is not importable; the live secret was set on first apply
-    # and the tunnel is healthy — prevent TF from regenerating it and forcing tunnel replacement.
-    ignore_changes = [secret]
-  }
 }
 
 # Routing rules — managed on Cloudflare's side, fetched by cloudflared at startup.
