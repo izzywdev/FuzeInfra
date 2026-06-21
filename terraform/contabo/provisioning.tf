@@ -102,6 +102,9 @@ resource "null_resource" "provision" {
       # External URL used by ArgoCD for CORS headers and OAuth callbacks.
       # Uses prod.fuzefront.com — the Cloudflare tunnel domain.
       "kubectl -n argocd patch configmap argocd-cm --type merge -p '{\"data\":{\"url\":\"https://argocd.prod.fuzefront.com\"}}'",
+      # Traefik runs as ClusterIP so Ingress never gets a LB address; without this
+      # custom health check ArgoCD marks every Ingress as Progressing forever.
+      "kubectl -n argocd patch configmap argocd-cm --type merge -p '{\"data\":{\"resource.customizations.health.networking.k8s.io_Ingress\":\"hs = {}\\nhs.status = \\\"Healthy\\\"\\nhs.message = \\\"Ingress is healthy (ClusterIP mode)\\\"\\nreturn hs\\n\"}}'",
       "kubectl -n argocd rollout restart deployment/argocd-server",
       "kubectl -n argocd rollout status deployment/argocd-server --timeout=60s",
       # Ingress for argocd.prod.fuzefront.com (Cloudflare tunnel → Traefik → ArgoCD)
