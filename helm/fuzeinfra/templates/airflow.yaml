@@ -112,6 +112,15 @@ spec:
               PGPASSWORD="$POSTGRES_PASSWORD" psql -h fuzeinfra-postgres -U "$POSTGRES_USER" -d postgres -tc \
                 "SELECT 1 FROM pg_database WHERE datname = 'airflow'" | grep -q 1 || \
                 PGPASSWORD="$POSTGRES_PASSWORD" psql -h fuzeinfra-postgres -U "$POSTGRES_USER" -d postgres -c "CREATE DATABASE airflow"
+              # Pre-create a database matching the role name ("$POSTGRES_USER").
+              # Clients/health-probes that connect without naming a database
+              # (e.g. `pg_isready -U $POSTGRES_USER`) fall back to a DB named
+              # after the role, otherwise spamming
+              # `FATAL: database "..." does not exist` on every probe.
+              echo "Ensuring role-default '$POSTGRES_USER' database exists..."
+              PGPASSWORD="$POSTGRES_PASSWORD" psql -h fuzeinfra-postgres -U "$POSTGRES_USER" -d postgres -tc \
+                "SELECT 1 FROM pg_database WHERE datname = '$POSTGRES_USER'" | grep -q 1 || \
+                PGPASSWORD="$POSTGRES_PASSWORD" psql -h fuzeinfra-postgres -U "$POSTGRES_USER" -d postgres -c "CREATE DATABASE \"$POSTGRES_USER\""
               echo "Running airflow db migrate..."
               airflow db migrate
               echo "Creating admin user (idempotent)..."

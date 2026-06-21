@@ -58,7 +58,7 @@ data:
         - name: PostgreSQL
           type: database
           endpoint: fuzeinfra-postgres:5432
-          healthcheck: "pg_isready -h fuzeinfra-postgres -p 5432"
+          healthcheck: "pg_isready -h fuzeinfra-postgres -p 5432 -U fuzeinfra -d postgres"
           critical: true
           
         - name: MongoDB  
