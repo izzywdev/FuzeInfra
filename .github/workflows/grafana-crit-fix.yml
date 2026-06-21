@@ -10,22 +10,32 @@ name: Grafana Error Log Auto-Fix
 #   2. preflight job: once a fix PR or triage issue carrying the
 #      "crit-autofix" label is open, every queued run exits immediately.
 #      The main job only runs when there is nothing already in flight.
+#      ignore-candidate issues also carry crit-autofix, so they block
+#      further alerts while awaiting the user's approval via Telegram.
 #
 # Flow:
 #   preflight → check open crit-autofix PRs/issues → skip if found
 #   analyze-and-fix (if not skipped):
 #     1. Set up kubectl with KUBE_CONFIG secret
 #     2. Port-forward Loki and fetch the last 30 min of ERROR/CRIT/FATAL/PANIC logs
-#     3. Run Claude Code headlessly — analyse logs + codebase
-#     4a. If Claude can make a fix: commit, open PR (+ label), enable auto-merge
-#     4b. If not: open a GitHub issue (+ label) with Claude's analysis
-#     5. Send email notification in both cases
+#     3. Check suppressed patterns (.github/crit-ignore-patterns.json)
+#        → if all logs match known-good patterns, exit silently
+#     4. Run Claude Code headlessly — analyse logs + codebase
+#     4a. action=fix:    commit, open PR (+ label), enable auto-merge
+#     4b. action=issue:  open a GitHub issue (+ label) with Claude's analysis
+#     4c. action=ignore: open a suppress-approval issue (+ crit-autofix label)
+#                        and send a Telegram notification requesting approval.
+#                        When the user closes the issue, update-ignore-list.yml
+#                        appends the pattern to .github/crit-ignore-patterns.json.
+#     5. Send email for fix/issue; Telegram message for ignore.
 #
 # Required GitHub secrets:
-#   KUBE_CONFIG        — base64-encoded k3s kubeconfig (set by terraform apply)
-#   ANTHROPIC_API_KEY  — Claude API key
-#   GMAIL_USERNAME     — izzy.weinberg@gmail.com (or any Gmail address)
-#   GMAIL_APP_PASSWORD — Gmail App Password (myaccount.google.com/apppasswords)
+#   KUBE_CONFIG         — base64-encoded k3s kubeconfig
+#   ANTHROPIC_API_KEY   — Claude API key
+#   GMAIL_USERNAME      — Gmail address for email alerts
+#   GMAIL_APP_PASSWORD  — Gmail App Password
+#   TELEGRAM_BOT_TOKEN  — from @BotFather
+#   TELEGRAM_CHAT_ID    — your personal Telegram user/chat ID
 
 on:
   repository_dispatch:
@@ -56,10 +66,15 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # Ensure the label exists (idempotent)
+          # Ensure both labels exist (idempotent)
           gh label create crit-autofix \
             --color "e11d48" \
             --description "Opened by CRIT log auto-fix pipeline" \
+            --repo "${{ github.repository }}" 2>/dev/null || true
+
+          gh label create ignore-candidate \
+            --color "f59e0b" \
+            --description "Pending user approval to suppress this alert pattern" \
             --repo "${{ github.repository }}" 2>/dev/null || true
 
           OPEN_PRS=$(gh pr list \
@@ -128,19 +143,33 @@ jobs:
             echo "LOGS_EOF"
           } >> "$GITHUB_OUTPUT"
 
-      # ── run Claude Code ─────────────────────────────────────────────────────
+      # ── suppression check ───────────────────────────────────────────────────
+      - name: Check suppressed patterns
+        id: suppress
+        env:
+          LOG_CTX: ${{ steps.logs.outputs.logs }}
+        run: python3 .github/check-suppressed.py
+
+      - name: Skip — all errors match suppress list
+        if: steps.suppress.outputs.skip == 'true'
+        run: |
+          echo "::notice::All log lines matched suppressed patterns (${{ steps.suppress.outputs.suppressed_count }} lines). No action needed."
+
+      # ── run Claude Code (only when unsuppressed logs remain) ────────────────
       - name: Install Claude Code CLI
+        if: steps.suppress.outputs.skip != 'true'
         run: npm install -g @anthropic-ai/claude-code
 
       - name: Run Claude Code agent
         id: claude
+        if: steps.suppress.outputs.skip != 'true'
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           ALERT_SUMMARY: ${{ github.event.client_payload.summary }}
           ALERT_DESC: ${{ github.event.client_payload.description }}
           ALERT_LABELS: ${{ github.event.client_payload.labels }}
           FIRED_AT: ${{ github.event.client_payload.fired_at }}
-          LOG_CTX: ${{ steps.logs.outputs.logs }}
+          LOG_CTX: ${{ steps.suppress.outputs.filtered_logs }}
         run: |
           PROMPT=$(python3 .github/gen-claude-prompt.py)
 
@@ -161,14 +190,17 @@ jobs:
             echo "JSON_EOF"
           } >> "$GITHUB_OUTPUT"
 
-      # ── create PR or issue (both tagged crit-autofix for dedup) ────────────
-      - name: Create fix PR or issue
+      # ── create PR, issue, or ignore request ────────────────────────────────
+      - name: Create fix PR, issue, or ignore request
         id: act
+        if: steps.suppress.outputs.skip != 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           FIRED_AT: ${{ github.event.client_payload.fired_at }}
           ALERT_SUMMARY: ${{ github.event.client_payload.summary }}
-          LOG_CTX: ${{ steps.logs.outputs.logs }}
+          LOG_CTX: ${{ steps.suppress.outputs.filtered_logs }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           WORKFLOW_URL: ${{ github.server_url }}/${{ github.repository }}/actions/workflows/grafana-crit-fix.yml
           RUN_NUMBER: ${{ github.run_number }}
@@ -231,19 +263,53 @@ jobs:
             echo "url=$URL"     >> "$GITHUB_OUTPUT"
           fi
 
-      # ── email ───────────────────────────────────────────────────────────────
+          if [ "$ACTION" = "ignore" ]; then
+            PATTERN=$(python3 -c "import json; r=json.loads(open('/tmp/claude_result.json').read()); print(r.get('pattern', r.get('title', 'unknown pattern')))")
+            REASON=$(python3 -c "import json; print(json.loads(open('/tmp/claude_result.json').read()).get('reason', 'No reason provided'))")
+
+            python3 .github/gen-ignore-body.py > /tmp/ignore_body.md
+
+            TITLE_SHORT="${PATTERN:0:80}"
+            URL=$(gh issue create \
+              --title "🔕 Suppress: ${TITLE_SHORT}" \
+              --label "ignore-candidate" \
+              --label "crit-autofix" \
+              --body-file /tmp/ignore_body.md)
+
+            # Send Telegram approval request (jq handles all JSON/HTML escaping)
+            curl -sf -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+              -H "Content-Type: application/json" \
+              -d "$(jq -n \
+                --arg chat_id "$TELEGRAM_CHAT_ID" \
+                --arg pattern "$PATTERN" \
+                --arg reason "$REASON" \
+                --arg url "$URL" \
+                '{
+                  chat_id: $chat_id,
+                  parse_mode: "HTML",
+                  disable_web_page_preview: true,
+                  text: ("🔕 <b>Claude suggests ignoring this error</b>\n\nPattern: <code>" + $pattern + "</code>\nReason: " + $reason + "\n\n<a href=\"" + $url + "\">✅ Approve suppression</a>\nClose the GitHub issue to permanently suppress future alerts for this pattern.")
+                }')" || echo "::warning::Telegram notification failed (check TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID secrets)"
+
+            echo "action=ignore" >> "$GITHUB_OUTPUT"
+            echo "url=$URL"      >> "$GITHUB_OUTPUT"
+          fi
+
+      # ── email (fix and issue actions only) ─────────────────────────────────
       - name: Prepare email subject
         id: email
+        if: steps.suppress.outputs.skip != 'true' && (steps.act.outputs.action == 'fix' || steps.act.outputs.action == 'issue')
         run: |
           if [ "${{ steps.act.outputs.action }}" = "fix" ]; then
-            echo "subject=🚨 FuzeInfra CRIT Alert — Fix PR Opened" >> "$GITHUB_OUTPUT"
+            echo "subject=🚨 FuzeInfra Alert — Fix PR Opened" >> "$GITHUB_OUTPUT"
             echo "action_line=Fix PR: ${{ steps.act.outputs.url }}" >> "$GITHUB_OUTPUT"
           else
-            echo "subject=🚨 FuzeInfra CRIT Alert — Needs Attention (Issue Created)" >> "$GITHUB_OUTPUT"
+            echo "subject=🚨 FuzeInfra Alert — Needs Attention (Issue Created)" >> "$GITHUB_OUTPUT"
             echo "action_line=GitHub Issue: ${{ steps.act.outputs.url }}" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Send email
+        if: steps.suppress.outputs.skip != 'true' && (steps.act.outputs.action == 'fix' || steps.act.outputs.action == 'issue')
         uses: dawidd6/action-send-mail@v3
         with:
           server_address: smtp.gmail.com
