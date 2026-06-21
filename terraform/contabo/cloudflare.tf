@@ -414,7 +414,8 @@ resource "null_resource" "crit_bridge_token_secret" {
   depends_on = [null_resource.extract_kubeconfig]
 
   triggers = {
-    token_hash = sha256(var.crit_bridge_token)
+    token_hash   = sha256(var.crit_bridge_token)
+    provision_id = null_resource.provision.id
   }
 
   provisioner "local-exec" {
@@ -440,9 +441,11 @@ resource "null_resource" "cloudflare_tunnel_token" {
   depends_on = [null_resource.extract_kubeconfig]
 
   triggers = {
-    # Re-run whenever tunnel ID or secret changes (e.g. after taint + rotate).
-    tunnel_id  = cloudflare_zero_trust_tunnel_cloudflared.fuzeinfra[0].id
-    token_hash = sha256(local.tunnel_token)
+    # Re-run whenever tunnel ID or secret changes (e.g. after taint + rotate),
+    # or after a full re-provision (which wipes the secret out of the cluster).
+    tunnel_id    = cloudflare_zero_trust_tunnel_cloudflared.fuzeinfra[0].id
+    token_hash   = sha256(local.tunnel_token)
+    provision_id = null_resource.provision.id
   }
 
   provisioner "local-exec" {

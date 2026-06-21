@@ -1,15 +1,19 @@
 # ---------------------------------------------------------------------------
 # k3s + ArgoCD provisioning via SSH remote-exec
 #
-# Runs in order:
-#   1. Install k3s (single-node, TLS SAN for external IP)
-#   2. Wait for node to be Ready
-#   3. Install ArgoCD via manifest
-#   4. Wait for ArgoCD to be available
-#   5. Apply AppProject + prod Application
+# Two resources, two scopes:
 #
-# Re-running terraform apply is safe — k3s install is idempotent, kubectl
-# apply is idempotent.  Triggers on server IP change (i.e. VPS replaced).
+#   null_resource.provision   — full k3s + ArgoCD bootstrap.
+#     Triggers ONLY on server_ip change (VPS replaced / first apply).
+#     k3s install is idempotent; ArgoCD install is idempotent.
+#     Does NOT trigger on ArgoCD manifest changes — ArgoCD auto-syncs from git.
+#
+#   null_resource.argocd_sync — lightweight manifest re-apply.
+#     Triggers when ArgoCD project/app YAML changes.
+#     Only pushes the updated YAML to the running cluster; never re-installs k3s.
+#
+# Separation prevents a routine commit to argocd/ from wiping cluster state
+# by triggering a full re-provision cascade (which also re-runs secret patches).
 # ---------------------------------------------------------------------------
 
 locals {
@@ -20,10 +24,10 @@ locals {
 }
 
 resource "null_resource" "provision" {
+  # Only re-run when the VPS is replaced (IP changes) or on first apply.
+  # ArgoCD manifest changes are handled by null_resource.argocd_sync below.
   triggers = {
-    server_ip   = local.server_ip
-    app_sha     = filesha256(local.argocd_app_path)
-    project_sha = filesha256(local.argocd_project_path)
+    server_ip = local.server_ip
   }
 
   connection {
@@ -116,6 +120,55 @@ resource "null_resource" "provision" {
 }
 
 # ---------------------------------------------------------------------------
+# Lightweight ArgoCD manifest re-apply
+#
+# Re-pushes project/app/ingress YAML when those files change. The cluster is
+# already running; this never touches k3s. Depends on provision so it waits
+# for a fresh cluster on first apply or after VPS replacement.
+# ---------------------------------------------------------------------------
+resource "null_resource" "argocd_sync" {
+  depends_on = [null_resource.provision]
+
+  triggers = {
+    server_ip   = local.server_ip
+    app_sha     = filesha256(local.argocd_app_path)
+    project_sha = filesha256(local.argocd_project_path)
+  }
+
+  connection {
+    type        = "ssh"
+    host        = local.server_ip
+    user        = var.server_user
+    private_key = file(var.ssh_private_key_path)
+    timeout     = "2m"
+  }
+
+  provisioner "file" {
+    source      = local.argocd_project_path
+    destination = "/tmp/argocd-project.yaml"
+  }
+
+  provisioner "file" {
+    source      = local.argocd_app_path
+    destination = "/tmp/argocd-app.yaml"
+  }
+
+  provisioner "file" {
+    source      = local.argocd_ingress_prod_path
+    destination = "/tmp/argocd-ingress-prod.yaml"
+  }
+
+  provisioner "remote-exec" {
+    inline = [
+      "kubectl apply -f /tmp/argocd-project.yaml",
+      "kubectl apply -f /tmp/argocd-app.yaml",
+      "kubectl apply -f /tmp/argocd-ingress-prod.yaml",
+      "echo 'ArgoCD manifests synced'",
+    ]
+  }
+}
+
+# ---------------------------------------------------------------------------
 # Extract kubeconfig from k3s, rewrite 127.0.0.1 → server IP, store locally
 # Used by the github secret resource below
 # ---------------------------------------------------------------------------
@@ -123,7 +176,8 @@ resource "null_resource" "extract_kubeconfig" {
   depends_on = [null_resource.provision]
 
   triggers = {
-    server_ip = local.server_ip
+    server_ip    = local.server_ip
+    provision_id = null_resource.provision.id
   }
 
   provisioner "local-exec" {
