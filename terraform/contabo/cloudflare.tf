@@ -154,6 +154,8 @@ locals {
     "mongo-express" = { name = "Mongo Express", logo = "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/mongodb.png" }
     "rabbitmq"      = { name = "RabbitMQ",      logo = "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/rabbitmq.png" }
     "neo4j"         = { name = "Neo4j",         logo = "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/neo4j.png" }
+    "elasticsearch" = { name = "Elasticsearch", logo = "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/elasticsearch.png" }
+    "chromadb"      = { name = "ChromaDB",      logo = "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/chroma.png" }
   }
 }
 
