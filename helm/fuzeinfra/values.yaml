@@ -160,24 +160,112 @@ prometheus:
   image: prom/prometheus:latest
   port: 9090
   storage: 10Gi
+  # Discover alert/recording rules from labeled ConfigMaps in ANY namespace.
+  # Opt-in: runs a k8s-sidecar that watches ConfigMaps with the configured label
+  # and writes their data into Prometheus' rules dir, then triggers a reload.
+  # Consumers add rules without forking the chart by creating a ConfigMap labeled
+  # `prometheus_rule: "1"` whose keys are *.yml Prometheus rule files.
+  ruleSidecar:
+    enabled: false
+    image: kiwigrid/k8s-sidecar:1.27.4
+    label: prometheus_rule
+    labelValue: "1"
+    # ALL = watch every namespace. Set to a specific namespace to scope it.
+    searchNamespace: ALL
+    resources:
+      requests: { cpu: 10m, memory: 32Mi }
+      limits:   { cpu: 100m, memory: 128Mi }
 
 grafana:
   enabled: true
   image: grafana/grafana:latest
   port: 3000
   storage: 2Gi
+  # Discover dashboards from labeled ConfigMaps in ANY namespace.
+  # Opt-in: runs a k8s-sidecar that watches ConfigMaps with the configured label
+  # and writes their JSON into a Grafana provisioning folder. Consumers ship
+  # dashboards without forking the chart by creating a ConfigMap labeled
+  # `grafana_dashboard: "1"` whose keys are *.json dashboard models.
+  dashboardSidecar:
+    enabled: false
+    image: kiwigrid/k8s-sidecar:1.27.4
+    label: grafana_dashboard
+    labelValue: "1"
+    # ALL = watch every namespace. Set to a specific namespace to scope it.
+    searchNamespace: ALL
+    # Grafana folder discovered dashboards are filed under.
+    folderName: "Discovered"
+    resources:
+      requests: { cpu: 10m, memory: 32Mi }
+      limits:   { cpu: 100m, memory: 128Mi }
 
 alertmanager:
   enabled: true
   image: prom/alertmanager:latest
   port: 9093
   storage: 1Gi
+  # Alertmanager routing/notification config. Defaults preserve the previous
+  # behavior: a single no-op `default` receiver (alerts group but go nowhere).
+  # Operators wire notifications by overriding `receivers` and `routes`, e.g. a
+  # webhook/Telegram/Slack receiver — no chart fork required.
+  config:
+    resolveTimeout: 5m
+    groupBy: ['alertname', 'namespace']
+    groupWait: 30s
+    groupInterval: 5m
+    repeatInterval: 3h
+    # Name of the root (catch-all) receiver. Must exist in `receivers` below.
+    receiver: default
+    # Extra top-level global keys (e.g. smtp_*, slack_api_url) merged verbatim.
+    global: {}
+  # Receivers. Default is a single no-op receiver named `default`.
+  # Example webhook receiver:
+  #   - name: ops
+  #     webhook_configs:
+  #       - url: https://example.com/alerts
+  receivers:
+    - name: default
+  # Child routes under the root route (rendered as route.routes). Default keeps
+  # the previous critical->default route with a faster repeat interval.
+  routes:
+    - match:
+        severity: critical
+      receiver: default
+      repeat_interval: 1h
+  # Inhibition rules (silence warnings when a matching critical is firing).
+  inhibitRules:
+    - source_match:
+        severity: critical
+      target_match:
+        severity: warning
+      equal: ['alertname', 'namespace']
 
 loki:
   enabled: true
   image: grafana/loki:3.2.0
   port: 3100
   storage: 5Gi
+  # Optional S3-compatible object store backend for Loki chunks + index.
+  # When disabled (default) Loki uses on-disk filesystem storage (the PVC above).
+  # When enabled, chunk+index storage moves to the configured bucket — keeping
+  # node disk free. Tested against Contabo Object Storage (S3-compatible).
+  #
+  # Credentials are read from a referenced Secret (never inlined in values), with
+  # `-config.expand-env=true` substituting them into the Loki config at runtime.
+  s3:
+    enabled: false
+    # S3 endpoint host (no scheme), e.g. eu2.contabostorage.com or s3.amazonaws.com
+    endpoint: ""
+    region: ""
+    bucket: ""
+    # Path-style access (required by most non-AWS S3 providers like Contabo/MinIO).
+    s3ForcePathStyle: true
+    # Set true only for plain-HTTP endpoints (not recommended).
+    insecure: false
+    # Existing Secret holding the access/secret keys. REQUIRED when s3.enabled.
+    existingSecret: ""
+    accessKeyIdKey: LOKI_S3_ACCESS_KEY_ID
+    secretAccessKeyKey: LOKI_S3_SECRET_ACCESS_KEY
 
 promtail:
   enabled: true
