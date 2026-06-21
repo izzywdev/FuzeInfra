@@ -236,6 +236,10 @@ spec:
                   key: GRAFANA_ADMIN_PASSWORD
             - name: GF_USERS_ALLOW_SIGN_UP
               value: "false"
+            - name: GF_FEATURE_TOGGLES_DASHBOARDNEWLAYOUTS
+              value: "false"
+            - name: GF_FEATURE_TOGGLES_DASHBOARDDEFAULTLAYOUTSELECTOR
+              value: "false"
           ports:
             - containerPort: 3000
               name: http
