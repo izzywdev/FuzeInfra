@@ -10,6 +10,12 @@ log_ctx      = os.environ.get('LOG_CTX', '')
 run_url      = os.environ.get('RUN_URL', '')
 workflow_url = os.environ.get('WORKFLOW_URL', '')
 
+# The log excerpt is attacker-influenceable (anyone who can write to the logs).
+# Neutralise HTML-comment markers so it cannot forge the IGNORE-PATTERN trailer
+# that update-ignore-list.py reads. (That reader also anchors the marker to the
+# end of the body; this is belt-and-suspenders.)
+log_ctx = log_ctx.replace('<!--', '<!- -').replace('-->', '- ->')
+
 print(f"""## 🔕 Claude suggests ignoring this error
 
 **Pattern:** `{pattern}`
