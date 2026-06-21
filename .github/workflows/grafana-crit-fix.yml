@@ -1,7 +1,7 @@
-name: Grafana CRIT Log Auto-Fix
+name: Grafana Error Log Auto-Fix
 
 # Triggered by the crit-alert-bridge CF Worker via repository_dispatch
-# when Grafana fires a "CRIT Log Detected" alert.
+# when Grafana fires a "CRIT Log Detected" alert (ERROR/CRIT/FATAL/PANIC).
 #
 # Deduplication — two layers:
 #   1. concurrency group (workflow-level): serialises all runs; no two
@@ -15,7 +15,7 @@ name: Grafana CRIT Log Auto-Fix
 #   preflight → check open crit-autofix PRs/issues → skip if found
 #   analyze-and-fix (if not skipped):
 #     1. Set up kubectl with KUBE_CONFIG secret
-#     2. Port-forward Loki and fetch the last 30 min of CRIT/FATAL/PANIC logs
+#     2. Port-forward Loki and fetch the last 30 min of ERROR/CRIT/FATAL/PANIC logs
 #     3. Run Claude Code headlessly — analyse logs + codebase
 #     4a. If Claude can make a fix: commit, open PR (+ label), enable auto-merge
 #     4b. If not: open a GitHub issue (+ label) with Claude's analysis
@@ -100,7 +100,7 @@ jobs:
           kubectl cluster-info --request-timeout=10s
 
       # ── fetch logs from Loki ────────────────────────────────────────────────
-      - name: Fetch recent CRIT logs from Loki
+      - name: Fetch recent error logs from Loki
         id: logs
         run: |
           kubectl port-forward -n fuzeinfra svc/fuzeinfra-loki 3100:3100 &
@@ -111,7 +111,7 @@ jobs:
           START=$(( $(date +%s) - 1800 ))000000000
 
           LOGS=$(curl -sf "http://localhost:3100/loki/api/v1/query_range" \
-            --data-urlencode 'query={namespace=~".+"} |~ "(?i)(CRIT|CRITICAL|FATAL|PANIC)"' \
+            --data-urlencode 'query={namespace=~".+"} |~ "(?i)(ERROR|CRIT|CRITICAL|FATAL|PANIC)"' \
             --data-urlencode "start=${START}" \
             --data-urlencode "end=${END}" \
             --data-urlencode "limit=50" \
@@ -255,7 +255,7 @@ jobs:
           to: izzy.weinberg@gmail.com
           from: FuzeInfra Alerts <${{ secrets.GMAIL_USERNAME }}>
           body: |
-            A CRIT/FATAL/PANIC error was detected in FuzeInfra.
+            An ERROR/CRIT/FATAL/PANIC was detected in FuzeInfra.
 
             Alert:    ${{ github.event.client_payload.summary }}
             Fired at: ${{ github.event.client_payload.fired_at }}

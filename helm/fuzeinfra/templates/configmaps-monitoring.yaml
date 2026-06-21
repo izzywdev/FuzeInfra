@@ -452,7 +452,7 @@ data:
             continue: false
 
   # ---------------------------------------------------------------------------
-  # Alert rule — fires when any namespace logs contain CRIT/FATAL/PANIC
+  # Alert rule — fires when any namespace logs contain ERROR/CRIT/FATAL/PANIC
   # in the last 5-minute window.  noDataState: OK so a quiet cluster does not
   # constantly re-trigger.  for: 0s means it fires on the first evaluation hit.
   # ---------------------------------------------------------------------------
@@ -476,9 +476,9 @@ data:
                 datasourceUid: fuzeinfra-loki
                 model:
                   refId: A
-                  expr: 'sum(count_over_time({namespace=~".+"} |~ "(?i)(CRIT|CRITICAL|FATAL|PANIC)" [5m]))'
+                  expr: 'sum(count_over_time({namespace=~".+"} |~ "(?i)(ERROR|CRIT|CRITICAL|FATAL|PANIC)" [5m]))'
                   queryType: range
-                  legendFormat: CRIT count
+                  legendFormat: error count
                   intervalMs: 2000
                   maxDataPoints: 43200
               - refId: C
@@ -510,7 +510,7 @@ data:
             labels:
               severity: critical
             annotations:
-              summary: "Critical log message detected in FuzeInfra"
-              description: "Found CRIT/FATAL/PANIC log lines in the last 5 minutes. Claude is investigating."
+              summary: "Error log message detected in FuzeInfra"
+              description: "Found ERROR/CRIT/FATAL/PANIC log lines in the last 5 minutes. Claude is investigating."
             isPaused: false
 {{- end }}
