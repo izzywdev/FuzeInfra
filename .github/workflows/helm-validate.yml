@@ -7,9 +7,7 @@ on:
       - 'helm/**'
       - '.github/workflows/helm-validate.yml'
   pull_request:
-    paths:
-      - 'helm/**'
-      - '.github/workflows/helm-validate.yml'
+    branches: [main]
 
 jobs:
   validate:
