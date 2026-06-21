@@ -167,18 +167,52 @@ resource "cloudflare_zero_trust_access_policy" "neo4j_browser_ui_bypass" {
   }
 }
 
-# Cache Neo4j Browser static assets at the CF edge.
+# Grafana build asset bypass — allows CF to cache /public/build/* at the edge.
 #
-# Neo4j sets Cache-Control: no-store on ALL browser assets. Vite's __vitePreload
-# fires ~30 concurrent modulepreload requests on page load; without caching they
-# all hit Neo4j simultaneously. Override to 1h — these files are content-hashed
-# so they never change for a given filename. Safe to cache.
+# CF Access injects the CF_Authorization cookie on all authenticated requests.
+# A request bearing any cookie gets CF-Cache-Status: BYPASS, meaning CF always
+# forwards to the origin tunnel and never serves from cache. Grafana's content-
+# hashed build files (/public/build/*.js, /public/build/*.css) are identical for
+# every user; they need no authentication. Bypassing CF Access for this path lets
+# CF cache them and serve subsequent requests from the edge, eliminating the burst
+# of concurrent tunnel connections that causes 503 on the tablePanel CSS load.
+resource "cloudflare_zero_trust_access_application" "grafana_build_assets" {
+  count            = local.cloudflare_enabled ? 1 : 0
+  account_id       = var.cloudflare_account_id
+  name             = "Grafana Build Assets (public)"
+  domain           = "grafana.${local.prod_domain}/public/build"
+  type             = "self_hosted"
+  session_duration = "0s"
+  app_launcher_visible = false
+}
+
+resource "cloudflare_zero_trust_access_policy" "grafana_build_assets_bypass" {
+  count          = local.cloudflare_enabled ? 1 : 0
+  account_id     = var.cloudflare_account_id
+  application_id = cloudflare_zero_trust_access_application.grafana_build_assets[0].id
+  name           = "Bypass — Grafana static build assets"
+  precedence     = 1
+  decision       = "bypass"
+
+  include {
+    everyone = true
+  }
+}
+
+# Cache static build assets at the CF edge.
 #
-# Note: authenticated sessions still get CF-Cache-Status: BYPASS (CF forwards
-# requests with the CF_Authorization cookie). Stripping cookies to fix this
-# requires CF Workers or Enterprise (no standard ruleset phase runs before the
-# cache lookup). Neo4j's 64-worker thread pool (NEO4J_server_threads_worker__count)
-# handles the burst on cache misses; no 503 in practice.
+# One zone-level ruleset per phase is the CF limit, so Neo4j and Grafana rules
+# live in the same ruleset. Both targets are content-hashed (filename = hash),
+# so a 1-year TTL is safe — a file never changes under its hash-addressed name.
+#
+# Without caching: ~8–10 concurrent JS/CSS requests on every Grafana dashboard
+# load all hit the CF tunnel simultaneously. CF coalesces duplicate-URL requests
+# into one upstream fetch; if that fetch returns 503, all waiters see 503.
+# The tablePanel CSS chunk is requested during the burst and reliably 503s,
+# producing "Error loading: table" on every dashboard open.
+#
+# With caching: first request per file hits the tunnel (single fetch); all
+# subsequent requests are served from the CF edge — no tunnel involved.
 resource "cloudflare_ruleset" "neo4j_browser_cache" {
   count   = local.cloudflare_enabled ? 1 : 0
   zone_id = var.cloudflare_zone_id
@@ -203,6 +237,53 @@ resource "cloudflare_ruleset" "neo4j_browser_cache" {
     description = "Cache Neo4j Browser static assets 1h — overrides origin no-store to prevent 503 on burst preload requests"
     enabled     = true
   }
+
+  rules {
+    action = "set_cache_settings"
+    action_parameters {
+      cache = true
+      edge_ttl {
+        mode    = "override_origin"
+        default = 31536000
+      }
+      browser_ttl {
+        mode    = "override_origin"
+        default = 31536000
+      }
+    }
+    expression  = "(http.host eq \"grafana.${local.prod_domain}\" and starts_with(http.request.uri.path, \"/public/build/\"))"
+    description = "Cache Grafana content-hashed build assets 1yr at CF edge — prevents 503 on concurrent tablePanel CSS load"
+    enabled     = true
+  }
+}
+
+# CF Worker: strip CF_Authorization cookie for Grafana /public/build/* static assets.
+#
+# Problem: the CF_Authorization cookie (set domain-wide by CF Access) is included in the
+# cache key for every browser request. Even with a cache rule that forces caching, CF
+# treats each unique cookie value as a separate cache entry — so every authenticated user's
+# first page load hits the origin tunnel cold, which 503s under the ~8-request burst.
+#
+# Fix: Workers intercept requests BEFORE CF's cache. Stripping the auth cookie makes CF
+# compute a cookie-free cache key → matches the shared HIT already warm for unauthenticated
+# requests → served from edge without touching the tunnel.
+#
+# http_request_transform only allows URL rewrites (not header removal at pre-cache time).
+# http_request_late_transform allows header removal but runs after cache — too late.
+# Workers are the only free-plan mechanism that runs pre-cache with header mutation.
+resource "cloudflare_worker_script" "grafana_asset_serve" {
+  count      = local.cloudflare_enabled ? 1 : 0
+  account_id = var.cloudflare_account_id
+  name       = "grafana-asset-serve"
+  content    = file("${path.module}/grafana-asset-serve.js")
+  module     = true
+}
+
+resource "cloudflare_worker_route" "grafana_build_assets" {
+  count       = local.cloudflare_enabled ? 1 : 0
+  zone_id     = var.cloudflare_zone_id
+  pattern     = "grafana.${local.prod_domain}/public/build/*"
+  script_name = cloudflare_worker_script.grafana_asset_serve[0].name
 }
 
 # ---------------------------------------------------------------------------
