@@ -271,6 +271,7 @@ data:
     compactor:
       working_directory: /loki/compactor
       retention_enabled: true
+      delete_request_store: filesystem
 
     ruler:
       alertmanager_url: http://fuzeinfra-alertmanager:{{ .Values.alertmanager.port }}
@@ -342,11 +343,6 @@ data:
               - __meta_kubernetes_pod_annotation_kubernetes_io_config_hash
               - __meta_kubernetes_pod_container_name
             target_label: __path__
-        metric_relabel_configs:
-          - source_labels: [__name__]
-            action: keep
-            regex: promtail_.*
-
       # System journal logs from nodes (if systemd available)
       - job_name: journal
         journal:
@@ -398,10 +394,5 @@ data:
         url: http://fuzeinfra-loki:{{ .Values.loki.port }}
         jsonData:
           maxLines: 5000
-          derivedFields:
-            - datasourceUid: fuzeinfra-prometheus
-              matcherRegex: "traceID=(\\w+)"
-              name: TraceID
-              url: ""
       {{- end }}
 {{- end }}
