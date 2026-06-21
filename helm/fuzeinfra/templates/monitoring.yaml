@@ -224,6 +224,18 @@ spec:
     spec:
       securityContext:
         fsGroup: 472
+      {{- with .Values.grafana.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.grafana.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.grafana.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       containers:
         - name: grafana
           image: {{ .Values.grafana.image }}
@@ -269,6 +281,13 @@ spec:
             initialDelaySeconds: 15
             periodSeconds: 10
       volumes:
+        {{- if not .Values.grafana.persistence.enabled }}
+        # Stateless by default: Grafana's SQLite DB lives in an emptyDir, so the
+        # pod carries no node-pinned state and can be rescheduled freely. All
+        # datasources, dashboards and alerting are provisioned from ConfigMaps.
+        - name: data
+          emptyDir: {}
+        {{- end }}
         - name: datasources
           configMap:
             name: fuzeinfra-grafana-datasources
@@ -291,6 +310,7 @@ spec:
         - name: alerting
           configMap:
             name: fuzeinfra-grafana-alerting
+  {{- if .Values.grafana.persistence.enabled }}
   volumeClaimTemplates:
     - metadata:
         name: data
@@ -300,6 +320,7 @@ spec:
         resources:
           requests:
             storage: {{ .Values.grafana.storage }}
+  {{- end }}
 {{- end }}
 
 {{- /* ===================== Loki ===================== */ -}}
