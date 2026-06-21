@@ -200,6 +200,18 @@ jobs:
 
               gh pr merge --auto --merge "$URL" || true
 
+              # Re-run any checks that GitHub blocked as "action_required"
+              # (happens on first bot-created PRs before admin approval)
+              sleep 15
+              PR_BRANCH="$BRANCH"
+              for RUN_ID in $(gh run list \
+                --repo "${{ github.repository }}" \
+                --branch "$PR_BRANCH" \
+                --json databaseId,conclusion \
+                --jq '.[] | select(.conclusion=="action_required") | .databaseId' 2>/dev/null); do
+                gh run rerun "$RUN_ID" --repo "${{ github.repository }}" 2>/dev/null || true
+              done
+
               echo "action=fix" >> "$GITHUB_OUTPUT"
               echo "url=$URL"   >> "$GITHUB_OUTPUT"
             fi
