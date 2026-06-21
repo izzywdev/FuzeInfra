@@ -34,6 +34,18 @@ export default {
 
     const alerts = body.alerts ?? [];
     const firstAlert = alerts[0] ?? {};
+
+    // Only dispatch to GitHub for severity=critical alerts.
+    // The notification policy uses claude-autofix as the root receiver so all
+    // alerts flow through here; this guard prevents non-critical alerts from
+    // triggering the GHA workflow.
+    const severity =
+      body.commonLabels?.severity ??
+      firstAlert.labels?.severity ??
+      "";
+    if (severity !== "critical") {
+      return new Response("OK — non-critical alert, ignoring", { status: 200 });
+    }
     const summary =
       firstAlert.annotations?.summary ??
       body.commonAnnotations?.summary ??
