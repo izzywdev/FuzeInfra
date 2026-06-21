@@ -135,6 +135,75 @@ resource "cloudflare_zero_trust_access_policy" "app_launcher" {
   }
 }
 
+# Neo4j Browser static UI bypass
+#
+# Neo4j Browser's index.html loads JS modules with <script type="module" crossorigin>,
+# which forces all dynamic imports to run with credentials:omit (no cookies).
+# CF Access redirects cookie-less requests to cloudflareaccess.com, which causes
+# a CORS failure in the browser — breaking the entire SPA before it mounts.
+#
+# Fix: bypass CF Access for neo4j.*/browser so the UI assets load freely.
+# The database itself still requires Neo4j username/password over Bolt.
+resource "cloudflare_zero_trust_access_application" "neo4j_browser_ui" {
+  count            = local.cloudflare_enabled ? 1 : 0
+  account_id       = var.cloudflare_account_id
+  name             = "Neo4j Browser (public UI)"
+  domain           = "neo4j.${local.prod_domain}/browser"
+  type             = "self_hosted"
+  session_duration = "0s"
+  app_launcher_visible = false
+}
+
+resource "cloudflare_zero_trust_access_policy" "neo4j_browser_ui_bypass" {
+  count          = local.cloudflare_enabled ? 1 : 0
+  account_id     = var.cloudflare_account_id
+  application_id = cloudflare_zero_trust_access_application.neo4j_browser_ui[0].id
+  name           = "Bypass — Neo4j Browser static UI"
+  precedence     = 1
+  decision       = "bypass"
+
+  include {
+    everyone = true
+  }
+}
+
+# Cache Neo4j Browser static assets at the CF edge.
+#
+# Neo4j sets Cache-Control: no-store on ALL browser assets, which causes
+# Cloudflare to forward every request to the origin (cf-cache: BYPASS).
+# When the page loads, Vite's __vitePreload triggers a second wave of
+# module-preload requests for the same files; Neo4j returns 503 under
+# that concurrent burst, crashing the entire dynamic-import chain.
+#
+# Fix: override origin cache directives for /browser/assets/* and cache
+# at the CF edge for 1 hour. These files are content-hashed (Vite build
+# output), so they never change for a given filename — safe to cache.
+resource "cloudflare_ruleset" "neo4j_browser_cache" {
+  count   = local.cloudflare_enabled ? 1 : 0
+  zone_id = var.cloudflare_zone_id
+  name    = "Neo4j Browser Asset Cache"
+  kind    = "zone"
+  phase   = "http_request_cache_settings"
+
+  rules {
+    action = "set_cache_settings"
+    action_parameters {
+      cache = true
+      edge_ttl {
+        mode    = "override_origin"
+        default = 3600
+      }
+      browser_ttl {
+        mode    = "override_origin"
+        default = 3600
+      }
+    }
+    expression  = "(http.host eq \"neo4j.${local.prod_domain}\" and starts_with(http.request.uri.path, \"/browser/assets/\"))"
+    description = "Cache Neo4j Browser static assets 1h — overrides origin no-store to prevent 503 on burst preload requests"
+    enabled     = true
+  }
+}
+
 # ---------------------------------------------------------------------------
 # Cloudflare App Launcher bookmarks
 #
