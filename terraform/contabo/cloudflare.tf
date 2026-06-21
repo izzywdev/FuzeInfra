@@ -340,6 +340,101 @@ locals {
 # Push token into the cluster secret so cloudflared connects on first sync.
 # Runs after kubeconfig is available locally (extract_kubeconfig).
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# CRIT-Alert Bridge — Cloudflare Worker
+#
+# Grafana fires a webhook when severity=critical alert fires.
+# This Worker validates the shared secret, drops "resolved" events, and
+# calls GitHub repository_dispatch → triggers grafana-crit-fix.yml.
+#
+# Secret bindings keep credentials out of Worker env vars in cleartext.
+# BRIDGE_TOKEN is also injected into fuzeinfra-secrets so Grafana can read it.
+# ---------------------------------------------------------------------------
+resource "cloudflare_worker_script" "crit_alert_bridge" {
+  count      = local.cloudflare_enabled && var.crit_bridge_token != "" ? 1 : 0
+  account_id = var.cloudflare_account_id
+  name       = "crit-alert-bridge"
+  content    = file("${path.module}/crit-alert-bridge.js")
+  module     = true
+
+  secret_text_binding {
+    name = "GITHUB_TOKEN"
+    text = var.github_token
+  }
+
+  plain_text_binding {
+    name = "GITHUB_REPO"
+    text = "${var.github_owner}/${var.github_repo}"
+  }
+
+  secret_text_binding {
+    name = "BRIDGE_TOKEN"
+    text = var.crit_bridge_token
+  }
+}
+
+resource "cloudflare_worker_route" "crit_alert_bridge" {
+  count       = local.cloudflare_enabled && var.crit_bridge_token != "" ? 1 : 0
+  zone_id     = var.cloudflare_zone_id
+  pattern     = "crit-alert.${local.prod_domain}/*"
+  script_name = cloudflare_worker_script.crit_alert_bridge[0].name
+}
+
+# CF Access bypass — Grafana must POST without a browser OTP session.
+# The wildcard *.prod.fuzefront.com Access app would block this endpoint.
+# A more-specific hostname app takes precedence and lets the Worker handle auth
+# itself (via BRIDGE_TOKEN).
+resource "cloudflare_zero_trust_access_application" "crit_alert_bridge" {
+  count            = local.cloudflare_enabled && var.crit_bridge_token != "" ? 1 : 0
+  account_id       = var.cloudflare_account_id
+  name             = "CRIT Alert Bridge (public webhook)"
+  domain           = "crit-alert.${local.prod_domain}"
+  type             = "self_hosted"
+  session_duration = "0s"
+  app_launcher_visible = false
+}
+
+resource "cloudflare_zero_trust_access_policy" "crit_alert_bridge_bypass" {
+  count          = local.cloudflare_enabled && var.crit_bridge_token != "" ? 1 : 0
+  account_id     = var.cloudflare_account_id
+  application_id = cloudflare_zero_trust_access_application.crit_alert_bridge[0].id
+  name           = "Bypass — CRIT alert webhook (Worker handles auth)"
+  precedence     = 1
+  decision       = "bypass"
+
+  include {
+    everyone = true
+  }
+}
+
+# Inject CRIT_BRIDGE_TOKEN into the cluster secret so Grafana can read it via env var.
+# Runs after the tunnel token is already in place (depends on the extract_kubeconfig step).
+resource "null_resource" "crit_bridge_token_secret" {
+  count      = local.cloudflare_enabled && var.crit_bridge_token != "" ? 1 : 0
+  depends_on = [null_resource.extract_kubeconfig]
+
+  triggers = {
+    token_hash = sha256(var.crit_bridge_token)
+  }
+
+  provisioner "local-exec" {
+    interpreter = ["bash", "-c"]
+    command     = <<-EOT
+      export KUBECONFIG="${path.root}/k3s-kubeconfig.yaml"
+      for i in $(seq 1 30); do
+        kubectl get secret fuzeinfra-secrets -n fuzeinfra &>/dev/null && break
+        echo "  Waiting for fuzeinfra-secrets ($i/30)..."
+        sleep 10
+      done
+      TOKEN_B64=$(printf '%s' '${var.crit_bridge_token}' | base64 -w0 2>/dev/null || printf '%s' '${var.crit_bridge_token}' | base64)
+      kubectl patch secret fuzeinfra-secrets -n fuzeinfra \
+        --type=merge \
+        -p "{\"data\":{\"CRIT_BRIDGE_TOKEN\":\"$${TOKEN_B64}\"}}"
+      echo "CRIT_BRIDGE_TOKEN stored in fuzeinfra-secrets."
+    EOT
+  }
+}
+
 resource "null_resource" "cloudflare_tunnel_token" {
   count      = local.cloudflare_enabled ? 1 : 0
   depends_on = [null_resource.extract_kubeconfig]

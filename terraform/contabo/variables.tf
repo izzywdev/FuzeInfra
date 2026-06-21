@@ -163,3 +163,10 @@ variable "access_session_duration" {
   default     = "24h"
 }
 
+variable "crit_bridge_token" {
+  description = "Shared secret between Grafana and the crit-alert CF Worker (BRIDGE_TOKEN). Set in terraform.tfvars. Also injected into fuzeinfra-secrets as CRIT_BRIDGE_TOKEN so Grafana can read it."
+  type        = string
+  default     = ""
+  sensitive   = true
+}
+

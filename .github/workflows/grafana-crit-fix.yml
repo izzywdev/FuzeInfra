@@ -1,0 +1,255 @@
+name: Grafana CRIT Log Auto-Fix
+
+# Triggered by the crit-alert-bridge CF Worker via repository_dispatch
+# when Grafana fires a "CRIT Log Detected" alert.
+#
+# Flow:
+#   1. Set up kubectl with KUBE_CONFIG secret
+#   2. Port-forward Loki and fetch the last 30 min of CRIT/FATAL/PANIC logs
+#   3. Run Claude Code headlessly — analyse logs + codebase
+#   4a. If Claude can make a fix: commit, open PR, enable auto-merge
+#   4b. If not: open a GitHub issue with Claude's analysis
+#   5. Send email notification in both cases
+#
+# Required GitHub secrets:
+#   KUBE_CONFIG       — base64-encoded k3s kubeconfig (set by terraform apply)
+#   ANTHROPIC_API_KEY — Claude API key
+#   GMAIL_USERNAME    — izzy.weinberg@gmail.com (or any Gmail address)
+#   GMAIL_APP_PASSWORD — Gmail App Password (myaccount.google.com/apppasswords)
+
+on:
+  repository_dispatch:
+    types: [grafana-crit-alert]
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+jobs:
+  analyze-and-fix:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # ── kubectl access ──────────────────────────────────────────────────────
+      - name: Configure kubectl
+        run: |
+          mkdir -p ~/.kube
+          echo "${{ secrets.KUBE_CONFIG }}" | base64 -d > ~/.kube/config
+          chmod 600 ~/.kube/config
+          kubectl cluster-info --request-timeout=10s
+
+      # ── fetch logs from Loki ────────────────────────────────────────────────
+      - name: Fetch recent CRIT logs from Loki
+        id: logs
+        run: |
+          kubectl port-forward -n fuzeinfra svc/fuzeinfra-loki 3100:3100 &
+          PF_PID=$!
+          sleep 5
+
+          END=$(date +%s)000000000
+          START=$(( $(date +%s) - 1800 ))000000000
+
+          LOGS=$(curl -sf "http://localhost:3100/loki/api/v1/query_range" \
+            --data-urlencode 'query={namespace=~".+"} |~ "(?i)(CRIT|CRITICAL|FATAL|PANIC)"' \
+            --data-urlencode "start=${START}" \
+            --data-urlencode "end=${END}" \
+            --data-urlencode "limit=50" \
+            | jq -r '.data.result[] | (.stream.namespace // "?") + "/" + (.stream.pod // "?") + ": " + .values[][1]' \
+            2>/dev/null | head -50 \
+            || echo "(could not retrieve logs from Loki)")
+
+          kill "$PF_PID" 2>/dev/null || true
+
+          {
+            echo "logs<<LOGS_EOF"
+            printf '%s' "$LOGS"
+            echo ""
+            echo "LOGS_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      # ── run Claude Code ─────────────────────────────────────────────────────
+      - name: Install Claude Code CLI
+        run: npm install -g @anthropic-ai/claude-code
+
+      - name: Run Claude Code agent
+        id: claude
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          ALERT_SUMMARY="${{ github.event.client_payload.summary }}"
+          ALERT_DESC="${{ github.event.client_payload.description }}"
+          ALERT_LABELS='${{ github.event.client_payload.labels }}'
+          FIRED_AT="${{ github.event.client_payload.fired_at }}"
+          LOG_CTX="${{ steps.logs.outputs.logs }}"
+
+          PROMPT="You are a DevOps engineer responding to a production alert in the \
+FuzeInfra Kubernetes cluster (k3s on Contabo VPS). The cluster runs a Helm chart \
+(helm/fuzeinfra/) with Grafana, Loki, Prometheus, Postgres, Redis, Kafka, and \
+other services. ArgoCD auto-syncs from the main branch.
+
+ALERT: ${ALERT_SUMMARY}
+DETAILS: ${ALERT_DESC}
+LABELS: ${ALERT_LABELS}
+FIRED AT: ${FIRED_AT}
+
+RECENT CRIT/FATAL/PANIC LOG LINES (last 30 min):
+${LOG_CTX}
+
+INSTRUCTIONS:
+1. Analyse the error. Search the codebase — helm/, monitoring/, docker/, \
+argocd/ — to identify the root cause.
+2. If you can make a CONCRETE fix (helm value, config file, alert rule, \
+dashboard JSON): implement it now. Then output ONLY this JSON on stdout (last \
+line of your output):
+   {\"action\":\"fix\",\"summary\":\"one-line description of the fix\",\"files\":[\"paths changed\"]}
+3. If the error requires human judgement (external dependency down, ambiguous \
+infrastructure state, hardware issue, insufficient log context): do NOT guess. \
+Output ONLY this JSON:
+   {\"action\":\"issue\",\"title\":\"short descriptive title\",\"body\":\"markdown body with: root cause hypothesis, evidence from logs, suggested next steps\"}
+
+Output the JSON as the LAST line. You may emit reasoning before it."
+
+          claude --print \
+            --allowedTools "Bash,Read,Write,Edit,Glob,Grep" \
+            --max-turns 30 \
+            -p "$PROMPT" > /tmp/claude_raw.txt 2>&1 || true
+
+          echo "=== Claude raw output ==="
+          cat /tmp/claude_raw.txt
+
+          # Extract the last JSON object from Claude's output
+          python3 - <<'PYEOF' > /tmp/claude_result.json
+import sys, json, re
+
+txt = open("/tmp/claude_raw.txt").read()
+# Find all {...} blocks containing "action"
+matches = re.findall(r'\{[^{}]*"action"[^{}]*\}', txt, re.DOTALL)
+if matches:
+    try:
+        d = json.loads(matches[-1])
+        print(json.dumps(d))
+        sys.exit(0)
+    except Exception:
+        pass
+
+# Fallback: Claude did not produce structured output
+print(json.dumps({
+    "action": "issue",
+    "title": "CRIT alert — Claude analysis inconclusive",
+    "body": f"Claude could not determine a fix. Raw output:\n\n```\n{txt[:3000]}\n```"
+}))
+PYEOF
+
+          cat /tmp/claude_result.json
+          {
+            echo "json<<JSON_EOF"
+            cat /tmp/claude_result.json
+            echo "JSON_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      # ── create PR or issue ──────────────────────────────────────────────────
+      - name: Create fix PR or issue
+        id: act
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          ACTION=$(python3 -c "import json; print(json.loads(open('/tmp/claude_result.json').read())['action'])")
+
+          if [ "$ACTION" = "fix" ]; then
+            SUMMARY=$(python3 -c "import json; print(json.loads(open('/tmp/claude_result.json').read()).get('summary','Fix CRIT error'))")
+            BRANCH="claude-crit-fix-$(date +%Y%m%d-%H%M%S)"
+
+            git config user.email "claude-autofix@fuzeinfra"
+            git config user.name "Claude Auto-Fix"
+            git checkout -b "$BRANCH"
+            git add -A
+
+            if git diff --cached --quiet; then
+              echo "No file changes from Claude — falling back to issue"
+              ACTION="issue"
+            else
+              git commit -m "fix: ${SUMMARY} [crit-autofix]"
+              git push origin "$BRANCH"
+
+              URL=$(gh pr create \
+                --title "fix: ${SUMMARY}" \
+                --body "## Auto-fix by Claude
+
+Triggered by Grafana CRIT alert at \`${{ github.event.client_payload.fired_at }}\`.
+
+**Alert:** ${{ github.event.client_payload.summary }}
+
+**Log excerpt:**
+\`\`\`
+${{ steps.logs.outputs.logs }}
+\`\`\`
+
+---
+_Auto-generated by [grafana-crit-fix](${{ github.server_url }}/${{ github.repository }}/actions/workflows/grafana-crit-fix.yml) · run [#${{ github.run_number }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})_" \
+                --base main --head "$BRANCH")
+
+              gh pr merge --auto --merge "$URL" || true
+
+              echo "action=fix" >> "$GITHUB_OUTPUT"
+              echo "url=$URL" >> "$GITHUB_OUTPUT"
+            fi
+          fi
+
+          if [ "$ACTION" = "issue" ]; then
+            TITLE=$(python3 -c "import json; print(json.loads(open('/tmp/claude_result.json').read()).get('title','CRIT alert needs attention'))")
+            BODY=$(python3 -c "import json; print(json.loads(open('/tmp/claude_result.json').read()).get('body',''))")
+
+            URL=$(gh issue create \
+              --title "🚨 ${TITLE}" \
+              --body "${BODY}
+
+---
+**Log excerpt:**
+\`\`\`
+${{ steps.logs.outputs.logs }}
+\`\`\`
+
+_Auto-opened by [grafana-crit-fix](${{ github.server_url }}/${{ github.repository }}/actions/workflows/grafana-crit-fix.yml) at ${{ github.event.client_payload.fired_at }}_" \
+              --label "bug")
+
+            echo "action=issue" >> "$GITHUB_OUTPUT"
+            echo "url=$URL" >> "$GITHUB_OUTPUT"
+          fi
+
+      # ── email ───────────────────────────────────────────────────────────────
+      - name: Prepare email subject
+        id: email
+        run: |
+          if [ "${{ steps.act.outputs.action }}" = "fix" ]; then
+            echo "subject=🚨 FuzeInfra CRIT Alert — Fix PR Opened" >> "$GITHUB_OUTPUT"
+            echo "action_line=Fix PR: ${{ steps.act.outputs.url }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "subject=🚨 FuzeInfra CRIT Alert — Needs Attention (Issue Created)" >> "$GITHUB_OUTPUT"
+            echo "action_line=GitHub Issue: ${{ steps.act.outputs.url }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Send email
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: smtp.gmail.com
+          server_port: 587
+          secure: false
+          username: ${{ secrets.GMAIL_USERNAME }}
+          password: ${{ secrets.GMAIL_APP_PASSWORD }}
+          subject: ${{ steps.email.outputs.subject }}
+          to: izzy.weinberg@gmail.com
+          from: FuzeInfra Alerts <${{ secrets.GMAIL_USERNAME }}>
+          body: |
+            A CRIT/FATAL/PANIC error was detected in FuzeInfra.
+
+            Alert:    ${{ github.event.client_payload.summary }}
+            Fired at: ${{ github.event.client_payload.fired_at }}
+
+            ${{ steps.email.outputs.action_line }}
+
+            GHA run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+            --- Log excerpt (last 30 min) ---
+            ${{ steps.logs.outputs.logs }}

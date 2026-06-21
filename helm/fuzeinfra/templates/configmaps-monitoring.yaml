@@ -396,3 +396,121 @@ data:
           maxLines: 5000
       {{- end }}
 {{- end }}
+
+{{- /* ===================== Grafana Alerting Provisioning ===================== */ -}}
+{{- if .Values.grafana.enabled }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: fuzeinfra-grafana-alerting
+  labels:
+    {{- include "fuzeinfra.labels" . | nindent 4 }}
+data:
+  # ---------------------------------------------------------------------------
+  # Contact point — webhook to the CF Worker bridge that forwards to GHA.
+  # CRIT_BRIDGE_TOKEN env var is injected into the Grafana pod from
+  # fuzeinfra-secrets (patched by terraform after first apply).
+  # If the var is empty, no Authorization header is sent (acceptable for
+  # internal-only Worker URLs).
+  # ---------------------------------------------------------------------------
+  contact-points.yaml: |
+    apiVersion: 1
+    contactPoints:
+      - orgId: 1
+        name: claude-autofix
+        receivers:
+          - uid: claude-autofix-webhook
+            type: webhook
+            settings:
+              url: "https://crit-alert.{{ .Values.global.domain }}/"
+              httpMethod: POST
+              authorizationScheme: Bearer
+              authorizationCredentials: "${CRIT_BRIDGE_TOKEN}"
+            disableResolveMessage: true
+
+  # ---------------------------------------------------------------------------
+  # Notification policy — route severity=critical labels to the webhook.
+  # All other alerts fall through to the default grafana receiver.
+  # repeat_interval: 4h prevents flooding Claude with duplicate alerts.
+  # ---------------------------------------------------------------------------
+  policy.yaml: |
+    apiVersion: 1
+    policies:
+      - orgId: 1
+        receiver: grafana-default-email
+        group_by: ['grafana_folder', 'alertname']
+        group_wait: 30s
+        group_interval: 5m
+        repeat_interval: 4h
+        routes:
+          - receiver: claude-autofix
+            matchers:
+              - severity = critical
+            group_wait: 0s
+            repeat_interval: 4h
+            continue: false
+
+  # ---------------------------------------------------------------------------
+  # Alert rule — fires when any namespace logs contain CRIT/FATAL/PANIC
+  # in the last 5-minute window.  noDataState: OK so a quiet cluster does not
+  # constantly re-trigger.  for: 0s means it fires on the first evaluation hit.
+  # ---------------------------------------------------------------------------
+  rules.yaml: |
+    apiVersion: 1
+    groups:
+      - orgId: 1
+        name: crit-log-alerts
+        folder: FuzeInfra
+        interval: 5m
+        rules:
+          - uid: critlogdetect
+            title: CRIT Log Detected
+            condition: C
+            data:
+              - refId: A
+                queryType: range
+                relativeTimeRange:
+                  from: 300
+                  to: 0
+                datasourceUid: fuzeinfra-loki
+                model:
+                  refId: A
+                  expr: 'sum(count_over_time({namespace=~".+"} |~ "(?i)(CRIT|CRITICAL|FATAL|PANIC)" [5m]))'
+                  queryType: range
+                  legendFormat: CRIT count
+                  intervalMs: 2000
+                  maxDataPoints: 43200
+              - refId: C
+                queryType: ""
+                relativeTimeRange:
+                  from: 300
+                  to: 0
+                datasourceUid: "-100"
+                model:
+                  type: classic_conditions
+                  refId: C
+                  datasource:
+                    type: __expr__
+                    uid: "-100"
+                  conditions:
+                    - evaluator:
+                        params: [0]
+                        type: gt
+                      operator:
+                        type: and
+                      query:
+                        params: [A]
+                      reducer:
+                        params: []
+                        type: last
+            noDataState: OK
+            execErrState: OK
+            for: 0s
+            labels:
+              severity: critical
+            annotations:
+              summary: "Critical log message detected in FuzeInfra"
+              description: "Found CRIT/FATAL/PANIC log lines in the last 5 minutes. Claude is investigating."
+            isPaused: false
+{{- end }}

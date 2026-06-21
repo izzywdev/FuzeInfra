@@ -240,6 +240,14 @@ spec:
               value: "false"
             - name: GF_FEATURE_TOGGLES_DASHBOARDDEFAULTLAYOUTSELECTOR
               value: "false"
+            - name: GF_UNIFIED_ALERTING_ENABLED
+              value: "true"
+            - name: CRIT_BRIDGE_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "fuzeinfra.secretName" . }}
+                  key: CRIT_BRIDGE_TOKEN
+                  optional: true
           ports:
             - containerPort: 3000
               name: http
@@ -252,6 +260,8 @@ spec:
               mountPath: /etc/grafana/provisioning/dashboards
             - name: dashboards
               mountPath: /var/lib/grafana/dashboards
+            - name: alerting
+              mountPath: /etc/grafana/provisioning/alerting
           readinessProbe:
             httpGet:
               path: /api/health
@@ -278,6 +288,9 @@ spec:
                   name: fuzeinfra-grafana-dashboard-fuzeinfra-services
               - configMap:
                   name: fuzeinfra-grafana-dashboard-logs-explorer
+        - name: alerting
+          configMap:
+            name: fuzeinfra-grafana-alerting
   volumeClaimTemplates:
     - metadata:
         name: data
