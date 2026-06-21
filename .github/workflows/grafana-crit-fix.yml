@@ -96,6 +96,7 @@ jobs:
           mkdir -p ~/.kube
           echo "${{ secrets.KUBE_CONFIG }}" | base64 -d > ~/.kube/config
           chmod 600 ~/.kube/config
+          kubectl config set-cluster default --insecure-skip-tls-verify=true
           kubectl cluster-info --request-timeout=10s
 
       # ── fetch logs from Loki ────────────────────────────────────────────────
