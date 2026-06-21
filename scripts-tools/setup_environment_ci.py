@@ -14,8 +14,8 @@ from pathlib import Path
 
 
 def generate_secure_password(length=16):
-    """Generate a secure random password."""
-    alphabet = string.ascii_letters + string.digits + "!@#$%^&*"
+    """Generate a secure random password (alphanumeric only for shell safety)."""
+    alphabet = string.ascii_letters + string.digits
     return ''.join(secrets.choice(alphabet) for _ in range(length))
 
 
