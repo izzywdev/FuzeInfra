@@ -51,15 +51,19 @@ spec:
             - name: data
               mountPath: /var/lib/postgresql/data
           readinessProbe:
+            # -d "$POSTGRES_DB" is required: without it pg_isready defaults the
+            # dbname to the username ("fuzeinfra"), which does not exist, making
+            # Postgres log "FATAL: database \"fuzeinfra\" does not exist" on every
+            # probe. Those FATAL lines trip the CRIT Log Detected Grafana alert.
             exec:
-              command: ["sh", "-c", "pg_isready -U \"$POSTGRES_USER\""]
+              command: ["sh", "-c", "pg_isready -U \"$POSTGRES_USER\" -d \"$POSTGRES_DB\""]
             initialDelaySeconds: 10
             periodSeconds: 10
             timeoutSeconds: 5
             failureThreshold: 6
           livenessProbe:
             exec:
-              command: ["sh", "-c", "pg_isready -U \"$POSTGRES_USER\""]
+              command: ["sh", "-c", "pg_isready -U \"$POSTGRES_USER\" -d \"$POSTGRES_DB\""]
             initialDelaySeconds: 30
             periodSeconds: 15
           resources:
