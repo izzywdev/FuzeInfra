@@ -112,6 +112,38 @@ resource "cloudflare_zero_trust_access_policy" "admin_email_otp" {
   }
 }
 
+# ---------------------------------------------------------------------------
+# Cloudflare App Launcher bookmarks
+#
+# One tile per service. type = "bookmark" creates a clickable shortcut in the
+# CF Access App Launcher — no extra access policy needed because the wildcard
+# self_hosted app above already enforces OTP on every *.prod.fuzefront.com URL.
+# ---------------------------------------------------------------------------
+locals {
+  launcher_services = {
+    "argocd"        = { name = "ArgoCD",       logo = "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/argocd.png" }
+    "grafana"       = { name = "Grafana",       logo = "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/grafana.png" }
+    "prometheus"    = { name = "Prometheus",    logo = "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/prometheus.png" }
+    "alertmanager"  = { name = "Alertmanager",  logo = "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/alertmanager.png" }
+    "airflow"       = { name = "Airflow",       logo = "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/apache-airflow.png" }
+    "flower"        = { name = "Flower",        logo = "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/celery.png" }
+    "kafka-ui"      = { name = "Kafka UI",      logo = "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/kafka.png" }
+    "mongo-express" = { name = "Mongo Express", logo = "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/mongodb.png" }
+    "rabbitmq"      = { name = "RabbitMQ",      logo = "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/rabbitmq.png" }
+    "neo4j"         = { name = "Neo4j",         logo = "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/neo4j.png" }
+  }
+}
+
+resource "cloudflare_zero_trust_access_application" "launcher_bookmark" {
+  for_each         = nonsensitive(local.cloudflare_enabled) ? local.launcher_services : {}
+  account_id       = var.cloudflare_account_id
+  name             = each.value.name
+  domain           = "https://${each.key}.${local.prod_domain}"
+  type             = "bookmark"
+  app_launcher_visible = true
+  logo_url         = each.value.logo
+}
+
 # Construct the cloudflared token from known fields.
 # Format: base64(JSON{ a: account_id, t: tunnel_id, s: base64_secret })
 locals {
