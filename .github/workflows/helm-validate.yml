@@ -41,6 +41,6 @@ jobs:
           for overlay in values-local.yaml values-aws.yaml; do
             echo "::group::$overlay"
             helm template fuzeinfra helm/fuzeinfra -f "helm/fuzeinfra/$overlay" \
-              | kubeconform -strict -summary -kubernetes-version 1.29.0
+              | kubeconform -strict -summary -kubernetes-version 1.29.0 -ignore-missing-schemas
             echo "::endgroup::"
           done

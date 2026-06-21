@@ -1,0 +1,230 @@
+{
+  "annotations": {"list": []},
+  "editable": true,
+  "graphTooltip": 1,
+  "id": null,
+  "panels": [
+    {
+      "collapsed": false,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 0},
+      "id": 100,
+      "title": "Service Health",
+      "type": "row"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "thresholds"},
+          "thresholds": {"mode": "absolute", "steps": [{"color": "red", "value": null}, {"color": "green", "value": 1}]},
+          "unit": "short",
+          "mappings": [{"type": "value", "options": {"0": {"text": "DOWN", "color": "red"}, "1": {"text": "UP", "color": "green"}}}]
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 4, "w": 24, "x": 0, "y": 1},
+      "id": 1,
+      "options": {"colorMode": "background", "graphMode": "none", "orientation": "horizontal", "reduceOptions": {"calcs": ["lastNotNull"]}},
+      "title": "StatefulSet Readiness (ready/desired)",
+      "type": "stat",
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "${datasource}"},
+          "expr": "min by (statefulset) (kube_statefulset_status_replicas_ready{namespace=\"fuzeinfra\"} / kube_statefulset_replicas{namespace=\"fuzeinfra\"})",
+          "instant": true,
+          "legendFormat": "{{ statefulset }}"
+        }
+      ]
+    },
+    {
+      "collapsed": false,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 5},
+      "id": 101,
+      "title": "Resource Usage",
+      "type": "row"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {"fillOpacity": 8, "lineWidth": 1},
+          "unit": "cores"
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 6},
+      "id": 2,
+      "options": {
+        "legend": {"calcs": ["mean", "max"], "displayMode": "table", "placement": "right"},
+        "tooltip": {"mode": "multi"}
+      },
+      "title": "CPU per Pod (fuzeinfra)",
+      "type": "timeseries",
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "${datasource}"},
+          "expr": "sum by (pod) (rate(container_cpu_usage_seconds_total{namespace=\"fuzeinfra\",container!=\"\",container!=\"POD\"}[5m]))",
+          "legendFormat": "{{ pod }}"
+        }
+      ]
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {"fillOpacity": 8, "lineWidth": 1},
+          "unit": "bytes"
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 6},
+      "id": 3,
+      "options": {
+        "legend": {"calcs": ["mean", "max"], "displayMode": "table", "placement": "right"},
+        "tooltip": {"mode": "multi"}
+      },
+      "title": "Memory per Pod (fuzeinfra)",
+      "type": "timeseries",
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "${datasource}"},
+          "expr": "sum by (pod) (container_memory_working_set_bytes{namespace=\"fuzeinfra\",container!=\"\",container!=\"POD\"})",
+          "legendFormat": "{{ pod }}"
+        }
+      ]
+    },
+    {
+      "collapsed": false,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 14},
+      "id": 102,
+      "title": "Storage",
+      "type": "row"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "thresholds"},
+          "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "yellow", "value": 0.70}, {"color": "red", "value": 0.85}]},
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 6, "w": 24, "x": 0, "y": 15},
+      "id": 4,
+      "options": {"displayMode": "gradient", "orientation": "horizontal", "reduceOptions": {"calcs": ["lastNotNull"]}},
+      "title": "PVC Usage (fuzeinfra)",
+      "type": "bargauge",
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "${datasource}"},
+          "expr": "1 - kubelet_volume_stats_available_bytes{namespace=\"fuzeinfra\"} / kubelet_volume_stats_capacity_bytes{namespace=\"fuzeinfra\"}",
+          "instant": true,
+          "legendFormat": "{{ persistentvolumeclaim }}"
+        }
+      ]
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "fieldConfig": {
+        "defaults": {"unit": "bytes"},
+        "overrides": [
+          {"matcher": {"id": "byName", "options": "PVC"}, "properties": [{"id": "custom.width", "value": 250}]},
+          {"matcher": {"id": "byName", "options": "Used"}, "properties": [{"id": "custom.displayMode", "value": "color-background"}]},
+          {"matcher": {"id": "byName", "options": "Free"}, "properties": [{"id": "custom.displayMode", "value": "color-background"}]}
+        ]
+      },
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 21},
+      "id": 5,
+      "title": "PVC Detail",
+      "type": "table",
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "${datasource}"},
+          "expr": "kubelet_volume_stats_used_bytes{namespace=\"fuzeinfra\"}",
+          "instant": true,
+          "format": "table",
+          "legendFormat": ""
+        },
+        {
+          "datasource": {"type": "prometheus", "uid": "${datasource}"},
+          "expr": "kubelet_volume_stats_available_bytes{namespace=\"fuzeinfra\"}",
+          "instant": true,
+          "format": "table",
+          "legendFormat": ""
+        },
+        {
+          "datasource": {"type": "prometheus", "uid": "${datasource}"},
+          "expr": "kubelet_volume_stats_capacity_bytes{namespace=\"fuzeinfra\"}",
+          "instant": true,
+          "format": "table",
+          "legendFormat": ""
+        }
+      ],
+      "transformations": [
+        {"id": "merge", "options": {}},
+        {"id": "organize", "options": {
+          "renameByName": {"persistentvolumeclaim": "PVC", "Value #A": "Used", "Value #B": "Free", "Value #C": "Capacity"},
+          "excludeByName": {"Time": true, "namespace": true, "__name__": true, "job": true, "node": true}
+        }}
+      ]
+    },
+    {
+      "collapsed": false,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 29},
+      "id": 103,
+      "title": "Monitoring Stack",
+      "type": "row"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "thresholds"},
+          "thresholds": {"mode": "absolute", "steps": [{"color": "red", "value": null}, {"color": "green", "value": 1}]},
+          "unit": "short",
+          "mappings": [{"type": "value", "options": {"0": {"text": "DOWN"}, "1": {"text": "UP"}}}]
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 4, "w": 24, "x": 0, "y": 30},
+      "id": 6,
+      "options": {"colorMode": "background", "graphMode": "none", "orientation": "horizontal", "reduceOptions": {"calcs": ["lastNotNull"]}},
+      "title": "Monitoring Components",
+      "type": "stat",
+      "targets": [
+        {"datasource": {"type": "prometheus", "uid": "${datasource}"}, "expr": "up{job=\"prometheus\"}", "instant": true, "legendFormat": "Prometheus"},
+        {"datasource": {"type": "prometheus", "uid": "${datasource}"}, "expr": "up{job=\"node-exporter\"}", "instant": true, "legendFormat": "Node Exporter"},
+        {"datasource": {"type": "prometheus", "uid": "${datasource}"}, "expr": "up{job=\"kube-state-metrics\"}", "instant": true, "legendFormat": "kube-state-metrics"},
+        {"datasource": {"type": "prometheus", "uid": "${datasource}"}, "expr": "up{job=\"alertmanager\"}", "instant": true, "legendFormat": "Alertmanager"}
+      ]
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 38,
+  "tags": ["fuzeinfra", "services", "kubernetes"],
+  "templating": {
+    "list": [
+      {
+        "current": {},
+        "hide": 0,
+        "label": "Datasource",
+        "multi": false,
+        "name": "datasource",
+        "query": "prometheus",
+        "refresh": 1,
+        "type": "datasource"
+      }
+    ]
+  },
+  "time": {"from": "now-1h", "to": "now"},
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "FuzeInfra Services",
+  "uid": "fuzeinfra-services",
+  "version": 1
+}

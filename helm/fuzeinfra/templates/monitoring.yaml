@@ -15,12 +15,12 @@ metadata:
     {{- include "fuzeinfra.labels" . | nindent 4 }}
 rules:
   - apiGroups: [""]
-    resources: ["nodes", "nodes/proxy", "nodes/metrics", "services", "endpoints", "pods"]
+    resources: ["nodes", "nodes/proxy", "nodes/metrics", "nodes/stats", "services", "endpoints", "pods"]
     verbs: ["get", "list", "watch"]
   - apiGroups: [""]
     resources: ["configmaps"]
     verbs: ["get"]
-  - nonResourceURLs: ["/metrics"]
+  - nonResourceURLs: ["/metrics", "/metrics/cadvisor"]
     verbs: ["get"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
@@ -92,6 +92,8 @@ spec:
           volumeMounts:
             - name: config
               mountPath: /etc/prometheus
+            - name: rules
+              mountPath: /etc/prometheus/rules
             - name: data
               mountPath: /prometheus
           readinessProbe:
@@ -104,6 +106,9 @@ spec:
         - name: config
           configMap:
             name: fuzeinfra-prometheus-config
+        - name: rules
+          configMap:
+            name: fuzeinfra-prometheus-rules
   volumeClaimTemplates:
     - metadata:
         name: data
@@ -239,6 +244,10 @@ spec:
               mountPath: /var/lib/grafana
             - name: datasources
               mountPath: /etc/grafana/provisioning/datasources
+            - name: dashboard-provisioning
+              mountPath: /etc/grafana/provisioning/dashboards
+            - name: dashboards
+              mountPath: /var/lib/grafana/dashboards
           readinessProbe:
             httpGet:
               path: /api/health
@@ -249,6 +258,22 @@ spec:
         - name: datasources
           configMap:
             name: fuzeinfra-grafana-datasources
+        - name: dashboard-provisioning
+          configMap:
+            name: fuzeinfra-grafana-dashboard-provisioning
+        - name: dashboards
+          projected:
+            sources:
+              - configMap:
+                  name: fuzeinfra-grafana-dashboard-cluster-overview
+              - configMap:
+                  name: fuzeinfra-grafana-dashboard-kubernetes-nodes
+              - configMap:
+                  name: fuzeinfra-grafana-dashboard-kubernetes-pods
+              - configMap:
+                  name: fuzeinfra-grafana-dashboard-fuzeinfra-services
+              - configMap:
+                  name: fuzeinfra-grafana-dashboard-logs-explorer
   volumeClaimTemplates:
     - metadata:
         name: data

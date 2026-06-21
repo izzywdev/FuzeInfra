@@ -1,0 +1,83 @@
+groups:
+  - name: monitoring-stack
+    rules:
+      - alert: PrometheusDown
+        expr: absent(up{job="prometheus"}) == 1
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Prometheus is unreachable"
+          description: "Prometheus self-scrape has disappeared — metrics collection is broken."
+
+      - alert: AlertmanagerDown
+        expr: absent(up{job="alertmanager"}) == 1
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Alertmanager is down"
+          description: "Alerts cannot be routed or deduplicated."
+
+      - alert: GrafanaDown
+        expr: absent(up{job="grafana"}) == 1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Grafana is down"
+          description: "Dashboards are unavailable."
+
+      - alert: LokiDown
+        expr: absent(up{job="loki"}) == 1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Loki is down"
+          description: "Log ingestion and querying unavailable."
+
+      - alert: NodeExporterDown
+        expr: absent(up{job="node-exporter"}) == 1
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Node Exporter is down"
+          description: "Node-level metrics (CPU, memory, disk) are unavailable."
+
+      - alert: KubeStateMetricsDown
+        expr: absent(up{job="kube-state-metrics"}) == 1
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "kube-state-metrics is down"
+          description: "Kubernetes object state metrics (pods, deployments, PVCs) are unavailable."
+
+      - alert: PrometheusConfigReloadFailed
+        expr: prometheus_config_last_reload_successful == 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Prometheus config reload failed"
+          description: "Prometheus failed to reload its configuration. New scrape jobs or rules may not be active."
+
+      - alert: PrometheusTargetMissing
+        expr: up == 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Scrape target {{ $labels.job }}/{{ $labels.instance }} down"
+          description: "Prometheus cannot reach this target."
+
+      - alert: PrometheusTSDBReloadsFailing
+        expr: increase(prometheus_tsdb_reloads_failures_total[2h]) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Prometheus TSDB reload failures"
+          description: "Prometheus encountered TSDB block reload failures — storage may be corrupted."

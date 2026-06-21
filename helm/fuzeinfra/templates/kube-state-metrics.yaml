@@ -1,0 +1,161 @@
+{{- /* =================== kube-state-metrics =================== */}}
+{{- if .Values.kubeStateMetrics.enabled }}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: fuzeinfra-kube-state-metrics
+  labels:
+    {{- include "fuzeinfra.labels" . | nindent 4 }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ .Release.Namespace }}-fuzeinfra-kube-state-metrics
+  labels:
+    {{- include "fuzeinfra.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources:
+      - configmaps
+      - secrets
+      - nodes
+      - pods
+      - services
+      - serviceaccounts
+      - resourcequotas
+      - replicationcontrollers
+      - limitranges
+      - persistentvolumeclaims
+      - persistentvolumes
+      - namespaces
+      - endpoints
+    verbs: ["list", "watch"]
+  - apiGroups: ["apps"]
+    resources:
+      - statefulsets
+      - daemonsets
+      - deployments
+      - replicasets
+    verbs: ["list", "watch"]
+  - apiGroups: ["batch"]
+    resources:
+      - cronjobs
+      - jobs
+    verbs: ["list", "watch"]
+  - apiGroups: ["autoscaling"]
+    resources:
+      - horizontalpodautoscalers
+    verbs: ["list", "watch"]
+  - apiGroups: ["authentication.k8s.io"]
+    resources:
+      - tokenreviews
+    verbs: ["create"]
+  - apiGroups: ["authorization.k8s.io"]
+    resources:
+      - subjectaccessreviews
+    verbs: ["create"]
+  - apiGroups: ["policy"]
+    resources:
+      - poddisruptionbudgets
+    verbs: ["list", "watch"]
+  - apiGroups: ["certificates.k8s.io"]
+    resources:
+      - certificatesigningrequests
+    verbs: ["list", "watch"]
+  - apiGroups: ["storage.k8s.io"]
+    resources:
+      - storageclasses
+      - volumeattachments
+    verbs: ["list", "watch"]
+  - apiGroups: ["networking.k8s.io"]
+    resources:
+      - networkpolicies
+      - ingresses
+    verbs: ["list", "watch"]
+  - apiGroups: ["coordination.k8s.io"]
+    resources:
+      - leases
+    verbs: ["list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ .Release.Namespace }}-fuzeinfra-kube-state-metrics
+  labels:
+    {{- include "fuzeinfra.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ .Release.Namespace }}-fuzeinfra-kube-state-metrics
+subjects:
+  - kind: ServiceAccount
+    name: fuzeinfra-kube-state-metrics
+    namespace: {{ .Release.Namespace }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: fuzeinfra-kube-state-metrics
+  labels:
+    {{- include "fuzeinfra.labels" . | nindent 4 }}
+    {{- include "fuzeinfra.selectorLabels" (dict "component" "kube-state-metrics") | nindent 4 }}
+spec:
+  selector:
+    {{- include "fuzeinfra.selectorLabels" (dict "component" "kube-state-metrics") | nindent 4 }}
+  ports:
+    - name: http-metrics
+      port: 8080
+      targetPort: 8080
+    - name: telemetry
+      port: 8081
+      targetPort: 8081
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fuzeinfra-kube-state-metrics
+  labels:
+    {{- include "fuzeinfra.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "fuzeinfra.selectorLabels" (dict "component" "kube-state-metrics") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "fuzeinfra.labels" . | nindent 8 }}
+        {{- include "fuzeinfra.selectorLabels" (dict "component" "kube-state-metrics") | nindent 8 }}
+    spec:
+      serviceAccountName: fuzeinfra-kube-state-metrics
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+      containers:
+        - name: kube-state-metrics
+          image: {{ .Values.kubeStateMetrics.image }}
+          imagePullPolicy: {{ include "fuzeinfra.pullPolicy" . }}
+          args:
+            - --port=8080
+            - --telemetry-port=8081
+          ports:
+            - name: http-metrics
+              containerPort: 8080
+            - name: telemetry
+              containerPort: 8081
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            {{- toYaml .Values.kubeStateMetrics.resources | nindent 12 }}
+{{- end }}

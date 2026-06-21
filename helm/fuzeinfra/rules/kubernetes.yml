@@ -1,0 +1,126 @@
+groups:
+  - name: kubernetes-pods
+    rules:
+      - alert: PodCrashLooping
+        expr: increase(kube_pod_container_status_restarts_total[1h]) > 5
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Pod {{ $labels.namespace }}/{{ $labels.pod }} crash looping"
+          description: "Container {{ $labels.container }} has restarted {{ $value | humanize }} times in the last hour."
+
+      - alert: PodFrequentRestarts
+        expr: increase(kube_pod_container_status_restarts_total[15m]) > 3
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Pod {{ $labels.namespace }}/{{ $labels.pod }} restarting rapidly"
+          description: "Container {{ $labels.container }} restarted {{ $value | humanize }} times in 15 minutes."
+
+      - alert: PodOOMKilled
+        expr: kube_pod_container_status_last_terminated_reason{reason="OOMKilled"} == 1
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "OOMKilled: {{ $labels.namespace }}/{{ $labels.pod }}/{{ $labels.container }}"
+          description: "Container was killed by the OOM killer. Consider increasing memory limits."
+
+      - alert: PodNotReady
+        expr: kube_pod_status_ready{condition="false"} == 1
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Pod {{ $labels.namespace }}/{{ $labels.pod }} not ready"
+          description: "Pod has been non-ready for more than 10 minutes."
+
+      - alert: PodPendingTooLong
+        expr: kube_pod_status_phase{phase="Pending"} == 1
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Pod {{ $labels.namespace }}/{{ $labels.pod }} stuck Pending"
+          description: "Pod has been in Pending state for 15 minutes — possible scheduling or PVC issue."
+
+      - alert: PodFailed
+        expr: kube_pod_status_phase{phase="Failed"} == 1
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Pod {{ $labels.namespace }}/{{ $labels.pod }} is Failed"
+          description: "Pod entered the Failed phase."
+
+  - name: kubernetes-workloads
+    rules:
+      - alert: StatefulSetReplicasMismatch
+        expr: |
+          kube_statefulset_status_replicas_ready
+          < kube_statefulset_replicas
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "StatefulSet {{ $labels.namespace }}/{{ $labels.statefulset }} degraded"
+          description: "Ready replicas ({{ $value }}) < desired replicas."
+
+      - alert: DeploymentReplicasMismatch
+        expr: |
+          kube_deployment_status_replicas_available
+          < kube_deployment_spec_replicas
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Deployment {{ $labels.namespace }}/{{ $labels.deployment }} degraded"
+          description: "Available replicas < desired. Rollout may be stuck."
+
+      - alert: PVCPending
+        expr: kube_persistentvolumeclaim_status_phase{phase="Pending"} == 1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "PVC {{ $labels.namespace }}/{{ $labels.persistentvolumeclaim }} stuck Pending"
+          description: "PersistentVolumeClaim has not been bound for 5 minutes."
+
+      - alert: PVCAlmostFull
+        expr: |
+          kubelet_volume_stats_available_bytes
+          / kubelet_volume_stats_capacity_bytes < 0.10
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "PVC {{ $labels.namespace }}/{{ $labels.persistentvolumeclaim }} almost full"
+          description: "Less than 10% capacity remaining."
+
+  - name: kubernetes-resources
+    rules:
+      - alert: ContainerHighCPU
+        expr: |
+          sum by (namespace, pod, container) (
+            rate(container_cpu_usage_seconds_total{container!="",container!="POD"}[5m])
+          ) > 0.9
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High CPU: {{ $labels.namespace }}/{{ $labels.pod }}/{{ $labels.container }}"
+          description: "Container using {{ $value | humanize }} CPU cores for 15 minutes."
+
+      - alert: ContainerHighMemory
+        expr: |
+          container_memory_working_set_bytes{container!="",container!="POD"}
+          / on(namespace, pod, container)
+          kube_pod_container_resource_limits{resource="memory"} > 0.90
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High memory: {{ $labels.namespace }}/{{ $labels.pod }}/{{ $labels.container }}"
+          description: "Container using >90% of its memory limit."

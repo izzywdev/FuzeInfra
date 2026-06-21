@@ -11,7 +11,12 @@ data:
       scrape_interval: 15s
       evaluation_interval: 15s
       external_labels:
-        monitor: fuzeinfra-monitor
+        cluster: fuzeinfra
+        monitor: fuzeinfra-prometheus
+
+    rule_files:
+      - /etc/prometheus/rules/*.yml
+
     alerting:
       alertmanagers:
         - static_configs:
@@ -19,20 +24,130 @@ data:
               {{- if .Values.alertmanager.enabled }}
                 - fuzeinfra-alertmanager:{{ .Values.alertmanager.port }}
               {{- end }}
+
     scrape_configs:
+      # Prometheus self-monitoring
       - job_name: prometheus
         static_configs:
           - targets: ["localhost:9090"]
+
       {{- if .Values.nodeExporter.enabled }}
+      # Node Exporter — one instance per node via DaemonSet headless service
       - job_name: node-exporter
         kubernetes_sd_configs:
           - role: endpoints
+            namespaces:
+              names: [{{ .Release.Namespace }}]
         relabel_configs:
           - source_labels: [__meta_kubernetes_service_name]
             action: keep
             regex: fuzeinfra-node-exporter
+          - source_labels: [__meta_kubernetes_endpoint_node_name]
+            target_label: node
+          - source_labels: [__meta_kubernetes_namespace]
+            target_label: namespace
       {{- end }}
-      # Scrape any pod annotated with prometheus.io/scrape: "true".
+
+      {{- if .Values.kubeStateMetrics.enabled }}
+      # kube-state-metrics — Kubernetes object state (pods, deployments, PVCs…)
+      - job_name: kube-state-metrics
+        static_configs:
+          - targets: ["fuzeinfra-kube-state-metrics:8080"]
+      {{- end }}
+
+      # Kubelet node-level metrics (resource summary, volume stats)
+      - job_name: kubernetes-nodes
+        scheme: https
+        tls_config:
+          ca_file: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+          insecure_skip_verify: true
+        bearer_token_file: /var/run/secrets/kubernetes.io/serviceaccount/token
+        kubernetes_sd_configs:
+          - role: node
+        relabel_configs:
+          - action: labelmap
+            regex: __meta_kubernetes_node_label_(.+)
+          - target_label: __address__
+            replacement: kubernetes.default.svc:443
+          - source_labels: [__meta_kubernetes_node_name]
+            regex: (.+)
+            target_label: __metrics_path__
+            replacement: /api/v1/nodes/$1/proxy/metrics
+
+      # cAdvisor — per-container CPU, memory, network, filesystem
+      - job_name: kubernetes-cadvisor
+        scheme: https
+        tls_config:
+          ca_file: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+          insecure_skip_verify: true
+        bearer_token_file: /var/run/secrets/kubernetes.io/serviceaccount/token
+        kubernetes_sd_configs:
+          - role: node
+        relabel_configs:
+          - action: labelmap
+            regex: __meta_kubernetes_node_label_(.+)
+          - target_label: __address__
+            replacement: kubernetes.default.svc:443
+          - source_labels: [__meta_kubernetes_node_name]
+            regex: (.+)
+            target_label: __metrics_path__
+            replacement: /api/v1/nodes/$1/proxy/metrics/cadvisor
+        metric_relabel_configs:
+          # Keep only the metrics used by dashboards to avoid cardinality explosion
+          - source_labels: [__name__]
+            action: keep
+            regex: >-
+              container_cpu_usage_seconds_total|
+              container_memory_working_set_bytes|
+              container_memory_rss|
+              container_network_receive_bytes_total|
+              container_network_transmit_bytes_total|
+              container_fs_reads_bytes_total|
+              container_fs_writes_bytes_total|
+              container_spec_memory_limit_bytes
+          - source_labels: [container]
+            action: drop
+            regex: ""
+
+      # Kubernetes API server
+      - job_name: kubernetes-apiservers
+        scheme: https
+        tls_config:
+          ca_file: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+        bearer_token_file: /var/run/secrets/kubernetes.io/serviceaccount/token
+        kubernetes_sd_configs:
+          - role: endpoints
+        relabel_configs:
+          - source_labels:
+              - __meta_kubernetes_namespace
+              - __meta_kubernetes_service_name
+              - __meta_kubernetes_endpoint_port_name
+            action: keep
+            regex: default;kubernetes;https
+
+      # Grafana self-metrics
+      {{- if .Values.grafana.enabled }}
+      - job_name: grafana
+        static_configs:
+          - targets: ["fuzeinfra-grafana:{{ .Values.grafana.port }}"]
+        metrics_path: /metrics
+      {{- end }}
+
+      # Alertmanager self-metrics
+      {{- if .Values.alertmanager.enabled }}
+      - job_name: alertmanager
+        static_configs:
+          - targets: ["fuzeinfra-alertmanager:{{ .Values.alertmanager.port }}"]
+      {{- end }}
+
+      # Loki self-metrics
+      {{- if .Values.loki.enabled }}
+      - job_name: loki
+        static_configs:
+          - targets: ["fuzeinfra-loki:{{ .Values.loki.port }}"]
+      {{- end }}
+
+      # Any pod annotated with prometheus.io/scrape: "true"
       - job_name: kubernetes-pods
         kubernetes_sd_configs:
           - role: pod
@@ -40,6 +155,10 @@ data:
           - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
             action: keep
             regex: "true"
+          - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scheme]
+            action: replace
+            regex: (https?)
+            target_label: __scheme__
           - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_path]
             action: replace
             target_label: __metrics_path__
@@ -53,7 +172,12 @@ data:
             target_label: namespace
           - source_labels: [__meta_kubernetes_pod_name]
             target_label: pod
+          - source_labels: [__meta_kubernetes_pod_label_app_kubernetes_io_name]
+            target_label: app
+          - action: labelmap
+            regex: __meta_kubernetes_pod_label_(.+)
 {{- end }}
+
 {{- if .Values.alertmanager.enabled }}
 ---
 apiVersion: v1
@@ -67,14 +191,31 @@ data:
     global:
       resolve_timeout: 5m
     route:
-      group_by: ['alertname']
+      group_by: ['alertname', 'namespace']
       group_wait: 30s
       group_interval: 5m
       repeat_interval: 3h
       receiver: 'default'
+      routes:
+        - match:
+            severity: critical
+          receiver: 'default'
+          repeat_interval: 1h
     receivers:
       - name: 'default'
+        # Add webhook/email/slack config here when ready.
+        # Example Slack:
+        # slack_configs:
+        #   - api_url: '<SLACK_WEBHOOK_URL>'
+        #     channel: '#alerts'
+    inhibit_rules:
+      - source_match:
+          severity: 'critical'
+        target_match:
+          severity: 'warning'
+        equal: ['alertname', 'namespace']
 {{- end }}
+
 {{- if .Values.loki.enabled }}
 ---
 apiVersion: v1
@@ -86,8 +227,11 @@ metadata:
 data:
   loki-config.yaml: |
     auth_enabled: false
+
     server:
       http_listen_port: 3100
+      grpc_listen_port: 9096
+
     common:
       instance_addr: 127.0.0.1
       path_prefix: /loki
@@ -99,18 +243,42 @@ data:
       ring:
         kvstore:
           store: inmemory
+
+    query_range:
+      results_cache:
+        cache:
+          embedded_cache:
+            enabled: true
+            max_size_mb: 100
+
     schema_config:
       configs:
         - from: 2020-10-24
-          store: boltdb-shipper
+          store: tsdb
           object_store: filesystem
-          schema: v11
+          schema: v13
           index:
             prefix: index_
             period: 24h
+
     limits_config:
       reject_old_samples: false
+      ingestion_rate_mb: 16
+      ingestion_burst_size_mb: 32
+      max_query_length: 721h
+      retention_period: 744h
+
+    compactor:
+      working_directory: /loki/compactor
+      retention_enabled: true
+
+    ruler:
+      alertmanager_url: http://fuzeinfra-alertmanager:{{ .Values.alertmanager.port }}
+
+    analytics:
+      reporting_enabled: false
 {{- end }}
+
 {{- if .Values.promtail.enabled }}
 ---
 apiVersion: v1
@@ -123,14 +291,28 @@ data:
   config.yml: |
     server:
       http_listen_port: 9080
+      grpc_listen_port: 0
+
     positions:
       filename: /run/promtail/positions.yaml
+
     clients:
       - url: http://fuzeinfra-loki:{{ .Values.loki.port }}/loki/api/v1/push
+        tenant_id: fuzeinfra
+        backoff_config:
+          min_period: 500ms
+          max_period: 5m
+          max_retries: 10
+
     scrape_configs:
+      # All pods across all namespaces
       - job_name: kubernetes-pods
         kubernetes_sd_configs:
           - role: pod
+        pipeline_stages:
+          - cri: {}
+          - labeldrop:
+              - filename
         relabel_configs:
           - source_labels: [__meta_kubernetes_pod_node_name]
             target_label: __host__
@@ -140,11 +322,49 @@ data:
             target_label: pod
           - source_labels: [__meta_kubernetes_pod_container_name]
             target_label: container
-          - replacement: /var/log/pods/*$1/*.log
+          - source_labels: [__meta_kubernetes_pod_label_app_kubernetes_io_name]
+            target_label: app
+          - source_labels: [__meta_kubernetes_pod_label_app_kubernetes_io_component]
+            target_label: component
+          - action: replace
+            replacement: /var/log/pods/*$1/*.log
             separator: /
-            source_labels: [__meta_kubernetes_pod_uid, __meta_kubernetes_pod_container_name]
+            source_labels:
+              - __meta_kubernetes_pod_uid
+              - __meta_kubernetes_pod_container_name
             target_label: __path__
+          - action: replace
+            regex: true/(.*)
+            replacement: /var/log/pods/*$1/*.log
+            separator: /
+            source_labels:
+              - __meta_kubernetes_pod_annotationpresent_kubernetes_io_config_hash
+              - __meta_kubernetes_pod_annotation_kubernetes_io_config_hash
+              - __meta_kubernetes_pod_container_name
+            target_label: __path__
+        metric_relabel_configs:
+          - source_labels: [__name__]
+            action: keep
+            regex: promtail_.*
+
+      # System journal logs from nodes (if systemd available)
+      - job_name: journal
+        journal:
+          max_age: 12h
+          labels:
+            job: systemd-journal
+        pipeline_stages:
+          - labeldrop:
+              - filename
+        relabel_configs:
+          - source_labels: ['__journal__systemd_unit']
+            target_label: unit
+          - source_labels: ['__journal__hostname']
+            target_label: node
+          - source_labels: ['__journal_priority_keyword']
+            target_label: level
 {{- end }}
+
 {{- if .Values.grafana.enabled }}
 ---
 apiVersion: v1
@@ -161,13 +381,27 @@ data:
       - name: Prometheus
         type: prometheus
         access: proxy
+        uid: fuzeinfra-prometheus
         url: http://fuzeinfra-prometheus:{{ .Values.prometheus.port }}
         isDefault: true
+        jsonData:
+          httpMethod: POST
+          prometheusType: Prometheus
+          cacheLevel: Low
+          incrementalQueryOverlapWindow: 10m
       {{- end }}
       {{- if .Values.loki.enabled }}
       - name: Loki
         type: loki
         access: proxy
+        uid: fuzeinfra-loki
         url: http://fuzeinfra-loki:{{ .Values.loki.port }}
+        jsonData:
+          maxLines: 5000
+          derivedFields:
+            - datasourceUid: fuzeinfra-prometheus
+              matcherRegex: "traceID=(\\w+)"
+              name: TraceID
+              url: ""
       {{- end }}
 {{- end }}

@@ -169,15 +169,16 @@ resource "cloudflare_zero_trust_access_policy" "neo4j_browser_ui_bypass" {
 
 # Cache Neo4j Browser static assets at the CF edge.
 #
-# Neo4j sets Cache-Control: no-store on ALL browser assets, which causes
-# Cloudflare to forward every request to the origin (cf-cache: BYPASS).
-# When the page loads, Vite's __vitePreload triggers a second wave of
-# module-preload requests for the same files; Neo4j returns 503 under
-# that concurrent burst, crashing the entire dynamic-import chain.
+# Neo4j sets Cache-Control: no-store on ALL browser assets. Vite's __vitePreload
+# fires ~30 concurrent modulepreload requests on page load; without caching they
+# all hit Neo4j simultaneously. Override to 1h — these files are content-hashed
+# so they never change for a given filename. Safe to cache.
 #
-# Fix: override origin cache directives for /browser/assets/* and cache
-# at the CF edge for 1 hour. These files are content-hashed (Vite build
-# output), so they never change for a given filename — safe to cache.
+# Note: authenticated sessions still get CF-Cache-Status: BYPASS (CF forwards
+# requests with the CF_Authorization cookie). Stripping cookies to fix this
+# requires CF Workers or Enterprise (no standard ruleset phase runs before the
+# cache lookup). Neo4j's 64-worker thread pool (NEO4J_server_threads_worker__count)
+# handles the burst on cache misses; no 503 in practice.
 resource "cloudflare_ruleset" "neo4j_browser_cache" {
   count   = local.cloudflare_enabled ? 1 : 0
   zone_id = var.cloudflare_zone_id
@@ -200,40 +201,6 @@ resource "cloudflare_ruleset" "neo4j_browser_cache" {
     }
     expression  = "(http.host eq \"neo4j.${local.prod_domain}\" and starts_with(http.request.uri.path, \"/browser/assets/\"))"
     description = "Cache Neo4j Browser static assets 1h — overrides origin no-store to prevent 503 on burst preload requests"
-    enabled     = true
-  }
-}
-
-# Strip Cookie header from Neo4j browser asset requests.
-#
-# Cloudflare Transform Rules run BEFORE CF Access evaluation and BEFORE the
-# Cache Rules layer.  When an authenticated user loads neo4j.*/browser/, the
-# browser sends its CF_Authorization session cookie with every sub-request.
-# CF detects this and returns CF-Cache-Status: BYPASS for ALL asset requests,
-# forcing every request to hit Neo4j directly on every page load.
-#
-# Stripping the Cookie header here means:
-#   1. CF Access sees no auth cookie → evaluates bypass policy → allows through
-#   2. CF cache layer sees no cookie → applies the cache rule → HIT on warm cache
-#
-# Safe: these are content-hashed static JS/CSS files; they carry no user state.
-resource "cloudflare_ruleset" "neo4j_browser_strip_cookie" {
-  count   = local.cloudflare_enabled ? 1 : 0
-  zone_id = var.cloudflare_zone_id
-  name    = "Neo4j Browser - Strip cookies for static assets"
-  kind    = "zone"
-  phase   = "http_request_transform"
-
-  rules {
-    action = "rewrite"
-    action_parameters {
-      headers {
-        name      = "Cookie"
-        operation = "remove"
-      }
-    }
-    expression  = "(http.host eq \"neo4j.${local.prod_domain}\" and starts_with(http.request.uri.path, \"/browser/assets/\"))"
-    description = "Strip Cookie header so CF caches Neo4j Browser assets for authenticated users (prevents BYPASS from CF_Authorization cookie)"
     enabled     = true
   }
 }
