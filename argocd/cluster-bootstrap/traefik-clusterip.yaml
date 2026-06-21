@@ -1,0 +1,18 @@
+# Lock k3s's bundled Traefik to ClusterIP so it never binds to the VPS public IP.
+#
+# All external HTTP(S) traffic enters exclusively through the Cloudflare Named Tunnel
+# (cloudflared connects outbound — no inbound ports needed). The tunnel reaches Traefik
+# via in-cluster DNS: http://traefik.kube-system.svc.cluster.local:80
+#
+# Applied during provisioning by terraform/contabo/provisioning.tf.
+# Re-apply manually if the cluster is rebuilt without Terraform:
+#   kubectl apply -f argocd/cluster-bootstrap/traefik-clusterip.yaml
+apiVersion: helm.cattle.io/v1
+kind: HelmChartConfig
+metadata:
+  name: traefik
+  namespace: kube-system
+spec:
+  valuesContent: |-
+    service:
+      type: ClusterIP

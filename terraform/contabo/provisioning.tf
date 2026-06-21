@@ -71,6 +71,23 @@ resource "null_resource" "provision" {
       "sleep 15",
       "kubectl wait --for=condition=ready node --all --timeout=120s",
 
+      # --- Lock Traefik to ClusterIP (no external LoadBalancer binding) ---
+      # All HTTP(S) must come through the Cloudflare tunnel; direct VPS access is blocked.
+      # HelmChartConfig overrides k3s's bundled Traefik before ArgoCD even syncs.
+      "kubectl apply -f - <<'HELMCFG'",
+      "apiVersion: helm.cattle.io/v1",
+      "kind: HelmChartConfig",
+      "metadata:",
+      "  name: traefik",
+      "  namespace: kube-system",
+      "spec:",
+      "  valuesContent: |",
+      "    service:",
+      "      type: ClusterIP",
+      "HELMCFG",
+      # Wait for k3s to reconcile Traefik to ClusterIP (it polls ~every 15s)
+      "for i in $(seq 1 20); do TYPE=$(kubectl get svc traefik -n kube-system -o jsonpath='{.spec.type}' 2>/dev/null); [ \"$TYPE\" = 'ClusterIP' ] && break; sleep 5; done",
+
       # --- ArgoCD ---
       "kubectl create namespace argocd --dry-run=client -o yaml | kubectl apply -f -",
       "kubectl apply -n argocd -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml",
