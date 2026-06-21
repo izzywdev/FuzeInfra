@@ -189,6 +189,14 @@ resource "cloudflare_ruleset" "neo4j_browser_cache" {
     action = "set_cache_settings"
     action_parameters {
       cache = true
+      cache_key {
+        custom_key {
+          cookie {
+            include        = []
+            check_presence = []
+          }
+        }
+      }
       edge_ttl {
         mode    = "override_origin"
         default = 3600
@@ -199,7 +207,7 @@ resource "cloudflare_ruleset" "neo4j_browser_cache" {
       }
     }
     expression  = "(http.host eq \"neo4j.${local.prod_domain}\" and starts_with(http.request.uri.path, \"/browser/assets/\"))"
-    description = "Cache Neo4j Browser static assets 1h — overrides origin no-store to prevent 503 on burst preload requests"
+    description = "Cache Neo4j Browser static assets 1h — overrides origin no-store; ignores cookies in cache key so CF_Authorization session cookie does not cause BYPASS"
     enabled     = true
   }
 }

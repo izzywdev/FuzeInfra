@@ -274,6 +274,8 @@ spec:
               value: '["apoc"]'
             - name: NEO4J_server_bolt_advertised__address
               value: "neo4j-bolt.{{ .Values.global.domain }}:443"
+            - name: NEO4J_server_threads_worker__count
+              value: "64"
           ports:
             - containerPort: 7474
               name: http
