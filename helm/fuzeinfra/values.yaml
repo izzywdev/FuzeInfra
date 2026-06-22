@@ -292,8 +292,16 @@ airflow:
   image: apache/airflow:2.9.1
   webPort: 8080
   flowerPort: 5555
-  # Number of Celery workers (scale data pipeline throughput here).
+  # Number of Celery worker pods (scale data pipeline throughput here).
   workerReplicas: 1
+  # Celery prefork concurrency per worker pod. Default Celery uses nproc (can
+  # be 16+ on a 4-core node), consuming 1.5 GB+ of RAM. Set explicitly.
+  celeryWorkerConcurrency: 4
+  # Resource envelope for the worker pod. Unset = unbounded (dangerous on
+  # single-node clusters). Override per environment in values-<env>.yaml.
+  workerResources:
+    requests: { cpu: 250m, memory: 512Mi }
+    limits:   { cpu: "2",  memory: 1Gi }
   # Mount DAGs from a ConfigMap built from airflow-shared/dags? For real use,
   # prefer git-sync or a baked image. Default: empty dir + example DAG ConfigMap.
   loadExamples: false
