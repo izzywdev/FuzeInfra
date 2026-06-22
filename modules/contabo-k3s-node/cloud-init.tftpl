@@ -1,0 +1,32 @@
+#cloud-config
+# Rendered per node by the contabo-k3s-node module.
+# cloud-init runs this once on first boot; it joins the VPS to the existing
+# k3s cluster as an agent and applies the requested node labels.
+users:
+  - name: root
+    ssh_authorized_keys:
+      - ${ssh_public_key}
+
+package_update: true
+
+write_files:
+  # k3s join secrets land in a root-only env file rather than the process table,
+  # so the token never shows up in `ps`/cloud-init logs as a CLI arg.
+  - path: /etc/k3s-agent.env
+    permissions: "0600"
+    owner: root:root
+    content: |
+      K3S_URL=${k3s_server_url}
+      K3S_TOKEN=${k3s_node_token}
+      INSTALL_K3S_CHANNEL=${k3s_channel}
+
+runcmd:
+  # Host firewall: agent needs to reach the API (6443) outbound and accept
+  # kubelet (10250) + Flannel VXLAN overlay (8472/udp) from the server.
+  - [ sh, -c, "ufw allow 22/tcp || true" ]
+  - [ sh, -c, "ufw allow 10250/tcp || true" ]
+  - [ sh, -c, "ufw allow 8472/udp || true" ]
+  - [ sh, -c, "ufw --force enable || true" ]
+  # Join as a k3s agent and label the node. Secrets come from the env file above;
+  # --node-name and the labels are baked in by Terraform per request.
+  - [ sh, -c, "set -a; . /etc/k3s-agent.env; set +a; curl -sfL https://get.k3s.io | sh -s - agent --node-name '${node_name}' ${node_labels}" ]
