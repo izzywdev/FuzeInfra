@@ -1,0 +1,26 @@
+
+Warning: Value for undeclared variable
+
+The root module does not declare a variable named "image_id" but a value was
+found in file "handler.auto.tfvars.json". If you meant to use this value, add
+a "variable" block to the configuration.
+
+To silence these warnings, use TF_VAR_... environment variables to provide
+certain "global" settings to all configurations in your organization. To
+reduce the verbosity of these warnings, use the -compact-warnings option.
+
+Warning: Value for undeclared variable
+
+The root module does not declare a variable named "contabo_client_id" but a
+value was found in file "handler.auto.tfvars.json". If you meant to use this
+value, add a "variable" block to the configuration.
+
+To silence these warnings, use TF_VAR_... environment variables to provide
+certain "global" settings to all configurations in your organization. To
+reduce the verbosity of these warnings, use the -compact-warnings option.
+
+Warning: Values for undeclared variables
+
+In addition to the other similar warnings shown, 7 other variable(s) defined
+without being declared.
+::error::Terraform exited with code 1.
