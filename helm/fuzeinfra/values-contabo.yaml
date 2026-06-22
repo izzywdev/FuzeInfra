@@ -101,6 +101,12 @@ grafana:
 
 airflow:
   workerReplicas: 1
+  # 4 vCPU / 8 GB node — cap concurrency and memory to stop the worker from
+  # crowding out CoreDNS/Postgres under memory pressure.
+  celeryWorkerConcurrency: 4
+  workerResources:
+    requests: { cpu: 500m, memory: 512Mi }
+    limits:   { cpu: "2",  memory: 1536Mi }
 
 # Cloudflare tunnel: all traffic enters via the named tunnel; no host-level
 # ports 80/443 need to be open.  The tunnel token lives in fuzeinfra-secrets
