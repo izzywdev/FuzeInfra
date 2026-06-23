@@ -23,6 +23,7 @@ jobs:
           ISSUE_BODY:   ${{ github.event.issue.body }}
           ISSUE_URL:    ${{ github.event.issue.html_url }}
           ISSUE_NUMBER: ${{ github.event.issue.number }}
+          ISSUE_AUTHOR: ${{ github.event.issue.user.login }}
           TODAY:        ${{ github.event.issue.closed_at }}
         run: |
           TODAY=$(echo "$TODAY" | cut -c1-10)

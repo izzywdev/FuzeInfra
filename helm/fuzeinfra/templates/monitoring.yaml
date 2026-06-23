@@ -1,5 +1,5 @@
 {{- /* ===================== RBAC for Prometheus & Promtail SD ===================== */ -}}
-{{- if or .Values.prometheus.enabled .Values.promtail.enabled }}
+{{- if or .Values.prometheus.enabled .Values.promtail.enabled (and .Values.grafana.enabled .Values.grafana.dashboardSidecar.enabled) }}
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -18,8 +18,10 @@ rules:
     resources: ["nodes", "nodes/proxy", "nodes/metrics", "nodes/stats", "services", "endpoints", "pods"]
     verbs: ["get", "list", "watch"]
   - apiGroups: [""]
+    # list/watch across namespaces is required by the Grafana dashboard and
+    # Prometheus rule discovery sidecars (kiwigrid/k8s-sidecar).
     resources: ["configmaps"]
-    verbs: ["get"]
+    verbs: ["get", "list", "watch"]
   - nonResourceURLs: ["/metrics", "/metrics/cadvisor"]
     verbs: ["get"]
 ---
@@ -96,12 +98,46 @@ spec:
               mountPath: /etc/prometheus/rules
             - name: data
               mountPath: /prometheus
+            {{- if .Values.prometheus.ruleSidecar.enabled }}
+            - name: rules-discovered
+              mountPath: /etc/prometheus/rules-discovered
+            {{- end }}
           readinessProbe:
             httpGet:
               path: /-/ready
               port: 9090
             initialDelaySeconds: 15
             periodSeconds: 10
+        {{- if .Values.prometheus.ruleSidecar.enabled }}
+        # k8s-sidecar: watches ConfigMaps labeled `{{ .Values.prometheus.ruleSidecar.label }}={{ .Values.prometheus.ruleSidecar.labelValue }}`
+        # in {{ .Values.prometheus.ruleSidecar.searchNamespace }}, writes their rule files into the shared rules-discovered
+        # volume, then POSTs to Prometheus /-/reload (enabled via --web.enable-lifecycle).
+        - name: rule-sidecar
+          image: {{ .Values.prometheus.ruleSidecar.image }}
+          imagePullPolicy: {{ include "fuzeinfra.pullPolicy" . }}
+          env:
+            - name: LABEL
+              value: {{ .Values.prometheus.ruleSidecar.label | quote }}
+            - name: LABEL_VALUE
+              value: {{ .Values.prometheus.ruleSidecar.labelValue | quote }}
+            - name: FOLDER
+              value: /etc/prometheus/rules-discovered
+            - name: RESOURCE
+              value: configmap
+            - name: NAMESPACE
+              value: {{ .Values.prometheus.ruleSidecar.searchNamespace | quote }}
+            - name: METHOD
+              value: WATCH
+            - name: REQ_URL
+              value: http://localhost:9090/-/reload
+            - name: REQ_METHOD
+              value: POST
+          resources:
+            {{- toYaml .Values.prometheus.ruleSidecar.resources | nindent 12 }}
+          volumeMounts:
+            - name: rules-discovered
+              mountPath: /etc/prometheus/rules-discovered
+        {{- end }}
       volumes:
         - name: config
           configMap:
@@ -109,6 +145,10 @@ spec:
         - name: rules
           configMap:
             name: fuzeinfra-prometheus-rules
+        {{- if .Values.prometheus.ruleSidecar.enabled }}
+        - name: rules-discovered
+          emptyDir: {}
+        {{- end }}
   volumeClaimTemplates:
     - metadata:
         name: data
@@ -222,6 +262,9 @@ spec:
         {{- include "fuzeinfra.labels" . | nindent 8 }}
         {{- include "fuzeinfra.selectorLabels" (dict "component" "grafana") | nindent 8 }}
     spec:
+      {{- if .Values.grafana.dashboardSidecar.enabled }}
+      serviceAccountName: fuzeinfra-monitoring
+      {{- end }}
       securityContext:
         fsGroup: 472
       {{- with .Values.grafana.nodeSelector }}
@@ -274,12 +317,43 @@ spec:
               mountPath: /var/lib/grafana/dashboards
             - name: alerting
               mountPath: /etc/grafana/provisioning/alerting
+            {{- if .Values.grafana.dashboardSidecar.enabled }}
+            - name: sidecar-dashboards
+              mountPath: /var/lib/grafana/dashboards-discovered
+            {{- end }}
           readinessProbe:
             httpGet:
               path: /api/health
               port: 3000
             initialDelaySeconds: 15
             periodSeconds: 10
+        {{- if .Values.grafana.dashboardSidecar.enabled }}
+        # k8s-sidecar: watches ConfigMaps labeled `{{ .Values.grafana.dashboardSidecar.label }}={{ .Values.grafana.dashboardSidecar.labelValue }}`
+        # in {{ .Values.grafana.dashboardSidecar.searchNamespace }} and writes their JSON into the shared dashboards-discovered volume.
+        - name: dashboard-sidecar
+          image: {{ .Values.grafana.dashboardSidecar.image }}
+          imagePullPolicy: {{ include "fuzeinfra.pullPolicy" . }}
+          env:
+            - name: LABEL
+              value: {{ .Values.grafana.dashboardSidecar.label | quote }}
+            - name: LABEL_VALUE
+              value: {{ .Values.grafana.dashboardSidecar.labelValue | quote }}
+            - name: FOLDER
+              value: /var/lib/grafana/dashboards-discovered
+            - name: RESOURCE
+              value: configmap
+            - name: NAMESPACE
+              value: {{ .Values.grafana.dashboardSidecar.searchNamespace | quote }}
+            - name: METHOD
+              value: WATCH
+            - name: FOLDER_ANNOTATION
+              value: grafana_dashboard_folder
+          resources:
+            {{- toYaml .Values.grafana.dashboardSidecar.resources | nindent 12 }}
+          volumeMounts:
+            - name: sidecar-dashboards
+              mountPath: /var/lib/grafana/dashboards-discovered
+        {{- end }}
       volumes:
         {{- if not .Values.grafana.persistence.enabled }}
         # Stateless by default: Grafana's SQLite DB lives in an emptyDir, so the
@@ -310,6 +384,10 @@ spec:
         - name: alerting
           configMap:
             name: fuzeinfra-grafana-alerting
+        {{- if .Values.grafana.dashboardSidecar.enabled }}
+        - name: sidecar-dashboards
+          emptyDir: {}
+        {{- end }}
   {{- if .Values.grafana.persistence.enabled }}
   volumeClaimTemplates:
     - metadata:
@@ -365,7 +443,24 @@ spec:
         - name: loki
           image: {{ .Values.loki.image }}
           imagePullPolicy: {{ include "fuzeinfra.pullPolicy" . }}
-          args: ["-config.file=/etc/loki/loki-config.yaml"]
+          args:
+            - '-config.file=/etc/loki/loki-config.yaml'
+            {{- if .Values.loki.s3.enabled }}
+            - '-config.expand-env=true'
+            {{- end }}
+          {{- if .Values.loki.s3.enabled }}
+          env:
+            - name: LOKI_S3_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ required "loki.s3.existingSecret is required when loki.s3.enabled=true" .Values.loki.s3.existingSecret }}
+                  key: {{ .Values.loki.s3.accessKeyIdKey }}
+            - name: LOKI_S3_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.loki.s3.existingSecret }}
+                  key: {{ .Values.loki.s3.secretAccessKeyKey }}
+          {{- end }}
           ports:
             - containerPort: 3100
               name: http

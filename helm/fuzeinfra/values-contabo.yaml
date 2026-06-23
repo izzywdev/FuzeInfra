@@ -56,9 +56,57 @@ kafka:
 
 prometheus:
   storage: 20Gi
+  # Let downstream apps ship Prometheus alert/recording rules from their own
+  # namespaces via ConfigMaps labeled `prometheus_rule: "1"`.
+  ruleSidecar:
+    enabled: true
+
+grafana:
+  # Auto-load dashboards from any namespace via ConfigMaps labeled
+  # `grafana_dashboard: "1"`.
+  dashboardSidecar:
+    enabled: true
+
+# Alertmanager: wire real notification receivers here. Example webhook receiver:
+# alertmanager:
+#   config:
+#     receiver: ops
+#   receivers:
+#     - name: default
+#     - name: ops
+#       webhook_configs:
+#         - url: https://example.com/hooks/alerts
+#           send_resolved: true
+#   routes:
+#     - match:
+#         severity: critical
+#       receiver: ops
+#       repeat_interval: 1h
+
+# Loki S3 backend (Contabo Object Storage) — keeps logs off the node disk.
+# 1. Create the bucket in Contabo Object Storage.
+# 2. Create a Secret with the credentials, e.g.:
+#      kubectl -n fuzeinfra create secret generic loki-s3 \
+#        --from-literal=LOKI_S3_ACCESS_KEY_ID=<key> \
+#        --from-literal=LOKI_S3_SECRET_ACCESS_KEY=<secret>
+# 3. Uncomment and fill in:
+# loki:
+#   s3:
+#     enabled: true
+#     endpoint: "eu2.contabostorage.com"
+#     region: "default"
+#     bucket: "fuzeinfra-loki"
+#     s3ForcePathStyle: true
+#     existingSecret: "loki-s3"
 
 airflow:
   workerReplicas: 1
+  # 4 vCPU / 8 GB node — cap concurrency and memory to stop the worker from
+  # crowding out CoreDNS/Postgres under memory pressure.
+  celeryWorkerConcurrency: 4
+  workerResources:
+    requests: { cpu: 500m, memory: 512Mi }
+    limits:   { cpu: "2",  memory: 1536Mi }
 
 # Cloudflare tunnel: all traffic enters via the named tunnel; no host-level
 # ports 80/443 need to be open.  The tunnel token lives in fuzeinfra-secrets

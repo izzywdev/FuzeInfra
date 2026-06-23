@@ -1,0 +1,220 @@
+# ===========================================================================
+# infra-request-handler
+# ===========================================================================
+# FuzeInfra is the SOLE credential holder. Consumer repos (FuzeFront, etc.)
+# *declare* infra needs in git and dispatch `repository_dispatch
+# (event_type: infra-request)` at this repo; this workflow reconciles them.
+#
+# Flow:
+#   1. Check out THIS repo (module + whitelist + scripts) and the REQUESTING
+#      repo's deploy/terraform/ + deploy/argocd/.
+#   2. Validate the request against config/infra-request-whitelist.json.
+#   3. Whitelisted  -> terraform apply (FuzeInfra creds + k3s token + remote
+#      backend), then label the node and argocd-sync the changed Applications.
+#   4. Not whitelisted -> open a gated PR carrying `terraform plan` for manual
+#      approval. Never auto-apply.
+#
+# ---------------------------------------------------------------------------
+# NOTE: This file lives in docs/workflows/ because the bot that authored it
+# cannot write under .github/workflows/. To activate it, a maintainer must:
+#     git mv docs/workflows/infra-request-handler.yml .github/workflows/
+# ---------------------------------------------------------------------------
+#
+# Required repo secrets (FuzeInfra CI only):
+#   CONTABO_CLIENT_ID, CONTABO_CLIENT_SECRET, CONTABO_API_USER, CONTABO_API_PASSWORD
+#   K3S_SERVER_URL, K3S_NODE_TOKEN
+#   CONTABO_IMAGE_ID, NODE_SSH_PUBLIC_KEY
+#   KUBE_CONFIG                  # base64 kubeconfig for the k3s server (label + argocd sync)
+#   TF_STATE_* backend creds     # for the FuzeInfra-owned remote TF state backend
+#
+# Dispatch client_payload shape (sent by the consumer's infra-dispatch.yml):
+#   { "repo": "izzywdev/FuzeFront", "ref": "main",
+#     "requests": [ {name, product_id, region, role, labels}, ... ] }
+
+name: infra-request-handler
+
+on:
+  repository_dispatch:
+    types: [infra-request]
+
+permissions:
+  contents: write          # commit the PR branch for the gated path
+  pull-requests: write     # open the gated PR
+
+concurrency:
+  # Serialize reconciliation per requesting repo so two dispatches don't race on
+  # the same TF state.
+  group: infra-request-${{ github.event.client_payload.repo }}
+  cancel-in-progress: false
+
+jobs:
+  reconcile:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out FuzeInfra (module + whitelist + scripts)
+        uses: actions/checkout@v4
+        with:
+          path: fuzeinfra
+
+      - name: Check out requesting repo (deploy/ only)
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.event.client_payload.repo }}
+          ref: ${{ github.event.client_payload.ref || 'main' }}
+          path: consumer
+          token: ${{ secrets.GITHUB_TOKEN }}
+          sparse-checkout: |
+            deploy/terraform
+            deploy/argocd
+
+      - name: Write dispatch payload to file
+        id: payload
+        env:
+          PAYLOAD: ${{ toJSON(github.event.client_payload) }}
+        run: |
+          printf '%s' "$PAYLOAD" > request.json
+          echo "Requesting repo: ${{ github.event.client_payload.repo }}"
+          cat request.json
+
+      - name: Validate against auto-apply whitelist
+        id: validate
+        run: |
+          python3 fuzeinfra/scripts-tools/validate_infra_request.py \
+            --whitelist fuzeinfra/config/infra-request-whitelist.json \
+            --request request.json \
+            --repo "${{ github.event.client_payload.repo }}" \
+            --github-output "$GITHUB_OUTPUT"
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.6.6"
+
+      # --- Pass the node requests + injected secrets to Terraform -------------
+      - name: Generate handler tfvars
+        working-directory: consumer/deploy/terraform
+        env:
+          REQUESTS_JSON: ${{ toJSON(github.event.client_payload.requests) }}
+        run: |
+          # Consumer declares `requests`; FuzeInfra injects the credentials/join
+          # params from CI secrets via an auto.tfvars the consumer never sees.
+          cat > handler.auto.tfvars.json <<JSON
+          {
+            "requests": ${REQUESTS_JSON},
+            "contabo_client_id": "${{ secrets.CONTABO_CLIENT_ID }}",
+            "contabo_client_secret": "${{ secrets.CONTABO_CLIENT_SECRET }}",
+            "contabo_api_user": "${{ secrets.CONTABO_API_USER }}",
+            "contabo_api_password": "${{ secrets.CONTABO_API_PASSWORD }}",
+            "k3s_server_url": "${{ secrets.K3S_SERVER_URL }}",
+            "k3s_node_token": "${{ secrets.K3S_NODE_TOKEN }}",
+            "image_id": "${{ secrets.CONTABO_IMAGE_ID }}",
+            "ssh_public_key": "${{ secrets.NODE_SSH_PUBLIC_KEY }}"
+          }
+          JSON
+
+      - name: Terraform init (FuzeInfra-owned remote backend)
+        working-directory: consumer/deploy/terraform
+        env:
+          # Configure the FuzeInfra-owned remote state backend here. Example for S3:
+          #   -backend-config="bucket=$TF_STATE_BUCKET" -backend-config="key=infra-requests/${{ github.event.client_payload.repo }}.tfstate" ...
+          TF_STATE_BUCKET: ${{ secrets.TF_STATE_BUCKET }}
+          TF_STATE_REGION: ${{ secrets.TF_STATE_REGION }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.TF_STATE_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.TF_STATE_SECRET_ACCESS_KEY }}
+        run: |
+          terraform init \
+            -backend-config="bucket=${TF_STATE_BUCKET}" \
+            -backend-config="key=infra-requests/${{ github.event.client_payload.repo }}.tfstate" \
+            -backend-config="region=${TF_STATE_REGION}"
+
+      # =====================================================================
+      # WHITELISTED -> auto-apply
+      # =====================================================================
+      - name: Terraform apply (auto)
+        if: steps.validate.outputs.whitelisted == 'true'
+        working-directory: consumer/deploy/terraform
+        run: terraform apply -auto-approve -input=false
+
+      - name: Configure kubectl
+        if: steps.validate.outputs.whitelisted == 'true'
+        run: |
+          mkdir -p "$HOME/.kube"
+          echo "${{ secrets.KUBE_CONFIG }}" | base64 -d > "$HOME/.kube/config"
+
+      - name: Label joined nodes
+        if: steps.validate.outputs.whitelisted == 'true'
+        env:
+          REQUESTS_JSON: ${{ toJSON(github.event.client_payload.requests) }}
+        run: |
+          # cloud-init labels nodes on join; this is a reconciling backstop in
+          # case a node registered before its --node-label flags applied.
+          echo "$REQUESTS_JSON" | python3 -c '
+          import json,sys,subprocess,time
+          for r in json.load(sys.stdin):
+              name, role = r["name"], r.get("role","workload")
+              for _ in range(30):
+                  if subprocess.run(["kubectl","get","node",name]).returncode == 0:
+                      break
+                  time.sleep(10)
+              labels = ["node-role=%s"%role, "fuzeinfra.io/role=%s"%role]
+              for k,v in (r.get("labels") or {}).items():
+                  labels.append("%s=%s"%(k,v))
+              subprocess.run(["kubectl","label","node",name,*labels,"--overwrite"],check=True)
+          '
+
+      - name: Apply & sync changed Argo Applications
+        if: steps.validate.outputs.whitelisted == 'true'
+        run: |
+          if [ -d consumer/deploy/argocd ]; then
+            kubectl apply -f consumer/deploy/argocd/
+            # If argocd CLI/login is configured, trigger an immediate sync:
+            #   argocd app sync -l app.kubernetes.io/instance=${{ github.event.client_payload.repo }}
+          else
+            echo "No deploy/argocd/ in the consumer repo — skipping Argo sync."
+          fi
+
+      # =====================================================================
+      # NOT WHITELISTED -> gated PR with terraform plan (manual approval)
+      # =====================================================================
+      - name: Terraform plan (gated)
+        if: steps.validate.outputs.whitelisted != 'true'
+        working-directory: consumer/deploy/terraform
+        run: |
+          terraform plan -input=false -no-color -out=tfplan | tee plan.txt
+          terraform show -no-color tfplan > plan-show.txt || true
+
+      - name: Open gated PR for manual approval
+        if: steps.validate.outputs.whitelisted != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cd fuzeinfra
+          REPO="${{ github.event.client_payload.repo }}"
+          SLUG="$(echo "$REPO" | tr '/' '-')"
+          BRANCH="infra-request/${SLUG}-${{ github.run_id }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git checkout -b "$BRANCH"
+          mkdir -p infra-requests
+          cp ../request.json "infra-requests/${SLUG}.json"
+          cp ../consumer/deploy/terraform/plan.txt "infra-requests/${SLUG}.plan.txt" || true
+          git add infra-requests
+          git commit -m "infra-request: gated plan for ${REPO} (manual approval required)"
+          git push origin "$BRANCH"
+          {
+            echo "Automated infra-request from **${REPO}** did NOT match the auto-apply whitelist."
+            echo ""
+            echo "**Validation reasons:** ${{ steps.validate.outputs.reasons }}"
+            echo ""
+            echo "Review the \`terraform plan\` below and merge to approve. Do not merge if unexpected."
+            echo ""
+            echo '```'
+            cat ../consumer/deploy/terraform/plan.txt || true
+            echo '```'
+          } > pr-body.md
+          gh pr create \
+            --repo "${{ github.repository }}" \
+            --base main \
+            --head "$BRANCH" \
+            --title "infra-request (gated): ${REPO}" \
+            --body-file pr-body.md
