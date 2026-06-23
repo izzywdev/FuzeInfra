@@ -1,3 +1,21 @@
+# ============================================================================
+# ACTIVATION REQUIRED — this file is INERT under docs/workflows/.
+#
+# The Claude GitHub App token lacks the `workflows` permission, so the bot
+# CANNOT write under .github/workflows/ (push is rejected by GitHub:
+# "refusing to allow a GitHub App to create or update workflow ... without
+# `workflows` permission"). To go live, a maintainer must either:
+#
+#   (a) move the file manually:
+#         git mv docs/workflows/terraform-contabo-cd.yml .github/workflows/
+#         git commit -m "ci: activate terraform-contabo merge-to-apply CD" && git push
+#   (b) OR grant the Actions/App token `workflows: write` so the bot can place
+#       it directly.
+#
+# Then add branch protection on main requiring the
+# "terraform-contabo-cd / plan" check + 1 code-owner review.
+# See docs/TERRAFORM_CD.md for backend bootstrap and required secrets/vars.
+# ============================================================================
 name: terraform-contabo-cd
 
 # Merge-to-apply Terraform CD for terraform/contabo (issue #47).
