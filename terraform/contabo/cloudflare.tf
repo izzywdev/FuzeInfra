@@ -87,6 +87,76 @@ resource "cloudflare_record" "prod_wildcard" {
   ttl     = 1
 }
 
+# ---------------------------------------------------------------------------
+# Vanity host redirects — app.fuzefront.com → app.prod.fuzefront.com
+#
+# Short, memorable hostnames at the zone apex (app.fuzefront.com) that
+# 301-redirect to the real platform host under *.prod.fuzefront.com. The
+# redirect runs at the Cloudflare edge (http_request_dynamic_redirect phase),
+# BEFORE any origin/tunnel fetch — so no tunnel ingress rule is needed and the
+# redirect is never reverted by `terraform apply` (it's Terraform-owned here).
+#
+# Each vanity host needs two pieces:
+#   1. A *proxied* DNS record so Cloudflare terminates TLS for the host and can
+#      run the redirect rule. We CNAME to the tunnel; because the edge redirect
+#      fires first, the tunnel itself is never reached. Universal SSL's
+#      *.fuzefront.com certificate already covers these first-level hosts.
+#   2. A Single Redirect rule (below). Cloudflare allows only one ruleset per
+#      zone+phase, so every vanity host shares the one ruleset, path + query
+#      preserved.
+#
+# To add another vanity host (e.g. auth.fuzefront.com → auth.prod.fuzefront.com)
+# just add an entry to the map below — the DNS record and redirect rule are
+# generated from it.
+# ---------------------------------------------------------------------------
+locals {
+  # vanity label (left of the zone apex) → full target host it 301s to
+  vanity_redirects = {
+    "app" = "app.${local.prod_domain}" # app.fuzefront.com → app.prod.fuzefront.com
+    # "auth" = "auth.${local.prod_domain}"  # uncomment to add auth.fuzefront.com
+  }
+}
+
+# Proxied DNS so Cloudflare owns TLS + can run the edge redirect for each host.
+resource "cloudflare_record" "vanity" {
+  for_each = nonsensitive(local.cloudflare_enabled) ? local.vanity_redirects : {}
+  zone_id  = var.cloudflare_zone_id
+  name     = each.key
+  value    = cloudflare_zero_trust_tunnel_cloudflared.fuzeinfra[0].cname
+  type     = "CNAME"
+  proxied  = true
+  ttl      = 1
+}
+
+# Single Redirect ruleset: 301 each vanity host → its app.prod target.
+resource "cloudflare_ruleset" "vanity_redirects" {
+  count   = local.cloudflare_enabled ? 1 : 0
+  zone_id = var.cloudflare_zone_id
+  name    = "Vanity host redirects"
+  kind    = "zone"
+  phase   = "http_request_dynamic_redirect"
+
+  dynamic "rules" {
+    for_each = local.vanity_redirects
+    content {
+      action = "redirect"
+      action_parameters {
+        from_value {
+          status_code = 301
+          target_url {
+            # Preserve the request path; query string preserved separately below.
+            expression = "concat(\"https://${rules.value}\", http.request.uri.path)"
+          }
+          preserve_query_string = true
+        }
+      }
+      expression  = "(http.host eq \"${rules.key}.${var.zone_name}\")"
+      description = "301 ${rules.key}.${var.zone_name} → ${rules.value}"
+      enabled     = true
+    }
+  }
+}
+
 # Cloudflare Access: protect *.prod.fuzefront.com with email OTP.
 # The apex prod.fuzefront.com is NOT matched by *.prod — it stays public.
 resource "cloudflare_zero_trust_access_application" "admin_services" {
