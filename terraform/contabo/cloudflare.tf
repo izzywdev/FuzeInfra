@@ -18,6 +18,14 @@
 locals {
   cloudflare_enabled = var.cloudflare_api_token != ""
   prod_domain        = "${var.prod_subdomain}.${var.zone_name}"
+
+  # Public vanity hosts served directly by the FuzeFront platform.
+  # These live at the apex zone (e.g. app.fuzefront.com), OUTSIDE the
+  # *.prod.fuzefront.com Access wildcard, so they are public by default —
+  # Authentik handles platform auth, not Cloudflare Access. The FuzeFront
+  # chart sets its Traefik Ingress host to match (className traefik, TLS off,
+  # CF terminates edge TLS). Adding a future public host is a one-line edit.
+  public_vanity_hosts = ["app", "auth"]
 }
 
 # 32-byte cryptographically random tunnel secret
@@ -58,6 +66,16 @@ resource "cloudflare_zero_trust_tunnel_cloudflared_config" "fuzeinfra" {
       hostname = local.prod_domain
       service  = "http://traefik.kube-system:80"
     }
+    # Public vanity hosts (app/auth.fuzefront.com) → Traefik. These are at the
+    # apex zone, outside the *.prod Access wildcard, so they stay public.
+    # Must come BEFORE the 404 catch-all below.
+    dynamic "ingress_rule" {
+      for_each = toset(local.public_vanity_hosts)
+      content {
+        hostname = "${ingress_rule.value}.${var.zone_name}"
+        service  = "http://traefik.kube-system:80"
+      }
+    }
     # Mandatory catch-all.
     ingress_rule {
       service = "http_status:404"
@@ -85,6 +103,20 @@ resource "cloudflare_record" "prod_wildcard" {
   type    = "CNAME"
   proxied = true
   ttl     = 1
+}
+
+# DNS: public vanity hosts (app/auth.fuzefront.com) → same tunnel, proxied.
+# Proxied so CF terminates TLS at the edge (Universal SSL covers the apex hosts)
+# and the request reaches cloudflared → the matching ingress_rule above → Traefik.
+# These hosts are NOT covered by the *.prod Access wildcard, so they are public.
+resource "cloudflare_record" "vanity" {
+  for_each = nonsensitive(local.cloudflare_enabled) ? toset(local.public_vanity_hosts) : toset([])
+  zone_id  = var.cloudflare_zone_id
+  name     = each.value
+  value    = cloudflare_zero_trust_tunnel_cloudflared.fuzeinfra[0].cname
+  type     = "CNAME"
+  proxied  = true
+  ttl      = 1
 }
 
 # Cloudflare Access: protect *.prod.fuzefront.com with email OTP.
