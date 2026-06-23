@@ -1,0 +1,252 @@
+name: terraform-contabo-cd
+
+# Merge-to-apply Terraform CD for terraform/contabo (issue #47).
+#
+# Model: the PR review IS the apply approval. On a PR touching terraform/**
+# we `terraform plan -out=tfplan`, post the plan as a sticky comment, and
+# upload the SAVED plan as an artifact keyed by the PR head SHA. On merge to
+# main we download that exact tfplan and `terraform apply tfplan` — never a
+# blind re-plan. If state drifted since review, Terraform rejects the stale
+# saved plan and fails loudly.
+#
+# Deadlock-safe (companion issue #51): the `plan` job is the required check.
+# It has NO top-level `paths:` filter and self-filters terraform/** INSIDE the
+# job. A non-terraform PR short-circuits to success ("nothing to plan") and
+# goes green immediately, so it never sits pending on a skipped required check.
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  pull-requests: write
+  actions: read
+
+# Serialize applies so CD and a human can never apply concurrently.
+concurrency:
+  group: terraform-contabo-apply
+  cancel-in-progress: false
+
+env:
+  TF_ROOT: terraform/contabo
+  TF_VERSION: 1.9.8
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # PLAN — the required status check. ALWAYS runs on PRs (no paths: filter),
+  # self-filters terraform/** internally so non-terraform PRs go green.
+  # ---------------------------------------------------------------------------
+  plan:
+    name: plan
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Detect terraform changes
+        id: changes
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            tf:
+              - 'terraform/**'
+              - '.github/workflows/terraform-contabo-cd.yml'
+
+      - name: Nothing to plan
+        if: steps.changes.outputs.tf != 'true'
+        run: echo "No terraform/** changes in this PR — skipping plan (required check passes)."
+
+      # Fork PRs never receive secrets — note and pass (don't fail the check).
+      - name: Skip plan on fork PR
+        if: steps.changes.outputs.tf == 'true' && github.event.pull_request.head.repo.fork
+        run: echo "::notice::Fork PR — secrets unavailable, plan skipped. A maintainer must re-run from a branch in this repo."
+
+      - name: Setup Terraform
+        if: steps.changes.outputs.tf == 'true' && !github.event.pull_request.head.repo.fork
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Terraform init (remote state)
+        if: steps.changes.outputs.tf == 'true' && !github.event.pull_request.head.repo.fork
+        working-directory: ${{ env.TF_ROOT }}
+        run: |
+          terraform init -input=false \
+            -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}" \
+            -backend-config="dynamodb_table=${{ vars.TF_STATE_DYNAMODB_TABLE }}" \
+            -backend-config="region=${{ vars.TF_STATE_REGION }}"
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.TF_STATE_AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.TF_STATE_AWS_SECRET_ACCESS_KEY }}
+
+      - name: Terraform plan (saved)
+        id: plan
+        if: steps.changes.outputs.tf == 'true' && !github.event.pull_request.head.repo.fork
+        working-directory: ${{ env.TF_ROOT }}
+        run: |
+          set +e
+          terraform plan -input=false -lock-timeout=120s -out=tfplan -no-color 2>&1 | tee plan.txt
+          code=${PIPESTATUS[0]}
+          echo "exit_code=$code" >> "$GITHUB_OUTPUT"
+          exit $code
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.TF_STATE_AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.TF_STATE_AWS_SECRET_ACCESS_KEY }}
+          TF_VAR_contabo_client_id: ${{ secrets.CONTABO_CLIENT_ID }}
+          TF_VAR_contabo_client_secret: ${{ secrets.CONTABO_CLIENT_SECRET }}
+          TF_VAR_contabo_api_user: ${{ secrets.CONTABO_API_USER }}
+          TF_VAR_contabo_api_password: ${{ secrets.CONTABO_API_PASSWORD }}
+          TF_VAR_ssh_public_key: ${{ secrets.TF_SSH_PUBLIC_KEY }}
+          TF_VAR_image_id: ${{ vars.CONTABO_IMAGE_ID }}
+          TF_VAR_product_id: ${{ vars.CONTABO_PRODUCT_ID }}
+          TF_VAR_github_token: ${{ secrets.GH_PAT }}
+          TF_VAR_cloudflare_api_token: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          TF_VAR_cloudflare_account_id: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          TF_VAR_cloudflare_zone_id: ${{ vars.CLOUDFLARE_ZONE_ID }}
+          TF_VAR_crit_bridge_token: ${{ secrets.CRIT_BRIDGE_TOKEN }}
+
+      - name: Upload saved plan (keyed by PR head SHA)
+        if: steps.changes.outputs.tf == 'true' && !github.event.pull_request.head.repo.fork && steps.plan.outputs.exit_code == '0'
+        uses: actions/upload-artifact@v4
+        with:
+          name: tfplan-${{ github.event.pull_request.head.sha }}
+          path: ${{ env.TF_ROOT }}/tfplan
+          retention-days: 30
+          if-no-files-found: error
+
+      - name: Post plan as sticky PR comment
+        if: steps.changes.outputs.tf == 'true' && !github.event.pull_request.head.repo.fork && always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            let plan = '';
+            try { plan = fs.readFileSync('${{ env.TF_ROOT }}/plan.txt', 'utf8'); } catch (e) { plan = '(no plan output)'; }
+            const max = 60000;
+            if (plan.length > max) plan = plan.slice(0, max) + '\n... (truncated, see job log) ...';
+            const body = [
+              '### Terraform plan — `terraform/contabo`',
+              'This **saved** plan (`-out=tfplan`) is exactly what applies on merge to `main`.',
+              '',
+              '```terraform',
+              plan,
+              '```',
+            ].join('\n');
+            const marker = '<!-- terraform-contabo-cd-plan -->';
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner, repo: context.repo.repo, issue_number: context.issue.number,
+            });
+            const existing = comments.find(c => c.body && c.body.includes(marker));
+            const full = marker + '\n' + body;
+            if (existing) {
+              await github.rest.issues.updateComment({ owner: context.repo.owner, repo: context.repo.repo, comment_id: existing.id, body: full });
+            } else {
+              await github.rest.issues.createComment({ owner: context.repo.owner, repo: context.repo.repo, issue_number: context.issue.number, body: full });
+            }
+
+  # ---------------------------------------------------------------------------
+  # APPLY — merge to main only. Applies the SAVED plan reviewed on the PR.
+  # ---------------------------------------------------------------------------
+  apply:
+    name: apply
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve merged PR + head SHA
+        id: pr
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const sha = context.sha;
+            const { data: prs } = await github.rest.repos.listPullRequestsAssociatedWithCommit({
+              owner: context.repo.owner, repo: context.repo.repo, commit_sha: sha,
+            });
+            const merged = prs.find(p => p.merged_at);
+            if (!merged) {
+              core.info('No merged PR associated with this push — nothing to apply.');
+              core.setOutput('found', 'false');
+              return;
+            }
+            core.setOutput('found', 'true');
+            core.setOutput('head_sha', merged.head.sha);
+            core.setOutput('number', String(merged.number));
+            core.info(`Merged PR #${merged.number}, head ${merged.head.sha}`);
+
+      - name: Download the reviewed saved plan
+        if: steps.pr.outputs.found == 'true'
+        id: dl
+        uses: actions/download-artifact@v4
+        with:
+          name: tfplan-${{ steps.pr.outputs.head_sha }}
+          path: ${{ env.TF_ROOT }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: ${{ github.run_id }}
+        continue-on-error: true
+
+      # The artifact lives on the PR's check-suite run, not this push run, so a
+      # cross-run lookup is required. Fall back to the GH CLI if the action's
+      # run-id scoping misses it; refuse to apply if no reviewed plan is found.
+      - name: Recover saved plan across runs
+        if: steps.pr.outputs.found == 'true' && steps.dl.outcome != 'success'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HEAD_SHA: ${{ steps.pr.outputs.head_sha }}
+        run: |
+          set -euo pipefail
+          name="tfplan-${HEAD_SHA}"
+          run_id=$(gh run list --workflow terraform-contabo-cd.yml --json databaseId,headSha \
+            --jq "[.[] | select(.headSha==\"${HEAD_SHA}\")][0].databaseId" || true)
+          if [ -z "${run_id}" ] || [ "${run_id}" = "null" ]; then
+            echo "::error::No reviewed plan run found for ${HEAD_SHA}. Refusing to apply without a saved, reviewed plan."
+            exit 1
+          fi
+          gh run download "${run_id}" -n "${name}" -D "${TF_ROOT}"
+
+      - name: Fail if no saved plan
+        if: steps.pr.outputs.found == 'true'
+        working-directory: ${{ env.TF_ROOT }}
+        run: |
+          test -f tfplan || { echo "::error::No reviewed tfplan present — refusing blind apply."; exit 1; }
+
+      - name: Setup Terraform
+        if: steps.pr.outputs.found == 'true'
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Terraform init (remote state)
+        if: steps.pr.outputs.found == 'true'
+        working-directory: ${{ env.TF_ROOT }}
+        run: |
+          terraform init -input=false \
+            -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}" \
+            -backend-config="dynamodb_table=${{ vars.TF_STATE_DYNAMODB_TABLE }}" \
+            -backend-config="region=${{ vars.TF_STATE_REGION }}"
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.TF_STATE_AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.TF_STATE_AWS_SECRET_ACCESS_KEY }}
+
+      - name: Terraform apply (saved plan)
+        if: steps.pr.outputs.found == 'true'
+        working-directory: ${{ env.TF_ROOT }}
+        run: terraform apply -input=false -lock-timeout=120s tfplan
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.TF_STATE_AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.TF_STATE_AWS_SECRET_ACCESS_KEY }}
+          TF_VAR_contabo_client_id: ${{ secrets.CONTABO_CLIENT_ID }}
+          TF_VAR_contabo_client_secret: ${{ secrets.CONTABO_CLIENT_SECRET }}
+          TF_VAR_contabo_api_user: ${{ secrets.CONTABO_API_USER }}
+          TF_VAR_contabo_api_password: ${{ secrets.CONTABO_API_PASSWORD }}
+          TF_VAR_ssh_public_key: ${{ secrets.TF_SSH_PUBLIC_KEY }}
+          TF_VAR_image_id: ${{ vars.CONTABO_IMAGE_ID }}
+          TF_VAR_product_id: ${{ vars.CONTABO_PRODUCT_ID }}
+          TF_VAR_github_token: ${{ secrets.GH_PAT }}
+          TF_VAR_cloudflare_api_token: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          TF_VAR_cloudflare_account_id: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          TF_VAR_cloudflare_zone_id: ${{ vars.CLOUDFLARE_ZONE_ID }}
+          TF_VAR_crit_bridge_token: ${{ secrets.CRIT_BRIDGE_TOKEN }}
