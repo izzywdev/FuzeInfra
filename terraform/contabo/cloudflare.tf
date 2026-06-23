@@ -113,6 +113,50 @@ resource "cloudflare_zero_trust_access_policy" "admin_email_otp" {
   }
 }
 
+# ---------------------------------------------------------------------------
+# Public FuzeFront platform carve-out — app.prod / auth.prod
+#
+# The wildcard "*.prod.fuzefront.com" admin_services app above gates the whole
+# prod zone with admin email OTP, which also catches the public FuzeFront
+# platform served on app.prod.fuzefront.com (and auth.prod.fuzefront.com),
+# 302-redirecting every visitor to the cloudflareaccess.com login.
+#
+# Fix: an exact-host self_hosted Access app with an everyone=true bypass policy.
+# A more-specific hostname takes precedence over the wildcard app, so these two
+# hosts become public while every admin service stays behind OTP — the same
+# mechanism as the Neo4j Browser / Grafana asset / CRIT bridge carve-outs below.
+#
+# DNS + tunnel routing already exist via the *.prod wildcard CNAME and ingress
+# rule, so no new record/ingress is needed — only this Access exception.
+#
+# To add another public host (e.g. a future vanity host), append to the list.
+locals {
+  public_platform_hosts = ["app", "auth"]
+}
+
+resource "cloudflare_zero_trust_access_application" "public_platform" {
+  for_each             = nonsensitive(local.cloudflare_enabled) ? toset(local.public_platform_hosts) : toset([])
+  account_id           = var.cloudflare_account_id
+  name                 = "FuzeFront Platform — ${each.value}.prod (public)"
+  domain               = "${each.value}.${local.prod_domain}"
+  type                 = "self_hosted"
+  session_duration     = "0s"
+  app_launcher_visible = false
+}
+
+resource "cloudflare_zero_trust_access_policy" "public_platform_bypass" {
+  for_each       = nonsensitive(local.cloudflare_enabled) ? toset(local.public_platform_hosts) : toset([])
+  account_id     = var.cloudflare_account_id
+  application_id = cloudflare_zero_trust_access_application.public_platform[each.value].id
+  name           = "Bypass — public FuzeFront platform (${each.value})"
+  precedence     = 1
+  decision       = "bypass"
+
+  include {
+    everyone = true
+  }
+}
+
 # Cloudflare App Launcher — the portal itself at <team>.cloudflareaccess.com
 # Needs its own access application + policy or CF shows "contact your admin".
 resource "cloudflare_zero_trust_access_application" "app_launcher" {
