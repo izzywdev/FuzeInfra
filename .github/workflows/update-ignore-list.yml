@@ -1,0 +1,42 @@
+name: Add pattern to alert ignore list
+
+# Runs when a user closes an ignore-candidate issue, treating closure as
+# approval to permanently suppress that alert pattern.
+
+on:
+  issues:
+    types: [closed]
+
+permissions:
+  contents: write
+
+jobs:
+  update:
+    # Only run for issues that carry the ignore-candidate label
+    if: contains(github.event.issue.labels.*.name, 'ignore-candidate')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Add pattern to crit-ignore-patterns.json
+        env:
+          ISSUE_BODY:   ${{ github.event.issue.body }}
+          ISSUE_URL:    ${{ github.event.issue.html_url }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          ISSUE_AUTHOR: ${{ github.event.issue.user.login }}
+          TODAY:        ${{ github.event.issue.closed_at }}
+        run: |
+          TODAY=$(echo "$TODAY" | cut -c1-10)
+          python3 .github/update-ignore-list.py
+
+      - name: Commit suppression pattern
+        run: |
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config user.name "github-actions[bot]"
+          git add .github/crit-ignore-patterns.json
+          if ! git diff --cached --quiet; then
+            git commit -m "chore(alerting): suppress pattern approved in #${{ github.event.issue.number }}"
+            git push origin main
+          else
+            echo "Pattern already in list or not found — nothing to commit."
+          fi

@@ -32,6 +32,39 @@ referenced via $(VAR) interpolation to build the SQLAlchemy/Celery URLs.
   value: {{ .Values.airflow.loadExamples | quote }}
 - name: AIRFLOW__API__AUTH_BACKENDS
   value: "airflow.api.auth.backend.basic_auth"
+{{- if .Values.airflow.celeryWorkerConcurrency }}
+- name: AIRFLOW__CELERY__WORKER_CONCURRENCY
+  value: {{ .Values.airflow.celeryWorkerConcurrency | quote }}
+{{- end }}
+{{- end -}}
+
+{{- /*
+  Shared DAG volumes/initContainer block.
+  Kubernetes ConfigMap directory mounts create a timestamped directory (e.g.
+  ..2026_06_21_17_06_42.3303819634) plus a ..data symlink pointing to it.
+  Airflow's list_py_file_paths walks with followlinks=True and tracks
+  os.path.realpath per directory; both entries resolve to the same real path,
+  triggering "Detected recursive loop when walking DAG directory".
+  Fix: copy DAG files from the ConfigMap mount into a plain emptyDir — no
+  symlinks, no loop.
+*/ -}}
+{{- define "fuzeinfra.dagInitContainer" -}}
+- name: dag-sync
+  image: busybox
+  command: ["sh", "-c", "cp /configmap-dags/*.py /dags/ 2>/dev/null || true"]
+  volumeMounts:
+    - name: dags-cm
+      mountPath: /configmap-dags
+    - name: dags
+      mountPath: /dags
+{{- end -}}
+
+{{- define "fuzeinfra.dagVolumes" -}}
+- name: dags
+  emptyDir: {}
+- name: dags-cm
+  configMap:
+    name: fuzeinfra-airflow-dags
 {{- end -}}
 
 {{- if .Values.airflow.enabled }}
@@ -161,6 +194,8 @@ spec:
         {{- include "fuzeinfra.labels" . | nindent 8 }}
         {{- include "fuzeinfra.selectorLabels" (dict "component" "airflow-webserver") | nindent 8 }}
     spec:
+      initContainers:
+        {{- include "fuzeinfra.dagInitContainer" . | nindent 8 }}
       containers:
         - name: webserver
           image: {{ .Values.airflow.image }}
@@ -184,9 +219,7 @@ spec:
             periodSeconds: 15
             failureThreshold: 12
       volumes:
-        - name: dags
-          configMap:
-            name: fuzeinfra-airflow-dags
+        {{- include "fuzeinfra.dagVolumes" . | nindent 8 }}
 ---
 {{- /* ===================== Airflow Scheduler ===================== */}}
 apiVersion: apps/v1
@@ -206,6 +239,8 @@ spec:
         {{- include "fuzeinfra.labels" . | nindent 8 }}
         {{- include "fuzeinfra.selectorLabels" (dict "component" "airflow-scheduler") | nindent 8 }}
     spec:
+      initContainers:
+        {{- include "fuzeinfra.dagInitContainer" . | nindent 8 }}
       containers:
         - name: scheduler
           image: {{ .Values.airflow.image }}
@@ -217,9 +252,7 @@ spec:
             - name: dags
               mountPath: /opt/airflow/dags
       volumes:
-        - name: dags
-          configMap:
-            name: fuzeinfra-airflow-dags
+        {{- include "fuzeinfra.dagVolumes" . | nindent 8 }}
 ---
 {{- /* ===================== Airflow Celery Worker ===================== */}}
 apiVersion: apps/v1
@@ -239,6 +272,8 @@ spec:
         {{- include "fuzeinfra.labels" . | nindent 8 }}
         {{- include "fuzeinfra.selectorLabels" (dict "component" "airflow-worker") | nindent 8 }}
     spec:
+      initContainers:
+        {{- include "fuzeinfra.dagInitContainer" . | nindent 8 }}
       containers:
         - name: worker
           image: {{ .Values.airflow.image }}
@@ -246,13 +281,15 @@ spec:
           args: ["celery", "worker"]
           env:
             {{- include "fuzeinfra.airflowEnv" . | nindent 12 }}
+          {{- if .Values.airflow.workerResources }}
+          resources:
+            {{- toYaml .Values.airflow.workerResources | nindent 12 }}
+          {{- end }}
           volumeMounts:
             - name: dags
               mountPath: /opt/airflow/dags
       volumes:
-        - name: dags
-          configMap:
-            name: fuzeinfra-airflow-dags
+        {{- include "fuzeinfra.dagVolumes" . | nindent 8 }}
 ---
 {{- /* ===================== Airflow Flower (Celery monitoring) ===================== */}}
 apiVersion: v1

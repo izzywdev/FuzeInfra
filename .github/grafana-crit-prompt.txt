@@ -8,19 +8,28 @@ DETAILS: {{ALERT_DESC}}
 LABELS: {{ALERT_LABELS}}
 FIRED AT: {{FIRED_AT}}
 
-RECENT CRIT/FATAL/PANIC LOG LINES (last 30 min):
+RECENT ERROR/CRIT/FATAL/PANIC LOG LINES (last 30 min, pre-filtered):
 {{LOG_CTX}}
 
 INSTRUCTIONS:
 1. Analyse the error. Search the codebase -- helm/, monitoring/, docker/,
 argocd/ -- to identify the root cause.
+
 2. If you can make a CONCRETE fix (helm value, config file, alert rule,
 dashboard JSON): implement it now. Then output ONLY this JSON on stdout (last
 line of your output):
    {"action":"fix","summary":"one-line description of the fix","files":["paths changed"]}
+
 3. If the error requires human judgement (external dependency down, ambiguous
 infrastructure state, hardware issue, insufficient log context): do NOT guess.
 Output ONLY this JSON:
    {"action":"issue","title":"short descriptive title","body":"markdown body with: root cause hypothesis, evidence from logs, suggested next steps"}
+
+4. If the error is BENIGN or EXPECTED — a known transient condition, a
+health-check probe misconfiguration, a controlled restart, or anything that
+does not indicate real data loss or service degradation — do NOT alert. Output:
+   {"action":"ignore","pattern":"regex matching the log lines causing this alert","reason":"one sentence why this is safe to ignore"}
+   The pattern will be stored and used to suppress future identical alerts.
+   Use a precise regex so unrelated errors are not accidentally suppressed.
 
 Output the JSON as the LAST line. You may emit reasoning before it.

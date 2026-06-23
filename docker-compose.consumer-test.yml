@@ -1,0 +1,99 @@
+# ===========================================================================
+# Consumer test-harness — version-accurate ephemeral infra for consumer CI
+# ===========================================================================
+# A trimmed set of the shared base services (Postgres / Redis / Kafka / ChromaDB
+# / MailHog) pinned to the SAME image versions production runs, so a consumer
+# repo (which vendors FuzeInfra as a git submodule) can stand up reproducible
+# infra in CI instead of hand-rolling its own and drifting.
+#
+# Image tags come from versions.env — the single source of truth that mirrors
+# docker-compose.FuzeInfra.yml. Run it from CI like:
+#
+#   docker compose --env-file versions.env -f docker-compose.consumer-test.yml up -d --wait
+#   # ... run your tests against localhost ...
+#   docker compose -f docker-compose.consumer-test.yml down -v
+#
+# Self-contained on purpose: its own bridge network and no host volumes, so it is
+# fully ephemeral and does NOT touch a developer's full FuzeInfra stack. Defaults
+# let it run with plain `docker compose -f docker-compose.consumer-test.yml up`
+# even without the --env-file, but pass --env-file versions.env for prod-accurate pins.
+name: fuzeinfra-consumer-test
+
+services:
+  postgres:
+    image: ${POSTGRES_IMAGE:-postgres:15}
+    environment:
+      POSTGRES_DB: ${TEST_POSTGRES_DB:-fuzeinfra_test}
+      POSTGRES_USER: ${TEST_POSTGRES_USER:-fuzeinfra}
+      POSTGRES_PASSWORD: ${TEST_POSTGRES_PASSWORD:-fuzeinfra_test}
+    ports:
+      - "${TEST_POSTGRES_PORT:-5432}:5432"
+    networks: [consumer-test]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${TEST_POSTGRES_USER:-fuzeinfra}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: ${REDIS_IMAGE:-redis:7-alpine}
+    command: redis-server --appendonly yes
+    ports:
+      - "${TEST_REDIS_PORT:-6379}:6379"
+    networks: [consumer-test]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  kafka:
+    image: ${KAFKA_IMAGE:-confluentinc/cp-kafka:7.6.1}
+    environment:
+      # KRaft single-node (broker + controller) — mirrors the prod broker config.
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093,PLAINTEXT_HOST://0.0.0.0:29092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
+      CLUSTER_ID: j7z6bP_dQ8-uF_3Dp5tiXw
+    ports:
+      - "${TEST_KAFKA_PORT:-29092}:29092"
+    networks: [consumer-test]
+    healthcheck:
+      test: ["CMD-SHELL", "kafka-broker-api-versions --bootstrap-server localhost:9092 >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+
+  chromadb:
+    image: ${CHROMADB_IMAGE:-chromadb/chroma:latest}
+    environment:
+      - CHROMA_HOST=0.0.0.0
+      - CHROMA_PORT=8000
+      - ALLOW_RESET=true
+      - IS_PERSISTENT=false
+    ports:
+      - "${TEST_CHROMADB_PORT:-8000}:8000"
+    networks: [consumer-test]
+    # No healthcheck: chromadb/chroma is distroless (no shell). Probe externally
+    # via GET http://localhost:${TEST_CHROMADB_PORT}/api/v2/heartbeat from CI.
+
+  mailhog:
+    image: ${MAILHOG_IMAGE:-mailhog/mailhog:v1.0.1}
+    ports:
+      - "${TEST_MAILHOG_SMTP_PORT:-1025}:1025"  # SMTP
+      - "${TEST_MAILHOG_HTTP_PORT:-8025}:8025"  # Web UI / API
+    networks: [consumer-test]
+
+networks:
+  consumer-test:
+    driver: bridge

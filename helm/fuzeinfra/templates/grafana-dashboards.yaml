@@ -21,6 +21,19 @@ data:
         allowUiUpdates: true
         options:
           path: /var/lib/grafana/dashboards
+      {{- if .Values.grafana.dashboardSidecar.enabled }}
+      # Discovered dashboards written by the k8s-sidecar (see grafana.dashboardSidecar).
+      - name: discovered
+        orgId: 1
+        folder: {{ .Values.grafana.dashboardSidecar.folderName | quote }}
+        type: file
+        disableDeletion: false
+        updateIntervalSeconds: 30
+        allowUiUpdates: true
+        options:
+          path: /var/lib/grafana/dashboards-discovered
+          foldersFromFilesStructure: true
+      {{- end }}
 ---
 {{- /* One ConfigMap per dashboard to stay well under the 1 MiB ConfigMap limit. */ -}}
 {{- range $name := list "cluster-overview" "kubernetes-nodes" "kubernetes-pods" "fuzeinfra-services" "logs-explorer" }}
