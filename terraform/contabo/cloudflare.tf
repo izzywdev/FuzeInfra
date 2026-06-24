@@ -533,3 +533,6 @@ resource "null_resource" "tunnel_secrets" {
     EOT
   }
 }
+
+# Trigger CD plan/apply of the already-reviewed pending changes (vanity
+# routes app/auth.fuzefront.com + sealed-secrets CF Access). See #59 plan.
