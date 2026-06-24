@@ -4,11 +4,16 @@
 # Lives in a CONSUMER repo (FuzeFront, future microservices), NOT in FuzeInfra.
 # Drop it at `.github/workflows/infra-dispatch.yml`.
 #
-# On merge to main touching `deploy/terraform/**` (or `deploy/argocd/**`), fire
-# a `repository_dispatch` to FuzeInfra with the change ref. FuzeInfra's
-# infra-request-handler then runs the merge-to-apply pipeline using ITS OWN
-# state + creds. The consumer NEVER applies and holds NO cloud creds — only a
-# narrowly-scoped dispatch token (see docs/INFRA_REQUEST_DISPATCH.md).
+# On merge to main touching `deploy/terraform/**`, fire a `repository_dispatch`
+# to FuzeInfra with the change ref. FuzeInfra's infra-request-handler then runs
+# the Terraform merge-to-apply pipeline using ITS OWN state + creds. The
+# consumer NEVER applies and holds NO cloud creds — only a narrowly-scoped
+# dispatch token (see docs/INFRA_REQUEST_DISPATCH.md).
+#
+# NOTE: this triggers on `deploy/terraform/**` ONLY — never `deploy/argocd/**`.
+# ArgoCD owns the consumer's argo manifests after the one-time registration
+# (FuzeInfra's argocd-register.yml), so argo-manifest edits self-reconcile and
+# must not dispatch an infra-request. The handler is Terraform-only.
 #
 # So:  consumer merge → dispatch → FuzeInfra apply.
 #
@@ -21,8 +26,7 @@ on:
   push:
     branches: [main]
     paths:
-      - "deploy/terraform/**"
-      - "deploy/argocd/**"
+      - "deploy/terraform/**"   # NOT deploy/argocd/** — ArgoCD self-syncs those
 
 permissions:
   contents: read
@@ -42,8 +46,11 @@ jobs:
           # (deploy/terraform/requests.json) shaped as { "requests": [ ... ] }.
           # FuzeInfra validates it against the auto-apply whitelist; anything
           # outside the whitelist routes to a gated PR (manual approval) there.
-          if [ ! -f deploy/terraform/requests.json ]; then
-            echo "deploy/terraform/requests.json not found — nothing to dispatch."
+          # Only dispatch when there is a non-empty requests[] payload — an empty
+          # or absent list is not an infra-request (FuzeInfra would no-op anyway).
+          if [ ! -s deploy/terraform/requests.json ] \
+             || [ "$(jq '(.requests // []) | length' deploy/terraform/requests.json)" -eq 0 ]; then
+            echo "No non-empty 'requests' in deploy/terraform/requests.json — nothing to dispatch."
             exit 0
           fi
 

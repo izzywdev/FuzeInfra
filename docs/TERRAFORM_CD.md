@@ -26,7 +26,7 @@ PR touching terraform/**            merge to main
  • REQUIRED status check
 ```
 
-Workflow: [`docs/workflows/terraform-plan-apply.yml`](workflows/terraform-plan-apply.yml).
+Workflow: [`.github/workflows/terraform-plan-apply.yml`](../.github/workflows/terraform-plan-apply.yml) (active).
 
 Key properties:
 - **Apply the reviewed plan, not a fresh one.** The PR job runs
@@ -41,18 +41,20 @@ Key properties:
 - **Least-privilege creds** injected from CI secrets as `TF_VAR_*` at apply
   time (Cloudflare token scoped to the zone, Contabo creds to the project).
 
-### Activation (maintainer, one-time)
+### Activation status
 
-The bot can't write under `.github/workflows/`, so the workflow ships in
-`docs/workflows/`. Activate it:
+The workflow is **active** at `.github/workflows/terraform-plan-apply.yml` — it
+runs `plan` on terraform PRs and `apply` (saved plan) on merge to `main`.
 
-```bash
-git mv docs/workflows/terraform-plan-apply.yml .github/workflows/
-git commit -m "ci: activate terraform merge-to-apply CD" && git push
-```
+**Not yet a required check.** Do NOT add `terraform-plan / plan` to branch
+protection's required checks yet: it triggers on `pull_request: paths:
+[terraform/**]`, so a non-terraform PR would leave the check **pending forever**
+(merge deadlock). Adopt the deadlock-safe pattern first (always-run job +
+internal `terraform/**` self-filter so non-terraform PRs go green), being folded
+in from PRs #52/#53. Once that lands:
 
-Then **Settings → Branches → main → Branch protection**:
-- Require the status check **`terraform-plan / plan (terraform/contabo)`**.
+**Settings → Branches → main → Branch protection**:
+- Require the status check **`terraform-plan / plan`**.
 - Require at least **1 approving review**.
 
 That combination is what makes "nothing applies without a reviewed plan" true.

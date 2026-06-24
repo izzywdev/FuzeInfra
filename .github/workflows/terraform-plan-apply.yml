@@ -20,12 +20,12 @@
 #     to the project.
 #
 # ---------------------------------------------------------------------------
-# ACTIVATION: the bot that authored this cannot write under .github/workflows/.
-# A maintainer must move it into place and set branch protection:
-#     git mv docs/workflows/terraform-plan-apply.yml .github/workflows/
-#     git commit -m "ci: activate terraform merge-to-apply CD" && git push
-# Then in repo Settings → Branches → main, require the
-#   "terraform-plan / plan (terraform/contabo)" check + 1 review before merge.
+# This workflow is ACTIVE (.github/workflows/). NOTE: do NOT add its `plan`
+# check to branch protection's required checks yet — it triggers on
+# `pull_request: paths: [terraform/**]`, so a non-terraform PR would leave the
+# check pending forever (merge deadlock). Make it required only after adopting
+# the deadlock-safe pattern (always-run job + internal terraform/** self-filter
+# so non-terraform PRs go green) being brought in from PRs #52/#53.
 # ---------------------------------------------------------------------------
 #
 # Required repo configuration:
