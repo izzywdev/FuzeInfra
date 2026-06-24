@@ -53,6 +53,13 @@ concurrency:
 jobs:
   reconcile:
     runs-on: ubuntu-latest
+    # AWS creds for the S3 remote backend — needed by EVERY terraform step
+    # (init/plan/apply), not just init. Without these on the plan/apply steps the
+    # S3 backend can't refresh state ("No valid credential sources found"), which
+    # made every node-provisioning request's plan fail (so no VPS was ever created).
+    env:
+      AWS_ACCESS_KEY_ID: ${{ secrets.TF_STATE_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.TF_STATE_SECRET_ACCESS_KEY }}
     steps:
       - name: Check out FuzeInfra (module + whitelist + scripts)
         uses: actions/checkout@v4
