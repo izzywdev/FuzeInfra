@@ -34,8 +34,19 @@ jobs:
             exit 0
           fi
           if git rev-list --count "origin/${BASE}..origin/${BRANCH}" | grep -qvE '^0$'; then
-            gh pr create --draft --base "$BASE" --head "$BRANCH" --fill \
-              || echo "gh pr create failed (no diff or transient) — skipping."
+            url=$(gh pr create --draft --base "$BASE" --head "$BRANCH" --fill) \
+              || { echo "gh pr create failed (no diff or transient) — skipping."; exit 0; }
+            echo "Opened $url"
+            # Auto-close the source issue on merge: derive N from claude/issue-<N>-...
+            # branch names and append "Closes #N" to the PR body (gh won't add it).
+            ISSUE=$(printf '%s' "$BRANCH" | sed -nE 's#^claude/issue-0*([0-9]+).*#\1#p')
+            num=$(printf '%s' "$url" | sed -nE 's#.*/pull/([0-9]+).*#\1#p')
+            if [ -n "$ISSUE" ] && [ -n "$num" ]; then
+              gh pr view "$num" --json body --jq '.body' > /tmp/prbody.md
+              printf '\n\nCloses #%s\n' "$ISSUE" >> /tmp/prbody.md
+              gh pr edit "$num" --body-file /tmp/prbody.md \
+                && echo "PR #$num will close #$ISSUE on merge."
+            fi
           else
             echo "No commits on $BRANCH ahead of $BASE — no PR opened."
           fi
