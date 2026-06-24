@@ -1,0 +1,66 @@
+# ===========================================================================
+# infra-dispatch (CONSUMER side)  —  part of the FuzeOne standard stack
+# ===========================================================================
+# Lives in a CONSUMER repo (FuzeFront, future microservices), NOT in FuzeInfra.
+# Drop it at `.github/workflows/infra-dispatch.yml`.
+#
+# On merge to main touching `deploy/terraform/**`, fire a `repository_dispatch`
+# to FuzeInfra with the change ref. FuzeInfra's infra-request-handler then runs
+# the Terraform merge-to-apply pipeline using ITS OWN state + creds. The
+# consumer NEVER applies and holds NO cloud creds — only a narrowly-scoped
+# dispatch token (see docs/INFRA_REQUEST_DISPATCH.md).
+#
+# NOTE: this triggers on `deploy/terraform/**` ONLY — never `deploy/argocd/**`.
+# ArgoCD owns the consumer's argo manifests after the one-time registration
+# (FuzeInfra's argocd-register.yml), so argo-manifest edits self-reconcile and
+# must not dispatch an infra-request. The handler is Terraform-only.
+#
+# So:  consumer merge → dispatch → FuzeInfra apply.
+#
+# Requires the consumer repo secret FUZEINFRA_DISPATCH_TOKEN (a fine-grained
+# PAT or GitHub App token whose ONLY power is to POST a dispatch to FuzeInfra).
+# ===========================================================================
+name: infra-dispatch
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "deploy/terraform/**"   # NOT deploy/argocd/** — ArgoCD self-syncs those
+
+permissions:
+  contents: read
+
+jobs:
+  dispatch:
+    name: dispatch infra-request to FuzeInfra
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build client_payload and dispatch
+        env:
+          GH_TOKEN: ${{ secrets.FUZEINFRA_DISPATCH_TOKEN }}
+        run: |
+          # The consumer declares its node requests in a committed JSON file
+          # (deploy/terraform/requests.json) shaped as { "requests": [ ... ] }.
+          # FuzeInfra validates it against the auto-apply whitelist; anything
+          # outside the whitelist routes to a gated PR (manual approval) there.
+          # Only dispatch when there is a non-empty requests[] payload — an empty
+          # or absent list is not an infra-request (FuzeInfra would no-op anyway).
+          if [ ! -s deploy/terraform/requests.json ] \
+             || [ "$(jq '(.requests // []) | length' deploy/terraform/requests.json)" -eq 0 ]; then
+            echo "No non-empty 'requests' in deploy/terraform/requests.json — nothing to dispatch."
+            exit 0
+          fi
+
+          # Build the full dispatch body: { event_type, client_payload }.
+          BODY=$(jq -c \
+            --arg repo "${{ github.repository }}" \
+            --arg ref "${{ github.sha }}" \
+            '{event_type:"infra-request",
+              client_payload:{repo:$repo, ref:$ref, requests:(.requests // [])}}' \
+            deploy/terraform/requests.json)
+
+          echo "Dispatching: $BODY"
+          echo "$BODY" | gh api --method POST repos/izzywdev/FuzeInfra/dispatches --input -

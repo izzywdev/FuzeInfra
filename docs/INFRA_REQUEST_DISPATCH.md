@@ -5,17 +5,25 @@ needs in git and **dispatch** to FuzeInfra to reconcile them. **FuzeInfra is the
 sole credential holder** — consumers never see Contabo creds, the k3s node-token,
 or the Terraform state backend.
 
+The handler is **Terraform-only**: it reconciles node-provisioning requests and
+nothing else. ArgoCD registration is a separate one-time `workflow_dispatch`
+(`argocd-register.yml`); after it, ArgoCD self-syncs the consumer's argo
+manifests and they never touch this handler.
+
 ```
 ┌────────────────────┐   repository_dispatch        ┌──────────────────────────┐
 │ Consumer repo      │   (event_type:               │ FuzeInfra                │
 │ (e.g. FuzeFront)   │    infra-request)            │                          │
 │                    │ ───────────────────────────► │ infra-request-handler.yml│
-│ deploy/terraform/  │   client_payload =           │  • validate vs whitelist │
+│ deploy/terraform/  │   client_payload =           │  • no requests → skip    │
 │   node-request.tf  │   { repo, ref, requests[] }  │  • whitelisted → apply   │
-│ deploy/argocd/     │                              │  • else → gated PR (plan)│
+│   requests.json    │   (TF changes only)          │  • else → gated PR (plan)│
 │ .github/workflows/ │                              │                          │
 │   infra-dispatch.yml                              │ creds: FuzeInfra CI only │
 └────────────────────┘                              └──────────────────────────┘
+
+  deploy/argocd/  ──(one-time)──► argocd-register.yml ──► ArgoCD self-syncs after
+                                  (workflow_dispatch)      registration; no handler
 ```
 
 ## Components in this repo
@@ -23,18 +31,10 @@ or the Terraform state backend.
 | Path | Role |
 |------|------|
 | [`modules/contabo-k3s-node`](../modules/contabo-k3s-node/) | TF module: VPS + cloud-init k3s agent join + labels (consumers reference this) |
-| `.github/workflows/infra-request-handler.yml` | Handler (see activation note below) |
+| `.github/workflows/infra-request-handler.yml` | Terraform-only handler (skip / apply / gated-PR) |
+| `.github/workflows/argocd-register.yml` | One-time ArgoCD registration of a repo (`workflow_dispatch`) |
 | [`config/infra-request-whitelist.json`](../config/infra-request-whitelist.json) | Auto-apply rules |
-| [`scripts-tools/validate_infra_request.py`](../scripts-tools/validate_infra_request.py) | Whitelist validator used by the handler |
-
-> **Activation note:** the handler workflow ships at
-> [`docs/workflows/infra-request-handler.yml`](workflows/infra-request-handler.yml)
-> because the bot that authored it cannot write under `.github/workflows/`. A
-> maintainer must move it into place:
-> ```bash
-> git mv docs/workflows/infra-request-handler.yml .github/workflows/
-> git commit -m "ci: activate infra-request-handler" && git push
-> ```
+| [`scripts-tools/validate_infra_request.py`](../scripts-tools/validate_infra_request.py) | Whitelist validator (returns skip / apply / gate) used by the handler |
 
 ## The auto-apply whitelist
 
@@ -93,14 +93,24 @@ gh secret set FUZEINFRA_DISPATCH_TOKEN --repo izzywdev/FuzeFront
 
 ### Consumer side — example `infra-dispatch.yml`
 
-The consumer's workflow fires the dispatch (for reference; lives in the consumer repo):
+The consumer's workflow fires the dispatch (for reference; lives in the consumer repo).
+
+**The handler is Terraform-only.** It reconciles infra (node) provisioning
+requests and nothing else, so the dispatch must:
+
+1. Trigger **only** on `deploy/terraform/**` — **never** on `deploy/argocd/**`.
+   ArgoCD self-syncs argo manifests after the one-time registration (below), so
+   argo-manifest edits are not infra-requests and must not dispatch.
+2. Dispatch **only when there is a non-empty `requests` payload** to send. A push
+   that changes terraform scaffolding but carries no node requests should send
+   nothing (the handler would no-op anyway, but don't dispatch noise).
 
 ```yaml
 name: infra-dispatch
 on:
   push:
     branches: [main]
-    paths: ["deploy/terraform/**", "deploy/argocd/**"]
+    paths: ["deploy/terraform/**"]      # NOT deploy/argocd/** — Argo owns those
 jobs:
   dispatch:
     runs-on: ubuntu-latest
@@ -110,14 +120,38 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.FUZEINFRA_DISPATCH_TOKEN }}
         run: |
-          # Build the requests[] payload from deploy/terraform (e.g. a committed
-          # requests.json) and dispatch it.
+          # Only dispatch if there is a non-empty requests[] payload to send.
+          if [ ! -s deploy/terraform/requests.json ] \
+             || [ "$(jq '(.requests // []) | length' deploy/terraform/requests.json)" -eq 0 ]; then
+            echo "No non-empty 'requests' in deploy/terraform/requests.json — nothing to dispatch."
+            exit 0
+          fi
           gh api repos/izzywdev/FuzeInfra/dispatches \
             -f event_type=infra-request \
             -F client_payload[repo]="${{ github.repository }}" \
             -F client_payload[ref]="${{ github.sha }}" \
             --input deploy/terraform/requests.json
 ```
+
+> `requests.json` must have the shape `{ "requests": [ {name, product_id, region, role, labels}, ... ] }`.
+> The consumer's `deploy/terraform/` root module must also **declare** the variables the
+> handler injects (`requests`, `contabo_client_id`, `contabo_client_secret`,
+> `contabo_api_user`, `contabo_api_password`, `k3s_server_url`, `k3s_node_token`,
+> `image_id`, `ssh_public_key`) — otherwise `terraform plan` fails with
+> "undeclared variable". Declare them and forward into the `contabo-k3s-node` module.
+
+### One-time ArgoCD registration (separate from infra-requests)
+
+Registering a repo into the cluster's ArgoCD is a **one-time, manual** action,
+decoupled from the Terraform handler. Run FuzeInfra's `argocd-register.yml`:
+
+```bash
+gh workflow run argocd-register.yml --repo izzywdev/FuzeInfra \
+  -f repo=izzywdev/FuzeFront -f ref=main -f path=deploy/argocd
+```
+
+After this, ArgoCD polls and self-syncs the consumer's `deploy/argocd` manifests.
+Ongoing edits to those files are **not** infra-requests and trigger nothing.
 
 ## Required FuzeInfra CI secrets (handler side)
 
@@ -127,11 +161,12 @@ jobs:
 | `K3S_SERVER_URL` / `K3S_NODE_TOKEN` | k3s agent join |
 | `CONTABO_IMAGE_ID` | OS image for new nodes |
 | `NODE_SSH_PUBLIC_KEY` | Break-glass SSH key injected via cloud-init |
-| `KUBE_CONFIG` | base64 kubeconfig — node labeling + Argo sync |
+| `KUBE_CONFIG` | base64 kubeconfig — node labeling (handler) + one-time Argo registration (`argocd-register.yml`) |
 | `TF_STATE_BUCKET` / `TF_STATE_REGION` / `TF_STATE_ACCESS_KEY_ID` / `TF_STATE_SECRET_ACCESS_KEY` | FuzeInfra-owned remote TF state backend |
 
 ## Related docs
 
+- [`TERRAFORM_CD.md`](TERRAFORM_CD.md) — the full merge-to-apply model (FuzeInfra-owned plane A + this dispatch bridge plane B), backend bootstrap, and the FuzeOne consumer-side workflows.
 - [`K3S_SECOND_NODE_RUNBOOK.md`](K3S_SECOND_NODE_RUNBOOK.md) — manual node-join procedure this automates.
 - [`gitops.md`](gitops.md) — Argo CD delivery model.
 - [`CONTRACT.md`](../CONTRACT.md) — FuzeInfra's stable service interface.

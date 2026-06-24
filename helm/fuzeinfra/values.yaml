@@ -180,7 +180,29 @@ grafana:
   enabled: true
   image: grafana/grafana:latest
   port: 3000
+  # Datasources (Prometheus, Loki), dashboards and alerting are all provisioned
+  # from ConfigMaps, so Grafana is stateless by default and can be rescheduled
+  # onto any node without depending on node-pinned local-path storage.
+  persistence:
+    # Off by default → Grafana's SQLite DB lives in an emptyDir. Set to true to
+    # retain runtime state (manually-created users/dashboards) across restarts
+    # via a PVC. Note: a PVC pins the pod to a node when using local-path.
+    enabled: false
+  # PVC size, used only when persistence.enabled=true.
   storage: 2Gi
+  # Scheduling controls (default empty → no change to single-node behaviour).
+  # Populate these to move Grafana onto a chosen node, e.g. to offload the
+  # primary node:
+  #   nodeSelector:
+  #     kubernetes.io/hostname: worker-2
+  #   tolerations:
+  #     - key: dedicated
+  #       operator: Equal
+  #       value: monitoring
+  #       effect: NoSchedule
+  nodeSelector: {}
+  affinity: {}
+  tolerations: []
   # Discover dashboards from labeled ConfigMaps in ANY namespace.
   # Opt-in: runs a k8s-sidecar that watches ConfigMaps with the configured label
   # and writes their JSON into a Grafana provisioning folder. Consumers ship
