@@ -95,7 +95,7 @@ jobs:
       # actually changed.
       - name: Detect terraform/** changes
         id: detect
-        uses: dorny/paths-filter@v3
+        uses: dorny/paths-filter@d1c1ffe0248fe513906c8e24db8ea791d46f8590 # v3
         with:
           filters: |
             tf:
@@ -228,7 +228,7 @@ jobs:
           echo "Merged PR #$PR, reviewed plan keyed by head SHA $HEAD_SHA"
 
       - name: Download the reviewed plan
-        uses: dawidd6/action-download-artifact@v6
+        uses: dawidd6/action-download-artifact@bf251b5aa9c2f7eeb574a96ee720e24f801b7c11 # v6
         with:
           name: tfplan-${{ steps.pr.outputs.head_sha }}
           # The plan was produced by a different workflow run (the PR check).
