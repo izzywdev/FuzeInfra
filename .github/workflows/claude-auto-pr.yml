@@ -34,7 +34,7 @@ jobs:
             exit 0
           fi
           if git rev-list --count "origin/${BASE}..origin/${BRANCH}" | grep -qvE '^0$'; then
-            url=$(gh pr create --draft --base "$BASE" --head "$BRANCH" --fill) \
+            url=$(gh pr create --base "$BASE" --head "$BRANCH" --fill) \
               || { echo "gh pr create failed (no diff or transient) — skipping."; exit 0; }
             echo "Opened $url"
             # Auto-close the source issue on merge: derive N from claude/issue-<N>-...
