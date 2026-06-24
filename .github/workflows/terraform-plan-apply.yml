@@ -143,17 +143,23 @@ jobs:
         working-directory: ${{ env.TF_ROOT }}
         run: |
           set +e
-          terraform plan -input=false -lock-timeout=5m -no-color -out=tfplan
+          # -detailed-exitcode: 0 = no changes, 1 = error, 2 = changes present.
+          terraform plan -input=false -lock-timeout=5m -no-color -detailed-exitcode -out=tfplan
           code=$?
           set -e
-          terraform show -no-color tfplan > plan.txt
+          terraform show -no-color tfplan > plan.txt 2>/dev/null || true
           # Trim the comment to GitHub's ~65k limit.
           head -c 60000 plan.txt > plan.trimmed.txt
           if [ "$(wc -c < plan.txt)" -gt 60000 ]; then
             echo "" >> plan.trimmed.txt
             echo "... (plan truncated — see the workflow log / artifact for the full plan)" >> plan.trimmed.txt
           fi
-          exit $code
+          echo "tf_exit=$code" >> "$GITHUB_OUTPUT"
+          # Fail NOW only on a real plan error (1). A changes-present plan (2) is
+          # still saved + commented below, then flagged as a check failure at the
+          # end — so drift is loud, but the reviewed plan stays available for apply.
+          [ "$code" = "1" ] && exit 1
+          exit 0
 
       - name: Save the reviewed plan
         if: success() && steps.detect.outputs.tf == 'true' && github.event.pull_request.head.repo.fork != true
@@ -194,6 +200,16 @@ jobs:
             } else {
               await github.rest.issues.createComment({ owner, repo, issue_number, body });
             }
+
+      # Drift gate: a non-empty plan (tf_exit=2) fails THIS check — loudly — after
+      # the plan was saved + commented above. The artifact still exists, so you can
+      # deliberately merge past the red check to apply the reviewed plan; but a
+      # green plan check now guarantees "no changes" (state matches config).
+      - name: Fail the check on a non-empty plan (drift)
+        if: steps.detect.outputs.tf == 'true' && github.event.pull_request.head.repo.fork != true && steps.plan.outputs.tf_exit == '2'
+        run: |
+          echo "::error::terraform plan is NON-EMPTY — config and live state differ (drift or unapplied changes). See the plan comment. Reconcile/import until clean, or merge deliberately to apply the reviewed plan."
+          exit 1
 
   # =========================================================================
   # APPLY — on merge to main. Applies the SAVED plan that was reviewed.
