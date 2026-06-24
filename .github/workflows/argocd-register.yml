@@ -1,0 +1,79 @@
+# ===========================================================================
+# argocd-register
+# ===========================================================================
+# ONE-TIME registration of a consumer repo into the FuzeInfra cluster's ArgoCD.
+#
+# This is deliberately a manual workflow_dispatch, fully decoupled from the
+# Terraform-only infra-request-handler. You run it once when onboarding a repo
+# (or when adding a brand-new Argo Application/AppProject for it). After that,
+# ArgoCD polls and self-syncs the consumer's deploy/argocd manifests — ongoing
+# edits to those files are NOT an infra-request and must never trigger the
+# handler. Re-running this is safe (kubectl apply is idempotent) but normally
+# unnecessary; let ArgoCD own the steady state.
+#
+# Required repo secrets (FuzeInfra CI only):
+#   KUBE_CONFIG   # base64 kubeconfig for the k3s server
+#
+# Example:
+#   gh workflow run argocd-register.yml \
+#     -f repo=izzywdev/FuzeFront -f ref=main -f path=deploy/argocd
+
+name: argocd-register
+
+on:
+  workflow_dispatch:
+    inputs:
+      repo:
+        description: "Consumer repo to register (owner/name)"
+        required: true
+        type: string
+      ref:
+        description: "Ref to read the argo manifests from"
+        required: false
+        default: main
+        type: string
+      path:
+        description: "Path in the consumer repo holding the Argo Application/AppProject manifests"
+        required: false
+        default: deploy/argocd
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  # One registration at a time per repo.
+  group: argocd-register-${{ inputs.repo }}
+  cancel-in-progress: false
+
+jobs:
+  register:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out consumer argo manifests
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.repo }}
+          ref: ${{ inputs.ref }}
+          path: consumer
+          token: ${{ secrets.GITHUB_TOKEN }}
+          sparse-checkout: |
+            ${{ inputs.path }}
+
+      - name: Configure kubectl
+        run: |
+          mkdir -p "$HOME/.kube"
+          echo "${{ secrets.KUBE_CONFIG }}" | base64 -d > "$HOME/.kube/config"
+
+      - name: Register Argo Applications (one-time)
+        run: |
+          DIR="consumer/${{ inputs.path }}"
+          if [ ! -d "$DIR" ]; then
+            echo "::error::No '${{ inputs.path }}' directory in ${{ inputs.repo }}@${{ inputs.ref }} — nothing to register."
+            exit 1
+          fi
+          echo "Registering Argo manifests from $DIR ..."
+          kubectl apply -f "$DIR/"
+          echo ""
+          echo "Done. ArgoCD now owns these Applications and will self-sync future"
+          echo "changes to ${{ inputs.path }} — do not re-run this for ordinary edits."

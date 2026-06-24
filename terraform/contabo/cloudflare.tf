@@ -18,6 +18,14 @@
 locals {
   cloudflare_enabled = var.cloudflare_api_token != ""
   prod_domain        = "${var.prod_subdomain}.${var.zone_name}"
+
+  # Public vanity hosts served directly by the FuzeFront platform.
+  # These live at the apex zone (e.g. app.fuzefront.com), OUTSIDE the
+  # *.prod.fuzefront.com Access wildcard, so they are public by default —
+  # Authentik handles platform auth, not Cloudflare Access. The FuzeFront
+  # chart sets its Traefik Ingress host to match (className traefik, TLS off,
+  # CF terminates edge TLS). Adding a future public host is a one-line edit.
+  public_vanity_hosts = ["app", "auth"]
 }
 
 # 32-byte cryptographically random tunnel secret
@@ -58,6 +66,16 @@ resource "cloudflare_zero_trust_tunnel_cloudflared_config" "fuzeinfra" {
       hostname = local.prod_domain
       service  = "http://traefik.kube-system:80"
     }
+    # Public vanity hosts (app/auth.fuzefront.com) → Traefik. These are at the
+    # apex zone, outside the *.prod Access wildcard, so they stay public.
+    # Must come BEFORE the 404 catch-all below.
+    dynamic "ingress_rule" {
+      for_each = toset(local.public_vanity_hosts)
+      content {
+        hostname = "${ingress_rule.value}.${var.zone_name}"
+        service  = "http://traefik.kube-system:80"
+      }
+    }
     # Mandatory catch-all.
     ingress_rule {
       service = "http_status:404"
@@ -85,6 +103,20 @@ resource "cloudflare_record" "prod_wildcard" {
   type    = "CNAME"
   proxied = true
   ttl     = 1
+}
+
+# DNS: public vanity hosts (app/auth.fuzefront.com) → same tunnel, proxied.
+# Proxied so CF terminates TLS at the edge (Universal SSL covers the apex hosts)
+# and the request reaches cloudflared → the matching ingress_rule above → Traefik.
+# These hosts are NOT covered by the *.prod Access wildcard, so they are public.
+resource "cloudflare_record" "vanity" {
+  for_each = nonsensitive(local.cloudflare_enabled) ? toset(local.public_vanity_hosts) : toset([])
+  zone_id  = var.cloudflare_zone_id
+  name     = each.value
+  value    = cloudflare_zero_trust_tunnel_cloudflared.fuzeinfra[0].cname
+  type     = "CNAME"
+  proxied  = true
+  ttl      = 1
 }
 
 # Cloudflare Access: protect *.prod.fuzefront.com with email OTP.
@@ -192,6 +224,41 @@ resource "cloudflare_zero_trust_access_policy" "grafana_build_assets_bypass" {
   account_id     = var.cloudflare_account_id
   application_id = cloudflare_zero_trust_access_application.grafana_build_assets[0].id
   name           = "Bypass — Grafana static build assets"
+  precedence     = 1
+  decision       = "bypass"
+
+  include {
+    everyone = true
+  }
+}
+
+# Sealed Secrets public cert bypass.
+#
+# sealed-secrets.prod.fuzefront.com/v1/cert.pem serves the Sealed Secrets
+# controller's PUBLIC key. Consumers fetch it to seal secrets OFFLINE — they
+# have no cluster access and no Cloudflare Access account, so this endpoint must
+# be reachable by anyone (CI, scripts, developers). The cert is a public key:
+# it can encrypt but never decrypt, so exposing it is safe by design.
+#
+# A more-specific hostname Access app takes precedence over the wildcard
+# *.prod.fuzefront.com OTP app, so this bypass exempts ONLY the cert endpoint;
+# the controller's private key and the rest of the cluster stay protected.
+# See docs/SECRETS_MANAGEMENT.md.
+resource "cloudflare_zero_trust_access_application" "sealed_secrets_cert" {
+  count                = local.cloudflare_enabled ? 1 : 0
+  account_id           = var.cloudflare_account_id
+  name                 = "Sealed Secrets public cert (public)"
+  domain               = "sealed-secrets.${local.prod_domain}"
+  type                 = "self_hosted"
+  session_duration     = "0s"
+  app_launcher_visible = false
+}
+
+resource "cloudflare_zero_trust_access_policy" "sealed_secrets_cert_bypass" {
+  count          = local.cloudflare_enabled ? 1 : 0
+  account_id     = var.cloudflare_account_id
+  application_id = cloudflare_zero_trust_access_application.sealed_secrets_cert[0].id
+  name           = "Bypass — Sealed Secrets public cert"
   precedence     = 1
   decision       = "bypass"
 
