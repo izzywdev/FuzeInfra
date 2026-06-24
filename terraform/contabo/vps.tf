@@ -32,7 +32,11 @@ resource "contabo_instance" "prod" {
     # Changing comments or whitespace here would otherwise trigger a Contabo API
     # update (no VPS effect) AND cause null_resource.provision to re-run because
     # it depends on the instance. Ignore it to prevent spurious re-provisions.
-    ignore_changes = [user_data]
+    #
+    # display_name: Contabo ignores the requested name and keeps its auto-assigned
+    # value (e.g. "vmi3383846"), so terraform would otherwise show a perpetual
+    # (no-op) diff trying to set it. Ignore to keep plans clean.
+    ignore_changes = [user_data, display_name]
   }
 }
 
