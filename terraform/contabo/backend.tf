@@ -1,10 +1,12 @@
 # ---------------------------------------------------------------------------
-# Remote state + locking — REQUIRED for merge-to-apply CD.
+# Remote state + locking (HARD PREREQ for merge-to-apply CD)
 #
-# This is a *partial* backend: no secrets and no environment-specific values
-# live in git. The bucket / table / region are supplied at `terraform init`
-# time via `-backend-config=...` (the CD workflow injects them from secrets;
-# operators pass them on the CLI for the one-time bootstrap/migration).
+# Uses S3 for state and DynamoDB for locking so concurrent applies (e.g. a
+# merge-to-apply run and an infra-request dispatch) can never corrupt state.
+#
+# This is a PARTIAL backend config on purpose — no bucket/table/region is
+# hardcoded here. CI (and humans) supply them at init time so the same root
+# works across environments and nothing secret lands in git:
 #
 #   terraform init \
 #     -backend-config="bucket=$TF_STATE_BUCKET" \
@@ -12,13 +14,13 @@
 #     -backend-config="region=$TF_STATE_REGION" \
 #     -backend-config="dynamodb_table=$TF_STATE_LOCK_TABLE"
 #
-# `encrypt = true` is enforced here; `dynamodb_table` gives state locking so two
-# applies (or an apply racing a plan) can never corrupt state. See
-# docs/TERRAFORM_CD.md for the one-time backend bootstrap commands.
+# AWS creds come from env (AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY) — see the
+# terraform-plan-apply workflow. For local runs, export the same vars.
+#
+# To bootstrap the backend once (bucket + lock table), see docs/TERRAFORM_CD.md.
 # ---------------------------------------------------------------------------
 terraform {
   backend "s3" {
     encrypt = true
-    # bucket / key / region / dynamodb_table supplied via -backend-config at init.
   }
 }

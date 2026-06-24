@@ -180,44 +180,43 @@ KAFKA_BROKER=kafka.fuzeinfra.svc.cluster.local:9092
 
 Plaintext `Secret` manifests must **never** be committed to git. FuzeInfra's
 GitOps model uses [Bitnami **Sealed Secrets**](https://github.com/bitnami-labs/sealed-secrets):
-you encrypt a `Secret` with the cluster's public key into a `SealedSecret` that
-is safe to commit; the in-cluster controller decrypts it back into a real
+you encrypt a `Secret` with the cluster's **public** cert into a `SealedSecret`
+that is safe to commit; the in-cluster controller decrypts it back into a real
 `Secret` at sync time. Only the controller (holding the private key) can decrypt
 it, so the ciphertext in git is useless to anyone else.
 
-**One-time, per cluster:** an operator installs the controller (lives outside
-your repo, like Argo CD itself):
+> **Full methodology:** [`SECRETS_MANAGEMENT.md`](./SECRETS_MANAGEMENT.md) — the
+> single source of truth for per-service secrets, offline sealing, the published
+> cert URL, rotation, and onboarding distribution. The summary below is the
+> day-to-day path.
+
+You **seal offline** against FuzeInfra's **published public cert** — you need
+**zero cluster access** and no kubeconfig. The canonical tool is
+[`scripts/seal-secret.sh`](../scripts/seal-secret.sh); it fetches the current
+cert, builds the Secret in memory, and writes the SealedSecret without ever
+printing plaintext:
 
 ```bash
-helm repo add sealed-secrets https://bitnami-labs.github.io/sealed-secrets
-helm install sealed-secrets sealed-secrets/sealed-secrets -n kube-system
+# Seal one secret PER SERVICE (least privilege) — scope is ns/name.
+scripts/seal-secret.sh myproject/myproject-secrets \
+  DATABASE_URL=@./db-url.txt \
+  REDIS_URL=@./redis-url.txt \
+  --out myproject/k8s/myproject-secrets-sealed.yaml
+
+# Commit the SealedSecret (safe); delete the plaintext inputs.
+git add myproject/k8s/myproject-secrets-sealed.yaml
 ```
 
-**Per secret (you):**
+By default the tool fetches `https://sealed-secrets.prod.fuzefront.com/v1/cert.pem`
+(override with `--cert` or `FUZEINFRA_SEALED_CERT_URL`). The committed
+`SealedSecret` is strict-scoped — it only decrypts in the `myproject` namespace
+under the same name. Mount the resulting `Secret` via `envFrom`/`secretKeyRef` in
+your Deployment.
 
-```bash
-# 1) Author the Secret locally — do NOT commit or apply this file.
-kubectl create secret generic myproject-secrets \
-  --namespace myproject \
-  --from-literal=DATABASE_URL='postgresql://myproject_user:s3cr3t@postgres.fuzeinfra.svc.cluster.local:5432/myproject' \
-  --from-literal=REDIS_URL='redis://:s3cr3t@redis.fuzeinfra.svc.cluster.local:6379/2' \
-  --dry-run=client -o yaml > /tmp/secret.yaml
-
-# 2) Seal it against the cluster's public key.
-kubeseal --format yaml < /tmp/secret.yaml > myproject/k8s/sealed-secrets.yaml
-
-# 3) Commit the SealedSecret (safe) and delete the plaintext.
-rm /tmp/secret.yaml
-git add myproject/k8s/sealed-secrets.yaml
-```
-
-The committed `SealedSecret` is namespace- and name-scoped by default — it will
-only decrypt in the `myproject` namespace under the same name. Mount the
-resulting `Secret` via `envFrom`/`secretKeyRef` in your Deployment.
-
-> Don't have the Sealed Secrets controller yet? The same model works with
-> **External Secrets Operator** (pulls from Vault/AWS Secrets Manager). Either
-> way: **no plaintext secrets in git.**
+> **One SealedSecret per service**, not one shared kitchen-sink — see
+> [`SECRETS_MANAGEMENT.md` §2](./SECRETS_MANAGEMENT.md#2-per-service-sealedsecrets-least-privilege).
+> The controller itself is installed cluster-side via
+> `argocd/applications/sealed-secrets.yaml`; consumers never touch it.
 
 ---
 

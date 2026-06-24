@@ -1,165 +1,179 @@
-# Terraform CD — merge-to-apply for `terraform/contabo`
+# Terraform CD — merge-to-apply (FuzeInfra-owned) + consumer dispatch bridge
 
-Infrastructure that lives **outside** the cluster (Contabo nodes, Cloudflare
-DNS/tunnel/Access) needs an explicit `terraform apply` with FuzeInfra's creds and
-state. This pipeline makes that apply happen by **merging a reviewed PR** — the
-PR review *is* the apply approval. There is no separate post-merge gate.
+Infrastructure upgrades go live by **merging a PR**. The PR review *is* the
+apply approval — there is no separate post-merge gate. This is the durable fix
+for the friction where HCL can be authored but not applied (#43/#46).
 
-> The in-cluster plane (Deployments/Services/Jobs) is already pull-reconciled by
-> Argo CD and is **not** covered here.
+There are **two planes**. Only the Terraform plane is covered here.
 
-## The model
+| Plane | What it manages | Delivery | Status |
+|-------|-----------------|----------|--------|
+| **Argo** | in-cluster: Deployments/Services, DB-bootstrap & Kafka-topic Jobs | pull-reconciled by the app-of-apps watching each repo's `deploy/argocd/applications/` | already works — a consumer merge auto-reconciles |
+| **Terraform** | out-of-cluster: Contabo nodes, Cloudflare DNS/tunnel/Access, cloud IAM/DBaaS | explicit `apply` with FuzeInfra's creds + state | **this doc** |
+
+---
+
+## A) FuzeInfra's OWN `terraform/` → merge-to-apply
 
 ```
-PR touches terraform/**        ──▶  terraform plan -out=tfplan
-                                     ├─ posted as a PR comment (visible diff)
-                                     └─ uploaded as artifact  tfplan-<headSHA>
-        (review + approve = approval to apply)
-                                          │
-        merge to main  ──────────────────▶  recover the PR head SHA
-                                             download THAT exact tfplan
-                                             terraform apply tfplan   ◀── saved plan, no blind re-plan
+PR touching terraform/**            merge to main
+        │                                  │
+        ▼                                  ▼
+ terraform plan -out=tfplan        download the SAVED tfplan
+ • posted as a PR comment          terraform apply tfplan
+ • uploaded as an artifact         (exactly what was reviewed;
+   keyed by PR head SHA             Terraform rejects a stale plan)
+ • REQUIRED status check
 ```
 
-- **Apply applies the exact reviewed plan.** The merge job downloads the
-  `tfplan` artifact produced by the PR's plan run (keyed by the PR head SHA) and
-  runs `terraform apply tfplan`. It never re-plans.
-- **Drift fails loud.** If state changed between review and merge, Terraform
-  rejects the stale saved plan and the apply step fails — it does not silently
-  apply something nobody reviewed.
-- **Apply only on push to `main`.** Fork PRs never receive secrets and never
-  apply.
+Workflow: [`.github/workflows/terraform-plan-apply.yml`](../.github/workflows/terraform-plan-apply.yml) (active).
 
-Workflow: [`docs/workflows/terraform-contabo-cd.yml`](workflows/terraform-contabo-cd.yml)
-(ships in `docs/workflows/` because the authoring bot cannot write
-`.github/workflows/`; activate with the `git mv` below).
+Key properties:
+- **Apply the reviewed plan, not a fresh one.** The PR job runs
+  `terraform plan -out=tfplan` and uploads `tfplan` as an artifact keyed by the
+  PR head SHA. On merge, the apply job finds the merged PR, recovers that head
+  SHA, downloads that exact `tfplan`, and runs `terraform apply tfplan`. If
+  state drifted between review and merge, Terraform refuses the stale saved plan
+  — it fails loudly rather than applying something unreviewed.
+- **Apply only on push to `main`.** Never on PRs, never on fork PRs (plan jobs
+  on forks have no secrets and can't apply).
+- **Remote state + locking** via S3 + DynamoDB (see below).
+- **Least-privilege creds** injected from CI secrets as `TF_VAR_*` at apply
+  time (Cloudflare token scoped to the zone, Contabo creds to the project).
 
-## Deadlock-safe required check
+### Activation status
 
-The `plan` job is the required status check, and it follows the
-**always-run + internal-paths-filter** pattern from the companion deadlock-fix:
+The workflow is **active** at `.github/workflows/terraform-plan-apply.yml` — it
+runs `plan` on terraform PRs and `apply` (saved plan) on merge to `main`.
 
-- The workflow has **no top-level `paths:` filter**, so the `plan` job runs on
-  **every** PR to `main` and always reports a conclusion.
-- The `terraform/**` filter is applied **inside** the job (`dorny/paths-filter`).
-  A PR that doesn't touch terraform succeeds immediately ("nothing to plan").
+**Deadlock-safe — safe to make required.** The `plan` job always runs (no trigger
+`paths` filter) and self-filters on `terraform/**` via `dorny/paths-filter`:
+non-terraform PRs pass the check instantly, terraform PRs get a real plan, and
+fork PRs pass with a notice. So it can be a required status check without ever
+leaving an unrelated PR pending. Enable it:
 
-So a non-terraform PR never blocks on a check that was *skipped* (skipped
-required checks sit "pending" forever). Branch protection can safely require
-`terraform-contabo-cd / plan`.
+**Settings → Branches → main → Branch protection**:
+- Require the status check **`plan`** (`terraform-plan` workflow).
+- Require at least **1 approving review**.
 
-## One-time backend bootstrap (S3 + DynamoDB)
+That combination is what makes "nothing applies without a reviewed plan" true.
+(Until the backend bootstrap in the next section is done, the `plan` job's real
+work fails at `terraform init` — so enable the required check only after bootstrap.)
 
-`terraform/contabo/backend.tf` is a **partial** S3 backend — no secrets in git;
-bucket/table/region are supplied at `init`. Create the state bucket + lock table
-once (an account/region you control):
+### One-time backend bootstrap (S3 + DynamoDB)
+
+State and locking must exist before the first `init`. Create them once (any
+account that owns the FuzeInfra state):
 
 ```bash
-export AWS_REGION=us-east-1
-export TF_STATE_BUCKET=fuzeinfra-tfstate-<unique>
-export TF_STATE_LOCK_TABLE=fuzeinfra-tflock
-
-aws s3api create-bucket --bucket "$TF_STATE_BUCKET" --region "$AWS_REGION"
-aws s3api put-bucket-versioning --bucket "$TF_STATE_BUCKET" \
+aws s3api create-bucket --bucket fuzeinfra-tfstate --region eu-central-1 \
+  --create-bucket-configuration LocationConstraint=eu-central-1
+aws s3api put-bucket-versioning --bucket fuzeinfra-tfstate \
   --versioning-configuration Status=Enabled
-aws s3api put-bucket-encryption --bucket "$TF_STATE_BUCKET" \
-  --server-side-encryption-configuration \
-  '{"Rules":[{"ApplyServerSideEncryptionByDefault":{"SSEAlgorithm":"AES256"}}]}'
-
-aws dynamodb create-table --table-name "$TF_STATE_LOCK_TABLE" \
+aws dynamodb create-table --table-name fuzeinfra-tflock \
   --attribute-definitions AttributeName=LockID,AttributeType=S \
   --key-schema AttributeName=LockID,KeyType=HASH \
-  --billing-mode PAY_PER_REQUEST --region "$AWS_REGION"
+  --billing-mode PAY_PER_REQUEST --region eu-central-1
 ```
 
-Migrate any existing local state into the remote backend (run once locally):
+The backend block is a **partial config** ([`terraform/contabo/backend.tf`](../terraform/contabo/backend.tf),
+[`terraform/cloudflare/backend.tf`](../terraform/cloudflare/backend.tf)) — bucket/table/region are
+supplied at `init` time, nothing secret is in git. Migrate existing local state
+once with `terraform init -migrate-state -backend-config=...`.
 
-```bash
-cd terraform/contabo
-terraform init -migrate-state \
-  -backend-config="bucket=$TF_STATE_BUCKET" \
-  -backend-config="key=fuzeinfra/contabo/terraform.tfstate" \
-  -backend-config="region=$AWS_REGION" \
-  -backend-config="dynamodb_table=$TF_STATE_LOCK_TABLE"
-```
+### Required configuration
 
-> HCP Terraform / Atlantis are the durable upgrade path (native plan-on-PR +
-> apply-the-saved-plan). This GHA pipeline meets the acceptance criteria with no
-> new infrastructure; swapping the backend block for `cloud {}` and dropping the
-> apply job is a clean migration later.
+**Variables** (Settings → Variables):
 
-## Required secrets and variables (FuzeInfra repo)
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `TF_ROOT` | `terraform/contabo` | root module the workflow plans/applies |
 
-**Variables** (Settings → Secrets and variables → Actions → *Variables*):
+**Secrets** (Settings → Secrets):
 
-| Variable | Example | Purpose |
-|---|---|---|
-| `TF_STATE_BUCKET` | `fuzeinfra-tfstate-abc` | remote state bucket |
-| `TF_STATE_REGION` | `us-east-1` | bucket + lock-table region |
-| `TF_STATE_LOCK_TABLE` | `fuzeinfra-tflock` | DynamoDB lock table |
+| Secret | Purpose |
+|--------|---------|
+| `TF_STATE_BUCKET` / `TF_STATE_REGION` / `TF_STATE_LOCK_TABLE` | S3+DynamoDB backend |
+| `TF_STATE_ACCESS_KEY_ID` / `TF_STATE_SECRET_ACCESS_KEY` | backend access (state only) |
+| `CONTABO_CLIENT_ID` / `CONTABO_CLIENT_SECRET` / `CONTABO_API_USER` / `CONTABO_API_PASSWORD` | Contabo provider |
+| `CONTABO_IMAGE_ID` / `CONTABO_PRODUCT_ID` / `NODE_SSH_PUBLIC_KEY` | VPS inputs |
+| `CLOUDFLARE_API_TOKEN` / `CLOUDFLARE_ACCOUNT_ID` / `CLOUDFLARE_ZONE_ID` | Cloudflare (zone-scoped token) |
+| `GH_TF_TOKEN` | token Terraform uses to set repo secrets (e.g. `KUBE_CONFIG`) |
 
-**Secrets** (least-privilege):
+---
 
-| Secret | Scope |
-|---|---|
-| `TF_STATE_ACCESS_KEY_ID` / `TF_STATE_SECRET_ACCESS_KEY` | IAM user limited to the state bucket + lock table only |
-| `CLOUDFLARE_API_TOKEN` | **scoped to the `fuzefront.com` zone**: DNS:Edit, Cloudflare Tunnel:Edit, Access (Apps & Policies):Edit |
-| `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_ZONE_ID` | account + zone ids |
-| `CONTABO_CLIENT_ID`, `CONTABO_CLIENT_SECRET`, `CONTABO_API_USER`, `CONTABO_API_PASSWORD` | Contabo API creds |
-| `CONTABO_IMAGE_ID`, `CONTABO_PRODUCT_ID`, `NODE_SSH_PUBLIC_KEY` | node provisioning inputs |
-| `GH_PAT` | repo + secrets write, for the `KUBE_CONFIG`/secret provisioners |
+## B) Consumer-repo Terraform → FuzeInfra applies (dispatch bridge)
 
-Provider creds are injected as `TF_VAR_*` **only** at plan/apply time — never
-committed, never exposed to fork PRs.
-
-## Activate
-
-```bash
-git mv docs/workflows/terraform-contabo-cd.yml .github/workflows/
-git commit -m "ci: activate terraform-contabo merge-to-apply CD"
-git push
-```
-
-## Branch protection (`main`)
-
-- Require status check: **`terraform-contabo-cd / plan`**.
-- Require **1 code-owner review** (the PR review is the apply approval).
-- No separate post-merge approval — merge = apply.
-
-## First run reconciles the pending #46 route
-
-The app/auth public route from #46 is already declared in
-`terraform/contabo/cloudflare.tf`:
-
-- `local.public_vanity_hosts = ["app", "auth"]`
-- the `dynamic "ingress_rule"` adding `app.fuzefront.com` / `auth.fuzefront.com`
-  → Traefik in the tunnel config, and
-- `cloudflare_record.vanity` — the proxied CNAMEs.
-
-The **first** CD apply on `main` therefore makes `app.fuzefront.com` live.
-
-**Verify before merge** — the PR plan comment should show additions for:
+Consumer repos declare out-of-cluster needs in their own `deploy/terraform/**`
+but hold **no cloud creds**. FuzeInfra is the single state + creds owner and is
+**always** the applier.
 
 ```
-+ cloudflare_record.vanity["app"]
-+ cloudflare_record.vanity["auth"]
-~ cloudflare_zero_trust_tunnel_cloudflared_config.fuzeinfra[0]   # +2 app/auth ingress_rule
+consumer merge (deploy/terraform/**)          FuzeInfra
+        │                                          │
+        ▼  repository_dispatch                     ▼
+ infra-dispatch.yml ───────────────►  infra-request-handler.yml
+ (scoped dispatch token)              • validate vs whitelist
+                                      • whitelisted → terraform apply
+                                      • else → gated PR carrying the plan
 ```
 
-**Verify after apply:**
+This plane already exists — see [`INFRA_REQUEST_DISPATCH.md`](INFRA_REQUEST_DISPATCH.md)
+for the handler, the auto-apply whitelist, and the scoped dispatch token. This
+issue adds the **consumer-side FuzeOne standard** workflows:
 
-```bash
-dig +short app.fuzefront.com   # → proxied Cloudflare CNAME (tunnel), not NXDOMAIN
-dig +short auth.fuzefront.com
-# app/auth are OUTSIDE the *.prod Access wildcard → public:
-curl -sI https://app.fuzefront.com   # 200/redirect to the app, NOT a 302 → cloudflareaccess.com
-```
+- [`docs/workflows/consumer/terraform-plan.yml`](workflows/consumer/terraform-plan.yml)
+  — plan-on-PR (fmt + validate the declaration; the authoritative cloud plan is
+  produced FuzeInfra-side).
+- [`docs/workflows/consumer/infra-dispatch.yml`](workflows/consumer/infra-dispatch.yml)
+  — dispatch-on-merge.
 
-## Consumer repos (FuzeOne standard)
+> **Pinned-module option.** Instead of FuzeInfra checking out the consumer's
+> `deploy/terraform`, the FuzeInfra root can reference it as a SHA-pinned
+> module: `source = "github.com/<repo>//deploy/terraform?ref=<sha>"`. The
+> dispatch already carries `ref` (the merge SHA) for exactly this. Pin to the
+> dispatched SHA so the applied module matches what the consumer reviewed.
 
-Consumer repos hold **no cloud creds**. They declare out-of-cluster needs under
-`deploy/terraform/**` and dispatch to FuzeInfra, which is the sole state+creds
-owner and applier. That bridge is handled by the existing
-[`infra-request-handler.yml`](workflows/infra-request-handler.yml) /
-[`docs/INFRA_REQUEST_DISPATCH.md`](INFRA_REQUEST_DISPATCH.md). This document
-covers FuzeInfra's own `terraform/contabo` plane.
+---
+
+## Make it the FuzeOne standard
+
+Any repo with a `deploy/terraform/` directory ships:
+
+| Side | Workflow | Trigger | Action |
+|------|----------|---------|--------|
+| **FuzeInfra** | `terraform-plan-apply.yml` | PR / push to main on `terraform/**` | plan-on-PR + apply-saved-plan-on-merge |
+| **Consumer** | `consumer/terraform-plan.yml` | PR on `deploy/terraform/**` | fmt + validate the declaration |
+| **Consumer** | `consumer/infra-dispatch.yml` | merge on `deploy/terraform/**` | dispatch to FuzeInfra |
+
+FuzeInfra always holds state + creds and is always the applier.
+
+---
+
+## Why GHA here, and the recommended upgrade
+
+The issue prefers **HCP Terraform (Terraform Cloud)** or **Atlantis** over
+hand-rolled GHA — both give plan-on-PR + apply-the-reviewed-plan natively, with
+managed state/locking and a clearer audit trail. This repo ships a GHA
+implementation as a **pragmatic, no-new-infra bridge** that satisfies the
+acceptance criteria today (saved-plan apply, remote state + locking, scoped
+creds, apply-only-on-merge).
+
+To upgrade later with minimal churn:
+- **HCP Terraform:** replace the `backend "s3"` blocks with `cloud {}`, connect
+  the workspace to this repo (VCS-driven runs give plan-on-PR + apply-on-merge
+  natively), move the `TF_VAR_*` secrets into workspace variables, and retire
+  `terraform-plan-apply.yml`. Plane B's handler can `terraform apply` against
+  the same workspace.
+- **Atlantis:** run the Atlantis server with the FuzeInfra creds, point its
+  webhook at this repo, and let `atlantis plan` / `atlantis apply` (on merge)
+  replace the GHA jobs.
+
+Either way the model is unchanged: **the PR review is the apply approval, and
+the reviewed plan is what applies.**
+
+## Related docs
+
+- [`INFRA_REQUEST_DISPATCH.md`](INFRA_REQUEST_DISPATCH.md) — consumer → FuzeInfra dispatch + whitelist.
+- [`gitops.md`](gitops.md) — the Argo CD delivery plane.
+- [`K3S_SECOND_NODE_RUNBOOK.md`](K3S_SECOND_NODE_RUNBOOK.md) — manual node-join this automates.

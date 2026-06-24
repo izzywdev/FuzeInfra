@@ -1,10 +1,20 @@
 #!/usr/bin/env python3
 """Validate a dispatched infra-request against the auto-apply whitelist.
 
-Used by the infra-request-handler workflow to decide auto-apply vs gated-PR.
-A request auto-applies ONLY if it comes from an allowed repo AND every node it
-declares satisfies the whitelist (product_id, region, role, bounded count).
-Any violation routes the whole request to a manual-approval PR.
+Used by the infra-request-handler workflow to decide what to do with a dispatch.
+The handler is Terraform-only: it reconciles infra (node) provisioning requests
+and nothing else. ArgoCD owns the consumer's argo manifests after the one-time
+initial registration, so a dispatch that carries no infra `requests` (e.g. an
+argo-only or unrelated change that wrongly fired the consumer's dispatch) is NOT
+an infra-request at all and must be a clean no-op — never a gated PR.
+
+There are three possible decisions:
+  * "skip"  -> payload has no non-empty `requests` list. Not an infra-request;
+               the handler does nothing (no terraform, no PR).
+  * "apply" -> a real request from an allowed repo where every node satisfies the
+               whitelist (product_id, region, role, bounded count) -> auto-apply.
+  * "gate"  -> a real request that violates the whitelist -> manual-approval PR
+               carrying `terraform plan`.
 
 Usage:
     validate_infra_request.py --whitelist config/infra-request-whitelist.json \
@@ -14,7 +24,8 @@ request.json is the dispatch client_payload, expected to contain a top-level
 "requests" list of {name, product_id, region, role, labels} objects.
 
 Exit code is always 0 (the decision is conveyed via output, not failure).
-Writes `whitelisted=true|false` and `reasons=<text>` to --github-output when given.
+Writes `decision=skip|apply|gate`, `whitelisted=true|false` (true iff apply) and
+`reasons=<text>` to --github-output when given.
 """
 import argparse
 import json
@@ -27,11 +38,14 @@ def load_json(path):
 
 
 def validate(whitelist, payload, repo):
+    """Return (decision, reasons) where decision is 'skip' | 'apply' | 'gate'."""
     reasons = []
 
     requests = payload.get("requests")
     if not isinstance(requests, list) or not requests:
-        return False, ["payload has no non-empty 'requests' list"]
+        # Not an infra-request: nothing to provision. The handler no-ops rather
+        # than opening a gated PR (argo-only/unrelated changes land here).
+        return "skip", ["no infra 'requests' in payload — nothing to reconcile (not an infra-request)"]
 
     allowed_repos = whitelist.get("allowed_repos")
     if allowed_repos and repo not in allowed_repos:
@@ -58,7 +72,7 @@ def validate(whitelist, payload, repo):
         if allowed_roles and role not in allowed_roles:
             reasons.append(f"node '{name}': role '{role}' not in {allowed_roles}")
 
-    return (len(reasons) == 0), reasons
+    return ("apply" if not reasons else "gate"), reasons
 
 
 def main(argv=None):
@@ -72,15 +86,18 @@ def main(argv=None):
     whitelist = load_json(args.whitelist)
     payload = load_json(args.request)
 
-    ok, reasons = validate(whitelist, payload, args.repo)
+    decision, reasons = validate(whitelist, payload, args.repo)
     reason_text = "; ".join(reasons) if reasons else "all nodes satisfy the whitelist"
+    whitelisted = "true" if decision == "apply" else "false"
 
-    print(f"whitelisted={'true' if ok else 'false'}")
+    print(f"decision={decision}")
+    print(f"whitelisted={whitelisted}")
     print(f"reasons={reason_text}")
 
     if args.github_output:
         with open(args.github_output, "a", encoding="utf-8") as fh:
-            fh.write(f"whitelisted={'true' if ok else 'false'}\n")
+            fh.write(f"decision={decision}\n")
+            fh.write(f"whitelisted={whitelisted}\n")
             fh.write(f"reasons={reason_text}\n")
 
     return 0
