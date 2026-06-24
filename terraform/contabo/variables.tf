@@ -136,7 +136,10 @@ variable "cloudflare_zone_id" {
 variable "tunnel_name" {
   description = "Name of the Named Tunnel in Cloudflare Zero Trust dashboard"
   type        = string
-  default     = "fuzeinfra"
+  # MUST match the deployed tunnel name. The production tunnel is named
+  # "FuzeInfra" (confirmed in state); a mismatch makes terraform rename — and if
+  # `name` is ForceNew, recreate — the tunnel, which would break all prod access.
+  default = "FuzeInfra"
 }
 
 variable "prod_subdomain" {
