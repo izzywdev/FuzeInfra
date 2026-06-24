@@ -150,7 +150,9 @@ spec:
           emptyDir: {}
         {{- end }}
   volumeClaimTemplates:
-    - metadata:
+    - apiVersion: v1
+      kind: PersistentVolumeClaim
+      metadata:
         name: data
       spec:
         accessModes: ["ReadWriteOnce"]
@@ -216,7 +218,9 @@ spec:
           configMap:
             name: fuzeinfra-alertmanager-config
   volumeClaimTemplates:
-    - metadata:
+    - apiVersion: v1
+      kind: PersistentVolumeClaim
+      metadata:
         name: data
       spec:
         accessModes: ["ReadWriteOnce"]
@@ -390,7 +394,9 @@ spec:
         {{- end }}
   {{- if .Values.grafana.persistence.enabled }}
   volumeClaimTemplates:
-    - metadata:
+    - apiVersion: v1
+      kind: PersistentVolumeClaim
+      metadata:
         name: data
       spec:
         accessModes: ["ReadWriteOnce"]
@@ -480,7 +486,9 @@ spec:
           configMap:
             name: fuzeinfra-loki-config
   volumeClaimTemplates:
-    - metadata:
+    - apiVersion: v1
+      kind: PersistentVolumeClaim
+      metadata:
         name: data
       spec:
         accessModes: ["ReadWriteOnce"]

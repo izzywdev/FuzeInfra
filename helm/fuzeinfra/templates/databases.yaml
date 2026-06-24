@@ -67,7 +67,9 @@ spec:
           resources:
             {{- toYaml .Values.postgres.resources | nindent 12 }}
   volumeClaimTemplates:
-    - metadata:
+    - apiVersion: v1
+      kind: PersistentVolumeClaim
+      metadata:
         name: data
       spec:
         accessModes: ["ReadWriteOnce"]
@@ -145,7 +147,9 @@ spec:
           resources:
             {{- toYaml .Values.mongodb.resources | nindent 12 }}
   volumeClaimTemplates:
-    - metadata:
+    - apiVersion: v1
+      kind: PersistentVolumeClaim
+      metadata:
         name: data
       spec:
         accessModes: ["ReadWriteOnce"]
@@ -213,7 +217,9 @@ spec:
           resources:
             {{- toYaml .Values.redis.resources | nindent 12 }}
   volumeClaimTemplates:
-    - metadata:
+    - apiVersion: v1
+      kind: PersistentVolumeClaim
+      metadata:
         name: data
       spec:
         accessModes: ["ReadWriteOnce"]
@@ -297,7 +303,9 @@ spec:
           resources:
             {{- toYaml .Values.neo4j.resources | nindent 12 }}
   volumeClaimTemplates:
-    - metadata:
+    - apiVersion: v1
+      kind: PersistentVolumeClaim
+      metadata:
         name: data
       spec:
         accessModes: ["ReadWriteOnce"]
@@ -387,7 +395,9 @@ spec:
           resources:
             {{- toYaml .Values.elasticsearch.resources | nindent 12 }}
   volumeClaimTemplates:
-    - metadata:
+    - apiVersion: v1
+      kind: PersistentVolumeClaim
+      metadata:
         name: data
       spec:
         accessModes: ["ReadWriteOnce"]
@@ -458,7 +468,9 @@ spec:
             periodSeconds: 10
             failureThreshold: 6
   volumeClaimTemplates:
-    - metadata:
+    - apiVersion: v1
+      kind: PersistentVolumeClaim
+      metadata:
         name: data
       spec:
         accessModes: ["ReadWriteOnce"]
