@@ -135,6 +135,12 @@ resource "null_resource" "provision" {
 # for a fresh cluster on first apply or after VPS replacement.
 # ---------------------------------------------------------------------------
 resource "null_resource" "argocd_sync" {
+  # OFF by default — see var.enable_argocd_provisioner. It SSHes with a local key
+  # file that doesn't exist on CI runners, so it must not run under the CD. With
+  # count = 0 the connection block (and file(var.ssh_private_key_path)) is never
+  # evaluated. Argo selfHeal + argocd-register.yml cover the work it did.
+  count = var.enable_argocd_provisioner ? 1 : 0
+
   depends_on = [null_resource.provision]
 
   triggers = {

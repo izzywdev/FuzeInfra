@@ -313,7 +313,9 @@ spec:
         resources:
           requests:
             storage: {{ .Values.neo4j.storage }}
-    - metadata:
+    - apiVersion: v1
+      kind: PersistentVolumeClaim
+      metadata:
         name: logs
       spec:
         accessModes: ["ReadWriteOnce"]
