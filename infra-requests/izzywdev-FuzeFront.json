@@ -1,0 +1,17 @@
+{
+  "changed": "deploy/terraform/README.md,deploy/terraform/backend.tf",
+  "ref": "bcb492e53bd750030407b5c7be331ba5ea4ea9a5",
+  "repo": "izzywdev/FuzeFront",
+  "requests": [
+    {
+      "labels": {
+        "app.fuzefront.com/by": "fuzefront",
+        "node-role": "workload"
+      },
+      "name": "fuzefront-worker-2",
+      "product_id": "V92",
+      "region": "EU",
+      "role": "workload"
+    }
+  ]
+}
