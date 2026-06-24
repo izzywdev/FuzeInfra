@@ -24,3 +24,5 @@ terraform {
     encrypt = true
   }
 }
+
+# CD plan verification trigger — no infra change (see PR). Safe to remove.
