@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-"""Unit tests for validate_infra_request.validate()."""
+"""Unit tests for validate_infra_request.validate().
+
+validate() returns (decision, reasons) where decision is one of:
+  "skip"  -> not an infra-request (no requests); handler no-ops
+  "apply" -> whitelisted; handler auto-applies
+  "gate"  -> valid request, not whitelisted; handler opens a gated PR
+"""
 import json
 import os
 import sys
@@ -20,33 +26,39 @@ WHITELIST = {
 class ValidateTests(unittest.TestCase):
     def test_valid_request_auto_applies(self):
         payload = {"requests": [{"name": "w1", "product_id": "V45", "region": "EU", "role": "workload"}]}
-        ok, reasons = validate(WHITELIST, payload, "izzywdev/FuzeFront")
-        self.assertTrue(ok, reasons)
+        decision, reasons = validate(WHITELIST, payload, "izzywdev/FuzeFront")
+        self.assertEqual(decision, "apply", reasons)
 
     def test_defaults_region_and_role(self):
         payload = {"requests": [{"name": "w1", "product_id": "V46"}]}
-        ok, _ = validate(WHITELIST, payload, "izzywdev/FuzeFront")
-        self.assertTrue(ok)
+        decision, _ = validate(WHITELIST, payload, "izzywdev/FuzeFront")
+        self.assertEqual(decision, "apply")
 
-    def test_bad_product_region_role_rejected(self):
+    def test_bad_product_region_role_gated(self):
         payload = {"requests": [{"name": "w1", "product_id": "V99", "region": "US", "role": "server"}]}
-        ok, reasons = validate(WHITELIST, payload, "izzywdev/FuzeFront")
-        self.assertFalse(ok)
+        decision, reasons = validate(WHITELIST, payload, "izzywdev/FuzeFront")
+        self.assertEqual(decision, "gate")
         self.assertEqual(len(reasons), 3)
 
-    def test_unknown_repo_rejected(self):
+    def test_unknown_repo_gated(self):
         payload = {"requests": [{"name": "w1", "product_id": "V45"}]}
-        ok, reasons = validate(WHITELIST, payload, "stranger/Repo")
-        self.assertFalse(ok)
+        decision, _ = validate(WHITELIST, payload, "stranger/Repo")
+        self.assertEqual(decision, "gate")
 
-    def test_too_many_nodes_rejected(self):
+    def test_too_many_nodes_gated(self):
         payload = {"requests": [{"name": f"w{i}", "product_id": "V45"} for i in range(4)]}
-        ok, _ = validate(WHITELIST, payload, "izzywdev/FuzeFront")
-        self.assertFalse(ok)
+        decision, _ = validate(WHITELIST, payload, "izzywdev/FuzeFront")
+        self.assertEqual(decision, "gate")
 
-    def test_empty_requests_rejected(self):
-        ok, _ = validate(WHITELIST, {"requests": []}, "izzywdev/FuzeFront")
-        self.assertFalse(ok)
+    def test_empty_requests_skipped(self):
+        # No infra requests -> not an infra-request -> skip (NOT a gated PR).
+        decision, _ = validate(WHITELIST, {"requests": []}, "izzywdev/FuzeFront")
+        self.assertEqual(decision, "skip")
+
+    def test_missing_requests_key_skipped(self):
+        # An argo-only / unrelated dispatch carries no `requests` key at all.
+        decision, _ = validate(WHITELIST, {"changed": "deploy/argocd/applications/x.yaml"}, "izzywdev/FuzeFront")
+        self.assertEqual(decision, "skip")
 
 
 if __name__ == "__main__":

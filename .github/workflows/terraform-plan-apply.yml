@@ -1,0 +1,229 @@
+# ===========================================================================
+# terraform-plan-apply  —  merge-to-apply CD for FuzeInfra's OWN terraform/
+# ===========================================================================
+# The PR review IS the apply approval. There is no separate post-merge gate.
+#
+#   • Pull request touching terraform/**  → `terraform plan -out=tfplan`,
+#     the plan is posted as a PR comment (visible diff) AND uploaded as an
+#     artifact keyed by the PR head SHA. This job is a REQUIRED status check.
+#   • Push to main (i.e. the PR merged) → download the EXACT saved plan that
+#     was reviewed and `terraform apply tfplan`. We never re-plan-and-apply
+#     blind. Terraform refuses a stale saved plan, so if state drifted since
+#     review the apply fails loudly instead of doing something unreviewed.
+#
+# Safety:
+#   • apply runs ONLY on push to main (never on PRs, never on forks).
+#   • remote state + DynamoDB locking (see terraform/*/backend.tf) serialize
+#     concurrent applies.
+#   • least-privilege creds are injected from CI secrets as TF_VAR_* at apply
+#     time; the Cloudflare token should be scoped to the zone, Contabo creds
+#     to the project.
+#
+# ---------------------------------------------------------------------------
+# This workflow is ACTIVE (.github/workflows/). NOTE: do NOT add its `plan`
+# check to branch protection's required checks yet — it triggers on
+# `pull_request: paths: [terraform/**]`, so a non-terraform PR would leave the
+# check pending forever (merge deadlock). Make it required only after adopting
+# the deadlock-safe pattern (always-run job + internal terraform/** self-filter
+# so non-terraform PRs go green) being brought in from PRs #52/#53.
+# ---------------------------------------------------------------------------
+#
+# Required repo configuration:
+#   Variables (Settings → Variables):
+#     TF_ROOT                  # root module to manage, default terraform/contabo
+#   Secrets (Settings → Secrets):
+#     TF_STATE_BUCKET, TF_STATE_REGION, TF_STATE_LOCK_TABLE
+#     TF_STATE_ACCESS_KEY_ID, TF_STATE_SECRET_ACCESS_KEY   # S3+DynamoDB backend
+#     CONTABO_CLIENT_ID, CONTABO_CLIENT_SECRET, CONTABO_API_USER, CONTABO_API_PASSWORD
+#     CONTABO_IMAGE_ID, CONTABO_PRODUCT_ID, NODE_SSH_PUBLIC_KEY
+#     CLOUDFLARE_API_TOKEN, CLOUDFLARE_ACCOUNT_ID, CLOUDFLARE_ZONE_ID
+#     GH_TF_TOKEN              # token TF uses to write the KUBE_CONFIG secret etc.
+
+name: terraform-plan-apply
+
+on:
+  pull_request:
+    paths: ["terraform/**"]
+  push:
+    branches: [main]
+    paths: ["terraform/**"]
+
+permissions:
+  contents: read
+  pull-requests: write   # post the plan comment
+
+env:
+  TF_ROOT: ${{ vars.TF_ROOT || 'terraform/contabo' }}
+  TERRAFORM_VERSION: "1.6.6"
+  # AWS creds for the S3/DynamoDB backend (used by every `terraform init`).
+  AWS_ACCESS_KEY_ID: ${{ secrets.TF_STATE_ACCESS_KEY_ID }}
+  AWS_SECRET_ACCESS_KEY: ${{ secrets.TF_STATE_SECRET_ACCESS_KEY }}
+  # Provider inputs injected as TF_VAR_* (least-privilege, scoped creds).
+  TF_VAR_contabo_client_id: ${{ secrets.CONTABO_CLIENT_ID }}
+  TF_VAR_contabo_client_secret: ${{ secrets.CONTABO_CLIENT_SECRET }}
+  TF_VAR_contabo_api_user: ${{ secrets.CONTABO_API_USER }}
+  TF_VAR_contabo_api_password: ${{ secrets.CONTABO_API_PASSWORD }}
+  TF_VAR_image_id: ${{ secrets.CONTABO_IMAGE_ID }}
+  TF_VAR_product_id: ${{ secrets.CONTABO_PRODUCT_ID }}
+  TF_VAR_ssh_public_key: ${{ secrets.NODE_SSH_PUBLIC_KEY }}
+  TF_VAR_cloudflare_api_token: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+  TF_VAR_cloudflare_account_id: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+  TF_VAR_cloudflare_zone_id: ${{ secrets.CLOUDFLARE_ZONE_ID }}
+  TF_VAR_github_token: ${{ secrets.GH_TF_TOKEN }}
+  # crit-alert bridge token — MUST be wired, else the plan sees crit_bridge_token=""
+  # and DESTROYS the crit-bridge CF worker/route/secret (count gates on it != "").
+  TF_VAR_crit_bridge_token: ${{ secrets.CRIT_BRIDGE_TOKEN }}
+
+jobs:
+  # =========================================================================
+  # PLAN — on every PR. Posts a visible diff; saves the exact plan for apply.
+  # =========================================================================
+  plan:
+    if: github.event_name == 'pull_request'
+    name: plan (${{ vars.TF_ROOT || 'terraform/contabo' }})
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+
+      - name: Terraform fmt check
+        working-directory: ${{ env.TF_ROOT }}
+        run: terraform fmt -check -recursive || (echo "::warning::terraform fmt would reformat files" && true)
+
+      - name: Terraform init (remote backend)
+        working-directory: ${{ env.TF_ROOT }}
+        run: |
+          terraform init -input=false \
+            -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}" \
+            -backend-config="key=fuzeinfra/$(basename "$TF_ROOT")/terraform.tfstate" \
+            -backend-config="region=${{ secrets.TF_STATE_REGION }}" \
+            -backend-config="dynamodb_table=${{ secrets.TF_STATE_LOCK_TABLE }}"
+
+      - name: Terraform validate
+        working-directory: ${{ env.TF_ROOT }}
+        run: terraform validate -no-color
+
+      - name: Terraform plan (saved)
+        id: plan
+        working-directory: ${{ env.TF_ROOT }}
+        run: |
+          set +e
+          terraform plan -input=false -lock-timeout=5m -no-color -out=tfplan
+          code=$?
+          set -e
+          terraform show -no-color tfplan > plan.txt
+          # Trim the comment to GitHub's ~65k limit.
+          head -c 60000 plan.txt > plan.trimmed.txt
+          if [ "$(wc -c < plan.txt)" -gt 60000 ]; then
+            echo "" >> plan.trimmed.txt
+            echo "... (plan truncated — see the workflow log / artifact for the full plan)" >> plan.trimmed.txt
+          fi
+          exit $code
+
+      - name: Save the reviewed plan
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          # Keyed by PR head SHA so the merge job applies the EXACT reviewed plan.
+          name: tfplan-${{ github.event.pull_request.head.sha }}
+          path: |
+            ${{ env.TF_ROOT }}/tfplan
+          retention-days: 14
+          if-no-files-found: error
+
+      - name: Post plan as PR comment
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const root = process.env.TF_ROOT;
+            let body;
+            try {
+              const plan = fs.readFileSync(`${root}/plan.trimmed.txt`, 'utf8');
+              body = `### \`terraform plan\` — \`${root}\`\n` +
+                     `Merging this PR applies **exactly this saved plan** (\`-out=tfplan\`). ` +
+                     `Review it as the apply approval.\n\n` +
+                     '<details><summary>Show plan</summary>\n\n```hcl\n' + plan + '\n```\n</details>';
+            } catch (e) {
+              body = `### \`terraform plan\` — \`${root}\`\n\n❌ Plan failed. See the [workflow log](${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}/actions/runs/${process.env.GITHUB_RUN_ID}).`;
+            }
+            const marker = `<!-- tf-plan:${root} -->`;
+            body = marker + '\n' + body;
+            const { owner, repo } = context.repo;
+            const issue_number = context.payload.pull_request.number;
+            const comments = await github.rest.issues.listComments({ owner, repo, issue_number });
+            const existing = comments.data.find(c => c.body.includes(marker));
+            if (existing) {
+              await github.rest.issues.updateComment({ owner, repo, comment_id: existing.id, body });
+            } else {
+              await github.rest.issues.createComment({ owner, repo, issue_number, body });
+            }
+
+  # =========================================================================
+  # APPLY — on merge to main. Applies the SAVED plan that was reviewed.
+  # =========================================================================
+  apply:
+    if: github.event_name == 'push'
+    name: apply (saved plan)
+    runs-on: ubuntu-latest
+    concurrency:
+      # Never let two applies touch state at once (backstops DynamoDB locking).
+      group: terraform-apply-${{ vars.TF_ROOT || 'terraform/contabo' }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve the merged PR + its head SHA
+        id: pr
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # The saved plan was uploaded keyed by the PR head SHA. Find the PR
+          # that produced this merge commit and recover that SHA.
+          PR=$(gh api "repos/${{ github.repository }}/commits/${{ github.sha }}/pulls" \
+                 --jq '.[0].number' 2>/dev/null || echo "")
+          if [ -z "$PR" ] || [ "$PR" = "null" ]; then
+            echo "No associated PR for ${{ github.sha }} — refusing to apply without a reviewed plan."
+            exit 1
+          fi
+          HEAD_SHA=$(gh api "repos/${{ github.repository }}/pulls/$PR" --jq '.head.sha')
+          echo "pr=$PR" >> "$GITHUB_OUTPUT"
+          echo "head_sha=$HEAD_SHA" >> "$GITHUB_OUTPUT"
+          echo "Merged PR #$PR, reviewed plan keyed by head SHA $HEAD_SHA"
+
+      - name: Download the reviewed plan
+        uses: dawidd6/action-download-artifact@v6
+        with:
+          name: tfplan-${{ steps.pr.outputs.head_sha }}
+          # The plan was produced by a different workflow run (the PR check).
+          workflow: terraform-plan-apply.yml
+          commit: ${{ steps.pr.outputs.head_sha }}
+          path: ${{ env.TF_ROOT }}
+          if_no_artifact_found: fail
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+
+      - name: Terraform init (remote backend)
+        working-directory: ${{ env.TF_ROOT }}
+        run: |
+          terraform init -input=false \
+            -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}" \
+            -backend-config="key=fuzeinfra/$(basename "$TF_ROOT")/terraform.tfstate" \
+            -backend-config="region=${{ secrets.TF_STATE_REGION }}" \
+            -backend-config="dynamodb_table=${{ secrets.TF_STATE_LOCK_TABLE }}"
+
+      - name: Terraform apply (saved plan — exactly what was reviewed)
+        working-directory: ${{ env.TF_ROOT }}
+        run: terraform apply -input=false -lock-timeout=5m tfplan
+
+      - name: Summarize
+        if: always()
+        run: |
+          echo "### Terraform apply — PR #${{ steps.pr.outputs.pr }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "Root: \`${{ env.TF_ROOT }}\` · reviewed plan SHA: \`${{ steps.pr.outputs.head_sha }}\`" >> "$GITHUB_STEP_SUMMARY"
