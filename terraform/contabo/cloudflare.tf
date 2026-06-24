@@ -232,6 +232,41 @@ resource "cloudflare_zero_trust_access_policy" "grafana_build_assets_bypass" {
   }
 }
 
+# Sealed Secrets public cert bypass.
+#
+# sealed-secrets.prod.fuzefront.com/v1/cert.pem serves the Sealed Secrets
+# controller's PUBLIC key. Consumers fetch it to seal secrets OFFLINE — they
+# have no cluster access and no Cloudflare Access account, so this endpoint must
+# be reachable by anyone (CI, scripts, developers). The cert is a public key:
+# it can encrypt but never decrypt, so exposing it is safe by design.
+#
+# A more-specific hostname Access app takes precedence over the wildcard
+# *.prod.fuzefront.com OTP app, so this bypass exempts ONLY the cert endpoint;
+# the controller's private key and the rest of the cluster stay protected.
+# See docs/SECRETS_MANAGEMENT.md.
+resource "cloudflare_zero_trust_access_application" "sealed_secrets_cert" {
+  count                = local.cloudflare_enabled ? 1 : 0
+  account_id           = var.cloudflare_account_id
+  name                 = "Sealed Secrets public cert (public)"
+  domain               = "sealed-secrets.${local.prod_domain}"
+  type                 = "self_hosted"
+  session_duration     = "0s"
+  app_launcher_visible = false
+}
+
+resource "cloudflare_zero_trust_access_policy" "sealed_secrets_cert_bypass" {
+  count          = local.cloudflare_enabled ? 1 : 0
+  account_id     = var.cloudflare_account_id
+  application_id = cloudflare_zero_trust_access_application.sealed_secrets_cert[0].id
+  name           = "Bypass — Sealed Secrets public cert"
+  precedence     = 1
+  decision       = "bypass"
+
+  include {
+    everyone = true
+  }
+}
+
 # Cache static build assets at the CF edge.
 #
 # One zone-level ruleset per phase is the CF limit, so Neo4j and Grafana rules
