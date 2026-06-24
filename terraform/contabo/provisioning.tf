@@ -17,10 +17,11 @@
 # ---------------------------------------------------------------------------
 
 locals {
-  argocd_project_path       = "${path.root}/../../argocd/projects/fuzeinfra.yaml"
-  argocd_app_path           = "${path.root}/../../argocd/applications/fuzeinfra-prod.yaml"
-  argocd_ingress_prod_path  = "${path.root}/../../argocd/argocd-ingress-prod.yaml"
-  values_path               = "${path.root}/../../helm/fuzeinfra/values-contabo.yaml"
+  argocd_project_path        = "${path.root}/../../argocd/projects/fuzeinfra.yaml"
+  argocd_app_path            = "${path.root}/../../argocd/applications/fuzeinfra-prod.yaml"
+  argocd_sealed_secrets_path = "${path.root}/../../argocd/applications/sealed-secrets.yaml"
+  argocd_ingress_prod_path   = "${path.root}/../../argocd/argocd-ingress-prod.yaml"
+  values_path                = "${path.root}/../../helm/fuzeinfra/values-contabo.yaml"
 }
 
 resource "null_resource" "provision" {
@@ -47,6 +48,11 @@ resource "null_resource" "provision" {
   provisioner "file" {
     source      = local.argocd_app_path
     destination = "/tmp/argocd-app.yaml"
+  }
+
+  provisioner "file" {
+    source      = local.argocd_sealed_secrets_path
+    destination = "/tmp/argocd-sealed-secrets.yaml"
   }
 
   provisioner "file" {
@@ -97,9 +103,11 @@ resource "null_resource" "provision" {
       "kubectl apply -n argocd -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml",
       "kubectl wait --for=condition=available deployment/argocd-server -n argocd --timeout=300s",
 
-      # --- ArgoCD AppProject + Application ---
+      # --- ArgoCD AppProject + Applications ---
       "kubectl apply -f /tmp/argocd-project.yaml",
       "kubectl apply -f /tmp/argocd-app.yaml",
+      # Sealed Secrets controller + published public-cert Ingress.
+      "kubectl apply -f /tmp/argocd-sealed-secrets.yaml",
 
       # --- ArgoCD Ingress via Traefik (insecure mode: Cloudflare handles TLS) ---
       "kubectl -n argocd patch configmap argocd-cmd-params-cm --type merge -p '{\"data\":{\"server.insecure\":\"true\"}}'",
@@ -130,9 +138,10 @@ resource "null_resource" "argocd_sync" {
   depends_on = [null_resource.provision]
 
   triggers = {
-    server_ip   = local.server_ip
-    app_sha     = filesha256(local.argocd_app_path)
-    project_sha = filesha256(local.argocd_project_path)
+    server_ip          = local.server_ip
+    app_sha            = filesha256(local.argocd_app_path)
+    project_sha        = filesha256(local.argocd_project_path)
+    sealed_secrets_sha = filesha256(local.argocd_sealed_secrets_path)
   }
 
   connection {
@@ -154,6 +163,11 @@ resource "null_resource" "argocd_sync" {
   }
 
   provisioner "file" {
+    source      = local.argocd_sealed_secrets_path
+    destination = "/tmp/argocd-sealed-secrets.yaml"
+  }
+
+  provisioner "file" {
     source      = local.argocd_ingress_prod_path
     destination = "/tmp/argocd-ingress-prod.yaml"
   }
@@ -162,6 +176,7 @@ resource "null_resource" "argocd_sync" {
     inline = [
       "kubectl apply -f /tmp/argocd-project.yaml",
       "kubectl apply -f /tmp/argocd-app.yaml",
+      "kubectl apply -f /tmp/argocd-sealed-secrets.yaml",
       "kubectl apply -f /tmp/argocd-ingress-prod.yaml",
       "echo 'ArgoCD manifests synced'",
     ]
