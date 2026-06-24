@@ -60,6 +60,18 @@ class ValidateTests(unittest.TestCase):
         decision, _ = validate(WHITELIST, {"changed": "deploy/argocd/applications/x.yaml"}, "izzywdev/FuzeFront")
         self.assertEqual(decision, "skip")
 
+    def test_approved_bypasses_whitelist(self):
+        # A human merged the gated PR → re-dispatch carries approved=true → apply
+        # even though the product_id is NOT whitelisted.
+        payload = {"approved": True, "requests": [{"name": "w1", "product_id": "V92", "region": "EU", "role": "workload"}]}
+        decision, _ = validate(WHITELIST, payload, "izzywdev/FuzeFront")
+        self.assertEqual(decision, "apply")
+
+    def test_approved_still_skips_when_no_requests(self):
+        # approved is irrelevant if there's nothing to provision.
+        decision, _ = validate(WHITELIST, {"approved": True, "requests": []}, "izzywdev/FuzeFront")
+        self.assertEqual(decision, "skip")
+
 
 if __name__ == "__main__":
     unittest.main()
