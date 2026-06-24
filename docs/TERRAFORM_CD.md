@@ -46,18 +46,19 @@ Key properties:
 The workflow is **active** at `.github/workflows/terraform-plan-apply.yml` — it
 runs `plan` on terraform PRs and `apply` (saved plan) on merge to `main`.
 
-**Not yet a required check.** Do NOT add `terraform-plan / plan` to branch
-protection's required checks yet: it triggers on `pull_request: paths:
-[terraform/**]`, so a non-terraform PR would leave the check **pending forever**
-(merge deadlock). Adopt the deadlock-safe pattern first (always-run job +
-internal `terraform/**` self-filter so non-terraform PRs go green), being folded
-in from PRs #52/#53. Once that lands:
+**Deadlock-safe — safe to make required.** The `plan` job always runs (no trigger
+`paths` filter) and self-filters on `terraform/**` via `dorny/paths-filter`:
+non-terraform PRs pass the check instantly, terraform PRs get a real plan, and
+fork PRs pass with a notice. So it can be a required status check without ever
+leaving an unrelated PR pending. Enable it:
 
 **Settings → Branches → main → Branch protection**:
-- Require the status check **`terraform-plan / plan`**.
+- Require the status check **`plan`** (`terraform-plan` workflow).
 - Require at least **1 approving review**.
 
 That combination is what makes "nothing applies without a reviewed plan" true.
+(Until the backend bootstrap in the next section is done, the `plan` job's real
+work fails at `terraform init` — so enable the required check only after bootstrap.)
 
 ### One-time backend bootstrap (S3 + DynamoDB)
 

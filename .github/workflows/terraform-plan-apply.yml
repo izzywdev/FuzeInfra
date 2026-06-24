@@ -20,12 +20,12 @@
 #     to the project.
 #
 # ---------------------------------------------------------------------------
-# This workflow is ACTIVE (.github/workflows/). NOTE: do NOT add its `plan`
-# check to branch protection's required checks yet — it triggers on
-# `pull_request: paths: [terraform/**]`, so a non-terraform PR would leave the
-# check pending forever (merge deadlock). Make it required only after adopting
-# the deadlock-safe pattern (always-run job + internal terraform/** self-filter
-# so non-terraform PRs go green) being brought in from PRs #52/#53.
+# This workflow is ACTIVE (.github/workflows/) and DEADLOCK-SAFE: the `plan` job
+# always runs (no trigger paths filter) and self-filters on terraform/** via
+# dorny/paths-filter, so non-terraform PRs pass it instantly. It is therefore
+# SAFE to make `plan` a required status check on main — required is exactly what
+# guarantees no apply touches infrastructure without a reviewed plan. (The apply
+# job still triggers only on push to main touching terraform/**.)
 # ---------------------------------------------------------------------------
 #
 # Required repo configuration:
@@ -42,11 +42,16 @@
 name: terraform-plan-apply
 
 on:
+  # DEADLOCK-SAFE: the plan job is a REQUIRED status check, so it must report a
+  # conclusion on EVERY PR to main — therefore NO paths filter here. The job
+  # self-filters on terraform/** internally (dorny/paths-filter): PRs that don't
+  # touch terraform pass instantly, terraform PRs get a real plan. A paths filter
+  # here would leave the required check pending forever on non-terraform PRs.
   pull_request:
-    paths: ["terraform/**"]
+    branches: [main]
   push:
     branches: [main]
-    paths: ["terraform/**"]
+    paths: ["terraform/**"]   # apply only when terraform actually changed
 
 permissions:
   contents: read
@@ -70,6 +75,9 @@ env:
   TF_VAR_cloudflare_account_id: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
   TF_VAR_cloudflare_zone_id: ${{ secrets.CLOUDFLARE_ZONE_ID }}
   TF_VAR_github_token: ${{ secrets.GH_TF_TOKEN }}
+  # crit-alert bridge token — MUST be wired, else the plan sees crit_bridge_token=""
+  # and DESTROYS the crit-bridge CF worker/route/secret (count gates on it != "").
+  TF_VAR_crit_bridge_token: ${{ secrets.CRIT_BRIDGE_TOKEN }}
 
 jobs:
   # =========================================================================
@@ -82,15 +90,40 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Deadlock-safe self-filter: this job ALWAYS runs (no trigger paths filter)
+      # so it can be a required check, but only does real work when terraform/**
+      # actually changed.
+      - name: Detect terraform/** changes
+        id: detect
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            tf:
+              - 'terraform/**'
+
+      - name: No terraform changes — nothing to plan
+        if: steps.detect.outputs.tf != 'true'
+        run: echo "No terraform/** files changed in this PR. Plan check passes (deadlock-safe)."
+
+      # Fork PRs have no access to secrets — never run a creds-bearing plan there.
+      # Report success with a note so branch protection isn't deadlocked; the
+      # merge is still gated by review.
+      - name: Fork PR — skip creds plan
+        if: steps.detect.outputs.tf == 'true' && github.event.pull_request.head.repo.fork == true
+        run: echo "::notice::Fork PR touches terraform/** — a maintainer must run the plan from a trusted branch. Check passes to avoid deadlock; merge is still gated by review."
+
       - uses: hashicorp/setup-terraform@v3
+        if: steps.detect.outputs.tf == 'true' && github.event.pull_request.head.repo.fork != true
         with:
           terraform_version: ${{ env.TERRAFORM_VERSION }}
 
       - name: Terraform fmt check
+        if: steps.detect.outputs.tf == 'true' && github.event.pull_request.head.repo.fork != true
         working-directory: ${{ env.TF_ROOT }}
         run: terraform fmt -check -recursive || (echo "::warning::terraform fmt would reformat files" && true)
 
       - name: Terraform init (remote backend)
+        if: steps.detect.outputs.tf == 'true' && github.event.pull_request.head.repo.fork != true
         working-directory: ${{ env.TF_ROOT }}
         run: |
           terraform init -input=false \
@@ -100,10 +133,12 @@ jobs:
             -backend-config="dynamodb_table=${{ secrets.TF_STATE_LOCK_TABLE }}"
 
       - name: Terraform validate
+        if: steps.detect.outputs.tf == 'true' && github.event.pull_request.head.repo.fork != true
         working-directory: ${{ env.TF_ROOT }}
         run: terraform validate -no-color
 
       - name: Terraform plan (saved)
+        if: steps.detect.outputs.tf == 'true' && github.event.pull_request.head.repo.fork != true
         id: plan
         working-directory: ${{ env.TF_ROOT }}
         run: |
@@ -121,7 +156,7 @@ jobs:
           exit $code
 
       - name: Save the reviewed plan
-        if: success()
+        if: success() && steps.detect.outputs.tf == 'true' && github.event.pull_request.head.repo.fork != true
         uses: actions/upload-artifact@v4
         with:
           # Keyed by PR head SHA so the merge job applies the EXACT reviewed plan.
@@ -132,7 +167,7 @@ jobs:
           if-no-files-found: error
 
       - name: Post plan as PR comment
-        if: always()
+        if: always() && steps.detect.outputs.tf == 'true' && github.event.pull_request.head.repo.fork != true
         uses: actions/github-script@v7
         with:
           script: |
