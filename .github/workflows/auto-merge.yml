@@ -16,5 +16,11 @@ jobs:
     steps:
       - name: Enable auto-merge
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # PAT (not GITHUB_TOKEN): a merge performed via GITHUB_TOKEN is attributed
+          # to github-actions[bot], and GitHub SUPPRESSES push/pull_request workflows
+          # for bot-token events — so the terraform CD `apply` job never fired on
+          # auto-merge. Using a PAT attributes the merge to a real user, so the
+          # `push: main` apply trigger runs. Falls back to GITHUB_TOKEN if GH_TOKEN
+          # is unset (auto-merge still works; apply just won't fire — as before).
+          GH_TOKEN: ${{ secrets.GH_TOKEN || secrets.GITHUB_TOKEN }}
         run: gh pr merge --auto --merge "${{ github.event.pull_request.number }}" --repo "${{ github.repository }}"
