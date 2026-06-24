@@ -5,26 +5,29 @@
 # *declare* infra needs in git and dispatch `repository_dispatch
 # (event_type: infra-request)` at this repo; this workflow reconciles them.
 #
+# This handler is TERRAFORM-ONLY. It reconciles infra (node) provisioning
+# requests from newly-added repos/microservices and nothing else. ArgoCD owns
+# the consumer's argo manifests after the one-time initial registration (see
+# argocd-register.yml), so an ongoing argo-manifest edit must never reach this
+# handler — and if one does dispatch (no `requests` payload) it is a clean
+# no-op, never a gated PR.
+#
 # Flow:
 #   1. Check out THIS repo (module + whitelist + scripts) and the REQUESTING
-#      repo's deploy/terraform/ + deploy/argocd/.
-#   2. Validate the request against config/infra-request-whitelist.json.
-#   3. Whitelisted  -> terraform apply (FuzeInfra creds + k3s token + remote
-#      backend), then label the node and argocd-sync the changed Applications.
-#   4. Not whitelisted -> open a gated PR carrying `terraform plan` for manual
-#      approval. Never auto-apply.
-#
-# ---------------------------------------------------------------------------
-# NOTE: This file lives in docs/workflows/ because the bot that authored it
-# cannot write under .github/workflows/. To activate it, a maintainer must:
-#     git mv docs/workflows/infra-request-handler.yml .github/workflows/
-# ---------------------------------------------------------------------------
+#      repo's deploy/terraform/.
+#   2. Validate the request against config/infra-request-whitelist.json, which
+#      yields a decision: skip | apply | gate.
+#   3. skip   -> no infra `requests` in the payload; do nothing and exit.
+#   4. apply  -> request is whitelisted: terraform apply (FuzeInfra creds + k3s
+#      token + remote backend), then label the joined nodes.
+#   5. gate   -> valid request, not whitelisted: open a PR carrying `terraform
+#      plan` for manual approval. Never auto-apply.
 #
 # Required repo secrets (FuzeInfra CI only):
 #   CONTABO_CLIENT_ID, CONTABO_CLIENT_SECRET, CONTABO_API_USER, CONTABO_API_PASSWORD
 #   K3S_SERVER_URL, K3S_NODE_TOKEN
 #   CONTABO_IMAGE_ID, NODE_SSH_PUBLIC_KEY
-#   KUBE_CONFIG                  # base64 kubeconfig for the k3s server (label + argocd sync)
+#   KUBE_CONFIG                  # base64 kubeconfig for the k3s server (node labeling backstop)
 #   TF_STATE_* backend creds     # for the FuzeInfra-owned remote TF state backend
 #
 # Dispatch client_payload shape (sent by the consumer's infra-dispatch.yml):
@@ -56,7 +59,7 @@ jobs:
         with:
           path: fuzeinfra
 
-      - name: Check out requesting repo (deploy/ only)
+      - name: Check out requesting repo (deploy/terraform only)
         uses: actions/checkout@v4
         with:
           repository: ${{ github.event.client_payload.repo }}
@@ -65,7 +68,6 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
           sparse-checkout: |
             deploy/terraform
-            deploy/argocd
 
       - name: Write dispatch payload to file
         id: payload
@@ -85,13 +87,24 @@ jobs:
             --repo "${{ github.event.client_payload.repo }}" \
             --github-output "$GITHUB_OUTPUT"
 
+      # Not an infra-request (no `requests` payload) -> clean no-op. This is the
+      # backstop that keeps argo-only/unrelated dispatches from manufacturing a
+      # gated PR. Every terraform step below is gated on decision != 'skip'.
+      - name: No-op (not an infra-request)
+        if: steps.validate.outputs.decision == 'skip'
+        run: |
+          echo "Decision: skip — ${{ steps.validate.outputs.reasons }}"
+          echo "Nothing to reconcile. ArgoCD owns argo manifests; this handler is Terraform-only."
+
       - name: Set up Terraform
+        if: steps.validate.outputs.decision != 'skip'
         uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: "1.6.6"
 
       # --- Pass the node requests + injected secrets to Terraform -------------
       - name: Generate handler tfvars
+        if: steps.validate.outputs.decision != 'skip'
         working-directory: consumer/deploy/terraform
         env:
           REQUESTS_JSON: ${{ toJSON(github.event.client_payload.requests) }}
@@ -113,6 +126,7 @@ jobs:
           JSON
 
       - name: Terraform init (FuzeInfra-owned remote backend)
+        if: steps.validate.outputs.decision != 'skip'
         working-directory: consumer/deploy/terraform
         env:
           # Configure the FuzeInfra-owned remote state backend here. Example for S3:
@@ -131,18 +145,18 @@ jobs:
       # WHITELISTED -> auto-apply
       # =====================================================================
       - name: Terraform apply (auto)
-        if: steps.validate.outputs.whitelisted == 'true'
+        if: steps.validate.outputs.decision == 'apply'
         working-directory: consumer/deploy/terraform
         run: terraform apply -auto-approve -input=false
 
       - name: Configure kubectl
-        if: steps.validate.outputs.whitelisted == 'true'
+        if: steps.validate.outputs.decision == 'apply'
         run: |
           mkdir -p "$HOME/.kube"
           echo "${{ secrets.KUBE_CONFIG }}" | base64 -d > "$HOME/.kube/config"
 
       - name: Label joined nodes
-        if: steps.validate.outputs.whitelisted == 'true'
+        if: steps.validate.outputs.decision == 'apply'
         env:
           REQUESTS_JSON: ${{ toJSON(github.event.client_payload.requests) }}
         run: |
@@ -162,29 +176,23 @@ jobs:
               subprocess.run(["kubectl","label","node",name,*labels,"--overwrite"],check=True)
           '
 
-      - name: Apply & sync changed Argo Applications
-        if: steps.validate.outputs.whitelisted == 'true'
-        run: |
-          if [ -d consumer/deploy/argocd ]; then
-            kubectl apply -f consumer/deploy/argocd/
-            # If argocd CLI/login is configured, trigger an immediate sync:
-            #   argocd app sync -l app.kubernetes.io/instance=${{ github.event.client_payload.repo }}
-          else
-            echo "No deploy/argocd/ in the consumer repo — skipping Argo sync."
-          fi
+      # NOTE: ArgoCD registration is intentionally NOT done here. A repo is
+      # registered into the cluster's ArgoCD exactly once via the separate
+      # argocd-register.yml (workflow_dispatch); thereafter ArgoCD self-syncs
+      # the consumer's deploy/argocd manifests. This handler stays Terraform-only.
 
       # =====================================================================
-      # NOT WHITELISTED -> gated PR with terraform plan (manual approval)
+      # GATE -> PR with terraform plan (manual approval)
       # =====================================================================
       - name: Terraform plan (gated)
-        if: steps.validate.outputs.whitelisted != 'true'
+        if: steps.validate.outputs.decision == 'gate'
         working-directory: consumer/deploy/terraform
         run: |
           terraform plan -input=false -no-color -out=tfplan | tee plan.txt
           terraform show -no-color tfplan > plan-show.txt || true
 
       - name: Open gated PR for manual approval
-        if: steps.validate.outputs.whitelisted != 'true'
+        if: steps.validate.outputs.decision == 'gate'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
