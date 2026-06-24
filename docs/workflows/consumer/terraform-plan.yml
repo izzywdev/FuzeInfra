@@ -1,0 +1,48 @@
+# ===========================================================================
+# terraform-plan (CONSUMER side)  —  part of the FuzeOne standard stack
+# ===========================================================================
+# Lives in a CONSUMER repo (FuzeFront, future microservices), NOT in FuzeInfra.
+# Drop it at `.github/workflows/terraform-plan.yml` in any repo that has a
+# `deploy/terraform/` declaration.
+#
+# Consumers hold NO cloud creds, so this is a validation gate, not a cloud
+# plan: it fmt-checks and validates the HCL declaration so a broken request
+# can't be merged. The AUTHORITATIVE cloud `terraform plan` is produced by
+# FuzeInfra's handler (gated-PR path) using FuzeInfra's state + creds.
+#
+# Make this a required status check on the consumer's main branch.
+# ===========================================================================
+name: terraform-plan
+
+on:
+  pull_request:
+    paths: ["deploy/terraform/**"]
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: validate deploy/terraform declaration
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.6.6"
+
+      - name: Terraform fmt
+        working-directory: deploy/terraform
+        run: terraform fmt -check -recursive
+
+      - name: Terraform validate (no backend, no creds)
+        working-directory: deploy/terraform
+        run: |
+          terraform init -backend=false -input=false
+          terraform validate -no-color
+
+      - name: Note
+        run: |
+          echo "Declaration is well-formed. The real cloud plan + apply happens"
+          echo "in FuzeInfra after merge (consumer merge → dispatch → FuzeInfra apply)."

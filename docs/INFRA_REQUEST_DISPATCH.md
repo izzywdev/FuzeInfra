@@ -166,6 +166,7 @@ Ongoing edits to those files are **not** infra-requests and trigger nothing.
 
 ## Related docs
 
+- [`TERRAFORM_CD.md`](TERRAFORM_CD.md) — the full merge-to-apply model (FuzeInfra-owned plane A + this dispatch bridge plane B), backend bootstrap, and the FuzeOne consumer-side workflows.
 - [`K3S_SECOND_NODE_RUNBOOK.md`](K3S_SECOND_NODE_RUNBOOK.md) — manual node-join procedure this automates.
 - [`gitops.md`](gitops.md) — Argo CD delivery model.
 - [`CONTRACT.md`](../CONTRACT.md) — FuzeInfra's stable service interface.
