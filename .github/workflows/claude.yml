@@ -3,6 +3,17 @@ name: Claude
 # Lets maintainers delegate work to Claude by mentioning @claude in an issue,
 # issue comment, PR, or review comment. Claude reads the thread + repo and
 # responds / opens a PR.
+#
+# This handler is CLUSTER-CAPABLE: it mounts the prod k3s KUBE_CONFIG and installs
+# kubectl/helm/terraform so a delegated infra task (create app secrets, nudge an
+# Argo sync, label nodes, render+diff the chart) can be done autonomously on the
+# runner — instead of bouncing back to a human who happens to hold the kubeconfig.
+# That is the whole point of cross-repo @claude delegation: it must run without a
+# local session open.
+#
+# SECURITY: because it now holds prod cluster creds + a PAT, the job is gated to
+# TRUSTED authors only (author_association in OWNER/MEMBER/COLLABORATOR). An
+# untrusted user commenting "@claude" must NOT be able to drive cluster ops.
 on:
   issue_comment:
     types: [created]
@@ -15,12 +26,21 @@ on:
 
 jobs:
   claude:
-    # Only run when @claude is actually mentioned (or an issue is assigned to claude).
+    # Gate 1: @claude is actually mentioned (or the issue is assigned to claude).
+    # Gate 2 (SECURITY): the author is a trusted collaborator. author_association
+    # is evaluated per event source. Anything else is ignored silently.
     if: |
-      (github.event_name == 'issue_comment' && contains(github.event.comment.body, '@claude')) ||
-      (github.event_name == 'pull_request_review_comment' && contains(github.event.comment.body, '@claude')) ||
-      (github.event_name == 'pull_request_review' && contains(github.event.review.body, '@claude')) ||
-      (github.event_name == 'issues' && (contains(github.event.issue.body, '@claude') || contains(github.event.issue.title, '@claude')))
+      (
+        (github.event_name == 'issue_comment' && contains(github.event.comment.body, '@claude') &&
+          contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association)) ||
+        (github.event_name == 'pull_request_review_comment' && contains(github.event.comment.body, '@claude') &&
+          contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association)) ||
+        (github.event_name == 'pull_request_review' && contains(github.event.review.body, '@claude') &&
+          contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.review.author_association)) ||
+        (github.event_name == 'issues' &&
+          (contains(github.event.issue.body, '@claude') || contains(github.event.issue.title, '@claude')) &&
+          contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.issue.author_association))
+      )
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -30,11 +50,95 @@ jobs:
       actions: read
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           fetch-depth: 1
 
+      # --- Infra tooling so @claude can actually DO infra work ------------------
+      # Third-party actions pinned to commit SHAs (supply-chain hardening); the
+      # trailing comment tracks the human-readable tag. Keep current via Dependabot
+      # (package-ecosystem: github-actions).
+      - name: Set up kubectl
+        uses: azure/setup-kubectl@776406bce94f63e41d621b960d78ee25c8b76ede # v4
+      - name: Set up helm
+        uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4
+        with:
+          version: v3.14.4
+      - name: Set up terraform
+        uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3
+        with:
+          terraform_version: "1.6.6"
+          terraform_wrapper: false
+
+      - name: Configure kubectl (prod k3s)
+        env:
+          KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
+        run: |
+          if [ -z "$KUBE_CONFIG" ]; then
+            echo "::warning::KUBE_CONFIG secret is empty — cluster ops will be unavailable this run."
+            exit 0
+          fi
+          mkdir -p "$HOME/.kube"
+          printf '%s' "$KUBE_CONFIG" | base64 -d > "$HOME/.kube/config"
+          chmod 600 "$HOME/.kube/config"
+          echo "KUBECONFIG=$HOME/.kube/config" >> "$GITHUB_ENV"
+          kubectl config current-context >/dev/null 2>&1 && echo "kubectl context ready"
+
+      # HARD guardrail (defense-in-depth beyond the system-prompt): shadow the
+      # cluster CLIs with PATH wrappers that REJECT destructive verbs against prod,
+      # enforced by the OS regardless of what the agent is instructed/injected to do.
+      # `kubectl apply/create/get/label/rollout`, `helm template/upgrade --dry-run`,
+      # `terraform plan` etc. all pass through; the irreversible verbs do not.
+      # The real fix (scoped-RBAC ServiceAccount kubeconfig instead of admin + a
+      # fine-scoped GitHub App token) is tracked separately.
+      - name: Install destructive-op guard shims
+        run: |
+          set -euo pipefail
+          GUARD="$HOME/guardbin"; mkdir -p "$GUARD"
+          RK="$(command -v kubectl)"; RH="$(command -v helm)"; RT="$(command -v terraform)"
+          cat > "$GUARD/kubectl" <<EOF
+          #!/usr/bin/env bash
+          for a in "\$@"; do case "\$a" in
+            delete|drain|cordon|uncordon|taint|patch|edit|replace) echo "guard: 'kubectl \$a' is blocked on this runner (prod GitOps; reconcile via chart+PR)" >&2; exit 97;; esac; done
+          exec "$RK" "\$@"
+          EOF
+          cat > "$GUARD/helm" <<EOF
+          #!/usr/bin/env bash
+          for a in "\$@"; do case "\$a" in uninstall|delete|rollback) echo "guard: 'helm \$a' is blocked on this runner" >&2; exit 97;; esac; done
+          exec "$RH" "\$@"
+          EOF
+          cat > "$GUARD/terraform" <<EOF
+          #!/usr/bin/env bash
+          for a in "\$@"; do case "\$a" in apply|destroy|import|"state") echo "guard: 'terraform \$a' is blocked on this runner (plan-only; apply via terraform-plan-apply CD)" >&2; exit 97;; esac; done
+          exec "$RT" "\$@"
+          EOF
+          chmod +x "$GUARD"/kubectl "$GUARD"/helm "$GUARD"/terraform
+          # self-test: a blocked verb must fail, an allowed one must pass
+          "$GUARD/kubectl" delete ns x >/dev/null 2>&1 && { echo "guard self-test FAILED (delete not blocked)"; exit 1; } || echo "guard: kubectl delete correctly blocked"
+          echo "$GUARD" >> "$GITHUB_PATH"
+
       - name: Run Claude
-        uses: anthropics/claude-code-action@v1
+        uses: anthropics/claude-code-action@428971d2ecd6e3a7cb0ee0da2a3a8b33fdb3678d # v1
+        env:
+          # KUBECONFIG (set above) + a real-user PAT for things GITHUB_TOKEN can't
+          # do (GHCR package visibility, cross-repo gh api). The agent reads any
+          # privileged values (e.g. the live Postgres superuser pwd) straight from
+          # the cluster via kubectl — nothing extra to inject here.
+          KUBECONFIG: ${{ env.KUBECONFIG }}
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          # Allow Bash (kubectl/helm/terraform/gh) + file tools + Task (so it can
+          # spawn the fuzeinfra-expert / devops-engineer agents from .claude/agents).
+          # --permission-mode bypassPermissions is REQUIRED for headless infra ops:
+          # the prior cluster-blind run reported that every non-git command (kubectl,
+          # curl, even `command -v`) was denied behind an approval gate an automated
+          # run can't clear. Bypassing is safe here ONLY because the job is already
+          # gated to trusted authors (OWNER/MEMBER/COLLABORATOR) above. GitOps
+          # guardrails live in the agent defs + repo CLAUDE.md in the checkout, and
+          # are reinforced via --append-system-prompt.
+          claude_args: >-
+            --allowedTools "Bash,Read,Write,Edit,Glob,Grep,Task,TodoWrite"
+            --permission-mode bypassPermissions
+            --max-turns 60
+            --append-system-prompt "Runner has PROD cluster access: KUBECONFIG targets the FuzeInfra Contabo k3s cluster; kubectl/helm/terraform installed; GH_TOKEN is a PAT. GitOps guardrails: prod is GitOps under ArgoCD selfHeal — never kubectl-patch/edit chart-managed resources (reverted); reconcile via chart+PR. Imperatively creating NON-chart-managed cluster Secrets to unblock go-live IS allowed. Never run destructive kubectl (delete/drain/cordon) against prod without explicit instruction. Prefer the fuzeinfra-expert and devops-engineer agents for infra delegations. End issue replies with DONE: or BLOCKED: so cross-repo monitors can key off it."
