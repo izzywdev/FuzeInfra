@@ -153,6 +153,8 @@ resource "cloudflare_zero_trust_access_application" "app_launcher" {
   name             = "App Launcher"
   type             = "app_launcher"
   session_duration = var.access_session_duration
+  # Show the App Launcher portal (drifted to false via ClickOps; pin true).
+  app_launcher_visible = true
 }
 
 resource "cloudflare_zero_trust_access_policy" "app_launcher" {
@@ -178,12 +180,12 @@ resource "cloudflare_zero_trust_access_policy" "app_launcher" {
 # Fix: bypass CF Access for neo4j.*/browser so the UI assets load freely.
 # The database itself still requires Neo4j username/password over Bolt.
 resource "cloudflare_zero_trust_access_application" "neo4j_browser_ui" {
-  count            = local.cloudflare_enabled ? 1 : 0
-  account_id       = var.cloudflare_account_id
-  name             = "Neo4j Browser (public UI)"
-  domain           = "neo4j.${local.prod_domain}/browser"
-  type             = "self_hosted"
-  session_duration = "0s"
+  count                = local.cloudflare_enabled ? 1 : 0
+  account_id           = var.cloudflare_account_id
+  name                 = "Neo4j Browser (public UI)"
+  domain               = "neo4j.${local.prod_domain}/browser"
+  type                 = "self_hosted"
+  session_duration     = "0s"
   app_launcher_visible = false
 }
 
@@ -210,12 +212,12 @@ resource "cloudflare_zero_trust_access_policy" "neo4j_browser_ui_bypass" {
 # CF cache them and serve subsequent requests from the edge, eliminating the burst
 # of concurrent tunnel connections that causes 503 on the tablePanel CSS load.
 resource "cloudflare_zero_trust_access_application" "grafana_build_assets" {
-  count            = local.cloudflare_enabled ? 1 : 0
-  account_id       = var.cloudflare_account_id
-  name             = "Grafana Build Assets (public)"
-  domain           = "grafana.${local.prod_domain}/public/build"
-  type             = "self_hosted"
-  session_duration = "0s"
+  count                = local.cloudflare_enabled ? 1 : 0
+  account_id           = var.cloudflare_account_id
+  name                 = "Grafana Build Assets (public)"
+  domain               = "grafana.${local.prod_domain}/public/build"
+  type                 = "self_hosted"
+  session_duration     = "0s"
   app_launcher_visible = false
 }
 
@@ -363,29 +365,29 @@ resource "cloudflare_worker_route" "grafana_build_assets" {
 # ---------------------------------------------------------------------------
 locals {
   launcher_services = {
-    "argocd"        = { name = "ArgoCD",       logo = "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/argo-cd.png",       path = "" }
-    "grafana"       = { name = "Grafana",       logo = "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/grafana.png",       path = "" }
-    "prometheus"    = { name = "Prometheus",    logo = "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/prometheus.png",    path = "" }
-    "alertmanager"  = { name = "Alertmanager",  logo = "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/alertmanager.png",  path = "" }
-    "airflow"       = { name = "Airflow",       logo = "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/apache-airflow.png",path = "" }
-    "flower"        = { name = "Flower",        logo = "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/celery.png",        path = "" }
-    "kafka-ui"      = { name = "Kafka UI",      logo = "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/kafka.png",         path = "" }
-    "mongo-express" = { name = "Mongo Express", logo = "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/mongodb.png",       path = "" }
-    "rabbitmq"      = { name = "RabbitMQ",      logo = "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/rabbitmq.png",      path = "" }
-    "neo4j"         = { name = "Neo4j",         logo = "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/neo4j.png",         path = "" }
+    "argocd"        = { name = "ArgoCD", logo = "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/argo-cd.png", path = "" }
+    "grafana"       = { name = "Grafana", logo = "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/grafana.png", path = "" }
+    "prometheus"    = { name = "Prometheus", logo = "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/prometheus.png", path = "" }
+    "alertmanager"  = { name = "Alertmanager", logo = "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/alertmanager.png", path = "" }
+    "airflow"       = { name = "Airflow", logo = "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/apache-airflow.png", path = "" }
+    "flower"        = { name = "Flower", logo = "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/celery.png", path = "" }
+    "kafka-ui"      = { name = "Kafka UI", logo = "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/kafka.png", path = "" }
+    "mongo-express" = { name = "Mongo Express", logo = "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/mongodb.png", path = "" }
+    "rabbitmq"      = { name = "RabbitMQ", logo = "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/rabbitmq.png", path = "" }
+    "neo4j"         = { name = "Neo4j", logo = "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/neo4j.png", path = "" }
     "elasticsearch" = { name = "Elasticsearch", logo = "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/elasticsearch.png", path = "" }
-    "chromadb"      = { name = "ChromaDB",      logo = "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/chroma.png",        path = "/api/v2/heartbeat" }
+    "chromadb"      = { name = "ChromaDB", logo = "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/chroma.png", path = "/api/v2/heartbeat" }
   }
 }
 
 resource "cloudflare_zero_trust_access_application" "launcher_bookmark" {
-  for_each         = nonsensitive(local.cloudflare_enabled) ? local.launcher_services : {}
-  account_id       = var.cloudflare_account_id
-  name             = each.value.name
-  domain           = "https://${each.key}.${local.prod_domain}${each.value.path}"
-  type             = "bookmark"
+  for_each             = nonsensitive(local.cloudflare_enabled) ? local.launcher_services : {}
+  account_id           = var.cloudflare_account_id
+  name                 = each.value.name
+  domain               = "https://${each.key}.${local.prod_domain}${each.value.path}"
+  type                 = "bookmark"
   app_launcher_visible = true
-  logo_url         = each.value.logo
+  logo_url             = each.value.logo
 }
 
 # Construct the cloudflared token from known fields.
@@ -447,12 +449,12 @@ resource "cloudflare_worker_route" "crit_alert_bridge" {
 # A more-specific hostname app takes precedence and lets the Worker handle auth
 # itself (via BRIDGE_TOKEN).
 resource "cloudflare_zero_trust_access_application" "crit_alert_bridge" {
-  count            = local.cloudflare_enabled && var.crit_bridge_token != "" ? 1 : 0
-  account_id       = var.cloudflare_account_id
-  name             = "CRIT Alert Bridge (public webhook)"
-  domain           = "crit-alert.${local.prod_domain}"
-  type             = "self_hosted"
-  session_duration = "0s"
+  count                = local.cloudflare_enabled && var.crit_bridge_token != "" ? 1 : 0
+  account_id           = var.cloudflare_account_id
+  name                 = "CRIT Alert Bridge (public webhook)"
+  domain               = "crit-alert.${local.prod_domain}"
+  type                 = "self_hosted"
+  session_duration     = "0s"
   app_launcher_visible = false
 }
 
@@ -495,10 +497,10 @@ resource "null_resource" "tunnel_secrets" {
 
   triggers = {
     # Re-run on: new provision, tunnel rotation, or crit-bridge token change.
-    provision_id  = null_resource.provision.id
-    tunnel_id     = cloudflare_zero_trust_tunnel_cloudflared.fuzeinfra[0].id
-    token_hash    = sha256(local.tunnel_token)
-    crit_hash     = sha256(var.crit_bridge_token)
+    provision_id = null_resource.provision.id
+    tunnel_id    = cloudflare_zero_trust_tunnel_cloudflared.fuzeinfra[0].id
+    token_hash   = sha256(local.tunnel_token)
+    crit_hash    = sha256(var.crit_bridge_token)
   }
 
   provisioner "local-exec" {

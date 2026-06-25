@@ -1,0 +1,3 @@
+# Cloudflare Worker scripts are uploaded verbatim by terraform file(); keep them
+# LF so a Windows (CRLF) checkout doesn't produce a spurious worker-content diff.
+terraform/contabo/*.js text eol=lf
