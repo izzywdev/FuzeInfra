@@ -1,0 +1,183 @@
+# =============================================================================
+# Scoped RBAC for the @claude cluster handler (issue #78)
+#
+# Replaces the cluster-admin k3s kubeconfig that the claude.yml handler used to
+# mount (KUBE_CONFIG secret) with a dedicated ServiceAccount whose permissions
+# are limited to EXACTLY what the handler needs:
+#
+#   * Secrets   — get/list/create/update/patch in the app namespaces
+#                 (e.g. GHCR image-pull secrets, sealed-secrets material).
+#                 NO delete. NO access to Secrets in kube-system / argocd.
+#   * Applications (argoproj.io) — read-only (get/list/watch) in `argocd`,
+#                 so the handler can inspect sync/health state but cannot
+#                 mutate, sync, or delete Applications.
+#   * Nodes     — get/list + patch, so `kubectl label nodes ...` works.
+#                 patch on Nodes does NOT grant patch on workloads.
+#
+# This is the durable control the guard shims in claude.yml only approximated:
+# even if an injected agent resolves the real kubectl binary, the API server
+# rejects anything outside these rules.
+#
+# Apply:    kubectl apply -f k8s/claude-handler/rbac.yaml
+# Then:     scripts/generate-claude-handler-kubeconfig.sh   (mints KUBE_CONFIG)
+#
+# Keep the cluster-admin kubeconfig for humans / CD (ArgoCD) ONLY.
+# =============================================================================
+
+# ---- Dedicated namespace for automation identities --------------------------
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: fuzeinfra-automation
+  labels:
+    app.kubernetes.io/part-of: fuzeinfra
+    fuzeinfra.dev/purpose: ci-automation
+---
+# ---- ServiceAccount: the handler's identity ---------------------------------
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: claude-handler
+  namespace: fuzeinfra-automation
+  labels:
+    app.kubernetes.io/part-of: fuzeinfra
+    app.kubernetes.io/component: claude-handler
+# Do NOT auto-mount this token into pods; it is consumed via an explicit
+# kubeconfig generated for GitHub Actions, not by an in-cluster workload.
+automountServiceAccountToken: false
+---
+# =============================================================================
+# Secrets management — namespaced Role, granted per app namespace.
+# Scoped to `fuzeinfra` (and `fuzeinfra-runners`) only. Deliberately NO delete,
+# and deliberately NOT bound in kube-system / argocd / cert-manager.
+# =============================================================================
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: claude-handler-secrets
+  namespace: fuzeinfra
+  labels:
+    app.kubernetes.io/part-of: fuzeinfra
+    app.kubernetes.io/component: claude-handler
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    # create/apply for image-pull + app secrets; update/patch to rotate them.
+    # NO "delete", NO "deletecollection".
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: claude-handler-secrets
+  namespace: fuzeinfra
+  labels:
+    app.kubernetes.io/part-of: fuzeinfra
+    app.kubernetes.io/component: claude-handler
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: claude-handler-secrets
+subjects:
+  - kind: ServiceAccount
+    name: claude-handler
+    namespace: fuzeinfra-automation
+---
+# Same Secrets Role in the runners namespace (GHCR pull secret lives here too).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: claude-handler-secrets
+  namespace: fuzeinfra-runners
+  labels:
+    app.kubernetes.io/part-of: fuzeinfra
+    app.kubernetes.io/component: claude-handler
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: claude-handler-secrets
+  namespace: fuzeinfra-runners
+  labels:
+    app.kubernetes.io/part-of: fuzeinfra
+    app.kubernetes.io/component: claude-handler
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: claude-handler-secrets
+subjects:
+  - kind: ServiceAccount
+    name: claude-handler
+    namespace: fuzeinfra-automation
+---
+# =============================================================================
+# ArgoCD Applications — READ ONLY, scoped to the `argocd` namespace.
+# The handler can inspect sync/health status but cannot sync/patch/delete apps
+# (prod is GitOps-managed with selfHeal; mutation must go through git).
+# =============================================================================
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: claude-handler-applications-ro
+  namespace: argocd
+  labels:
+    app.kubernetes.io/part-of: fuzeinfra
+    app.kubernetes.io/component: claude-handler
+rules:
+  - apiGroups: ["argoproj.io"]
+    resources: ["applications", "applicationsets", "appprojects"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: claude-handler-applications-ro
+  namespace: argocd
+  labels:
+    app.kubernetes.io/part-of: fuzeinfra
+    app.kubernetes.io/component: claude-handler
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: claude-handler-applications-ro
+subjects:
+  - kind: ServiceAccount
+    name: claude-handler
+    namespace: fuzeinfra-automation
+---
+# =============================================================================
+# Nodes — cluster-scoped, so this must be a ClusterRole. get/list + patch is
+# the minimum for `kubectl label nodes`. patch on Nodes confers NOTHING on
+# pods/deployments/secrets — those are separate resources with separate rules.
+# =============================================================================
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: fuzeinfra-claude-handler-nodes
+  labels:
+    app.kubernetes.io/part-of: fuzeinfra
+    app.kubernetes.io/component: claude-handler
+rules:
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list", "watch", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: fuzeinfra-claude-handler-nodes
+  labels:
+    app.kubernetes.io/part-of: fuzeinfra
+    app.kubernetes.io/component: claude-handler
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: fuzeinfra-claude-handler-nodes
+subjects:
+  - kind: ServiceAccount
+    name: claude-handler
+    namespace: fuzeinfra-automation
