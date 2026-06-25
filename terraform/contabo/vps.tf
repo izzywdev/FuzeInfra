@@ -22,8 +22,13 @@ resource "contabo_instance" "prod" {
     runcmd:
       # Ports 80/443 are intentionally omitted — all HTTP(S) traffic flows through
       # the Cloudflare Named Tunnel (outbound-only from cloudflared).
+      # 8472/udp = Flannel VXLAN overlay, 10250/tcp = kubelet — required for
+      # cross-node pod networking once worker nodes join (the server must accept
+      # inbound VXLAN from agents, or worker pods can't reach control-plane services).
       - ufw allow 22/tcp
       - ufw allow 6443/tcp
+      - ufw allow 8472/udp
+      - ufw allow 10250/tcp
       - ufw --force enable
   EOT
 

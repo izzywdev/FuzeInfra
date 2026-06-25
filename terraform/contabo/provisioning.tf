@@ -67,7 +67,17 @@ resource "null_resource" "provision" {
       # All HTTP(S) traffic enters exclusively through the Cloudflare Named Tunnel,
       # which cloudflared initiates as outbound-only connections — no inbound port needed.
       # Blocking 80/443 externally prevents direct VPS access bypassing WAF + Access.
-      "ufw allow 22/tcp && ufw allow 6443/tcp && ufw --force enable 2>/dev/null || true",
+      #
+      # 8472/udp = Flannel VXLAN overlay. REQUIRED once worker nodes join: without it
+      # the control-plane DROPs inbound VXLAN from agents, so pods on worker nodes
+      # can't reach control-plane services (CoreDNS/Postgres/Traefik) — symptom is
+      # cross-node DNS timeouts / EAI_AGAIN. (The worker module already opens 8472;
+      # the server never did, which broke the first worker that joined.)
+      # 10250/tcp = kubelet (parity with the worker module). NOTE: 8472 is opened
+      # Anywhere here, matching the worker cloud-init + the public-IP VXLAN design;
+      # the overlay is unauthenticated, so moving to flannel wireguard-native or a
+      # Contabo private VLAN is tracked as a hardening follow-up.
+      "ufw allow 22/tcp && ufw allow 6443/tcp && ufw allow 8472/udp && ufw allow 10250/tcp && ufw --force enable 2>/dev/null || true",
       "ufw delete allow 80/tcp 2>/dev/null || true",
       "ufw delete allow 443/tcp 2>/dev/null || true",
 
