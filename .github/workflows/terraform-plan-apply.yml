@@ -59,7 +59,10 @@ permissions:
 
 env:
   TF_ROOT: ${{ vars.TF_ROOT || 'terraform/contabo' }}
-  TERRAFORM_VERSION: "1.6.6"
+  # Must be >= the version that wrote the live state. The state was applied with
+  # 1.15.x, so an older CLI (1.6.6) mis-plans random_bytes/tunnel as a phantom
+  # secret rotation. Keep this in lockstep with whatever applies the state.
+  TERRAFORM_VERSION: "1.15.6"
   # AWS creds for the S3/DynamoDB backend (used by every `terraform init`).
   AWS_ACCESS_KEY_ID: ${{ secrets.TF_STATE_ACCESS_KEY_ID }}
   AWS_SECRET_ACCESS_KEY: ${{ secrets.TF_STATE_SECRET_ACCESS_KEY }}
@@ -252,6 +255,13 @@ jobs:
           # The plan was produced by a different workflow run (the PR check).
           workflow: terraform-plan-apply.yml
           commit: ${{ steps.pr.outputs.head_sha }}
+          # CRITICAL: the plan job INTENTIONALLY fails (exit 1) when the plan is
+          # non-empty (the drift gate) — which is exactly the case where we DO want
+          # to apply on merge. dawidd6 defaults to workflow_conclusion=success and
+          # would skip that failed run, so the saved plan artifact is "not found"
+          # and merge-to-apply only ever worked for empty plans. Match ANY
+          # conclusion (pinned by commit) so the reviewed plan is recoverable.
+          workflow_conclusion: ""
           path: ${{ env.TF_ROOT }}
           if_no_artifact_found: fail
 

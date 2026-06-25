@@ -153,8 +153,15 @@ resource "cloudflare_zero_trust_access_application" "app_launcher" {
   name             = "App Launcher"
   type             = "app_launcher"
   session_duration = var.access_session_duration
-  # Show the App Launcher portal (drifted to false via ClickOps; pin true).
-  app_launcher_visible = true
+
+  # NOTE: app_launcher_visible is INERT on a type=app_launcher resource —
+  # Cloudflare's API always stores it false and ignores writes, so the provider's
+  # computed default (true) vs the API (false) is a perpetual no-op diff. Ignore it
+  # (the API owns this field). The portal's TILES are the `launcher_bookmark`
+  # bookmark apps below — those carry app_launcher_visible=true and it sticks there.
+  lifecycle {
+    ignore_changes = [app_launcher_visible]
+  }
 }
 
 resource "cloudflare_zero_trust_access_policy" "app_launcher" {
