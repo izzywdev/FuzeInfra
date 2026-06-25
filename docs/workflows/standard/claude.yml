@@ -1,0 +1,90 @@
+# =============================================================================
+# STANDARD @claude ISSUE HANDLER — INSTALLER TEMPLATE
+# =============================================================================
+# Canonical, replicable @claude handler for the FuzeOne standard automation
+# stack. Install into any repo as `.github/workflows/claude.yml`.
+#
+# INSTALL:
+#   1. Copy this file to `.github/workflows/claude.yml` in the target repo.
+#   2. Replace every __REPONAME__ with the repo's short name, lowercased
+#      (e.g. repo "FuzeFront" -> "fuzefront"). It is used for the
+#      "<reponame>-expert" agent the handler starts with.
+#   3. Secrets required: ANTHROPIC_API_KEY. Optional: GH_TOKEN (PAT/App token).
+#   4. CLUSTER ACCESS (optional): only repos whose @claude must do live cluster
+#      ops (e.g. FuzeInfra) keep the block marked "OPTIONAL: cluster access".
+#      Delete that whole block + the KUBECONFIG env for repos that don't.
+#      When kept, also add the KUBE_CONFIG secret and the guard-shim step.
+#   5. Commit the matching `.claude/agents/__REPONAME__-expert.md` if it exists;
+#      if it doesn't, the handler will create it from the repo-expert template
+#      on first run (see the expert-first directive in --append-system-prompt).
+#
+# SECURITY: this handler is gated to TRUSTED authors (author_association in
+# OWNER/MEMBER/COLLABORATOR). Keep that gate, especially if you enable the
+# optional cluster-access block (which mounts prod credentials).
+# =============================================================================
+name: Claude
+
+on:
+  issue_comment:
+    types: [created]
+  pull_request_review_comment:
+    types: [created]
+  issues:
+    types: [opened, assigned, labeled]
+  pull_request_review:
+    types: [submitted]
+
+jobs:
+  claude:
+    # Gate 1: @claude is actually mentioned (or the issue is assigned to claude).
+    # Gate 2 (SECURITY): the author is a trusted collaborator. Anything else is
+    # ignored silently. Tighten/loosen the association set per repo trust model.
+    if: |
+      (
+        (github.event_name == 'issue_comment' && contains(github.event.comment.body, '@claude') &&
+          contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association)) ||
+        (github.event_name == 'pull_request_review_comment' && contains(github.event.comment.body, '@claude') &&
+          contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association)) ||
+        (github.event_name == 'pull_request_review' && contains(github.event.review.body, '@claude') &&
+          contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.review.author_association)) ||
+        (github.event_name == 'issues' &&
+          (contains(github.event.issue.body, '@claude') || contains(github.event.issue.title, '@claude')) &&
+          contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.issue.author_association))
+      )
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+      id-token: write
+      actions: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 1
+
+      # ---- OPTIONAL: cluster access (delete this block for repos that don't do
+      # live cluster ops). Pin SHAs; mount KUBE_CONFIG; install a destructive-op
+      # guard shim. See FuzeInfra's .github/workflows/claude.yml for the full
+      # version (kubectl/helm/terraform setup + guard shims). ----
+      # - uses: azure/setup-kubectl@<sha>            # v4
+      # - uses: azure/setup-helm@<sha>               # v4
+      # - uses: hashicorp/setup-terraform@<sha>      # v3
+      # - name: Configure kubectl
+      #   run: |
+      #     printf '%s' "${{ secrets.KUBE_CONFIG }}" | base64 -d > "$HOME/.kube/config"
+      #     echo "KUBECONFIG=$HOME/.kube/config" >> "$GITHUB_ENV"
+      # - name: Install destructive-op guard shims   # see FuzeInfra for the script
+
+      - name: Run Claude
+        uses: anthropics/claude-code-action@428971d2ecd6e3a7cb0ee0da2a3a8b33fdb3678d # v1
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+          # KUBECONFIG: ${{ env.KUBECONFIG }}   # uncomment if cluster block kept
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          claude_args: >-
+            --allowedTools "Bash,Read,Write,Edit,Glob,Grep,Task,TodoWrite"
+            --max-turns 60
+            --append-system-prompt "EXPERT-FIRST: begin every task by invoking the __REPONAME__-expert subagent (via Task) to load this repo's architecture/deploy/gotcha context before planning or coding. If `.claude/agents/__REPONAME__-expert.md` does NOT exist, FIRST create it from the repo-expert template at `.claude/templates/repo-expert.template.md` (explore the repo to fill it in), open a PR adding it, then use it for the task. CROSS-REPO HAND-OFF: if a delegated issue's REMAINING work belongs to another repo, open/comment that repo's @claude with full context + a STATE block, post a closing note here, and CLOSE this issue (only keep it open if THIS repo still has work). End issue replies with DONE: or BLOCKED: so cross-repo monitors can key off it."
