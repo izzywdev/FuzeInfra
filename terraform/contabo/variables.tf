@@ -173,3 +173,17 @@ variable "crit_bridge_token" {
   sensitive   = true
 }
 
+variable "enable_argocd_provisioner" {
+  description = <<-EOT
+    Run null_resource.argocd_sync, which SSHes to the server (using
+    ssh_private_key_path) to re-apply the ArgoCD Application/Project/SealedSecrets
+    manifests. OFF by default: it requires a local SSH private key FILE that does
+    not exist on CI runners (the merge-to-apply CD), so it breaks CI applies.
+    Ongoing reconciliation is handled by ArgoCD selfHeal, and one-time argo
+    registration by the argocd-register.yml workflow. Enable locally (in
+    terraform.tfvars) only if you want terraform to push argo manifests via SSH.
+  EOT
+  type        = bool
+  default     = false
+}
+

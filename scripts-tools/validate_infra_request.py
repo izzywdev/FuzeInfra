@@ -47,6 +47,12 @@ def validate(whitelist, payload, repo):
         # than opening a gated PR (argo-only/unrelated changes land here).
         return "skip", ["no infra 'requests' in payload — nothing to reconcile (not an infra-request)"]
 
+    # Manually approved: a human merged the gated PR, which re-dispatches the
+    # request with approved=true. That merge IS the approval, so apply regardless
+    # of the whitelist (the whitelist only governs UNATTENDED auto-apply).
+    if payload.get("approved") is True:
+        return "apply", ["manually approved via gated-PR merge — whitelist bypassed"]
+
     allowed_repos = whitelist.get("allowed_repos")
     if allowed_repos and repo not in allowed_repos:
         reasons.append(f"repo '{repo}' is not in allowed_repos")

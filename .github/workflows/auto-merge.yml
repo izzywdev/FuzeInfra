@@ -12,7 +12,14 @@ permissions:
 jobs:
   enable-auto-merge:
     runs-on: ubuntu-latest
-    if: "!github.event.pull_request.draft"
+    # Skip drafts, and skip GATED infra-request PRs (branch infra-request/*) —
+    # those are NON-whitelisted node requests that exist precisely for human
+    # approval. Auto-merging them would defeat the whitelist and auto-provision a
+    # paid VPS unattended. A human merges them; that triggers the approved apply
+    # (infra-request-apply-on-approve.yml).
+    if: >-
+      !github.event.pull_request.draft &&
+      !startsWith(github.event.pull_request.head.ref, 'infra-request/')
     steps:
       - name: Enable auto-merge
         env:

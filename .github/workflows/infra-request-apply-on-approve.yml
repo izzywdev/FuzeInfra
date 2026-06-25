@@ -1,0 +1,63 @@
+# ===========================================================================
+# infra-request-apply-on-approve
+# ===========================================================================
+# Fills the gap behind a gated infra-request PR's "merge to approve".
+#
+# A NON-whitelisted infra-request is routed by infra-request-handler.yml to a
+# gated PR carrying `infra-requests/<slug>.json` (the request) + `.plan.txt`.
+# Merging that PR is the human approval — but on its own it applied NOTHING.
+#
+# This workflow closes the loop: when such a PR merges (a push to main that
+# adds/updates an infra-requests/*.json), it re-dispatches the request with
+# `approved: true`. The handler's validator treats approved=true as decision
+# `apply` (bypassing the whitelist for that one approved run), so the SAME apply
+# path runs — no duplicated terraform logic here.
+#
+# Note: auto-merge.yml deliberately does NOT auto-merge `infra-request/*` PRs, so
+# the merge here is always a human action (the approval).
+# ===========================================================================
+name: infra-request-apply-on-approve
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'infra-requests/**.json'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: infra-request-apply-on-approve
+  cancel-in-progress: false
+
+jobs:
+  reapply-approved:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Re-dispatch merged (approved) infra-requests
+        env:
+          # A PAT so the dispatch (and the handler it triggers) is a real-user
+          # event, not a suppressed GITHUB_TOKEN one.
+          GH_TOKEN: ${{ secrets.GH_TOKEN || secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          # Only the infra-request files added/modified by THIS push (the merged PR).
+          files=$(git diff --name-only --diff-filter=AM HEAD~1 HEAD -- 'infra-requests/*.json' || true)
+          if [ -z "$files" ]; then
+            echo "No infra-request json added/modified in this push — nothing to approve."
+            exit 0
+          fi
+          for f in $files; do
+            echo "Approved (merged): $f — re-dispatching with approved=true"
+            body=$(jq -c '{
+              event_type: "infra-request",
+              client_payload: { repo: .repo, ref: .ref, requests: .requests, approved: true }
+            }' "$f")
+            echo "$body" | gh api -X POST "repos/${{ github.repository }}/dispatches" --input -
+            echo "  dispatched."
+          done
