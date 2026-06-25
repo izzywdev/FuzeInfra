@@ -143,23 +143,25 @@ jobs:
         working-directory: ${{ env.TF_ROOT }}
         run: |
           set +e
-          # -detailed-exitcode: 0 = no changes, 1 = error, 2 = changes present.
-          terraform plan -input=false -lock-timeout=5m -no-color -detailed-exitcode -out=tfplan
-          code=$?
+          terraform plan -input=false -lock-timeout=5m -no-color -out=tfplan
+          plan_rc=$?
           set -e
-          terraform show -no-color tfplan > plan.txt 2>/dev/null || true
+          if [ "$plan_rc" -ne 0 ]; then
+            echo "::error::terraform plan failed (exit $plan_rc)"
+            exit 1
+          fi
+          terraform show -no-color tfplan > plan.txt
           # Trim the comment to GitHub's ~65k limit.
           head -c 60000 plan.txt > plan.trimmed.txt
           if [ "$(wc -c < plan.txt)" -gt 60000 ]; then
-            echo "" >> plan.trimmed.txt
-            echo "... (plan truncated — see the workflow log / artifact for the full plan)" >> plan.trimmed.txt
+            printf '\n... (plan truncated — see the workflow log / artifact for the full plan)\n' >> plan.trimmed.txt
           fi
-          echo "tf_exit=$code" >> "$GITHUB_OUTPUT"
-          # Fail NOW only on a real plan error (1). A changes-present plan (2) is
-          # still saved + commented below, then flagged as a check failure at the
-          # end — so drift is loud, but the reviewed plan stays available for apply.
-          [ "$code" = "1" ] && exit 1
-          exit 0
+          # Robustly detect a non-empty plan from the SAVED plan JSON — does NOT rely
+          # on -detailed-exitcode exit-code capture (which proved flaky in CI). True
+          # iff any resource-change action is something other than "no-op".
+          changes=$(terraform show -json tfplan | jq -r '[.resource_changes[]?.change.actions[]?] | any(. != "no-op")')
+          echo "has_changes=${changes}" >> "$GITHUB_OUTPUT"
+          echo "plan has changes: ${changes}"
 
       - name: Save the reviewed plan
         if: success() && steps.detect.outputs.tf == 'true' && github.event.pull_request.head.repo.fork != true
@@ -201,12 +203,12 @@ jobs:
               await github.rest.issues.createComment({ owner, repo, issue_number, body });
             }
 
-      # Drift gate: a non-empty plan (tf_exit=2) fails THIS check — loudly — after
-      # the plan was saved + commented above. The artifact still exists, so you can
-      # deliberately merge past the red check to apply the reviewed plan; but a
+      # Drift gate: a non-empty plan (has_changes=true) fails THIS check — loudly —
+      # after the plan was saved + commented above. The artifact still exists, so you
+      # can deliberately merge past the red check to apply the reviewed plan; but a
       # green plan check now guarantees "no changes" (state matches config).
       - name: Fail the check on a non-empty plan (drift)
-        if: steps.detect.outputs.tf == 'true' && github.event.pull_request.head.repo.fork != true && steps.plan.outputs.tf_exit == '2'
+        if: steps.detect.outputs.tf == 'true' && github.event.pull_request.head.repo.fork != true && steps.plan.outputs.has_changes == 'true'
         run: |
           echo "::error::terraform plan is NON-EMPTY — config and live state differ (drift or unapplied changes). See the plan comment. Reconcile/import until clean, or merge deliberately to apply the reviewed plan."
           exit 1
