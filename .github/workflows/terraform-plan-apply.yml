@@ -252,6 +252,13 @@ jobs:
           # The plan was produced by a different workflow run (the PR check).
           workflow: terraform-plan-apply.yml
           commit: ${{ steps.pr.outputs.head_sha }}
+          # CRITICAL: the plan job INTENTIONALLY fails (exit 1) when the plan is
+          # non-empty (the drift gate) — which is exactly the case where we DO want
+          # to apply on merge. dawidd6 defaults to workflow_conclusion=success and
+          # would skip that failed run, so the saved plan artifact is "not found"
+          # and merge-to-apply only ever worked for empty plans. Match ANY
+          # conclusion (pinned by commit) so the reviewed plan is recoverable.
+          workflow_conclusion: ""
           path: ${{ env.TF_ROOT }}
           if_no_artifact_found: fail
 
