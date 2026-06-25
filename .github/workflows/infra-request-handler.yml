@@ -53,6 +53,13 @@ concurrency:
 jobs:
   reconcile:
     runs-on: ubuntu-latest
+    # AWS creds for the S3 remote backend — needed by EVERY terraform step
+    # (init/plan/apply), not just init. Without these on the plan/apply steps the
+    # S3 backend can't refresh state ("No valid credential sources found"), which
+    # made every node-provisioning request's plan fail (so no VPS was ever created).
+    env:
+      AWS_ACCESS_KEY_ID: ${{ secrets.TF_STATE_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.TF_STATE_SECRET_ACCESS_KEY }}
     steps:
       - name: Check out FuzeInfra (module + whitelist + scripts)
         uses: actions/checkout@v4
@@ -214,7 +221,10 @@ jobs:
             echo ""
             echo "**Validation reasons:** ${{ steps.validate.outputs.reasons }}"
             echo ""
-            echo "Review the \`terraform plan\` below and merge to approve. Do not merge if unexpected."
+            echo "Review the \`terraform plan\` below. **Merging this PR IS the approval** — it"
+            echo "re-dispatches the request as approved and the handler APPLIES it (provisioning"
+            echo "real infrastructure). Do not merge if unexpected. (These PRs are excluded from"
+            echo "auto-merge precisely so a human approves them.)"
             echo ""
             echo '```'
             cat ../consumer/deploy/terraform/plan.txt || true
