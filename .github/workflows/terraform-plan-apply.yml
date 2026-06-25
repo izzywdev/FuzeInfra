@@ -59,7 +59,10 @@ permissions:
 
 env:
   TF_ROOT: ${{ vars.TF_ROOT || 'terraform/contabo' }}
-  TERRAFORM_VERSION: "1.6.6"
+  # Must be >= the version that wrote the live state. The state was applied with
+  # 1.15.x, so an older CLI (1.6.6) mis-plans random_bytes/tunnel as a phantom
+  # secret rotation. Keep this in lockstep with whatever applies the state.
+  TERRAFORM_VERSION: "1.15.6"
   # AWS creds for the S3/DynamoDB backend (used by every `terraform init`).
   AWS_ACCESS_KEY_ID: ${{ secrets.TF_STATE_ACCESS_KEY_ID }}
   AWS_SECRET_ACCESS_KEY: ${{ secrets.TF_STATE_SECRET_ACCESS_KEY }}
