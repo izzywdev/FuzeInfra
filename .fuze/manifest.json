@@ -1,0 +1,26 @@
+{
+  "repo": "izzywdev/FuzeInfra",
+  "tier": "infra",
+  "expert": "fuzeinfra-expert",
+  "baselineRef": "main",
+  "agents": [
+    "contract-designer",
+    "backend-engineer",
+    "database-engineer",
+    "devops-engineer",
+    "test-engineer",
+    "docs-maintainer",
+    "security",
+    "platform-governance",
+    "fuzeinfra-expert"
+  ],
+  "hardening": {
+    "ruleset": true,
+    "requireSignatures": true,
+    "requiredChecks": [
+      "test-infrastructure",
+      "Lint & schema-validate chart"
+    ],
+    "deployOnPush": true
+  }
+}
