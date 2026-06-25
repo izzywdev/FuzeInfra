@@ -50,19 +50,22 @@ jobs:
       actions: read
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           fetch-depth: 1
 
       # --- Infra tooling so @claude can actually DO infra work ------------------
+      # Third-party actions pinned to commit SHAs (supply-chain hardening); the
+      # trailing comment tracks the human-readable tag. Keep current via Dependabot
+      # (package-ecosystem: github-actions).
       - name: Set up kubectl
-        uses: azure/setup-kubectl@v4
+        uses: azure/setup-kubectl@776406bce94f63e41d621b960d78ee25c8b76ede # v4
       - name: Set up helm
-        uses: azure/setup-helm@v4
+        uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4
         with:
           version: v3.14.4
       - name: Set up terraform
-        uses: hashicorp/setup-terraform@v3
+        uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3
         with:
           terraform_version: "1.6.6"
           terraform_wrapper: false
@@ -81,8 +84,41 @@ jobs:
           echo "KUBECONFIG=$HOME/.kube/config" >> "$GITHUB_ENV"
           kubectl config current-context >/dev/null 2>&1 && echo "kubectl context ready"
 
+      # HARD guardrail (defense-in-depth beyond the system-prompt): shadow the
+      # cluster CLIs with PATH wrappers that REJECT destructive verbs against prod,
+      # enforced by the OS regardless of what the agent is instructed/injected to do.
+      # `kubectl apply/create/get/label/rollout`, `helm template/upgrade --dry-run`,
+      # `terraform plan` etc. all pass through; the irreversible verbs do not.
+      # The real fix (scoped-RBAC ServiceAccount kubeconfig instead of admin + a
+      # fine-scoped GitHub App token) is tracked separately.
+      - name: Install destructive-op guard shims
+        run: |
+          set -euo pipefail
+          GUARD="$HOME/guardbin"; mkdir -p "$GUARD"
+          RK="$(command -v kubectl)"; RH="$(command -v helm)"; RT="$(command -v terraform)"
+          cat > "$GUARD/kubectl" <<EOF
+          #!/usr/bin/env bash
+          for a in "\$@"; do case "\$a" in
+            delete|drain|cordon|uncordon|taint|patch|edit|replace) echo "guard: 'kubectl \$a' is blocked on this runner (prod GitOps; reconcile via chart+PR)" >&2; exit 97;; esac; done
+          exec "$RK" "\$@"
+          EOF
+          cat > "$GUARD/helm" <<EOF
+          #!/usr/bin/env bash
+          for a in "\$@"; do case "\$a" in uninstall|delete|rollback) echo "guard: 'helm \$a' is blocked on this runner" >&2; exit 97;; esac; done
+          exec "$RH" "\$@"
+          EOF
+          cat > "$GUARD/terraform" <<EOF
+          #!/usr/bin/env bash
+          for a in "\$@"; do case "\$a" in apply|destroy|import|"state") echo "guard: 'terraform \$a' is blocked on this runner (plan-only; apply via terraform-plan-apply CD)" >&2; exit 97;; esac; done
+          exec "$RT" "\$@"
+          EOF
+          chmod +x "$GUARD"/kubectl "$GUARD"/helm "$GUARD"/terraform
+          # self-test: a blocked verb must fail, an allowed one must pass
+          "$GUARD/kubectl" delete ns x >/dev/null 2>&1 && { echo "guard self-test FAILED (delete not blocked)"; exit 1; } || echo "guard: kubectl delete correctly blocked"
+          echo "$GUARD" >> "$GITHUB_PATH"
+
       - name: Run Claude
-        uses: anthropics/claude-code-action@v1
+        uses: anthropics/claude-code-action@428971d2ecd6e3a7cb0ee0da2a3a8b33fdb3678d # v1
         env:
           # KUBECONFIG (set above) + a real-user PAT for things GITHUB_TOKEN can't
           # do (GHCR package visibility, cross-repo gh api). The agent reads any
