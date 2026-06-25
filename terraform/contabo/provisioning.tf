@@ -73,11 +73,15 @@ resource "null_resource" "provision" {
       # can't reach control-plane services (CoreDNS/Postgres/Traefik) — symptom is
       # cross-node DNS timeouts / EAI_AGAIN. (The worker module already opens 8472;
       # the server never did, which broke the first worker that joined.)
-      # 10250/tcp = kubelet (parity with the worker module). NOTE: 8472 is opened
-      # Anywhere here, matching the worker cloud-init + the public-IP VXLAN design;
-      # the overlay is unauthenticated, so moving to flannel wireguard-native or a
-      # Contabo private VLAN is tracked as a hardening follow-up.
-      "ufw allow 22/tcp && ufw allow 6443/tcp && ufw allow 8472/udp && ufw allow 10250/tcp && ufw --force enable 2>/dev/null || true",
+      # NOTE: kubelet (10250) is intentionally NOT opened — k3s reaches agent kubelets
+      # through the agent's outbound tunnel to 6443, so no inbound 10250 is needed,
+      # and exposing the kubelet API is an unnecessary risk.
+      # SECURITY: 8472 is opened Anywhere here only as a rebuild bootstrap default
+      # (static cloud-init can't know future worker IPs). The RUNTIME posture is
+      # scoped — the live rule allows 8472 only from the specific node IPs, and the
+      # node-join path should add a scoped per-worker rule. The durable fix is moving
+      # the overlay onto flannel wireguard-native or a Contabo private VLAN (tracked).
+      "ufw allow 22/tcp && ufw allow 6443/tcp && ufw allow 8472/udp && ufw --force enable 2>/dev/null || true",
       "ufw delete allow 80/tcp 2>/dev/null || true",
       "ufw delete allow 443/tcp 2>/dev/null || true",
 
