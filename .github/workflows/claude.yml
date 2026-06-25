@@ -94,9 +94,15 @@ jobs:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           # Allow Bash (kubectl/helm/terraform/gh) + file tools + Task (so it can
           # spawn the fuzeinfra-expert / devops-engineer agents from .claude/agents).
-          # GitOps guardrails live in those agent defs + the repo CLAUDE.md, which
-          # are in the checkout the agent runs against.
+          # --permission-mode bypassPermissions is REQUIRED for headless infra ops:
+          # the prior cluster-blind run reported that every non-git command (kubectl,
+          # curl, even `command -v`) was denied behind an approval gate an automated
+          # run can't clear. Bypassing is safe here ONLY because the job is already
+          # gated to trusted authors (OWNER/MEMBER/COLLABORATOR) above. GitOps
+          # guardrails live in the agent defs + repo CLAUDE.md in the checkout, and
+          # are reinforced via --append-system-prompt.
           claude_args: >-
             --allowedTools "Bash,Read,Write,Edit,Glob,Grep,Task,TodoWrite"
+            --permission-mode bypassPermissions
             --max-turns 60
             --append-system-prompt "Runner has PROD cluster access: KUBECONFIG targets the FuzeInfra Contabo k3s cluster; kubectl/helm/terraform installed; GH_TOKEN is a PAT. GitOps guardrails: prod is GitOps under ArgoCD selfHeal — never kubectl-patch/edit chart-managed resources (reverted); reconcile via chart+PR. Imperatively creating NON-chart-managed cluster Secrets to unblock go-live IS allowed. Never run destructive kubectl (delete/drain/cordon) against prod without explicit instruction. Prefer the fuzeinfra-expert and devops-engineer agents for infra delegations. End issue replies with DONE: or BLOCKED: so cross-repo monitors can key off it."
