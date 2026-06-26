@@ -1,0 +1,50 @@
+# =============================================================================
+# FuzeInfra LOCAL (kind) TLS — self-signed CA + ClusterIssuer
+# =============================================================================
+# Centralized cert management for local dev so consumer apps DON'T each install
+# their own cert-manager + CA (issue #10). Applied by k8s/kind/setup-kind.sh
+# after cert-manager is installed.
+#
+# Chain: a self-signed bootstrap issuer mints a long-lived root CA, which backs
+# the `fuzeinfra-local-ca` ClusterIssuer. Any Ingress in any namespace that adds
+#   cert-manager.io/cluster-issuer: fuzeinfra-local-ca
+# plus a tls: block gets a cert signed by that CA — trusted once the CA is
+# imported into the host trust store (see docs/LOCAL_TLS.md).
+#
+# LOCAL DEV ONLY. Prod terminates TLS at the Cloudflare edge (the tunnel), so
+# prod needs no cert-manager — do not apply this to the Contabo cluster.
+# =============================================================================
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: fuzeinfra-selfsigned-bootstrap
+spec:
+  selfSigned: {}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: fuzeinfra-local-ca
+  namespace: cert-manager
+spec:
+  isCA: true
+  commonName: FuzeInfra Local Dev CA
+  secretName: fuzeinfra-local-ca           # the CA keypair the ClusterIssuer signs with
+  duration: 87600h0m0s                     # 10 years — local dev, no rotation churn
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+  issuerRef:
+    name: fuzeinfra-selfsigned-bootstrap
+    kind: ClusterIssuer
+    group: cert-manager.io
+---
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: fuzeinfra-local-ca
+spec:
+  ca:
+    # A CA ClusterIssuer reads its keypair from a Secret in the cluster
+    # resource namespace (cert-manager's namespace by default).
+    secretName: fuzeinfra-local-ca

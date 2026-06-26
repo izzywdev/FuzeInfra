@@ -12,6 +12,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 CLUSTER_NAME="fuzeinfra"
 NAMESPACE="fuzeinfra"
+CERT_MANAGER_VERSION="v1.16.2"   # bump deliberately
 
 command -v kind   >/dev/null || { echo "kind not found - https://kind.sigs.k8s.io"; exit 1; }
 command -v kubectl>/dev/null || { echo "kubectl not found"; exit 1; }
@@ -34,6 +35,22 @@ kubectl wait --namespace ingress-nginx \
   --selector=app.kubernetes.io/component=controller \
   --timeout=180s
 
+echo "==> Installing cert-manager ($CERT_MANAGER_VERSION)"
+kubectl apply -f "https://github.com/cert-manager/cert-manager/releases/download/${CERT_MANAGER_VERSION}/cert-manager.yaml"
+echo "==> Waiting for cert-manager to be ready"
+kubectl wait --namespace cert-manager \
+  --for=condition=Available --timeout=180s deployment --all
+
+echo "==> Installing the FuzeInfra local CA ClusterIssuer (shared local TLS)"
+# Retry: the CRDs/webhook may take a moment to register after the deployments are Available.
+for i in 1 2 3 4 5; do
+  kubectl apply -f "$REPO_ROOT/k8s/local-tls/cluster-issuer.yaml" && break
+  echo "    cert-manager webhook not ready yet, retrying ($i)..."; sleep 6
+done
+kubectl wait --for=condition=Ready --timeout=120s \
+  clusterissuer/fuzeinfra-local-ca 2>/dev/null || \
+  echo "    (CA ClusterIssuer still initializing — it'll be Ready shortly)"
+
 echo "==> Deploying FuzeInfra Helm chart"
 helm upgrade --install fuzeinfra "$REPO_ROOT/helm/fuzeinfra" \
   --namespace "$NAMESPACE" --create-namespace \
@@ -55,4 +72,14 @@ wildcard for *.dev.local:
 
 Then open:  http://grafana.dev.local  (admin / admin)
 Check pods: kubectl -n $NAMESPACE get pods
+
+==> Local HTTPS (shared cert management — issue #10)
+cert-manager + the 'fuzeinfra-local-ca' ClusterIssuer are installed. Any app's
+Ingress gets a trusted cert by adding:
+    annotations: { cert-manager.io/cluster-issuer: fuzeinfra-local-ca }
+    spec.tls: [{ hosts: [<host>.dev.local], secretName: <host>-tls }]
+Trust the local CA ONCE so browsers/curl accept it (no -k needed):
+    kubectl -n cert-manager get secret fuzeinfra-local-ca -o jsonpath='{.data.tls\\.crt}' | base64 -d > fuzeinfra-local-ca.crt
+    # then import fuzeinfra-local-ca.crt into your OS/browser trust store
+See docs/LOCAL_TLS.md for the full consumer guide.
 EOF
