@@ -191,7 +191,7 @@ metadata:
     {{- include "fuzeinfra.labels" . | nindent 4 }}
 spec:
   serviceName: fuzeinfra-rabbitmq
-  replicas: 1
+  replicas: {{ dig "replicas" 1 .Values.rabbitmq }}
   selector:
     matchLabels:
       {{- include "fuzeinfra.selectorLabels" (dict "component" "rabbitmq" "root" $) | nindent 6 }}

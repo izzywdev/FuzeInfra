@@ -184,7 +184,7 @@ metadata:
   labels:
     {{- include "fuzeinfra.labels" . | nindent 4 }}
 spec:
-  replicas: 1
+  replicas: {{ dig "replicas" 1 .Values.airflow }}
   selector:
     matchLabels:
       {{- include "fuzeinfra.selectorLabels" (dict "component" "airflow-webserver" "root" $) | nindent 6 }}
@@ -229,7 +229,7 @@ metadata:
   labels:
     {{- include "fuzeinfra.labels" . | nindent 4 }}
 spec:
-  replicas: 1
+  replicas: {{ dig "replicas" 1 .Values.airflow }}
   selector:
     matchLabels:
       {{- include "fuzeinfra.selectorLabels" (dict "component" "airflow-scheduler" "root" $) | nindent 6 }}
@@ -314,7 +314,7 @@ metadata:
   labels:
     {{- include "fuzeinfra.labels" . | nindent 4 }}
 spec:
-  replicas: 1
+  replicas: {{ dig "replicas" 1 .Values.airflow }}
   selector:
     matchLabels:
       {{- include "fuzeinfra.selectorLabels" (dict "component" "airflow-flower" "root" $) | nindent 6 }}
