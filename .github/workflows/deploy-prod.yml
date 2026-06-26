@@ -10,6 +10,7 @@ on:
     paths:
       - 'helm/**'
       - 'argocd/applications/fuzeinfra-prod.yaml'
+      - 'argocd/applications/sealed-secrets.yaml'
       - '.github/workflows/deploy-prod.yml'
   workflow_dispatch:
 
@@ -41,7 +42,7 @@ jobs:
       # Trigger an immediate ArgoCD sync via kubectl patch.
       # Requires KUBE_CONFIG secret (set by `terraform apply` in terraform/contabo/).
       # If the secret is absent the deploy is skipped with a warning.
-      - name: Trigger ArgoCD sync
+      - name: Register standalone Argo apps + trigger sync
         env:
           KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
         run: |
@@ -52,9 +53,22 @@ jobs:
           fi
           echo "$KUBE_CONFIG" | base64 -d > /tmp/kubeconfig
           chmod 600 /tmp/kubeconfig
-          kubectl --kubeconfig /tmp/kubeconfig \
-            -n argocd patch application fuzeinfra-prod \
-            --type merge \
-            -p '{"operation":{"initiatedBy":{"username":"ci"},"sync":{"revision":"HEAD"}}}' \
-            && echo "ArgoCD sync triggered for fuzeinfra-prod" \
-            || echo "::warning::ArgoCD patch failed — check that ArgoCD is running on the cluster"
+          export KUBECONFIG=/tmp/kubeconfig
+
+          # Register the standalone Application manifests idempotently on every prod
+          # deploy. Terraform only applies them on first-provision, so on a VPS
+          # rebuild (or if one was never registered — e.g. sealed-secrets, #88) they
+          # would silently go missing. apply -f makes the repo the source of truth.
+          for app in fuzeinfra-prod sealed-secrets; do
+            kubectl apply -f "argocd/applications/$app.yaml" \
+              && echo "registered $app" \
+              || echo "::warning::failed to register $app"
+          done
+
+          # Kick an immediate sync so the rollout starts seconds after merge.
+          for app in fuzeinfra-prod sealed-secrets; do
+            kubectl -n argocd patch application "$app" --type merge \
+              -p '{"operation":{"initiatedBy":{"username":"ci"},"sync":{}}}' \
+              && echo "sync triggered for $app" \
+              || echo "::warning::sync patch failed for $app"
+          done
