@@ -21,6 +21,60 @@ GitHub Actions: grafana-crit-fix.yml
 Email → izzy.weinberg@gmail.com
 ```
 
+## Per-repo routing (which repo gets the issue?)
+
+The shared cluster hosts many consumers, each in its own namespace. A CRIT log
+should land in the issue tracker of whoever **owns** the emitting service — not
+always FuzeInfra.
+
+The owning repo is declared by an annotation on the namespace:
+
+```
+fuzeinfra.io/owner-repo: <owner>/<repo>
+```
+
+`grafana-crit-fix.yml` resolves it (it already has cluster access via
+`KUBE_CONFIG`) — the CF Worker stays thin and never queries the cluster:
+
+1. Parse `namespace` from the alert labels (`client_payload.labels`, treated as data).
+2. `kubectl get ns "$ns" -o jsonpath='{.metadata.annotations.fuzeinfra\.io/owner-repo}'`.
+3. Validate it matches `^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$`.
+4. File the issue there: `gh issue create --repo "$owner_repo" …` (with cross-repo dedup).
+
+**Fallback** to `izzywdev/FuzeInfra` when the namespace is missing/unknown, not
+found, unannotated, or the value is invalid.
+
+**`fix` vs `issue` by owner:** a code-fix PR can only target FuzeInfra's own
+checkout, so for a consumer-owned namespace `action=fix` is **downgraded to a
+triage issue** filed in the consumer repo. `action=ignore` always stays in
+FuzeInfra — the suppression list is FuzeInfra's.
+
+### Onboarding a consumer namespace
+
+Annotate the namespace once so its crit logs route to its own repo:
+
+```bash
+kubectl annotate namespace <namespace> \
+  fuzeinfra.io/owner-repo=<owner>/<repo> --overwrite
+# e.g.
+kubectl annotate namespace fuzefront \
+  fuzeinfra.io/owner-repo=izzywdev/FuzeFront --overwrite
+```
+
+FuzeInfra's own `fuzeinfra` namespace is annotated automatically by Argo CD
+(`managedNamespaceMetadata` in `argocd/applications/fuzeinfra-prod.yaml`).
+
+> **Token scope:** filing into a consumer repo needs the workflow's `GH_TOKEN`
+> (a PAT) to have `issues:write` there — the default `GITHUB_TOKEN` is scoped to
+> FuzeInfra only. The workflow uses `secrets.GH_TOKEN || secrets.GITHUB_TOKEN`;
+> set `GH_TOKEN` to a PAT spanning the consumer repos (the existing automation
+> PAT covers `izzywdev/*`).
+
+### Traceability
+
+Every auto-opened issue/PR links the **specific run** (not just the workflow) via
+a `**Handling run:**` line + footer, so you can trace which run produced it.
+
 ## Why CF Worker as bridge (not direct Loki query)
 
 The GHA workflow runner has existing `KUBE_CONFIG` access to the k3s cluster. Fetching logs via `kubectl port-forward → curl Loki HTTP API` reuses that access without exposing Loki publicly.
@@ -60,8 +114,8 @@ Steps:
 2. `kubectl port-forward svc/fuzeinfra-loki 3100:3100` → `curl` Loki query API for last 30 min
 3. `claude --print --allowedTools "Bash,Read,Write,Edit,Glob,Grep" --max-turns 30` with structured prompt
 4. Python extracts last `{"action":"..."}` JSON from Claude's stdout
-5. `action=fix` → commit changes, push branch, `gh pr create`, `gh pr merge --auto --merge`
-6. `action=issue` → `gh issue create --label bug`
+5. `action=fix` → (FuzeInfra-owned namespaces only) commit changes, push branch, `gh pr create`, `gh pr merge --auto --merge`
+6. `action=issue` → `gh issue create --repo <owner-repo> --label bug` (routed to the namespace owner — see [Per-repo routing](#per-repo-routing-which-repo-gets-the-issue))
 7. Email via Gmail SMTP (`dawidd6/action-send-mail`)
 
 ### 4. Terraform Resources (`terraform/contabo/cloudflare.tf`)
