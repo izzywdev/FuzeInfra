@@ -31,6 +31,12 @@ spec:
     automated:
       prune: true
       selfHeal: true
+    # Annotate the Argo-created `fuzeinfra` namespace so CRIT-log alerts from
+    # infra services resolve to this repo explicitly (grafana-crit-fix.yml reads
+    # fuzeinfra.io/owner-repo off the emitting namespace to pick the issue repo).
+    managedNamespaceMetadata:
+      annotations:
+        fuzeinfra.io/owner-repo: izzywdev/FuzeInfra
     syncOptions:
       - CreateNamespace=true
       - ServerSideApply=true

@@ -114,6 +114,48 @@ jobs:
           kubectl config set-cluster default --insecure-skip-tls-verify=true
           kubectl cluster-info --request-timeout=10s
 
+      # ── resolve which repo owns the emitting namespace ──────────────────────
+      # A CRIT log should land in the issue tracker of whoever owns the service
+      # that emitted it — not always FuzeInfra. The owning repo is declared by a
+      # `fuzeinfra.io/owner-repo` annotation on the namespace (consumers set it at
+      # onboarding; FuzeInfra's own namespace is annotated via Argo CD). Falls back
+      # to this repo when the namespace is missing, unannotated, or invalid.
+      - name: Resolve owner repo from namespace annotation
+        id: ownerrepo
+        env:
+          ALERT_LABELS: ${{ github.event.client_payload.labels }}
+        run: |
+          set -euo pipefail
+          DEFAULT_REPO="${{ github.repository }}"
+          OWNER_REPO="$DEFAULT_REPO"
+
+          # client_payload.labels is a JSON string of the alert labels (incl.
+          # namespace). Treat strictly as DATA — never interpolate into a prompt.
+          printf '%s' "$ALERT_LABELS" > /tmp/alert_labels.json
+          jq empty /tmp/alert_labels.json 2>/dev/null || echo '{}' > /tmp/alert_labels.json
+          NS=$(jq -r '.namespace // ""' /tmp/alert_labels.json)
+
+          if [ -z "$NS" ] || [ "$NS" = "null" ]; then
+            echo "No namespace label on the alert; routing to $DEFAULT_REPO"
+          else
+            ANNOT=$(kubectl get ns "$NS" \
+              -o jsonpath='{.metadata.annotations.fuzeinfra\.io/owner-repo}' \
+              2>/dev/null || true)
+            # Security gate: the value flows into `gh --repo` and Claude's prompt.
+            # Accept only a strict owner/repo slug; otherwise fall back.
+            if [ -n "$ANNOT" ] && printf '%s' "$ANNOT" | grep -Eq '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$'; then
+              OWNER_REPO="$ANNOT"
+            else
+              echo "Namespace '$NS' has no valid fuzeinfra.io/owner-repo annotation; routing to $DEFAULT_REPO"
+            fi
+          fi
+
+          IS_SELF=false
+          [ "$OWNER_REPO" = "$DEFAULT_REPO" ] && IS_SELF=true
+          echo "owner_repo=$OWNER_REPO" >> "$GITHUB_OUTPUT"
+          echo "is_self=$IS_SELF"       >> "$GITHUB_OUTPUT"
+          echo "::notice::CRIT issue will be filed in '$OWNER_REPO' (namespace '${NS:-<none>}')"
+
       # ── fetch logs from Loki ────────────────────────────────────────────────
       - name: Fetch recent error logs from Loki
         id: logs
@@ -195,7 +237,12 @@ jobs:
         id: act
         if: steps.suppress.outputs.skip != 'true'
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # GH_TOKEN: a cross-repo PAT is required to file issues in a CONSUMER
+          # repo (the default GITHUB_TOKEN is scoped to this repo only). Falls back
+          # to GITHUB_TOKEN, which still works for FuzeInfra's own (is_self) crits.
+          GH_TOKEN: ${{ secrets.GH_TOKEN || secrets.GITHUB_TOKEN }}
+          OWNER_REPO: ${{ steps.ownerrepo.outputs.owner_repo }}
+          IS_SELF: ${{ steps.ownerrepo.outputs.is_self }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           FIRED_AT: ${{ github.event.client_payload.fired_at }}
@@ -206,6 +253,14 @@ jobs:
           RUN_NUMBER: ${{ github.run_number }}
         run: |
           ACTION=$(python3 -c "import json; print(json.loads(open('/tmp/claude_result.json').read())['action'])")
+
+          # A code-fix PR can only target THIS repo's checkout. For a consumer-owned
+          # namespace we can't fix their code from here — downgrade fix→issue so it
+          # gets filed (as triage) in the owner repo instead.
+          if [ "$ACTION" = "fix" ] && [ "$IS_SELF" != "true" ]; then
+            echo "::notice::Owner repo '$OWNER_REPO' is not this repo; downgrading fix→issue"
+            ACTION="issue"
+          fi
 
           if [ "$ACTION" = "fix" ]; then
             SUMMARY=$(python3 -c "import json; print(json.loads(open('/tmp/claude_result.json').read()).get('summary','Fix CRIT error'))")
@@ -253,14 +308,30 @@ jobs:
             TITLE=$(python3 -c "import json; print(json.loads(open('/tmp/claude_result.json').read()).get('title','CRIT alert needs attention'))")
             python3 .github/gen-issue-body.py > /tmp/issue_body.md
 
-            URL=$(gh issue create \
-              --title "🚨 ${TITLE}" \
-              --label "bug" \
-              --label "crit-autofix" \
-              --body-file /tmp/issue_body.md)
-
-            echo "action=issue" >> "$GITHUB_OUTPUT"
-            echo "url=$URL"     >> "$GITHUB_OUTPUT"
+            # Dedup in the owner repo: the FuzeInfra preflight gate can't see a
+            # consumer repo's open issues, so check here before piling on.
+            EXISTING=$(gh issue list --repo "$OWNER_REPO" --label crit-autofix \
+              --state open --json number --jq 'length' 2>/dev/null || echo 0)
+            if [ "${EXISTING:-0}" -gt 0 ]; then
+              echo "::notice::An open crit-autofix issue already exists in $OWNER_REPO; skipping"
+              echo "action=issue" >> "$GITHUB_OUTPUT"
+            else
+              # Ensure the label exists in the (possibly consumer) repo; tolerate
+              # a missing label / no label-create permission by retrying bare.
+              gh label create crit-autofix --color e11d48 \
+                --description "Opened by FuzeInfra CRIT log auto-fix" \
+                --repo "$OWNER_REPO" 2>/dev/null || true
+              URL=$(gh issue create --repo "$OWNER_REPO" \
+                --title "🚨 ${TITLE}" \
+                --label "bug" --label "crit-autofix" \
+                --body-file /tmp/issue_body.md 2>/tmp/issue_err.txt) || {
+                  echo "::warning::labelled issue create failed in $OWNER_REPO (label/token scope?); retrying without labels"
+                  URL=$(gh issue create --repo "$OWNER_REPO" \
+                    --title "🚨 ${TITLE}" --body-file /tmp/issue_body.md)
+                }
+              echo "action=issue" >> "$GITHUB_OUTPUT"
+              echo "url=$URL"     >> "$GITHUB_OUTPUT"
+            fi
           fi
 
           if [ "$ACTION" = "ignore" ]; then

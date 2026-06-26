@@ -6,8 +6,14 @@ body         = r.get('body', '')
 fired_at     = os.environ.get('FIRED_AT', '')
 log_ctx      = os.environ.get('LOG_CTX', '')
 workflow_url = os.environ.get('WORKFLOW_URL', '')
+run_url      = os.environ.get('RUN_URL', '')
+owner_repo   = os.environ.get('OWNER_REPO', '')
+
+routed = f" · routed to `{owner_repo}`" if owner_repo else ""
 
 print(f"""{body}
+
+**Handling run:** {run_url}
 
 ---
 **Log excerpt:**
@@ -15,4 +21,4 @@ print(f"""{body}
 {log_ctx}
 ```
 
-_Auto-opened by [grafana-crit-fix]({workflow_url}) at {fired_at}_""")
+_Auto-opened by [grafana-crit-fix]({workflow_url}) · [run]({run_url}) at {fired_at}{routed}_""")
