@@ -1,5 +1,6 @@
 {
   "repo": "izzywdev/FuzeInfra",
+  "class": "oss-public",
   "tier": "infra",
   "expert": "fuzeinfra-expert",
   "baselineRef": "main",
