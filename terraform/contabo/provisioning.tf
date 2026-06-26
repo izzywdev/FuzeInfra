@@ -86,11 +86,15 @@ resource "null_resource" "provision" {
       "ufw delete allow 443/tcp 2>/dev/null || true",
 
       # --- k3s ---
+      # --node-taint control-plane=:PreferNoSchedule biases tenant workloads onto
+      # worker nodes, keeping the single control-plane node (apiserver + Traefik +
+      # CoreDNS + Postgres) from saturating under tenant churn (FuzeInfra#92). The
+      # live node already carries this taint; this makes it survive a VPS rebuild.
       "if ! command -v k3s &>/dev/null; then",
-      "  curl -sfL https://get.k3s.io | INSTALL_K3S_EXEC='--tls-san ${local.server_ip}' sh -",
+      "  curl -sfL https://get.k3s.io | INSTALL_K3S_EXEC='--tls-san ${local.server_ip} --node-taint node-role.kubernetes.io/control-plane=:PreferNoSchedule' sh -",
       "else",
       "  echo 'k3s already installed, running upgrade check'",
-      "  curl -sfL https://get.k3s.io | INSTALL_K3S_EXEC='--tls-san ${local.server_ip}' sh - || true",
+      "  curl -sfL https://get.k3s.io | INSTALL_K3S_EXEC='--tls-san ${local.server_ip} --node-taint node-role.kubernetes.io/control-plane=:PreferNoSchedule' sh - || true",
       "fi",
       "sleep 15",
       "kubectl wait --for=condition=ready node --all --timeout=120s",
