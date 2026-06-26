@@ -4,15 +4,20 @@ name: Auto-merge
 # (required reviews + code-owner + signed commits). GitHub's native auto-merge
 # QUEUE does NOT apply ruleset bypass actors — it waits for a human review even
 # when the enabler is a bypass actor — so PRs stall. Instead, when ALL required
-# status checks are green, we perform a direct **admin** squash-merge as the
-# admin PAT (a bypass actor): squash so GitHub signs the single resulting commit
-# (satisfies required_signatures), --admin so the review/signature rules are
-# bypassed FOR THE AUTOMATION ONLY. External contributors / non-admin pushes are
-# still fully gated by the ruleset — this job merges as the admin and only after
-# every required check passes.
+# status checks are green, we do a direct **admin** squash-merge as the admin PAT
+# (a bypass actor): squash so GitHub signs the single commit (satisfies
+# required_signatures), --admin so the review/signature rules are bypassed FOR
+# THE AUTOMATION ONLY. External / non-admin contributors stay fully gated.
 #
-# Requires: secrets.GH_TOKEN = a PAT for an admin / bypass-actor user (NOT the
-# default GITHUB_TOKEN, which is not an admin and cannot --admin merge).
+# RELIABILITY: this evaluates ALL open PRs to main on every run and is driven by
+# THREE triggers — pull_request + check_suite (fast path) and a schedule
+# backstop. The event-only design missed merges because the LAST check to go
+# green didn't always fire a fresh check_suite the job could process (or the
+# rollup it read was momentarily stale). The schedule guarantees eventual merge;
+# evaluating all open PRs removes any dependence on an event's PR linkage.
+#
+# Requires: secrets.GH_TOKEN = an admin / bypass-actor PAT (the default
+# GITHUB_TOKEN is not admin and cannot --admin merge).
 
 on:
   pull_request:
@@ -20,6 +25,9 @@ on:
     branches: [main]
   check_suite:
     types: [completed]
+  schedule:
+    - cron: '*/10 * * * *'   # backstop: sweep eligible green PRs every ~10 min
+  workflow_dispatch:
 
 permissions:
   pull-requests: write
@@ -27,38 +35,30 @@ permissions:
   checks: read
 
 concurrency:
-  group: auto-merge-${{ github.event.pull_request.number || github.event.check_suite.head_sha }}
+  group: auto-merge
   cancel-in-progress: false
 
 jobs:
   admin-merge:
     runs-on: ubuntu-latest
     steps:
-      - name: Admin-merge eligible green PRs
+      - name: Admin-merge all eligible green PRs
         env:
           GH_TOKEN: ${{ secrets.GH_TOKEN || secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
-          EVENT: ${{ github.event_name }}
-          PR_EVENT: ${{ github.event.pull_request.number }}
-          SUITE_PRS: ${{ toJSON(github.event.check_suite.pull_requests) }}
         run: |
           set -euo pipefail
 
-          # ---- required status-check contexts, read live from the ruleset so
-          # this stays correct if the ruleset changes ----
+          # required status-check contexts, read live from the ruleset
           mapfile -t REQUIRED < <(gh api "repos/$REPO/rules/branches/main" \
             --jq '[.[] | select(.type=="required_status_checks") | .parameters.required_status_checks[].context] | .[]' 2>/dev/null || true)
           echo "Required checks: ${REQUIRED[*]:-<none>}"
 
-          # ---- candidate PR numbers ----
-          if [ "$EVENT" = "pull_request" ]; then
-            CANDIDATES="$PR_EVENT"
-          else
-            CANDIDATES=$(echo "$SUITE_PRS" | jq -r '.[]?.number' 2>/dev/null || true)
-          fi
-          [ -z "${CANDIDATES// /}" ] && { echo "No candidate PRs."; exit 0; }
+          # Evaluate EVERY open PR targeting main (no reliance on event PR linkage).
+          mapfile -t PRS < <(gh pr list --repo "$REPO" --base main --state open --json number --jq '.[].number' 2>/dev/null || true)
+          [ "${#PRS[@]}" -eq 0 ] && { echo "No open PRs to main."; exit 0; }
 
-          for PR in $CANDIDATES; do
+          for PR in "${PRS[@]}"; do
             echo "::group::Evaluate PR #$PR"
             meta=$(gh pr view "$PR" --repo "$REPO" \
               --json number,state,isDraft,baseRefName,headRefName,isCrossRepository,mergeable,statusCheckRollup 2>/dev/null || echo '')
@@ -71,8 +71,6 @@ jobs:
             fork=$(jq -r '.isCrossRepository' <<<"$meta")
             mergeable=$(jq -r '.mergeable' <<<"$meta")
 
-            # eligibility — mirror the old gate: skip drafts, non-main, forks, and
-            # gated infra-request/* PRs (those exist for human approval).
             [ "$state" != "OPEN" ] && { echo "  state=$state — skip"; echo "::endgroup::"; continue; }
             [ "$draft" = "true" ] && { echo "  draft — skip"; echo "::endgroup::"; continue; }
             [ "$base" != "main" ] && { echo "  base=$base — skip"; echo "::endgroup::"; continue; }
@@ -80,14 +78,15 @@ jobs:
             case "$head" in infra-request/*) echo "  infra-request/* — skip (human-gated)"; echo "::endgroup::"; continue;; esac
             [ "$mergeable" = "CONFLICTING" ] && { echo "  conflicts — skip"; echo "::endgroup::"; continue; }
 
-            # every REQUIRED context must be present AND SUCCESS
+            # every REQUIRED context must be present AND SUCCESS (treat null/empty
+            # — i.e. still-running — as not ready)
             green=1
             for ctx in "${REQUIRED[@]}"; do
               [ -z "$ctx" ] && continue
               concl=$(jq -r --arg c "$ctx" \
                 '[.statusCheckRollup[]? | select((.name==$c) or (.context==$c)) | (.conclusion // .state)] | .[0] // "MISSING"' <<<"$meta")
               if [ "$concl" != "SUCCESS" ]; then
-                echo "  required '$ctx' = $concl — not ready"; green=0; break
+                echo "  required '$ctx' = ${concl:-<running>} — not ready"; green=0; break
               fi
             done
             [ "$green" -ne 1 ] && { echo "::endgroup::"; continue; }
@@ -95,6 +94,6 @@ jobs:
             echo "  all required checks green — admin squash-merge"
             gh pr merge --squash --admin "$PR" --repo "$REPO" \
               && echo "  merged #$PR" \
-              || echo "  merge failed for #$PR (will retry on next check_suite)"
+              || echo "  merge failed for #$PR (will retry next run)"
             echo "::endgroup::"
           done
