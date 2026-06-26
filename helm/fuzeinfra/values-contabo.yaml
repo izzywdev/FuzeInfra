@@ -32,24 +32,32 @@ postgres:
     requests: { cpu: 250m, memory: 512Mi }
     limits:   { cpu: "1",  memory: 1Gi }
 
+# -----------------------------------------------------------------------------
+# Trimmed on Contabo for control-plane headroom (FuzeInfra#93).
+# The single 8 GB node was saturating; FuzeFront (the only prod consumer) needs
+# only postgres, redis, kafka, chromadb, and monitoring. These services are
+# disabled here — re-enable in this overlay if a prod consumer ever needs them.
+# -----------------------------------------------------------------------------
 mongodb:
-  storage: 10Gi
-  resources:
-    requests: { cpu: 100m, memory: 256Mi }
-    limits:   { cpu: "1",  memory: 512Mi }
+  enabled: false
+
+mongoExpress:        # mongodb admin UI — depends on mongodb
+  enabled: false
+
+neo4j:
+  enabled: false
+
+elasticsearch:
+  enabled: false
+
+rabbitmq:
+  enabled: false
 
 redis:
   storage: 2Gi
   resources:
     requests: { cpu: 50m,  memory: 128Mi }
     limits:   { cpu: 500m, memory: 256Mi }
-
-elasticsearch:
-  storage: 20Gi
-  javaOpts: "-Xms512m -Xmx512m"
-  resources:
-    requests: { cpu: 250m, memory: 1Gi }
-    limits:   { cpu: "1",  memory: 1536Mi }
 
 kafka:
   storage: 10Gi
@@ -99,14 +107,11 @@ grafana:
 #     s3ForcePathStyle: true
 #     existingSecret: "loki-s3"
 
+# Airflow (init/webserver/scheduler/worker + flower = 5 pods) disabled on
+# Contabo for headroom (FuzeInfra#93) — no prod consumer needs it. Sizing
+# defaults live in values.yaml if it is re-enabled here.
 airflow:
-  workerReplicas: 1
-  # 4 vCPU / 8 GB node — cap concurrency and memory to stop the worker from
-  # crowding out CoreDNS/Postgres under memory pressure.
-  celeryWorkerConcurrency: 4
-  workerResources:
-    requests: { cpu: 500m, memory: 512Mi }
-    limits:   { cpu: "2",  memory: 1536Mi }
+  enabled: false
 
 # Cloudflare tunnel: all traffic enters via the named tunnel; no host-level
 # ports 80/443 need to be open.  The tunnel token lives in fuzeinfra-secrets
