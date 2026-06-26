@@ -52,8 +52,13 @@ spec:
               value: "1@localhost:9093"
             - name: KAFKA_LISTENERS
               value: "PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093"
+            # Advertise the cluster-wide FQDN so cross-namespace clients (e.g. the
+            # `fuzefront` namespace) can resolve the broker returned in metadata.
+            # The bare service name only resolves inside ns `{{ .Release.Namespace }}`,
+            # which broke produce/consume for consumers in other namespaces. The FQDN
+            # resolves everywhere (including intra-namespace), so a single listener suffices.
             - name: KAFKA_ADVERTISED_LISTENERS
-              value: "PLAINTEXT://fuzeinfra-kafka:9092"
+              value: "PLAINTEXT://fuzeinfra-kafka.{{ .Release.Namespace }}.svc.cluster.local:9092"
             - name: KAFKA_LISTENER_SECURITY_PROTOCOL_MAP
               value: "CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT"
             - name: KAFKA_CONTROLLER_LISTENER_NAMES
