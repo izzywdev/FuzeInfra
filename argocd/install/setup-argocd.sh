@@ -27,8 +27,11 @@ kubectl apply -n argocd \
 echo "==> Waiting for Argo CD server to be ready"
 kubectl -n argocd rollout status deploy/argocd-server --timeout=300s
 
-echo "==> Applying FuzeInfra AppProject"
+echo "==> Applying AppProjects (FuzeInfra owns the destination/security boundary)"
 kubectl apply -f "$ARGOCD_DIR/projects/fuzeinfra.yaml"
+# Consumer projects are FuzeInfra-owned + restricted (cannot deploy into the
+# fuzeinfra namespace). Add one per consumer repo.
+kubectl apply -f "$ARGOCD_DIR/projects/fuzefront.yaml"
 
 case "$ENVIRONMENT" in
   local)
