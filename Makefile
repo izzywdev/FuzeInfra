@@ -4,13 +4,32 @@
 CHART      := helm/fuzeinfra
 NAMESPACE  := fuzeinfra
 RELEASE    := fuzeinfra
+PROFILE    ?=
+
+# Cross-platform: native Windows `make` shells to the PowerShell scripts; macOS/
+# Linux (and Git Bash/WSL) use the bash scripts. The Python helpers run the same
+# everywhere (python on Windows, python3 elsewhere).
+ifeq ($(OS),Windows_NT)
+  KIND_UP      := pwsh -NoProfile -ExecutionPolicy Bypass -File k8s/kind/setup-kind.ps1
+  KIND_DOWN    := pwsh -NoProfile -ExecutionPolicy Bypass -File k8s/kind/teardown-kind.ps1
+  PROFILE_FLAG := -Profile
+  PY           := python
+else
+  KIND_UP      := ./k8s/kind/setup-kind.sh
+  KIND_DOWN    := ./k8s/kind/teardown-kind.sh
+  PROFILE_FLAG := --profile
+  PY           := python3
+endif
 
 .PHONY: help
 help:
 	@echo "FuzeInfra make targets:"
 	@echo "  Local Kubernetes (kind):"
-	@echo "    make kind-up         Create kind cluster + ingress + deploy chart"
-	@echo "    make kind-down       Delete the kind cluster"
+	@echo "    make kind-up                     Create kind cluster + ingress + deploy full stack"
+	@echo "    make kind-profile PROFILE=<name> Deploy a subset (minimal, data-stores, full)"
+	@echo "    make kind-validate               Assert every enabled service is ready + reachable"
+	@echo "    make kind-test                   Run the pytest suite via kubectl port-forward"
+	@echo "    make kind-down                   Delete the kind cluster"
 	@echo "    make k8s-deploy      Deploy/upgrade chart to current kube-context (local values)"
 	@echo "    make k8s-status      Show pods in the $(NAMESPACE) namespace"
 	@echo "  Chart validation (no cluster needed):"
@@ -27,11 +46,24 @@ help:
 # ----------------------------------------------------------------------------
 .PHONY: kind-up
 kind-up:
-	./k8s/kind/setup-kind.sh
+	$(KIND_UP)
+
+.PHONY: kind-profile
+kind-profile:
+	@if [ -z "$(PROFILE)" ]; then echo "Usage: make kind-profile PROFILE=<minimal|data-stores|full>"; exit 1; fi
+	$(KIND_UP) $(PROFILE_FLAG) $(PROFILE)
+
+.PHONY: kind-validate
+kind-validate:
+	$(PY) scripts-tools/validate_kind_deployment.py --reuse
+
+.PHONY: kind-test
+kind-test:
+	$(PY) scripts-tools/kind_port_forward.py -- pytest tests/ -v
 
 .PHONY: kind-down
 kind-down:
-	./k8s/kind/teardown-kind.sh
+	$(KIND_DOWN)
 
 .PHONY: k8s-deploy
 k8s-deploy:

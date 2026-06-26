@@ -4,7 +4,11 @@
 # ingress-nginx controller, and deploy the FuzeInfra Helm chart.
 #
 # Prereqs: docker, kind, kubectl, helm.
-# Usage:   ./k8s/kind/setup-kind.sh
+# Usage:   ./k8s/kind/setup-kind.sh [--profile <name>] [--reuse]
+#   --profile <name>  Layer helm/fuzeinfra/profiles/<name>.yaml on top of
+#                     values-local.yaml (e.g. minimal, data-stores, full).
+#   --reuse           Reuse an existing cluster (already the default; accepted
+#                     for parity with the PowerShell/CI entrypoints).
 # -----------------------------------------------------------------------------
 set -euo pipefail
 
@@ -13,6 +17,16 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 CLUSTER_NAME="fuzeinfra"
 NAMESPACE="fuzeinfra"
 CERT_MANAGER_VERSION="v1.16.2"   # bump deliberately
+
+PROFILE=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --profile)   PROFILE="${2:-}"; shift 2 ;;
+    --profile=*) PROFILE="${1#*=}"; shift ;;
+    --reuse)     shift ;;   # default already reuses; accepted for parity
+    *) echo "unknown arg: $1" >&2; exit 1 ;;
+  esac
+done
 
 command -v kind   >/dev/null || { echo "kind not found - https://kind.sigs.k8s.io"; exit 1; }
 command -v kubectl>/dev/null || { echo "kubectl not found"; exit 1; }
@@ -52,9 +66,21 @@ kubectl wait --for=condition=Ready --timeout=120s \
   echo "    (CA ClusterIssuer still initializing — it'll be Ready shortly)"
 
 echo "==> Deploying FuzeInfra Helm chart"
+PROFILE_ARGS=()
+if [ -n "$PROFILE" ]; then
+  PFILE="$REPO_ROOT/helm/fuzeinfra/profiles/${PROFILE}.yaml"
+  [ -f "$PFILE" ] || {
+    echo "profile '$PROFILE' not found at $PFILE" >&2
+    echo "available: $(ls "$REPO_ROOT/helm/fuzeinfra/profiles" 2>/dev/null | sed 's/\.yaml$//' | tr '\n' ' ')" >&2
+    exit 1
+  }
+  echo "    applying profile overlay: $PROFILE"
+  PROFILE_ARGS=(-f "$PFILE")
+fi
 helm upgrade --install fuzeinfra "$REPO_ROOT/helm/fuzeinfra" \
   --namespace "$NAMESPACE" --create-namespace \
   -f "$REPO_ROOT/helm/fuzeinfra/values-local.yaml" \
+  ${PROFILE_ARGS[@]+"${PROFILE_ARGS[@]}"} \
   --wait --timeout 10m || {
     echo "Helm install reported a timeout; some heavy images (elasticsearch, kafka)"
     echo "may still be pulling. Check: kubectl -n $NAMESPACE get pods"
