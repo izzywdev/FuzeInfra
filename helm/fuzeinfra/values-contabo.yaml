@@ -44,12 +44,20 @@ redis:
     requests: { cpu: 50m,  memory: 128Mi }
     limits:   { cpu: 500m, memory: 256Mi }
 
+# TEMPORARY headroom reduction for the saturated single control-plane node (#93).
+# elasticsearch / rabbitmq / airflow are scaled to 0 pods. Their StatefulSets and
+# PVCs are RETAINED (no prune, no data loss) — set replicas back to 1 to restore.
+# mongo / neo4j / postgres / redis / kafka / chromadb / monitoring stay running.
 elasticsearch:
+  replicas: 0
   storage: 20Gi
   javaOpts: "-Xms512m -Xmx512m"
   resources:
     requests: { cpu: 250m, memory: 1Gi }
     limits:   { cpu: "1",  memory: 1536Mi }
+
+rabbitmq:
+  replicas: 0   # TEMP headroom (#93) — restore to 1 when the node has capacity
 
 kafka:
   storage: 10Gi
@@ -100,7 +108,8 @@ grafana:
 #     existingSecret: "loki-s3"
 
 airflow:
-  workerReplicas: 1
+  replicas: 0          # TEMP headroom (#93): webserver/scheduler/flower -> 0 pods
+  workerReplicas: 0    # TEMP headroom (#93): celery worker -> 0 pods
   # 4 vCPU / 8 GB node — cap concurrency and memory to stop the worker from
   # crowding out CoreDNS/Postgres under memory pressure.
   celeryWorkerConcurrency: 4
