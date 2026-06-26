@@ -262,6 +262,15 @@ spec:
       {{- include "fuzeinfra.selectorLabels" (dict "component" "grafana" "root" $) | nindent 6 }}
   template:
     metadata:
+      annotations:
+        # Grafana provisions datasources/alerting/dashboards from ConfigMaps on
+        # STARTUP only (its data dir is emptyDir/stateless). Without this, a
+        # provisioning change applies to the ConfigMap but the running pod keeps
+        # the stale config until manually restarted — which silently broke the
+        # Loki-crit alerting for days. Hashing the config templates rolls the pod
+        # whenever they change, so a provisioning edit reloads automatically.
+        checksum/monitoring-config: {{ include (print $.Template.BasePath "/configmaps-monitoring.yaml") $ | sha256sum }}
+        checksum/dashboards: {{ include (print $.Template.BasePath "/grafana-dashboards.yaml") $ | sha256sum }}
       labels:
         {{- include "fuzeinfra.labels" . | nindent 8 }}
         {{- include "fuzeinfra.selectorLabels" (dict "component" "grafana" "root" $) | nindent 8 }}
