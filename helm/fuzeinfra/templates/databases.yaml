@@ -6,11 +6,11 @@ metadata:
   name: fuzeinfra-postgres
   labels:
     {{- include "fuzeinfra.labels" . | nindent 4 }}
-    {{- include "fuzeinfra.selectorLabels" (dict "component" "postgres") | nindent 4 }}
+    {{- include "fuzeinfra.selectorLabels" (dict "component" "postgres" "root" $) | nindent 4 }}
 spec:
   clusterIP: None
   selector:
-    {{- include "fuzeinfra.selectorLabels" (dict "component" "postgres") | nindent 4 }}
+    {{- include "fuzeinfra.selectorLabels" (dict "component" "postgres" "root" $) | nindent 4 }}
   ports:
     - name: postgres
       port: {{ .Values.postgres.port }}
@@ -27,12 +27,12 @@ spec:
   replicas: 1
   selector:
     matchLabels:
-      {{- include "fuzeinfra.selectorLabels" (dict "component" "postgres") | nindent 6 }}
+      {{- include "fuzeinfra.selectorLabels" (dict "component" "postgres" "root" $) | nindent 6 }}
   template:
     metadata:
       labels:
         {{- include "fuzeinfra.labels" . | nindent 8 }}
-        {{- include "fuzeinfra.selectorLabels" (dict "component" "postgres") | nindent 8 }}
+        {{- include "fuzeinfra.selectorLabels" (dict "component" "postgres" "root" $) | nindent 8 }}
     spec:
       containers:
         - name: postgres
@@ -88,11 +88,11 @@ metadata:
   name: fuzeinfra-mongodb
   labels:
     {{- include "fuzeinfra.labels" . | nindent 4 }}
-    {{- include "fuzeinfra.selectorLabels" (dict "component" "mongodb") | nindent 4 }}
+    {{- include "fuzeinfra.selectorLabels" (dict "component" "mongodb" "root" $) | nindent 4 }}
 spec:
   clusterIP: None
   selector:
-    {{- include "fuzeinfra.selectorLabels" (dict "component" "mongodb") | nindent 4 }}
+    {{- include "fuzeinfra.selectorLabels" (dict "component" "mongodb" "root" $) | nindent 4 }}
   ports:
     - name: mongodb
       port: {{ .Values.mongodb.port }}
@@ -109,12 +109,12 @@ spec:
   replicas: 1
   selector:
     matchLabels:
-      {{- include "fuzeinfra.selectorLabels" (dict "component" "mongodb") | nindent 6 }}
+      {{- include "fuzeinfra.selectorLabels" (dict "component" "mongodb" "root" $) | nindent 6 }}
   template:
     metadata:
       labels:
         {{- include "fuzeinfra.labels" . | nindent 8 }}
-        {{- include "fuzeinfra.selectorLabels" (dict "component" "mongodb") | nindent 8 }}
+        {{- include "fuzeinfra.selectorLabels" (dict "component" "mongodb" "root" $) | nindent 8 }}
     spec:
       containers:
         - name: mongodb
@@ -168,11 +168,11 @@ metadata:
   name: fuzeinfra-redis
   labels:
     {{- include "fuzeinfra.labels" . | nindent 4 }}
-    {{- include "fuzeinfra.selectorLabels" (dict "component" "redis") | nindent 4 }}
+    {{- include "fuzeinfra.selectorLabels" (dict "component" "redis" "root" $) | nindent 4 }}
 spec:
   clusterIP: None
   selector:
-    {{- include "fuzeinfra.selectorLabels" (dict "component" "redis") | nindent 4 }}
+    {{- include "fuzeinfra.selectorLabels" (dict "component" "redis" "root" $) | nindent 4 }}
   ports:
     - name: redis
       port: {{ .Values.redis.port }}
@@ -189,12 +189,12 @@ spec:
   replicas: 1
   selector:
     matchLabels:
-      {{- include "fuzeinfra.selectorLabels" (dict "component" "redis") | nindent 6 }}
+      {{- include "fuzeinfra.selectorLabels" (dict "component" "redis" "root" $) | nindent 6 }}
   template:
     metadata:
       labels:
         {{- include "fuzeinfra.labels" . | nindent 8 }}
-        {{- include "fuzeinfra.selectorLabels" (dict "component" "redis") | nindent 8 }}
+        {{- include "fuzeinfra.selectorLabels" (dict "component" "redis" "root" $) | nindent 8 }}
     spec:
       containers:
         - name: redis
@@ -238,10 +238,10 @@ metadata:
   name: fuzeinfra-neo4j
   labels:
     {{- include "fuzeinfra.labels" . | nindent 4 }}
-    {{- include "fuzeinfra.selectorLabels" (dict "component" "neo4j") | nindent 4 }}
+    {{- include "fuzeinfra.selectorLabels" (dict "component" "neo4j" "root" $) | nindent 4 }}
 spec:
   selector:
-    {{- include "fuzeinfra.selectorLabels" (dict "component" "neo4j") | nindent 4 }}
+    {{- include "fuzeinfra.selectorLabels" (dict "component" "neo4j" "root" $) | nindent 4 }}
   ports:
     - name: http
       port: {{ .Values.neo4j.httpPort }}
@@ -261,12 +261,12 @@ spec:
   replicas: 1
   selector:
     matchLabels:
-      {{- include "fuzeinfra.selectorLabels" (dict "component" "neo4j") | nindent 6 }}
+      {{- include "fuzeinfra.selectorLabels" (dict "component" "neo4j" "root" $) | nindent 6 }}
   template:
     metadata:
       labels:
         {{- include "fuzeinfra.labels" . | nindent 8 }}
-        {{- include "fuzeinfra.selectorLabels" (dict "component" "neo4j") | nindent 8 }}
+        {{- include "fuzeinfra.selectorLabels" (dict "component" "neo4j" "root" $) | nindent 8 }}
     spec:
       containers:
         - name: neo4j
@@ -334,10 +334,10 @@ metadata:
   name: fuzeinfra-elasticsearch
   labels:
     {{- include "fuzeinfra.labels" . | nindent 4 }}
-    {{- include "fuzeinfra.selectorLabels" (dict "component" "elasticsearch") | nindent 4 }}
+    {{- include "fuzeinfra.selectorLabels" (dict "component" "elasticsearch" "root" $) | nindent 4 }}
 spec:
   selector:
-    {{- include "fuzeinfra.selectorLabels" (dict "component" "elasticsearch") | nindent 4 }}
+    {{- include "fuzeinfra.selectorLabels" (dict "component" "elasticsearch" "root" $) | nindent 4 }}
   ports:
     - name: http
       port: {{ .Values.elasticsearch.port }}
@@ -354,12 +354,12 @@ spec:
   replicas: 1
   selector:
     matchLabels:
-      {{- include "fuzeinfra.selectorLabels" (dict "component" "elasticsearch") | nindent 6 }}
+      {{- include "fuzeinfra.selectorLabels" (dict "component" "elasticsearch" "root" $) | nindent 6 }}
   template:
     metadata:
       labels:
         {{- include "fuzeinfra.labels" . | nindent 8 }}
-        {{- include "fuzeinfra.selectorLabels" (dict "component" "elasticsearch") | nindent 8 }}
+        {{- include "fuzeinfra.selectorLabels" (dict "component" "elasticsearch" "root" $) | nindent 8 }}
     spec:
       initContainers:
         # Elasticsearch requires vm.max_map_count >= 262144.
@@ -418,10 +418,10 @@ metadata:
   name: fuzeinfra-chromadb
   labels:
     {{- include "fuzeinfra.labels" . | nindent 4 }}
-    {{- include "fuzeinfra.selectorLabels" (dict "component" "chromadb") | nindent 4 }}
+    {{- include "fuzeinfra.selectorLabels" (dict "component" "chromadb" "root" $) | nindent 4 }}
 spec:
   selector:
-    {{- include "fuzeinfra.selectorLabels" (dict "component" "chromadb") | nindent 4 }}
+    {{- include "fuzeinfra.selectorLabels" (dict "component" "chromadb" "root" $) | nindent 4 }}
   ports:
     - name: http
       port: {{ .Values.chromadb.port }}
@@ -438,12 +438,12 @@ spec:
   replicas: 1
   selector:
     matchLabels:
-      {{- include "fuzeinfra.selectorLabels" (dict "component" "chromadb") | nindent 6 }}
+      {{- include "fuzeinfra.selectorLabels" (dict "component" "chromadb" "root" $) | nindent 6 }}
   template:
     metadata:
       labels:
         {{- include "fuzeinfra.labels" . | nindent 8 }}
-        {{- include "fuzeinfra.selectorLabels" (dict "component" "chromadb") | nindent 8 }}
+        {{- include "fuzeinfra.selectorLabels" (dict "component" "chromadb" "root" $) | nindent 8 }}
     spec:
       containers:
         - name: chromadb

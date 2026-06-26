@@ -15,6 +15,13 @@ spec:
     targetRevision: main
     path: helm/fuzeinfra
     helm:
+      # Pin the Helm release name to "fuzeinfra" (not the default app name
+      # "fuzeinfra-prod"). The chart's selectorLabels now derive instance from
+      # {{ .Release.Name }}; the LIVE StatefulSets carry instance=fuzeinfra (the
+      # old hardcoded value) and that label is IMMUTABLE, so the release name MUST
+      # render "fuzeinfra" to keep this a no-op. Verified: helm template with
+      # release "fuzeinfra" is byte-identical to the previous output.
+      releaseName: fuzeinfra
       valueFiles:
         - values-contabo.yaml
   destination:

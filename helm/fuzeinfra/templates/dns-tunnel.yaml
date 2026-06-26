@@ -29,11 +29,11 @@ metadata:
   name: fuzeinfra-dnsmasq
   labels:
     {{- include "fuzeinfra.labels" . | nindent 4 }}
-    {{- include "fuzeinfra.selectorLabels" (dict "component" "dnsmasq") | nindent 4 }}
+    {{- include "fuzeinfra.selectorLabels" (dict "component" "dnsmasq" "root" $) | nindent 4 }}
 spec:
   type: {{ .Values.dnsmasq.serviceType }}
   selector:
-    {{- include "fuzeinfra.selectorLabels" (dict "component" "dnsmasq") | nindent 4 }}
+    {{- include "fuzeinfra.selectorLabels" (dict "component" "dnsmasq" "root" $) | nindent 4 }}
   ports:
     - name: dns-udp
       port: {{ .Values.dnsmasq.dnsPort }}
@@ -58,7 +58,7 @@ spec:
   replicas: 1
   selector:
     matchLabels:
-      {{- include "fuzeinfra.selectorLabels" (dict "component" "dnsmasq") | nindent 6 }}
+      {{- include "fuzeinfra.selectorLabels" (dict "component" "dnsmasq" "root" $) | nindent 6 }}
   template:
     metadata:
       annotations:
@@ -66,7 +66,7 @@ spec:
         checksum/config: {{ .Values.global.domain | printf "%s-%s" .Values.dnsmasq.wildcardTarget | sha256sum }}
       labels:
         {{- include "fuzeinfra.labels" . | nindent 8 }}
-        {{- include "fuzeinfra.selectorLabels" (dict "component" "dnsmasq") | nindent 8 }}
+        {{- include "fuzeinfra.selectorLabels" (dict "component" "dnsmasq" "root" $) | nindent 8 }}
     spec:
       containers:
         - name: dnsmasq
@@ -138,12 +138,12 @@ spec:
   replicas: {{ .Values.cloudflareTunnel.replicas }}
   selector:
     matchLabels:
-      {{- include "fuzeinfra.selectorLabels" (dict "component" "cloudflare-tunnel") | nindent 6 }}
+      {{- include "fuzeinfra.selectorLabels" (dict "component" "cloudflare-tunnel" "root" $) | nindent 6 }}
   template:
     metadata:
       labels:
         {{- include "fuzeinfra.labels" . | nindent 8 }}
-        {{- include "fuzeinfra.selectorLabels" (dict "component" "cloudflare-tunnel") | nindent 8 }}
+        {{- include "fuzeinfra.selectorLabels" (dict "component" "cloudflare-tunnel" "root" $) | nindent 8 }}
       annotations:
         checksum/tunnel-id: {{ .Values.cloudflareTunnel.tunnelId | sha256sum }}
     spec:

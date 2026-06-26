@@ -50,10 +50,10 @@ metadata:
   name: fuzeinfra-prometheus
   labels:
     {{- include "fuzeinfra.labels" . | nindent 4 }}
-    {{- include "fuzeinfra.selectorLabels" (dict "component" "prometheus") | nindent 4 }}
+    {{- include "fuzeinfra.selectorLabels" (dict "component" "prometheus" "root" $) | nindent 4 }}
 spec:
   selector:
-    {{- include "fuzeinfra.selectorLabels" (dict "component" "prometheus") | nindent 4 }}
+    {{- include "fuzeinfra.selectorLabels" (dict "component" "prometheus" "root" $) | nindent 4 }}
   ports:
     - name: http
       port: {{ .Values.prometheus.port }}
@@ -70,12 +70,12 @@ spec:
   replicas: 1
   selector:
     matchLabels:
-      {{- include "fuzeinfra.selectorLabels" (dict "component" "prometheus") | nindent 6 }}
+      {{- include "fuzeinfra.selectorLabels" (dict "component" "prometheus" "root" $) | nindent 6 }}
   template:
     metadata:
       labels:
         {{- include "fuzeinfra.labels" . | nindent 8 }}
-        {{- include "fuzeinfra.selectorLabels" (dict "component" "prometheus") | nindent 8 }}
+        {{- include "fuzeinfra.selectorLabels" (dict "component" "prometheus" "root" $) | nindent 8 }}
     spec:
       serviceAccountName: fuzeinfra-monitoring
       securityContext:
@@ -171,10 +171,10 @@ metadata:
   name: fuzeinfra-alertmanager
   labels:
     {{- include "fuzeinfra.labels" . | nindent 4 }}
-    {{- include "fuzeinfra.selectorLabels" (dict "component" "alertmanager") | nindent 4 }}
+    {{- include "fuzeinfra.selectorLabels" (dict "component" "alertmanager" "root" $) | nindent 4 }}
 spec:
   selector:
-    {{- include "fuzeinfra.selectorLabels" (dict "component" "alertmanager") | nindent 4 }}
+    {{- include "fuzeinfra.selectorLabels" (dict "component" "alertmanager" "root" $) | nindent 4 }}
   ports:
     - name: http
       port: {{ .Values.alertmanager.port }}
@@ -191,12 +191,12 @@ spec:
   replicas: 1
   selector:
     matchLabels:
-      {{- include "fuzeinfra.selectorLabels" (dict "component" "alertmanager") | nindent 6 }}
+      {{- include "fuzeinfra.selectorLabels" (dict "component" "alertmanager" "root" $) | nindent 6 }}
   template:
     metadata:
       labels:
         {{- include "fuzeinfra.labels" . | nindent 8 }}
-        {{- include "fuzeinfra.selectorLabels" (dict "component" "alertmanager") | nindent 8 }}
+        {{- include "fuzeinfra.selectorLabels" (dict "component" "alertmanager" "root" $) | nindent 8 }}
     spec:
       containers:
         - name: alertmanager
@@ -239,10 +239,10 @@ metadata:
   name: fuzeinfra-grafana
   labels:
     {{- include "fuzeinfra.labels" . | nindent 4 }}
-    {{- include "fuzeinfra.selectorLabels" (dict "component" "grafana") | nindent 4 }}
+    {{- include "fuzeinfra.selectorLabels" (dict "component" "grafana" "root" $) | nindent 4 }}
 spec:
   selector:
-    {{- include "fuzeinfra.selectorLabels" (dict "component" "grafana") | nindent 4 }}
+    {{- include "fuzeinfra.selectorLabels" (dict "component" "grafana" "root" $) | nindent 4 }}
   ports:
     - name: http
       port: {{ .Values.grafana.port }}
@@ -259,12 +259,12 @@ spec:
   replicas: 1
   selector:
     matchLabels:
-      {{- include "fuzeinfra.selectorLabels" (dict "component" "grafana") | nindent 6 }}
+      {{- include "fuzeinfra.selectorLabels" (dict "component" "grafana" "root" $) | nindent 6 }}
   template:
     metadata:
       labels:
         {{- include "fuzeinfra.labels" . | nindent 8 }}
-        {{- include "fuzeinfra.selectorLabels" (dict "component" "grafana") | nindent 8 }}
+        {{- include "fuzeinfra.selectorLabels" (dict "component" "grafana" "root" $) | nindent 8 }}
     spec:
       {{- if .Values.grafana.dashboardSidecar.enabled }}
       serviceAccountName: fuzeinfra-monitoring
@@ -416,10 +416,10 @@ metadata:
   name: fuzeinfra-loki
   labels:
     {{- include "fuzeinfra.labels" . | nindent 4 }}
-    {{- include "fuzeinfra.selectorLabels" (dict "component" "loki") | nindent 4 }}
+    {{- include "fuzeinfra.selectorLabels" (dict "component" "loki" "root" $) | nindent 4 }}
 spec:
   selector:
-    {{- include "fuzeinfra.selectorLabels" (dict "component" "loki") | nindent 4 }}
+    {{- include "fuzeinfra.selectorLabels" (dict "component" "loki" "root" $) | nindent 4 }}
   ports:
     - name: http
       port: {{ .Values.loki.port }}
@@ -436,12 +436,12 @@ spec:
   replicas: 1
   selector:
     matchLabels:
-      {{- include "fuzeinfra.selectorLabels" (dict "component" "loki") | nindent 6 }}
+      {{- include "fuzeinfra.selectorLabels" (dict "component" "loki" "root" $) | nindent 6 }}
   template:
     metadata:
       labels:
         {{- include "fuzeinfra.labels" . | nindent 8 }}
-        {{- include "fuzeinfra.selectorLabels" (dict "component" "loki") | nindent 8 }}
+        {{- include "fuzeinfra.selectorLabels" (dict "component" "loki" "root" $) | nindent 8 }}
     spec:
       securityContext:
         fsGroup: 10001
@@ -510,12 +510,12 @@ metadata:
 spec:
   selector:
     matchLabels:
-      {{- include "fuzeinfra.selectorLabels" (dict "component" "promtail") | nindent 6 }}
+      {{- include "fuzeinfra.selectorLabels" (dict "component" "promtail" "root" $) | nindent 6 }}
   template:
     metadata:
       labels:
         {{- include "fuzeinfra.labels" . | nindent 8 }}
-        {{- include "fuzeinfra.selectorLabels" (dict "component" "promtail") | nindent 8 }}
+        {{- include "fuzeinfra.selectorLabels" (dict "component" "promtail" "root" $) | nindent 8 }}
     spec:
       serviceAccountName: fuzeinfra-monitoring
       containers:
@@ -563,11 +563,11 @@ metadata:
   name: fuzeinfra-node-exporter
   labels:
     {{- include "fuzeinfra.labels" . | nindent 4 }}
-    {{- include "fuzeinfra.selectorLabels" (dict "component" "node-exporter") | nindent 4 }}
+    {{- include "fuzeinfra.selectorLabels" (dict "component" "node-exporter" "root" $) | nindent 4 }}
 spec:
   clusterIP: None
   selector:
-    {{- include "fuzeinfra.selectorLabels" (dict "component" "node-exporter") | nindent 4 }}
+    {{- include "fuzeinfra.selectorLabels" (dict "component" "node-exporter" "root" $) | nindent 4 }}
   ports:
     - name: metrics
       port: {{ .Values.nodeExporter.port }}
@@ -582,12 +582,12 @@ metadata:
 spec:
   selector:
     matchLabels:
-      {{- include "fuzeinfra.selectorLabels" (dict "component" "node-exporter") | nindent 6 }}
+      {{- include "fuzeinfra.selectorLabels" (dict "component" "node-exporter" "root" $) | nindent 6 }}
   template:
     metadata:
       labels:
         {{- include "fuzeinfra.labels" . | nindent 8 }}
-        {{- include "fuzeinfra.selectorLabels" (dict "component" "node-exporter") | nindent 8 }}
+        {{- include "fuzeinfra.selectorLabels" (dict "component" "node-exporter" "root" $) | nindent 8 }}
     spec:
       hostNetwork: true
       hostPID: true
