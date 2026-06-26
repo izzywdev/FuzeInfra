@@ -99,10 +99,10 @@ metadata:
   name: fuzeinfra-kube-state-metrics
   labels:
     {{- include "fuzeinfra.labels" . | nindent 4 }}
-    {{- include "fuzeinfra.selectorLabels" (dict "component" "kube-state-metrics") | nindent 4 }}
+    {{- include "fuzeinfra.selectorLabels" (dict "component" "kube-state-metrics" "root" $) | nindent 4 }}
 spec:
   selector:
-    {{- include "fuzeinfra.selectorLabels" (dict "component" "kube-state-metrics") | nindent 4 }}
+    {{- include "fuzeinfra.selectorLabels" (dict "component" "kube-state-metrics" "root" $) | nindent 4 }}
   ports:
     - name: http-metrics
       port: 8080
@@ -121,12 +121,12 @@ spec:
   replicas: 1
   selector:
     matchLabels:
-      {{- include "fuzeinfra.selectorLabels" (dict "component" "kube-state-metrics") | nindent 6 }}
+      {{- include "fuzeinfra.selectorLabels" (dict "component" "kube-state-metrics" "root" $) | nindent 6 }}
   template:
     metadata:
       labels:
         {{- include "fuzeinfra.labels" . | nindent 8 }}
-        {{- include "fuzeinfra.selectorLabels" (dict "component" "kube-state-metrics") | nindent 8 }}
+        {{- include "fuzeinfra.selectorLabels" (dict "component" "kube-state-metrics" "root" $) | nindent 8 }}
     spec:
       serviceAccountName: fuzeinfra-kube-state-metrics
       securityContext:

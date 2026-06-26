@@ -17,11 +17,11 @@ app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
 {{- end -}}
 
 {{/*
-Per-component selector labels. Usage: {{ include "fuzeinfra.selectorLabels" (dict "component" "postgres") }}
+Per-component selector labels. Usage: {{ include "fuzeinfra.selectorLabels" (dict "component" "postgres" "root" $) }} — root REQUIRED (for .Release.Name)
 */}}
 {{- define "fuzeinfra.selectorLabels" -}}
 app.kubernetes.io/name: {{ .component }}
-app.kubernetes.io/instance: fuzeinfra
+app.kubernetes.io/instance: {{ .root.Release.Name }}
 {{- end -}}
 
 {{/*

@@ -113,7 +113,7 @@ spec:
     metadata:
       labels:
         {{- include "fuzeinfra.labels" . | nindent 8 }}
-        {{- include "fuzeinfra.selectorLabels" (dict "component" "airflow-init") | nindent 8 }}
+        {{- include "fuzeinfra.selectorLabels" (dict "component" "airflow-init" "root" $) | nindent 8 }}
     spec:
       restartPolicy: Never
       containers:
@@ -168,10 +168,10 @@ metadata:
   name: fuzeinfra-airflow-webserver
   labels:
     {{- include "fuzeinfra.labels" . | nindent 4 }}
-    {{- include "fuzeinfra.selectorLabels" (dict "component" "airflow-webserver") | nindent 4 }}
+    {{- include "fuzeinfra.selectorLabels" (dict "component" "airflow-webserver" "root" $) | nindent 4 }}
 spec:
   selector:
-    {{- include "fuzeinfra.selectorLabels" (dict "component" "airflow-webserver") | nindent 4 }}
+    {{- include "fuzeinfra.selectorLabels" (dict "component" "airflow-webserver" "root" $) | nindent 4 }}
   ports:
     - name: http
       port: {{ .Values.airflow.webPort }}
@@ -187,12 +187,12 @@ spec:
   replicas: 1
   selector:
     matchLabels:
-      {{- include "fuzeinfra.selectorLabels" (dict "component" "airflow-webserver") | nindent 6 }}
+      {{- include "fuzeinfra.selectorLabels" (dict "component" "airflow-webserver" "root" $) | nindent 6 }}
   template:
     metadata:
       labels:
         {{- include "fuzeinfra.labels" . | nindent 8 }}
-        {{- include "fuzeinfra.selectorLabels" (dict "component" "airflow-webserver") | nindent 8 }}
+        {{- include "fuzeinfra.selectorLabels" (dict "component" "airflow-webserver" "root" $) | nindent 8 }}
     spec:
       initContainers:
         {{- include "fuzeinfra.dagInitContainer" . | nindent 8 }}
@@ -232,12 +232,12 @@ spec:
   replicas: 1
   selector:
     matchLabels:
-      {{- include "fuzeinfra.selectorLabels" (dict "component" "airflow-scheduler") | nindent 6 }}
+      {{- include "fuzeinfra.selectorLabels" (dict "component" "airflow-scheduler" "root" $) | nindent 6 }}
   template:
     metadata:
       labels:
         {{- include "fuzeinfra.labels" . | nindent 8 }}
-        {{- include "fuzeinfra.selectorLabels" (dict "component" "airflow-scheduler") | nindent 8 }}
+        {{- include "fuzeinfra.selectorLabels" (dict "component" "airflow-scheduler" "root" $) | nindent 8 }}
     spec:
       initContainers:
         {{- include "fuzeinfra.dagInitContainer" . | nindent 8 }}
@@ -265,12 +265,12 @@ spec:
   replicas: {{ .Values.airflow.workerReplicas }}
   selector:
     matchLabels:
-      {{- include "fuzeinfra.selectorLabels" (dict "component" "airflow-worker") | nindent 6 }}
+      {{- include "fuzeinfra.selectorLabels" (dict "component" "airflow-worker" "root" $) | nindent 6 }}
   template:
     metadata:
       labels:
         {{- include "fuzeinfra.labels" . | nindent 8 }}
-        {{- include "fuzeinfra.selectorLabels" (dict "component" "airflow-worker") | nindent 8 }}
+        {{- include "fuzeinfra.selectorLabels" (dict "component" "airflow-worker" "root" $) | nindent 8 }}
     spec:
       initContainers:
         {{- include "fuzeinfra.dagInitContainer" . | nindent 8 }}
@@ -298,10 +298,10 @@ metadata:
   name: fuzeinfra-airflow-flower
   labels:
     {{- include "fuzeinfra.labels" . | nindent 4 }}
-    {{- include "fuzeinfra.selectorLabels" (dict "component" "airflow-flower") | nindent 4 }}
+    {{- include "fuzeinfra.selectorLabels" (dict "component" "airflow-flower" "root" $) | nindent 4 }}
 spec:
   selector:
-    {{- include "fuzeinfra.selectorLabels" (dict "component" "airflow-flower") | nindent 4 }}
+    {{- include "fuzeinfra.selectorLabels" (dict "component" "airflow-flower" "root" $) | nindent 4 }}
   ports:
     - name: http
       port: {{ .Values.airflow.flowerPort }}
@@ -317,12 +317,12 @@ spec:
   replicas: 1
   selector:
     matchLabels:
-      {{- include "fuzeinfra.selectorLabels" (dict "component" "airflow-flower") | nindent 6 }}
+      {{- include "fuzeinfra.selectorLabels" (dict "component" "airflow-flower" "root" $) | nindent 6 }}
   template:
     metadata:
       labels:
         {{- include "fuzeinfra.labels" . | nindent 8 }}
-        {{- include "fuzeinfra.selectorLabels" (dict "component" "airflow-flower") | nindent 8 }}
+        {{- include "fuzeinfra.selectorLabels" (dict "component" "airflow-flower" "root" $) | nindent 8 }}
     spec:
       containers:
         - name: flower

@@ -15,6 +15,10 @@ spec:
     targetRevision: main
     path: helm/fuzeinfra
     helm:
+      # Pin release name to "fuzeinfra" — the chart derives the (immutable)
+      # instance selector label from {{ .Release.Name }}; existing deployments
+      # carry instance=fuzeinfra, so the release name must render "fuzeinfra".
+      releaseName: fuzeinfra
       valueFiles:
         - values-local.yaml
   destination:
