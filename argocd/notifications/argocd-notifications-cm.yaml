@@ -1,0 +1,55 @@
+# =============================================================================
+# argocd-notifications-cm — fire a GitHub repository_dispatch when any app goes
+# OutOfSync. The GitHub workflow (.github/workflows/argo-outofsync-autofix.yml)
+# then does BOTH halves: a Telegram 🔴 alert (link to Argo) AND a devops-engineer
+# Claude auto-fix run. Keeping Telegram in the workflow means the bot token stays
+# in GitHub secrets (TELEGRAM_*) — only a github token is needed in-cluster.
+#
+# Secret: argocd-notifications-secret must hold `github-token` (a PAT/OAuth token
+# with repo scope to POST .../dispatches).
+# =============================================================================
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: argocd-notifications-cm
+  namespace: argocd
+data:
+  # ---- service: POST a repository_dispatch to this repo --------------------
+  service.webhook.github-dispatch: |
+    url: https://api.github.com/repos/izzywdev/FuzeInfra/dispatches
+    headers:
+      - name: Authorization
+        value: token $github-token
+      - name: Accept
+        value: application/vnd.github+json
+      - name: User-Agent
+        value: argocd-notifications
+
+  # ---- template: the dispatch body (app/sync/health) ----------------------
+  # app name is validated to a k8s-name charset by the workflow before use.
+  template.app-out-of-sync: |
+    webhook:
+      github-dispatch:
+        method: POST
+        body: |
+          {
+            "event_type": "argo-out-of-sync",
+            "client_payload": {
+              "app": "{{.app.metadata.name}}",
+              "sync": "{{.app.status.sync.status}}",
+              "health": "{{.app.status.health.status}}"
+            }
+          }
+
+  # ---- trigger: on OutOfSync, once per transition (not on every refresh) ---
+  trigger.on-out-of-sync: |
+    - when: app.status.sync.status == 'OutOfSync'
+      oncePer: app.status.sync.status
+      send: [app-out-of-sync]
+
+  # ---- default subscription: all apps in this Argo instance ---------------
+  subscriptions: |
+    - recipients:
+        - github-dispatch
+      triggers:
+        - on-out-of-sync

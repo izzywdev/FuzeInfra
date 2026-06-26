@@ -472,7 +472,13 @@ data:
     groups:
       - orgId: 1
         name: crit-log-alerts
-        folder: FuzeInfra
+        # Distinct folder from the dashboards' "FuzeInfra" (folderUid
+        # fuzeinfra-folder). Grafana's alert provisioning creates a folder by
+        # TITLE and won't reuse the dashboard provider's pinned-uid folder, so a
+        # shared "FuzeInfra" title produced a second, dashboard-empty "FuzeInfra"
+        # folder. A distinct title keeps exactly one "FuzeInfra" (dashboards) +
+        # one "FuzeInfra Alerts" (this rule).
+        folder: FuzeInfra Alerts
         interval: 5m
         rules:
           - uid: critlogdetect

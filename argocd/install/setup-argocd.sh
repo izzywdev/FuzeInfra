@@ -67,3 +67,7 @@ NOTE: if this repo is PRIVATE, register repo credentials so Argo CD can read it:
     --username <user> --password <token>
   (or create a repository Secret labeled argocd.argoproj.io/secret-type=repository)
 EOF
+
+echo "==> Applying ArgoCD notifications config (OutOfSync -> GitHub dispatch)"
+kubectl apply -f "$ARGOCD_DIR/notifications/argocd-notifications-cm.yaml"
+# argocd-notifications-secret (github-token) is applied out-of-band (holds a token).
