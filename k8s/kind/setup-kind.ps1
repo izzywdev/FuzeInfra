@@ -47,7 +47,16 @@ $existing = (& kind get clusters) 2>$null
 if ($existing -notcontains $ClusterName) {
   & kind create cluster --config (Join-Path $ScriptDir "kind-cluster.yaml")
 } else {
-  Write-Host "    cluster already exists, reusing"
+  & kubectl cluster-info --context "kind-$ClusterName" *> $null
+  if ($LASTEXITCODE -eq 0) {
+    Write-Host "    cluster already exists and is reachable, reusing"
+  } else {
+    # A leftover-but-dead cluster (e.g. after a Docker restart) would wedge every
+    # kubectl/helm call below — recreate it instead of reusing.
+    Write-Host "    existing cluster is unreachable - recreating" -ForegroundColor Yellow
+    & kind delete cluster --name $ClusterName 2>$null
+    & kind create cluster --config (Join-Path $ScriptDir "kind-cluster.yaml")
+  }
 }
 & kubectl cluster-info --context "kind-$ClusterName"
 

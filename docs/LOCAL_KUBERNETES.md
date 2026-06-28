@@ -55,6 +55,27 @@ Reach the UIs by adding the hostnames it prints to your hosts file (all →
 `127.0.0.1`), e.g. `grafana.dev.local`, `prometheus.dev.local`. Local HTTPS via
 the `fuzeinfra-local-ca` issuer is covered in [LOCAL_TLS.md](LOCAL_TLS.md).
 
+### Alternative: Docker Desktop's built-in Kubernetes (no kind)
+
+Docker Desktop ships a single-node Kubernetes — enable it in **Settings →
+Kubernetes → Enable Kubernetes**. It's the simplest path on Windows/macOS and
+works where kind can't (notably a Docker Desktop still on **cgroup v1**, which
+kind's control-plane can't bootstrap — check with `docker info | grep -i cgroup`;
+if it says v1, either use this path or switch Docker to the WSL 2 engine).
+
+```bash
+make dd-up            # deploy the chart to the docker-desktop context
+make kind-validate    # validator/test target the *current* context
+make kind-test
+make dd-down          # uninstall
+```
+
+Same `values-local.yaml` (Docker Desktop provides the `standard` storageClass).
+ingress-nginx/cert-manager aren't preinstalled, so `*.dev.local` routing won't
+work out of the box — reach services via `kubectl port-forward` (`make kind-test`
+does this) or install ingress-nginx separately. Verified: all 19 services come up
+Ready.
+
 ---
 
 ## 3. Turn services on / off (profiles)
