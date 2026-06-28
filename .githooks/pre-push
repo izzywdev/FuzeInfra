@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+# =============================================================================
+# FuzeInfra pre-push deployability gate.
+#
+# Fast, REAL check that the chart still deploys — the local stand-in for the
+# kind-validate CI gate (kind can't run on a cgroup-v1 Docker Desktop, so this
+# uses whatever local cluster is reachable, docker-desktop or kind).
+#
+# It runs ONLY when chart / k8s files changed, and is fast (~lint + a
+# server-side dry-run, no full deploy). The server-side dry-run validates the
+# rendered manifests against the live API server + its CRDs, so it catches
+# apply-time failures (e.g. a Traefik-only Middleware CRD on a non-Traefik
+# cluster) that static `kubeconform` misses.
+#
+# Activate (one-time, per clone):   git config core.hooksPath .githooks
+# Skip for one push:                git push --no-verify
+# Full gate (manual, heavier):      make dd-up && make kind-validate && make kind-test
+# =============================================================================
+set -euo pipefail
+
+CHART="helm/fuzeinfra"
+VALUES="$CHART/values-local.yaml"
+NS="fuzeinfra"
+
+# Determine what's being pushed; gate only on chart/k8s-relevant changes.
+if git rev-parse --verify origin/main >/dev/null 2>&1; then
+  changed="$(git diff --name-only origin/main...HEAD 2>/dev/null || true)"
+else
+  changed="$(git diff --name-only HEAD~1...HEAD 2>/dev/null || true)"
+fi
+if ! printf '%s\n' "$changed" | grep -qE '^(helm/|k8s/kind/|scripts-tools/(validate_kind_deployment|kind_port_forward)|Makefile)'; then
+  echo "pre-push: no chart/k8s changes — skipping deployability gate."
+  exit 0
+fi
+
+command -v helm >/dev/null || { echo "pre-push: helm not found — skipping (install helm to enable the gate)"; exit 0; }
+
+echo "pre-push: helm lint $CHART (values-local)..."
+helm lint "$CHART" -f "$VALUES" >/dev/null
+
+# Pick the first reachable local cluster.
+CTX=""
+for c in docker-desktop kind-fuzeinfra; do
+  if kubectl --context "$c" cluster-info >/dev/null 2>&1; then CTX="$c"; break; fi
+done
+
+if [ -n "$CTX" ]; then
+  echo "pre-push: server-side dry-run against '$CTX'..."
+  helm template "$NS" "$CHART" --namespace "$NS" -f "$VALUES" \
+    | kubectl --context "$CTX" apply --dry-run=server -n "$NS" -f - >/dev/null
+  echo "pre-push: deployability OK ($CTX). ✅"
+else
+  echo "pre-push: no local cluster reachable — ran lint only."
+  echo "          (start one with 'make dd-up' or 'make kind-up' for the full server-side check)"
+fi
+
+echo "pre-push: gate passed."
