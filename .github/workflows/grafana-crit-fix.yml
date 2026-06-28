@@ -304,33 +304,67 @@ jobs:
             fi
           fi
 
-          if [ "$ACTION" = "issue" ]; then
+          if [ "$ACTION" = "issue" ] && [ "$IS_SELF" = "true" ]; then
+            # ── FuzeInfra-owned crit: file the issue here ─────────────────────
+            TITLE=$(python3 -c "import json; print(json.loads(open('/tmp/claude_result.json').read()).get('title','CRIT alert needs attention'))")
+            python3 .github/gen-issue-body.py > /tmp/issue_body.md
+            URL=$(gh issue create --repo "$OWNER_REPO" \
+              --title "🚨 ${TITLE}" --label "bug" --label "crit-autofix" \
+              --body-file /tmp/issue_body.md 2>/dev/null) \
+              || URL=$(gh issue create --repo "$OWNER_REPO" \
+                   --title "🚨 ${TITLE}" --body-file /tmp/issue_body.md)
+            echo "action=issue" >> "$GITHUB_OUTPUT"
+            echo "url=$URL"     >> "$GITHUB_OUTPUT"
+          fi
+
+          if [ "$ACTION" = "issue" ] && [ "$IS_SELF" != "true" ]; then
+            # ── Consumer-owned crit: HAND OFF to the owner repo ───────────────
+            # The crit came from a consumer's namespace, so FuzeInfra can't fix it.
+            # Record a FuzeInfra tracking issue, open an @claude issue in the owner
+            # repo (its own process fixes the root cause + deploys), cross-link the
+            # two, then close the FuzeInfra tracking issue as handed-off. Dedup on
+            # the owner repo so repeated alerts don't pile on.
             TITLE=$(python3 -c "import json; print(json.loads(open('/tmp/claude_result.json').read()).get('title','CRIT alert needs attention'))")
             python3 .github/gen-issue-body.py > /tmp/issue_body.md
 
-            # Dedup in the owner repo: the FuzeInfra preflight gate can't see a
-            # consumer repo's open issues, so check here before piling on.
             EXISTING=$(gh issue list --repo "$OWNER_REPO" --label crit-autofix \
               --state open --json number --jq 'length' 2>/dev/null || echo 0)
             if [ "${EXISTING:-0}" -gt 0 ]; then
-              echo "::notice::An open crit-autofix issue already exists in $OWNER_REPO; skipping"
-              echo "action=issue" >> "$GITHUB_OUTPUT"
+              echo "::notice::open crit-autofix issue already exists in $OWNER_REPO; skipping handoff"
+              echo "action=handoff" >> "$GITHUB_OUTPUT"
             else
-              # Ensure the label exists in the (possibly consumer) repo; tolerate
-              # a missing label / no label-create permission by retrying bare.
+              # 1) FuzeInfra tracking issue (the audit record)
+              TRACK_URL=$(gh issue create --repo "${{ github.repository }}" \
+                --title "🚨 ${TITLE} (→ ${OWNER_REPO})" --label "crit-autofix" \
+                --body-file /tmp/issue_body.md 2>/dev/null) \
+                || TRACK_URL=$(gh issue create --repo "${{ github.repository }}" \
+                     --title "🚨 ${TITLE} (→ ${OWNER_REPO})" --body-file /tmp/issue_body.md)
+              TRACK_NUM="${TRACK_URL##*/}"
+
+              # 2) Owner-repo issue with @claude + a back-link to the tracking issue
+              {
+                cat /tmp/issue_body.md
+                echo ""; echo "---"
+                echo "**Origin:** ${{ github.repository }}#${TRACK_NUM} (FuzeInfra crit-alert auto-triage)."
+                echo ""
+                echo "@claude please investigate and fix the root cause in this repo, open a PR, and report back here when triggered, fixed, and deployed."
+              } > /tmp/handoff_body.md
               gh label create crit-autofix --color e11d48 \
-                --description "Opened by FuzeInfra CRIT log auto-fix" \
-                --repo "$OWNER_REPO" 2>/dev/null || true
-              URL=$(gh issue create --repo "$OWNER_REPO" \
-                --title "🚨 ${TITLE}" \
-                --label "bug" --label "crit-autofix" \
-                --body-file /tmp/issue_body.md 2>/tmp/issue_err.txt) || {
-                  echo "::warning::labelled issue create failed in $OWNER_REPO (label/token scope?); retrying without labels"
-                  URL=$(gh issue create --repo "$OWNER_REPO" \
-                    --title "🚨 ${TITLE}" --body-file /tmp/issue_body.md)
-                }
-              echo "action=issue" >> "$GITHUB_OUTPUT"
-              echo "url=$URL"     >> "$GITHUB_OUTPUT"
+                --description "Handed off from FuzeInfra CRIT auto-fix" --repo "$OWNER_REPO" 2>/dev/null || true
+              FF_URL=$(gh issue create --repo "$OWNER_REPO" \
+                --title "🚨 ${TITLE}" --label "crit-autofix" \
+                --body-file /tmp/handoff_body.md 2>/dev/null) \
+                || FF_URL=$(gh issue create --repo "$OWNER_REPO" \
+                     --title "🚨 ${TITLE}" --body-file /tmp/handoff_body.md)
+
+              # 3) Cross-link + close the FuzeInfra tracking issue
+              gh issue comment "$TRACK_NUM" --repo "${{ github.repository }}" \
+                --body "🤝 Handed off to ${OWNER_REPO}: ${FF_URL} — that repo's @claude process will fix + deploy. Closing here; tracking continues in the linked issue." 2>/dev/null || true
+              gh issue close "$TRACK_NUM" --repo "${{ github.repository }}" --reason "not planned" 2>/dev/null || true
+
+              echo "::notice::handed off ${TRACK_URL} → ${FF_URL}"
+              echo "action=handoff" >> "$GITHUB_OUTPUT"
+              echo "url=$FF_URL"    >> "$GITHUB_OUTPUT"
             fi
           fi
 
@@ -369,18 +403,21 @@ jobs:
       # ── email (fix and issue actions only) ─────────────────────────────────
       - name: Prepare email subject
         id: email
-        if: steps.suppress.outputs.skip != 'true' && (steps.act.outputs.action == 'fix' || steps.act.outputs.action == 'issue')
+        if: steps.suppress.outputs.skip != 'true' && (steps.act.outputs.action == 'fix' || steps.act.outputs.action == 'issue' || steps.act.outputs.action == 'handoff')
         run: |
           if [ "${{ steps.act.outputs.action }}" = "fix" ]; then
             echo "subject=🚨 FuzeInfra Alert — Fix PR Opened" >> "$GITHUB_OUTPUT"
             echo "action_line=Fix PR: ${{ steps.act.outputs.url }}" >> "$GITHUB_OUTPUT"
+          elif [ "${{ steps.act.outputs.action }}" = "handoff" ]; then
+            echo "subject=🤝 FuzeInfra Alert — Handed off to owner repo" >> "$GITHUB_OUTPUT"
+            echo "action_line=Handed off (owner repo will fix + deploy): ${{ steps.act.outputs.url }}" >> "$GITHUB_OUTPUT"
           else
             echo "subject=🚨 FuzeInfra Alert — Needs Attention (Issue Created)" >> "$GITHUB_OUTPUT"
             echo "action_line=GitHub Issue: ${{ steps.act.outputs.url }}" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Send email
-        if: steps.suppress.outputs.skip != 'true' && (steps.act.outputs.action == 'fix' || steps.act.outputs.action == 'issue')
+        if: steps.suppress.outputs.skip != 'true' && (steps.act.outputs.action == 'fix' || steps.act.outputs.action == 'issue' || steps.act.outputs.action == 'handoff')
         uses: dawidd6/action-send-mail@v3
         with:
           server_address: smtp.gmail.com
