@@ -144,8 +144,26 @@ It runs on a **host-level self-hosted runner** (`runs-on: [self-hosted, kind-hos
 because kind needs Docker + real RAM, which the hardened in-pod ARC `staging`
 runners can't provide. Register that runner once — see
 [runners/README.md → Host-level kind runner](../runners/README.md#host-level-kind-runner-for-the-kind-validate-gate).
-Prefer zero infra? The same commands run as a `pre-push` git hook (also documented
-there).
+
+### Local pre-push gate (recommended on this machine)
+
+No host runner needed. A versioned hook at **`.githooks/pre-push`** runs a fast,
+**real** deployability check before every push — `helm lint` plus a **server-side
+dry-run** of the rendered chart against whatever local cluster is reachable
+(docker-desktop or kind). The server-side dry-run validates against the live API
+server + its CRDs, so it catches apply-time failures (like a Traefik-only CRD on
+a non-Traefik cluster) that static `kubeconform` misses — in seconds, with no full
+deploy. It only fires when chart/k8s files changed.
+
+Activate it once per clone:
+
+```bash
+git config core.hooksPath .githooks
+```
+
+- Skip for one push: `git push --no-verify`
+- Want the full gate locally? `make dd-up && make kind-validate && make kind-test`
+  (or `make kind-up …` where kind works).
 
 ---
 
