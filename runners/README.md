@@ -337,6 +337,13 @@ make kind-up && make kind-validate && make kind-test && make kind-down
 
 The PR gate is simply the automated version of these commands.
 
+> **Security (public repo):** a self-hosted runner executes PR-supplied code.
+> `kind-validate.yml` is gated to skip **fork** PRs (`pull_request.head.repo.fork`),
+> so only same-repo branches and pushes to `main` run on the host. Also keep the
+> org setting **Settings → Actions → "Require approval for all outside
+> collaborators"** enabled so a fork PR can never auto-launch any workflow on
+> self-hosted infra. For untrusted contributions, prefer ephemeral runners.
+
 ---
 
 ## Cluster-level bootstrap note (ArgoCD project)

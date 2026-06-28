@@ -14,12 +14,31 @@ A comprehensive containerized shared infrastructure platform providing databases
 
 ## 🚀 Quick Start
 
+FuzeInfra runs two ways — pick one:
+
+### A) Docker Compose (fastest local path)
+
 1. **Clone repository**: `git clone --recursive https://github.com/izzywdev/FuzeInfra.git`
 2. **Set up environment**: `python scripts-tools/setup_environment.py`
 3. **Generate certificates**: `./tools/cert-manager/setup-local-certs.sh`
 4. **Start infrastructure**: `./infra-up.bat` (Windows) or `./infra-up.sh` (Linux/Mac)
 
 > **Note**: Use `--recursive` to automatically clone the envmanager submodule. If already cloned, run `git submodule update --init --recursive`.
+
+### B) Kubernetes on kind (production parity)
+
+Mirrors the EKS/Contabo prod deployment locally. Prereqs: docker, kind, kubectl, helm.
+
+```bash
+make kind-up            # cluster + ingress + cert-manager + full chart
+make kind-validate      # prove every enabled service is Ready + reachable
+make kind-test          # functional smoke (pytest via port-forward)
+make kind-down          # tear down
+```
+
+Windows (no make): `.\k8s\kind\setup-kind.ps1`. Deploy a subset with
+`make kind-profile PROFILE=minimal`. **Full guide:
+[docs/LOCAL_KUBERNETES.md](docs/LOCAL_KUBERNETES.md).**
 
 ## 📁 Repository Structure
 

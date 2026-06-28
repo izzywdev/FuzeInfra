@@ -45,6 +45,12 @@ permissions:
 
 jobs:
   kind-up-validate:
+    # SECURITY: this job executes PR-supplied scripts (setup-kind.sh, tests/,
+    # tests/requirements.txt, the validators) on a self-hosted HOST runner. A fork
+    # PR running here would be RCE on the host. Gate to same-repo branches + pushes
+    # to main only — fork PRs are skipped. (Mirrors terraform-plan-apply.yml; also
+    # keep the org setting "Require approval for all outside collaborators" on.)
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork != true
     runs-on: [self-hosted, kind-host]
     timeout-minutes: 40
     steps:
