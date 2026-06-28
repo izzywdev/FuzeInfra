@@ -44,10 +44,17 @@ fuzeinfra.io/owner-repo: <owner>/<repo>
 **Fallback** to `izzywdev/FuzeInfra` when the namespace is missing/unknown, not
 found, unannotated, or the value is invalid.
 
-**`fix` vs `issue` by owner:** a code-fix PR can only target FuzeInfra's own
-checkout, so for a consumer-owned namespace `action=fix` is **downgraded to a
-triage issue** filed in the consumer repo. `action=ignore` always stays in
-FuzeInfra — the suppression list is FuzeInfra's.
+**`fix` vs `issue` vs handoff, by owner:**
+- **FuzeInfra-owned** crit (`is_self`): unchanged — `fix` opens a PR here, `issue`
+  files here, `ignore` requests suppression here.
+- **Consumer-owned** crit (a code-fix PR can't target another repo's checkout):
+  the handler performs a **cross-repo handoff** — it (1) records a FuzeInfra
+  **tracking** issue, (2) opens an issue in the owner repo that **`@claude`-mentions**
+  so the owner's own handler fixes the root cause and deploys, (3) cross-links the
+  two, and (4) **closes the FuzeInfra tracking issue** as handed-off. `action=fix`
+  on a consumer namespace is first downgraded into this handoff path. Dedup is on
+  the owner repo (skip if it already has an open `crit-autofix` issue).
+- `action=ignore` always stays in FuzeInfra — the suppression list is FuzeInfra's.
 
 ### Onboarding a consumer namespace
 
