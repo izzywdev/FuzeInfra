@@ -30,6 +30,10 @@ help:
 	@echo "    make kind-validate               Assert every enabled service is ready + reachable"
 	@echo "    make kind-test                   Run the pytest suite via kubectl port-forward"
 	@echo "    make kind-down                   Delete the kind cluster"
+	@echo "  Docker Desktop Kubernetes (no kind needed):"
+	@echo "    make dd-up                       Deploy the chart to Docker Desktop k8s"
+	@echo "    make dd-down                     Uninstall the chart from Docker Desktop k8s"
+	@echo "    (then: make kind-validate / kind-test run against the docker-desktop context)"
 	@echo "    make k8s-deploy      Deploy/upgrade chart to current kube-context (local values)"
 	@echo "    make k8s-status      Show pods in the $(NAMESPACE) namespace"
 	@echo "  Chart validation (no cluster needed):"
@@ -64,6 +68,23 @@ kind-test:
 .PHONY: kind-down
 kind-down:
 	$(KIND_DOWN)
+
+# ----------------------------------------------------------------------------
+# Docker Desktop's built-in Kubernetes (alternative to kind — needs no kind and
+# works where kind can't, e.g. a Docker Desktop on cgroup v1). Enable it in
+# Docker Desktop → Settings → Kubernetes. Deploys the same chart/values-local;
+# kind-validate / kind-test then run against the docker-desktop context.
+# ----------------------------------------------------------------------------
+.PHONY: dd-up
+dd-up:
+	kubectl config use-context docker-desktop
+	helm upgrade --install $(RELEASE) $(CHART) --kube-context docker-desktop \
+	  -n $(NAMESPACE) --create-namespace \
+	  -f $(CHART)/values-local.yaml
+
+.PHONY: dd-down
+dd-down:
+	-helm --kube-context docker-desktop uninstall $(RELEASE) -n $(NAMESPACE)
 
 .PHONY: k8s-deploy
 k8s-deploy:

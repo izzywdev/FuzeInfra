@@ -35,8 +35,14 @@ command -v helm   >/dev/null || { echo "helm not found"; exit 1; }
 echo "==> Creating kind cluster '$CLUSTER_NAME' (if missing)"
 if ! kind get clusters | grep -qx "$CLUSTER_NAME"; then
   kind create cluster --config "$SCRIPT_DIR/kind-cluster.yaml"
+elif kubectl cluster-info --context "kind-${CLUSTER_NAME}" >/dev/null 2>&1; then
+  echo "    cluster already exists and is reachable, reusing"
 else
-  echo "    cluster already exists, reusing"
+  # A leftover-but-dead cluster (e.g. after a Docker restart) would otherwise
+  # wedge every kubectl/helm call below — recreate it instead of reusing.
+  echo "    existing cluster is unreachable — recreating"
+  kind delete cluster --name "$CLUSTER_NAME" || true
+  kind create cluster --config "$SCRIPT_DIR/kind-cluster.yaml"
 fi
 kubectl cluster-info --context "kind-${CLUSTER_NAME}"
 

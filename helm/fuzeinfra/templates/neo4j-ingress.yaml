@@ -1,4 +1,10 @@
 {{- if and .Values.ingress.enabled .Values.neo4j.enabled }}
+{{- /* The retry Middleware is a Traefik CRD (traefik.io/v1alpha1) — it only
+       exists on the Traefik-based ingress (prod / Contabo k3s). On nginx-based
+       clusters (kind, Docker Desktop) the CRD is absent, so render the Traefik
+       Middleware + its annotation only when the ingress class is traefik. */ -}}
+{{- $traefik := eq .Values.ingress.className "traefik" }}
+{{- if $traefik }}
 ---
 # Traefik retry middleware for Neo4j's HTTP server.
 #
@@ -17,19 +23,21 @@ spec:
   retry:
     attempts: 4
     initialInterval: 150ms
+{{- end }}
 
 ---
-# Dedicated Ingress for Neo4j (HTTP UI + Bolt WebSocket) with the retry
-# middleware wired in.  Kept separate from the shared fuzeinfra Ingress so
-# the middleware annotation applies only to these two routes.
+# Dedicated Ingress for Neo4j (HTTP UI + Bolt WebSocket). On Traefik the retry
+# middleware is wired in via annotation; on nginx the route is plain.
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
   name: fuzeinfra-neo4j
   labels:
     {{- include "fuzeinfra.labels" . | nindent 4 }}
+  {{- if $traefik }}
   annotations:
     traefik.ingress.kubernetes.io/router.middlewares: {{ .Release.Namespace }}-neo4j-retry@kubernetescrd
+  {{- end }}
 spec:
   ingressClassName: {{ .Values.ingress.className }}
   {{- if .Values.ingress.tls.enabled }}
