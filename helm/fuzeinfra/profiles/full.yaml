@@ -1,0 +1,31 @@
+# =============================================================================
+# Profile: full — the entire FuzeInfra stack (explicit).
+#
+# This is the default when no profile is given (values-local.yaml already
+# enables everything via the base chart). It exists so `full` is a nameable,
+# self-documenting target and so the complete service set is visible in one
+# place — the inverse of minimal / data-stores.
+#   make kind-profile PROFILE=full     # == make kind-up
+#
+# This is the profile the per-merge validation gate deploys: every enabled
+# service must stand up, because different consuming repos depend on different
+# subsets (one needs mongo, another neo4j, another kafka).
+# =============================================================================
+postgres:         { enabled: true }
+mongodb:          { enabled: true }
+mongoExpress:     { enabled: true }
+redis:            { enabled: true }
+neo4j:            { enabled: true }
+elasticsearch:    { enabled: true }
+chromadb:         { enabled: true }
+kafka:            { enabled: true }
+kafkaUi:          { enabled: true }
+rabbitmq:         { enabled: true }
+prometheus:       { enabled: true }
+grafana:          { enabled: true }
+alertmanager:     { enabled: true }
+loki:             { enabled: true }
+promtail:         { enabled: true }
+nodeExporter:     { enabled: true }
+kubeStateMetrics: { enabled: true }
+airflow:          { enabled: true }

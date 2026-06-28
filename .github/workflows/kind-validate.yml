@@ -1,0 +1,97 @@
+# =============================================================================
+# kind-validate — per-merge "the local Kubernetes deployment still works" gate.
+#
+# Stands the FULL FuzeInfra stack up on a fresh kind cluster and proves every
+# enabled service is Ready + reachable, then runs the pytest smoke suite against
+# it. This is the stand-up + smoke half of gate-localup (helm-validate.yml covers
+# the static lint + kubeconform half).
+#
+# Runs on a HOST-LEVEL self-hosted runner (label `kind-host`) — NOT the hardened
+# in-pod ARC `staging` runners, which drop all caps / run non-root / are capped at
+# 1Gi and cannot run kind. Register a classic Actions runner as a process on a
+# machine that has docker + kind + kubectl + helm (see runners/README.md →
+# "Host-level kind runner"). If no such runner is online, this job simply stays
+# queued — it never blocks on GitHub-hosted infra.
+# =============================================================================
+name: kind-validate
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'helm/**'
+      - 'k8s/kind/**'
+      - 'tests/**'
+      - 'scripts-tools/validate_kind_deployment.py'
+      - 'scripts-tools/kind_port_forward.py'
+      - 'helm/fuzeinfra/profiles/**'
+      - 'Makefile'
+      - '.github/workflows/kind-validate.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'helm/**'
+      - 'k8s/kind/**'
+      - 'scripts-tools/validate_kind_deployment.py'
+      - 'scripts-tools/kind_port_forward.py'
+
+# kind is a host singleton (one cluster named "fuzeinfra"); never run two at once.
+concurrency:
+  group: kind-validate-host
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  kind-up-validate:
+    # SECURITY: this job executes PR-supplied scripts (setup-kind.sh, tests/,
+    # tests/requirements.txt, the validators) on a self-hosted HOST runner. A fork
+    # PR running here would be RCE on the host. Gate to same-repo branches + pushes
+    # to main only — fork PRs are skipped. (Mirrors terraform-plan-apply.yml; also
+    # keep the org setting "Require approval for all outside collaborators" on.)
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork != true
+    runs-on: [self-hosted, kind-host]
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Tool check (docker / kind / kubectl / helm / python)
+        shell: bash
+        run: |
+          for t in docker kind kubectl helm python3; do
+            command -v "$t" >/dev/null || { echo "::error::$t not found on the kind-host runner"; exit 1; }
+          done
+          docker info >/dev/null || { echo "::error::docker daemon not reachable"; exit 1; }
+
+      # Clean any leftover cluster from a cancelled run, then a FRESH full-stack
+      # bring-up — proving the env is deployable from scratch (the consumer promise).
+      - name: Fresh cluster + full stack
+        shell: bash
+        run: |
+          ./k8s/kind/teardown-kind.sh 2>/dev/null || true
+          ./k8s/kind/setup-kind.sh
+
+      - name: Deployability gate (every enabled service Ready + reachable)
+        shell: bash
+        run: python3 scripts-tools/validate_kind_deployment.py --reuse
+
+      - name: Install pytest smoke deps
+        shell: bash
+        run: |
+          python3 -m pip install --quiet --upgrade pip
+          if [ -f tests/requirements.txt ]; then
+            python3 -m pip install --quiet -r tests/requirements.txt
+          else
+            python3 -m pip install --quiet pytest requests psycopg2-binary pymongo redis \
+              neo4j elasticsearch kafka-python pika
+          fi
+
+      - name: Functional smoke (pytest via port-forward)
+        shell: bash
+        run: python3 scripts-tools/kind_port_forward.py -- pytest tests/ -v -m "not integration"
+
+      - name: Tear down
+        if: always()
+        shell: bash
+        run: ./k8s/kind/teardown-kind.sh 2>/dev/null || true

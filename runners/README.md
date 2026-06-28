@@ -294,6 +294,58 @@ share the same environment.
 
 ---
 
+## Host-level kind runner (for the `kind-validate` gate)
+
+The `kind-validate.yml` workflow stands the **full FuzeInfra stack up on a kind
+cluster** on every PR. That needs Docker + privilege and several GB of RAM —
+which the hardened in-pod ARC `staging` runners above **cannot** provide (they
+drop all capabilities, run non-root, and are capped at 1Gi). Running kind inside
+those pods is out of scope by design.
+
+Instead, register a **classic Actions runner as a process on a host** that already
+has `docker`, `kind`, `kubectl`, and `helm` — e.g. the developer / Docker-Desktop
+machine. kind then creates its cluster as a sibling container on that host's
+Docker, with the host's full resources.
+
+```bash
+# On the host (Linux / macOS / WSL / Git-Bash):
+mkdir actions-runner && cd actions-runner
+curl -O -L https://github.com/actions/runner/releases/latest/download/actions-runner-<os>-<arch>.tar.gz
+tar xzf actions-runner-*.tar.gz
+
+# Register against the org (or a single repo). Give it the kind-host label.
+./config.sh --url https://github.com/izzywdev \
+  --token <RUNNER_REGISTRATION_TOKEN> \
+  --labels self-hosted,kind-host \
+  --name kind-host-$(hostname) --unattended
+
+# Run it (or install as a service: ./svc.sh install && ./svc.sh start)
+./run.sh
+```
+
+Add the repo to the runner group's allowlist (same gate as the staging runners).
+`kind-validate.yml` uses `runs-on: [self-hosted, kind-host]`, so it only ever
+schedules onto this host runner — the hardened `staging` pods are untouched.
+
+**Don't want to host a runner?** The same gate runs locally as a pre-push hook —
+zero runner infrastructure:
+
+```bash
+# .git/hooks/pre-push   (chmod +x)
+make kind-up && make kind-validate && make kind-test && make kind-down
+```
+
+The PR gate is simply the automated version of these commands.
+
+> **Security (public repo):** a self-hosted runner executes PR-supplied code.
+> `kind-validate.yml` is gated to skip **fork** PRs (`pull_request.head.repo.fork`),
+> so only same-repo branches and pushes to `main` run on the host. Also keep the
+> org setting **Settings → Actions → "Require approval for all outside
+> collaborators"** enabled so a fork PR can never auto-launch any workflow on
+> self-hosted infra. For untrusted contributions, prefer ephemeral runners.
+
+---
+
 ## Cluster-level bootstrap note (ArgoCD project)
 
 The `arc-runners` and `arc-systems` namespaces are created by `install.sh`.  If you want

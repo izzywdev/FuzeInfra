@@ -1,0 +1,29 @@
+# =============================================================================
+# Profile: data-stores — every database, no messaging/monitoring/workflow.
+#
+# For consumers that need the data tier (any of Postgres, MongoDB, Redis, Neo4j,
+# Elasticsearch, ChromaDB) but not Kafka/RabbitMQ, the monitoring stack, or
+# Airflow. Layered ON TOP of values-local.yaml:
+#   make kind-profile PROFILE=data-stores
+#
+# Trim further with --set <svc>.enabled=false (e.g. drop neo4j if unused).
+# =============================================================================
+postgres:      { enabled: true }
+mongodb:       { enabled: true }
+mongoExpress:  { enabled: true }
+redis:         { enabled: true }
+neo4j:         { enabled: true }
+elasticsearch: { enabled: true }
+chromadb:      { enabled: true }
+
+kafka:            { enabled: false }
+kafkaUi:          { enabled: false }
+rabbitmq:         { enabled: false }
+prometheus:       { enabled: false }
+grafana:          { enabled: false }
+alertmanager:     { enabled: false }
+loki:             { enabled: false }
+promtail:         { enabled: false }
+nodeExporter:     { enabled: false }
+kubeStateMetrics: { enabled: false }
+airflow:          { enabled: false }

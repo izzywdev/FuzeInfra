@@ -1,0 +1,31 @@
+# =============================================================================
+# Profile: minimal — Postgres + Redis only.
+#
+# For consumers that just need a relational DB + a cache. Layered ON TOP of
+# values-local.yaml (so it inherits the kind/local tuning):
+#   make kind-profile PROFILE=minimal
+#   ./k8s/kind/setup-kind.sh --profile minimal
+#   .\k8s\kind\setup-kind.ps1 -Profile minimal
+#
+# Toggling is just the per-service `enabled` gate — copy this pattern for any
+# bespoke subset, or pass --set <svc>.enabled=false ad hoc.
+# =============================================================================
+postgres:     { enabled: true }
+redis:        { enabled: true }
+
+mongodb:          { enabled: false }
+mongoExpress:     { enabled: false }
+neo4j:            { enabled: false }
+elasticsearch:    { enabled: false }
+chromadb:         { enabled: false }
+kafka:            { enabled: false }
+kafkaUi:          { enabled: false }
+rabbitmq:         { enabled: false }
+prometheus:       { enabled: false }
+grafana:          { enabled: false }
+alertmanager:     { enabled: false }
+loki:             { enabled: false }
+promtail:         { enabled: false }
+nodeExporter:     { enabled: false }
+kubeStateMetrics: { enabled: false }
+airflow:          { enabled: false }
