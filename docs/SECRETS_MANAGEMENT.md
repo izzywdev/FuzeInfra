@@ -151,8 +151,37 @@ decrypt. Because consumers always fetch the cert from the published URL, rotatio
 is transparent: the next seal automatically uses the newest key. You do **not**
 need to re-seal existing secrets when the key rotates.
 
-You only re-seal when **you** change a secret's value. Re-run `seal-secret.sh`
-against the same `--out` file; it merges the new value in place.
+You only re-seal when a secret's **value** changes. That must be a hands-off
+automated primitive — never a manual runbook.
+
+### Automated value rotation (`rotate-sealed-secret.yml`)
+
+`.github/workflows/rotate-sealed-secret.yml` is the self-service rotation gate.
+Trigger it (UI → Actions → *rotate-sealed-secret* → Run, or
+`gh workflow run rotate-sealed-secret.yml -f scope=<ns>/<name> -f key=<KEY> -f manifest=<path>`)
+and it:
+
+1. generates a fresh value (`openssl rand -hex` + whitespace-scrubbed) — or takes
+   an explicit `value` input;
+2. seals it **offline** against the published public cert via `seal-secret.sh`
+   (no cluster access, plaintext never logged) and merges it into the manifest;
+3. opens a PR that **auto-merges on green** → Argo CD syncs the SealedSecret →
+   the controller decrypts it → the Secret updates.
+
+For the consumer to pick up the new value automatically, it must carry a
+**reloader trigger** — a [stakater/reloader](https://github.com/stakater/Reloader)
+annotation or a Helm `checksum/secret` pod annotation — so its pods restart on
+the Secret change. (If neither is present, pass `reload_argocd_app=<app>` to have
+the workflow hard-refresh + sync that Argo app.) The result: rotating a secret is
+**fire-the-workflow → done**, with no human running `seal-secret.sh` by hand.
+
+This is the family-standard primitive — replicate the workflow in each repo (like
+`claude.yml` / `auto-merge.yml`) pointed at that repo's SealedSecret. An agent's
+remediation for a bad/leaked secret should be *"triggered rotation → PR #N →
+synced"*, never *"please run this script."*
+
+`seal-secret.sh` remains available for the rare interactive case, but rotation
+should go through the workflow.
 
 **Operator responsibilities** (not consumers):
 
