@@ -91,7 +91,7 @@ jobs:
           SSH_PRIVATE_KEY: ${{ secrets.NODE_SSH_PRIVATE_KEY }}
         run: |
           install -d -m 700 ~/.ssh
-          # Use env var (not inline ${{ }}) to preserve multiline PEM content
+          # Use env var (not inline secrets expansion) to preserve multiline PEM content
           printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/id_ed25519
           chmod 600 ~/.ssh/id_ed25519
           ssh-keygen -l -f ~/.ssh/id_ed25519 && echo "SSH key valid" || echo "::warning::SSH key format check failed"
