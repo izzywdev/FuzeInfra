@@ -87,10 +87,14 @@ jobs:
       # (null_resource.extract_kubeconfig local-exec). The full k3s + ArgoCD
       # bootstrap is in cloud-init (user_data) — no remote-exec runs from CI.
       - name: Load SSH private key
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.NODE_SSH_PRIVATE_KEY }}
         run: |
           install -d -m 700 ~/.ssh
-          echo "${{ secrets.NODE_SSH_PRIVATE_KEY }}" > ~/.ssh/id_ed25519
+          # Use env var (not inline ${{ }}) to preserve multiline PEM content
+          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/id_ed25519
           chmod 600 ~/.ssh/id_ed25519
+          ssh-keygen -l -f ~/.ssh/id_ed25519 && echo "SSH key valid" || echo "::warning::SSH key format check failed"
           echo "TF_VAR_ssh_private_key_path=$HOME/.ssh/id_ed25519" >> "$GITHUB_ENV"
 
       - name: Terraform init
