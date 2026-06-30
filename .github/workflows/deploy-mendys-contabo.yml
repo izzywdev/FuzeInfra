@@ -72,6 +72,9 @@ jobs:
       TF_VAR_cloudflare_api_token: ${{ secrets.CLOUDFLARE_API_TOKEN }}
       TF_VAR_cloudflare_zone_id: "3784bf88809ac135888856ab6183db00"
       TF_VAR_letsencrypt_email: ${{ vars.MENDYS_LETSENCRYPT_EMAIL || 'izzy.weinberg@gmail.com' }}
+      # gh CLI token for null_resource.set_github_secret local-exec (matches FuzeInfra terraform/contabo pattern)
+      TF_VAR_github_token: ${{ secrets.GH_TF_TOKEN }}
+      GH_TOKEN: ${{ secrets.GH_TF_TOKEN }}
     steps:
       - uses: actions/checkout@v4
 
@@ -101,24 +104,10 @@ jobs:
         run: terraform plan -input=false -out=tfplan
 
       - name: Terraform apply
+        # null_resource.set_github_secret (in provisioning.tf) stores the kubeconfig
+        # as MENDYS_KUBECONFIG via gh CLI local-exec — matching FuzeInfra's own
+        # terraform/contabo/secrets.tf pattern. No post-apply step needed here.
         run: terraform apply -input=false -auto-approve tfplan
-
-      # After apply, null_resource.extract_kubeconfig has written mendys-kubeconfig.yaml.
-      # Encode it and store as MENDYS_KUBECONFIG so the sync job can reach the cluster.
-      - name: Store kubeconfig as GitHub secret
-        env:
-          GH_TOKEN: ${{ secrets.GH_TF_TOKEN }}
-        run: |
-          KUBECONFIG_FILE="mendys-kubeconfig.yaml"
-          if [ ! -f "$KUBECONFIG_FILE" ]; then
-            echo "::error::$KUBECONFIG_FILE not found — kubeconfig extraction may have failed."
-            exit 1
-          fi
-          KUBECONFIG_B64=$(base64 -w0 < "$KUBECONFIG_FILE")
-          gh secret set MENDYS_KUBECONFIG \
-            --repo izzywdev/FuzeInfra \
-            --body "$KUBECONFIG_B64"
-          echo "MENDYS_KUBECONFIG secret updated."
 
   # -----------------------------------------------------------------------
   # SYNC — register the bootstrap app + trigger an ArgoCD sync of all three

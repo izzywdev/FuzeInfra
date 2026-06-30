@@ -1,17 +1,19 @@
 # ---------------------------------------------------------------------------
-# Kubeconfig extraction — local-exec after the VPS is up and k3s has started.
+# Kubeconfig extraction + GitHub secret storage.
 #
-# The full k3s + ArgoCD bootstrap happens in cloud-init (vps.tf user_data) so
-# no SSH remote-exec runs from CI — the CI runner needs only the private key
-# for this single kubeconfig pull, which happens after cloud-init finishes.
+# The full k3s + ArgoCD bootstrap runs in cloud-init (vps.tf user_data) so
+# no SSH remote-exec is needed from CI runners for the initial provision.
 #
-# This resource triggers only when the VPS is replaced (server_ip changes).
-# It polls until /etc/rancher/k3s/k3s.yaml appears on the node (cloud-init
-# complete), then pulls and rewrites the kubeconfig.
+# null_resource.extract_kubeconfig polls until cloud-init finishes
+# (/etc/rancher/k3s/k3s.yaml appears), then pulls and rewrites the kubeconfig
+# via local-exec SSH — matching FuzeInfra's own extract_kubeconfig pattern in
+# terraform/contabo/provisioning.tf.
 #
-# The resulting mendys-kubeconfig.yaml is base64-encoded and stored as the
-# MENDYS_KUBECONFIG GitHub Actions secret by the deploy-mendys-contabo.yml
-# workflow step that follows terraform apply.
+# null_resource.set_github_secret stores the kubeconfig as MENDYS_KUBECONFIG in
+# GitHub Actions secrets via the gh CLI — matching FuzeInfra's secrets.tf
+# null_resource.set_github_secret pattern exactly.
+#
+# Both resources trigger only on server_ip change (VPS replaced / first apply).
 # ---------------------------------------------------------------------------
 
 resource "null_resource" "extract_kubeconfig" {
@@ -28,7 +30,7 @@ resource "null_resource" "extract_kubeconfig" {
 
       echo "Waiting for cloud-init bootstrap to complete on ${local.server_ip}..."
 
-      # Poll until k3s kubeconfig exists (bootstrap wrote it) — max 20 min
+      # Poll until k3s kubeconfig exists — max 20 min (cloud-init installs k3s + ArgoCD)
       for i in $(seq 1 120); do
         if ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 -o BatchMode=yes \
                -i "$KEY" "$HOST" \
@@ -47,6 +49,28 @@ resource "null_resource" "extract_kubeconfig" {
         > "${path.root}/mendys-kubeconfig.yaml"
       chmod 600 "${path.root}/mendys-kubeconfig.yaml"
       echo "Kubeconfig written to ${path.root}/mendys-kubeconfig.yaml"
+    EOT
+  }
+}
+
+# ---------------------------------------------------------------------------
+# Store the kubeconfig as the MENDYS_KUBECONFIG GitHub Actions secret.
+# Matches FuzeInfra's own null_resource.set_github_secret in
+# terraform/contabo/secrets.tf — uses gh CLI local-exec with GH_TOKEN env.
+# ---------------------------------------------------------------------------
+resource "null_resource" "set_github_secret" {
+  depends_on = [null_resource.extract_kubeconfig]
+
+  triggers = {
+    server_ip = local.server_ip
+  }
+
+  provisioner "local-exec" {
+    interpreter = ["bash", "-c"]
+    command     = <<-EOT
+      gh secret set MENDYS_KUBECONFIG \
+        --body "$(base64 -w0 < "${path.root}/mendys-kubeconfig.yaml")" \
+        --repo "${var.github_owner}/${var.github_repo}"
     EOT
   }
 }

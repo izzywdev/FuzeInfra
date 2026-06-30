@@ -114,6 +114,27 @@ variable "subdomains" {
 }
 
 # ---------------------------------------------------------------------------
+# GitHub (for storing MENDYS_KUBECONFIG — matches FuzeInfra terraform/contabo/variables.tf)
+# ---------------------------------------------------------------------------
+variable "github_token" {
+  description = "GitHub PAT with repo + secrets write permission (GH_TF_TOKEN secret)"
+  type        = string
+  sensitive   = true
+}
+
+variable "github_owner" {
+  description = "GitHub owner (org or user)"
+  type        = string
+  default     = "izzywdev"
+}
+
+variable "github_repo" {
+  description = "GitHub repository where MENDYS_KUBECONFIG secret is stored"
+  type        = string
+  default     = "FuzeInfra"
+}
+
+# ---------------------------------------------------------------------------
 # GitOps source (MendysRobotics provides declarations; FuzeInfra executes)
 # ---------------------------------------------------------------------------
 variable "mendys_repo_url" {
