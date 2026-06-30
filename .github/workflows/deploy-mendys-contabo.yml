@@ -78,10 +78,11 @@ jobs:
       - name: Set up Terraform
         uses: hashicorp/setup-terraform@v3
         with:
-          terraform_version: 1.7.5
+          terraform_version: 1.15.6
 
-      # The provisioner SSHes to the VPS; the private key must match
-      # CONTABO_SSH_PUBLIC_KEY. Point ssh_private_key_path at the loaded key.
+      # The SSH private key is used only for kubeconfig extraction after apply
+      # (null_resource.extract_kubeconfig local-exec). The full k3s + ArgoCD
+      # bootstrap is in cloud-init (user_data) — no remote-exec runs from CI.
       - name: Load SSH private key
         run: |
           install -d -m 700 ~/.ssh
@@ -101,6 +102,23 @@ jobs:
 
       - name: Terraform apply
         run: terraform apply -input=false -auto-approve tfplan
+
+      # After apply, null_resource.extract_kubeconfig has written mendys-kubeconfig.yaml.
+      # Encode it and store as MENDYS_KUBECONFIG so the sync job can reach the cluster.
+      - name: Store kubeconfig as GitHub secret
+        env:
+          GH_TOKEN: ${{ secrets.GH_TF_TOKEN }}
+        run: |
+          KUBECONFIG_FILE="mendys-kubeconfig.yaml"
+          if [ ! -f "$KUBECONFIG_FILE" ]; then
+            echo "::error::$KUBECONFIG_FILE not found — kubeconfig extraction may have failed."
+            exit 1
+          fi
+          KUBECONFIG_B64=$(base64 -w0 < "$KUBECONFIG_FILE")
+          gh secret set MENDYS_KUBECONFIG \
+            --repo izzywdev/FuzeInfra \
+            --body "$KUBECONFIG_B64"
+          echo "MENDYS_KUBECONFIG secret updated."
 
   # -----------------------------------------------------------------------
   # SYNC — register the bootstrap app + trigger an ArgoCD sync of all three
