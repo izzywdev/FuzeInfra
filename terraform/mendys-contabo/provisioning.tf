@@ -1,121 +1,76 @@
 # ---------------------------------------------------------------------------
-# k3s + ingress-nginx + cert-manager + ArgoCD provisioning via SSH remote-exec.
+# Kubeconfig extraction + GitHub secret storage.
 #
-# Mirrors MendysRobotics/deploy/contabo/bootstrap.sh, but driven by Terraform so
-# FuzeInfra owns the execution. Idempotent — safe to re-apply.
+# The full k3s + ArgoCD bootstrap runs in cloud-init (vps.tf user_data) so
+# no SSH remote-exec is needed from CI runners for the initial provision.
 #
-# null_resource.provision triggers ONLY on server_ip change (first apply / VPS
-# rebuild). Ongoing reconciliation is ArgoCD's job; routine manifest changes in
-# the MendysRobotics repo are synced by ArgoCD selfHeal, not by re-provisioning.
+# null_resource.extract_kubeconfig polls until cloud-init finishes
+# (/etc/rancher/k3s/k3s.yaml appears), then pulls and rewrites the kubeconfig
+# via local-exec SSH — matching FuzeInfra's own extract_kubeconfig pattern in
+# terraform/contabo/provisioning.tf.
+#
+# null_resource.set_github_secret stores the kubeconfig as MENDYS_KUBECONFIG in
+# GitHub Actions secrets via the gh CLI — matching FuzeInfra's secrets.tf
+# null_resource.set_github_secret pattern exactly.
+#
+# Both resources trigger only on server_ip change (VPS replaced / first apply).
 # ---------------------------------------------------------------------------
-locals {
-  argocd_bootstrap_path = "${path.root}/../../argocd/applications/mendys-robotics-bootstrap.yaml"
-}
 
-resource "null_resource" "provision" {
+resource "null_resource" "extract_kubeconfig" {
   triggers = {
     server_ip = local.server_ip
-  }
-
-  connection {
-    type        = "ssh"
-    host        = local.server_ip
-    user        = var.server_user
-    private_key = file(var.ssh_private_key_path)
-    timeout     = "5m"
-  }
-
-  # Upload the FuzeInfra-owned ArgoCD bootstrap Application (app-of-apps root for
-  # Mendys). It points ArgoCD at izzywdev/MendysRobotics deploy/argocd/applications.
-  provisioner "file" {
-    source      = local.argocd_bootstrap_path
-    destination = "/tmp/mendys-robotics-bootstrap.yaml"
-  }
-
-  provisioner "remote-exec" {
-    inline = [
-      # --- firewall: direct ingress (80/443 OPEN) ---
-      "ufw allow 22/tcp && ufw allow 80/tcp && ufw allow 443/tcp && ufw allow 6443/tcp && ufw allow 8472/udp && ufw --force enable 2>/dev/null || true",
-
-      # --- k3s (Traefik disabled; ingress-nginx replaces it) ---
-      "if ! command -v k3s >/dev/null 2>&1; then",
-      "  curl -sfL https://get.k3s.io | INSTALL_K3S_EXEC='--tls-san ${local.server_ip} --disable traefik' sh -",
-      "else",
-      "  curl -sfL https://get.k3s.io | INSTALL_K3S_EXEC='--tls-san ${local.server_ip} --disable traefik' sh - || true",
-      "fi",
-      "sleep 20",
-      "kubectl wait --for=condition=ready node --all --timeout=180s",
-
-      # --- ingress-nginx ---
-      "kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/controller-v1.11.3/deploy/static/provider/cloud/deploy.yaml",
-      "kubectl -n ingress-nginx wait --for=condition=available deployment/ingress-nginx-controller --timeout=180s",
-
-      # --- cert-manager ---
-      "kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/v1.16.3/cert-manager.yaml",
-      "kubectl -n cert-manager wait --for=condition=available deployment/cert-manager --timeout=180s",
-      "kubectl -n cert-manager wait --for=condition=available deployment/cert-manager-webhook --timeout=120s",
-      "sleep 10",
-
-      # --- Let's Encrypt ClusterIssuer (HTTP-01 via ingress-nginx) ---
-      # Email comes from var.letsencrypt_email, which is validated non-empty.
-      "cat <<'EOF' | kubectl apply -f -",
-      "apiVersion: cert-manager.io/v1",
-      "kind: ClusterIssuer",
-      "metadata:",
-      "  name: letsencrypt-prod",
-      "spec:",
-      "  acme:",
-      "    server: https://acme-v02.api.letsencrypt.org/directory",
-      "    email: ${var.letsencrypt_email}",
-      "    privateKeySecretRef:",
-      "      name: letsencrypt-prod",
-      "    solvers:",
-      "      - http01:",
-      "          ingress:",
-      "            ingressClassName: nginx",
-      "EOF",
-
-      # --- ArgoCD ---
-      "kubectl create namespace argocd --dry-run=client -o yaml | kubectl apply -f -",
-      "kubectl apply -n argocd -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml",
-      "kubectl wait --for=condition=available deployment/argocd-server -n argocd --timeout=300s",
-
-      # ArgoCD runs insecure — TLS is terminated by cert-manager/ingress-nginx.
-      "kubectl -n argocd patch configmap argocd-cmd-params-cm --type merge -p '{\"data\":{\"server.insecure\":\"true\"}}'",
-      "kubectl -n argocd patch configmap argocd-cm --type merge -p '{\"data\":{\"url\":\"https://argocd.${var.domain}\"}}'",
-      "kubectl -n argocd rollout restart deployment/argocd-server",
-      "kubectl -n argocd rollout status deployment/argocd-server --timeout=120s",
-
-      # --- Bootstrap GitOps: app-of-apps root → izzywdev/MendysRobotics ---
-      "kubectl apply -f /tmp/mendys-robotics-bootstrap.yaml",
-
-      "echo 'Mendys provisioning complete — ArgoCD is converging from git.'",
-    ]
-  }
-}
-
-# ---------------------------------------------------------------------------
-# Extract kubeconfig (rewrite 127.0.0.1 → server IP) for CI / the MENDYS_KUBECONFIG
-# secret. base64 -w0 the file and store it as the MENDYS_KUBECONFIG GH secret.
-# ---------------------------------------------------------------------------
-resource "null_resource" "extract_kubeconfig" {
-  depends_on = [null_resource.provision]
-
-  triggers = {
-    server_ip    = local.server_ip
-    provision_id = null_resource.provision.id
   }
 
   provisioner "local-exec" {
     interpreter = ["bash", "-c"]
     command     = <<-EOT
-      ssh -o StrictHostKeyChecking=no \
-          -i "${var.ssh_private_key_path}" \
-          ${var.server_user}@${local.server_ip} \
+      set -euo pipefail
+      KEY="${var.ssh_private_key_path}"
+      HOST="${var.server_user}@${local.server_ip}"
+
+      echo "Waiting for cloud-init bootstrap to complete on ${local.server_ip}..."
+
+      # Poll until k3s kubeconfig exists — max 20 min (cloud-init installs k3s + ArgoCD)
+      for i in $(seq 1 120); do
+        if ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 -o BatchMode=yes \
+               -i "$KEY" "$HOST" \
+               "test -f /etc/rancher/k3s/k3s.yaml" 2>/dev/null; then
+          echo "k3s kubeconfig found (attempt $i)"
+          break
+        fi
+        echo "  attempt $i/120 — waiting 10s..."
+        sleep 10
+      done
+
+      # Extract kubeconfig, rewrite 127.0.0.1 → public IP
+      ssh -o StrictHostKeyChecking=no -o ConnectTimeout=30 -i "$KEY" "$HOST" \
           "cat /etc/rancher/k3s/k3s.yaml" \
         | sed 's/127\.0\.0\.1/${local.server_ip}/g' \
         > "${path.root}/mendys-kubeconfig.yaml"
       chmod 600 "${path.root}/mendys-kubeconfig.yaml"
+      echo "Kubeconfig written to ${path.root}/mendys-kubeconfig.yaml"
+    EOT
+  }
+}
+
+# ---------------------------------------------------------------------------
+# Store the kubeconfig as the MENDYS_KUBECONFIG GitHub Actions secret.
+# Matches FuzeInfra's own null_resource.set_github_secret in
+# terraform/contabo/secrets.tf — uses gh CLI local-exec with GH_TOKEN env.
+# ---------------------------------------------------------------------------
+resource "null_resource" "set_github_secret" {
+  depends_on = [null_resource.extract_kubeconfig]
+
+  triggers = {
+    server_ip = local.server_ip
+  }
+
+  provisioner "local-exec" {
+    interpreter = ["bash", "-c"]
+    command     = <<-EOT
+      gh secret set MENDYS_KUBECONFIG \
+        --body "$(base64 -w0 < "${path.root}/mendys-kubeconfig.yaml")" \
+        --repo "${var.github_owner}/${var.github_repo}"
     EOT
   }
 }

@@ -72,16 +72,20 @@ jobs:
       TF_VAR_cloudflare_api_token: ${{ secrets.CLOUDFLARE_API_TOKEN }}
       TF_VAR_cloudflare_zone_id: "3784bf88809ac135888856ab6183db00"
       TF_VAR_letsencrypt_email: ${{ vars.MENDYS_LETSENCRYPT_EMAIL || 'izzy.weinberg@gmail.com' }}
+      # gh CLI token for null_resource.set_github_secret local-exec (matches FuzeInfra terraform/contabo pattern)
+      TF_VAR_github_token: ${{ secrets.GH_TF_TOKEN }}
+      GH_TOKEN: ${{ secrets.GH_TF_TOKEN }}
     steps:
       - uses: actions/checkout@v4
 
       - name: Set up Terraform
         uses: hashicorp/setup-terraform@v3
         with:
-          terraform_version: 1.7.5
+          terraform_version: 1.15.6
 
-      # The provisioner SSHes to the VPS; the private key must match
-      # CONTABO_SSH_PUBLIC_KEY. Point ssh_private_key_path at the loaded key.
+      # The SSH private key is used only for kubeconfig extraction after apply
+      # (null_resource.extract_kubeconfig local-exec). The full k3s + ArgoCD
+      # bootstrap is in cloud-init (user_data) — no remote-exec runs from CI.
       - name: Load SSH private key
         run: |
           install -d -m 700 ~/.ssh
@@ -100,6 +104,9 @@ jobs:
         run: terraform plan -input=false -out=tfplan
 
       - name: Terraform apply
+        # null_resource.set_github_secret (in provisioning.tf) stores the kubeconfig
+        # as MENDYS_KUBECONFIG via gh CLI local-exec — matching FuzeInfra's own
+        # terraform/contabo/secrets.tf pattern. No post-apply step needed here.
         run: terraform apply -input=false -auto-approve tfplan
 
   # -----------------------------------------------------------------------
