@@ -56,29 +56,15 @@ resource "cloudflare_zero_trust_tunnel_cloudflared_config" "fuzeinfra" {
       hostname = "argocd.${local.prod_domain}"
       service  = "http://argocd-server.argocd:80"
     }
-    # All other *.prod.fuzefront.com → Traefik, which uses the Helm Ingress rules.
+    # Generic catch-all: every other hostname → Traefik, which host-routes by
+    # Ingress. This is domain-agnostic: any product on its own domain (its own
+    # apex/subdomains) just CNAMEs that host to THIS tunnel and declares a Traefik
+    # Ingress in its OWN repo — no per-product hostname is enumerated here.
+    # Traefik returns 404 for unconfigured hosts, so this exposes nothing new.
+    # CF Access still gates *.prod.fuzefront.com at the edge (see below); other
+    # domains are public by default (Authentik / the app owns their auth).
     ingress_rule {
-      hostname = "*.${local.prod_domain}"
-      service  = "http://traefik.kube-system:80"
-    }
-    # Apex prod.fuzefront.com → Traefik (FuzeFront app, public).
-    ingress_rule {
-      hostname = local.prod_domain
-      service  = "http://traefik.kube-system:80"
-    }
-    # Public vanity hosts (app/auth.fuzefront.com) → Traefik. These are at the
-    # apex zone, outside the *.prod Access wildcard, so they stay public.
-    # Must come BEFORE the 404 catch-all below.
-    dynamic "ingress_rule" {
-      for_each = toset(local.public_vanity_hosts)
-      content {
-        hostname = "${ingress_rule.value}.${var.zone_name}"
-        service  = "http://traefik.kube-system:80"
-      }
-    }
-    # Mandatory catch-all.
-    ingress_rule {
-      service = "http_status:404"
+      service = "http://traefik.kube-system:80"
     }
   }
 }
@@ -542,6 +528,3 @@ resource "null_resource" "tunnel_secrets" {
     EOT
   }
 }
-
-# Trigger CD plan/apply of the already-reviewed pending changes (vanity
-# routes app/auth.fuzefront.com + sealed-secrets CF Access). See #59 plan.
