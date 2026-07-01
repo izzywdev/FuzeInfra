@@ -26,6 +26,15 @@ locals {
   # chart sets its Traefik Ingress host to match (className traefik, TLS off,
   # CF terminates edge TLS). Adding a future public host is a one-line edit.
   public_vanity_hosts = ["app", "auth"]
+
+  # MendysRobotics public sites (live/marketplace/wp.mendysrobotics.com) routed
+  # through THIS tunnel to Traefik on the shared cluster. mendysrobotics.com is a
+  # SEPARATE Cloudflare zone (not fuzefront.com), so these hosts are NOT covered
+  # by the *.prod.fuzefront.com Access wildcard → public by default. Mendys
+  # ingresses use ingressClassName "traefik"; CF terminates edge TLS.
+  # The zone id is a public identifier (see landing/infra/terraform), not a secret.
+  mendys_zone_id = "3784bf88809ac135888856ab6183db00"
+  mendys_hosts   = ["live", "marketplace", "wp"]
 }
 
 # 32-byte cryptographically random tunnel secret
@@ -76,6 +85,16 @@ resource "cloudflare_zero_trust_tunnel_cloudflared_config" "fuzeinfra" {
         service  = "http://traefik.kube-system:80"
       }
     }
+    # MendysRobotics public sites (live/marketplace/wp.mendysrobotics.com) →
+    # Traefik on the shared cluster. Separate zone, no Access policy → public.
+    # Must come BEFORE the 404 catch-all below.
+    dynamic "ingress_rule" {
+      for_each = toset(local.mendys_hosts)
+      content {
+        hostname = "${ingress_rule.value}.mendysrobotics.com"
+        service  = "http://traefik.kube-system:80"
+      }
+    }
     # Mandatory catch-all.
     ingress_rule {
       service = "http_status:404"
@@ -112,6 +131,21 @@ resource "cloudflare_record" "prod_wildcard" {
 resource "cloudflare_record" "vanity" {
   for_each = nonsensitive(local.cloudflare_enabled) ? toset(local.public_vanity_hosts) : toset([])
   zone_id  = var.cloudflare_zone_id
+  name     = each.value
+  value    = cloudflare_zero_trust_tunnel_cloudflared.fuzeinfra[0].cname
+  type     = "CNAME"
+  proxied  = true
+  ttl      = 1
+}
+
+# DNS: MendysRobotics subdomains → same tunnel, proxied (CF terminates edge TLS).
+# Created in the mendysrobotics.com zone (separate from fuzefront.com). Additive
+# subdomains only — apex/www are managed in landing/infra and left untouched.
+# NOTE: CLOUDFLARE_API_TOKEN must be authorized for the mendysrobotics.com zone
+# (Zone:DNS:Edit), not just fuzefront.com, for these records to apply.
+resource "cloudflare_record" "mendys" {
+  for_each = nonsensitive(local.cloudflare_enabled) ? toset(local.mendys_hosts) : toset([])
+  zone_id  = local.mendys_zone_id
   name     = each.value
   value    = cloudflare_zero_trust_tunnel_cloudflared.fuzeinfra[0].cname
   type     = "CNAME"
