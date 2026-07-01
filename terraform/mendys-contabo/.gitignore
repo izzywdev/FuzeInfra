@@ -1,8 +1,0 @@
-# Never commit — may contain secrets
-terraform.tfvars
-*.tfstate
-*.tfstate.*
-.terraform/
-tfplan
-plan.json
-mendys-kubeconfig.yaml
