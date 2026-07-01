@@ -1,15 +1,12 @@
 # ===========================================================================
 # argocd-register
 # ===========================================================================
-# Registers ArgoCD Application manifests into the shared k3s cluster.
+# ONE-TIME registration of a consumer repo into the FuzeInfra cluster's ArgoCD.
 #
-# Trigger modes:
-#   1. push to main touching argocd/applications/** — auto-applies FuzeInfra's
-#      own argocd/applications/ directory. Dropping any file there and merging
-#      is sufficient to register a new app; no manual steps required.
-#   2. workflow_dispatch (manual): for public repos or manual onboarding.
+# Supports two trigger modes:
+#   1. workflow_dispatch (manual): for public repos or manual onboarding.
 #      Pass repo, ref, path inputs — handler checks out the consumer repo.
-#   3. repository_dispatch (type=argocd-register): for private repos or
+#   2. repository_dispatch (type=argocd-register): for private repos or
 #      automated dispatch on deploy/argocd/** changes.
 #      Consumer bundles its deploy/argocd/ as base64-gzipped tar in
 #      client_payload.argocd_bundle; handler extracts inline (no token needed).
@@ -33,12 +30,6 @@
 name: argocd-register
 
 on:
-  # Auto-apply FuzeInfra's own ArgoCD Applications when any file in
-  # argocd/applications/ changes on main. Scales to any number of apps:
-  # merge a new YAML file → it's registered with ArgoCD automatically.
-  push:
-    branches: [main]
-    paths: ['argocd/applications/**']
   workflow_dispatch:
     inputs:
       repo:
@@ -62,18 +53,13 @@ permissions:
   contents: read
 
 concurrency:
-  group: argocd-register-${{ github.event.client_payload.repo || inputs.repo || 'self' }}
+  group: argocd-register-${{ github.event.client_payload.repo || inputs.repo }}
   cancel-in-progress: false
 
 jobs:
   register:
     runs-on: ubuntu-latest
     steps:
-      # --- Self-apply mode (push to main touching argocd/applications/**) ------
-      - name: Check out FuzeInfra (self-apply mode)
-        if: github.event_name == 'push'
-        uses: actions/checkout@v4
-
       # --- Inline bundle mode (private repo dispatch) --------------------------
       - name: Extract inline argocd bundle (repository_dispatch with argocd_bundle)
         if: github.event_name == 'repository_dispatch' && github.event.client_payload.argocd_bundle != ''
@@ -101,17 +87,7 @@ jobs:
           mkdir -p "$HOME/.kube"
           echo "${{ secrets.KUBE_CONFIG }}" | base64 -d > "$HOME/.kube/config"
 
-      - name: Apply FuzeInfra ArgoCD Applications (self-apply mode)
-        if: github.event_name == 'push'
-        run: |
-          echo "Applying FuzeInfra argocd/applications/ to cluster..."
-          kubectl apply -f argocd/applications/
-          echo ""
-          echo "Done. ArgoCD now owns these Applications and will self-sync future"
-          echo "changes automatically."
-
-      - name: Register consumer Argo Applications (one-time)
-        if: github.event_name != 'push'
+      - name: Register Argo Applications (one-time)
         run: |
           REPO="${{ github.event.client_payload.repo || inputs.repo }}"
           DIR="consumer/deploy/argocd"
