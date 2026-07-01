@@ -246,7 +246,63 @@ kubectl taint node node1 dedicated=stateful:NoSchedule
 
 ---
 
-## 5. Post-join checklist
+## 5. Monitoring auto-configuration (Promtail, node-exporter, Grafana, Loki)
+
+**No manual action is required.** The FuzeInfra monitoring stack discovers new
+nodes automatically the moment they join.
+
+| Component | Mechanism | What happens |
+|-----------|-----------|--------------|
+| **Promtail** | DaemonSet | One Promtail pod schedules on every node automatically. Collects all pod logs and systemd journal from the new node and ships them to Loki. |
+| **node-exporter** | DaemonSet | One node-exporter pod schedules on every node automatically. Exposes CPU/memory/disk/network metrics on port 9100. |
+| **Prometheus** | `kubernetes_sd_configs role: node/endpoints` | Auto-discovers the new node-exporter endpoint. No config change needed. |
+| **cAdvisor** | Kubelet `/metrics/cadvisor` via `role: node` SD | Container metrics from the new node scraped automatically. |
+| **Loki** | Promtail ships logs | Logs indexed by namespace, pod, container, and node name. Queryable immediately. |
+| **Grafana dashboards** | `kubernetes-nodes.json`, `cluster-overview.json` | Built-in dashboards use aggregate queries that scale to any number of nodes. New node appears automatically. |
+| **ArgoCD** | No per-node registration needed | ArgoCD manages apps, not nodes. The existing `fuzeinfra-prod.yaml` Application syncs the Helm chart cluster-wide; DaemonSets land on new nodes on the next sync (within minutes). |
+
+### 5a. Post-join monitoring verification
+
+Run these after a new node joins to confirm the monitoring stack picked it up.
+Replace `<node-name>` with the actual node name (e.g. `mendys-worker-1`).
+
+```bash
+# 1. Promtail pod scheduled on the new node
+kubectl get pods -n fuzeinfra -l component=promtail -o wide
+# Expect: one Running pod per node, including <node-name>
+
+# 2. node-exporter pod scheduled on the new node
+kubectl get pods -n fuzeinfra -l component=node-exporter -o wide
+# Expect: one Running pod per node, including <node-name>
+
+# 3. Prometheus target up
+#    Open https://prometheus.prod.fuzefront.com/targets
+#    Look for <node-name>:9100 in the "node-exporter" job — state should be UP
+
+# 4. Grafana — Kubernetes Nodes dashboard
+#    Open https://grafana.prod.fuzefront.com
+#    → Dashboards → "Kubernetes Nodes"
+#    The new node should appear in CPU/memory/disk panels within a few minutes
+
+# 5. Loki log query in Grafana Explore
+#    Datasource: Loki
+#    Query: {node_name="<node-name>"}   or   {kubernetes_node="<node-name>"}
+#    Logs from the new node's pods should appear
+```
+
+### 5b. Custom dashboards and Prometheus rules for downstream repos
+
+Downstream repos (e.g. MendysRobotics) can ship their own Grafana dashboards
+and Prometheus alerting rules without editing FuzeInfra:
+
+- **Grafana dashboard:** Create a ConfigMap in any namespace with label
+  `grafana_dashboard: "1"`. The Grafana sidecar picks it up automatically.
+- **Prometheus rule:** Create a ConfigMap with label `prometheus_rule: "1"`.
+  The Prometheus rule-reload sidecar watches all namespaces and loads it.
+
+---
+
+## 6. Post-join checklist
 
 - [ ] `kubectl get nodes` shows both nodes `Ready`.
 - [ ] A pod on `node2` resolves & reaches `*.fuzeinfra.svc.cluster.local` (overlay OK).
@@ -254,6 +310,10 @@ kubectl taint node node1 dedicated=stateful:NoSchedule
 - [ ] Stateless services prefer/land on `node2`.
 - [ ] Firewall allows only the required ports, sourced to the other node's IP.
 - [ ] (If public-IP nodes) WireGuard backend active (`ip link show flannel-wg`).
+- [ ] Promtail pod running on new node (`kubectl get pods -n fuzeinfra -l component=promtail -o wide`).
+- [ ] node-exporter pod running on new node (`kubectl get pods -n fuzeinfra -l component=node-exporter -o wide`).
+- [ ] New node visible in Grafana "Kubernetes Nodes" dashboard.
+- [ ] New node's logs queryable in Grafana Loki (`{node_name="<node-name>"}`).
 
 ---
 
