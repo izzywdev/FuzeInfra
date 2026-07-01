@@ -3,20 +3,29 @@
 # ===========================================================================
 # ONE-TIME registration of a consumer repo into the FuzeInfra cluster's ArgoCD.
 #
-# This is deliberately a manual workflow_dispatch, fully decoupled from the
-# Terraform-only infra-request-handler. You run it once when onboarding a repo
-# (or when adding a brand-new Argo Application/AppProject for it). After that,
-# ArgoCD polls and self-syncs the consumer's deploy/argocd manifests — ongoing
-# edits to those files are NOT an infra-request and must never trigger the
-# handler. Re-running this is safe (kubectl apply is idempotent) but normally
-# unnecessary; let ArgoCD own the steady state.
+# Supports two trigger modes:
+#   1. workflow_dispatch (manual): for public repos or manual onboarding.
+#      Pass repo, ref, path inputs — handler checks out the consumer repo.
+#   2. repository_dispatch (type=argocd-register): for private repos or
+#      automated dispatch on deploy/argocd/** changes.
+#      Consumer bundles its deploy/argocd/ as base64-gzipped tar in
+#      client_payload.argocd_bundle; handler extracts inline (no token needed).
+#
+# After the first registration, ArgoCD polls and self-syncs the consumer's
+# deploy/argocd manifests — re-running this is safe (kubectl apply is idempotent)
+# but normally unnecessary. Let ArgoCD own the steady state.
 #
 # Required repo secrets (FuzeInfra CI only):
 #   KUBE_CONFIG   # base64 kubeconfig for the k3s server
 #
-# Example:
+# Example (manual, public repo):
 #   gh workflow run argocd-register.yml \
 #     -f repo=izzywdev/FuzeFront -f ref=main -f path=deploy/argocd
+#
+# Example (automated dispatch from private repo infra-dispatch.yml):
+#   jq -nc '{event_type:"argocd-register",
+#            client_payload:{repo:"izzywdev/MendysRobotics", argocd_bundle:"<base64-tar>"}}' \
+#     | gh api repos/izzywdev/FuzeInfra/dispatches --input -
 
 name: argocd-register
 
@@ -37,28 +46,41 @@ on:
         required: false
         default: deploy/argocd
         type: string
+  repository_dispatch:
+    types: [argocd-register]
 
 permissions:
   contents: read
 
 concurrency:
-  # One registration at a time per repo.
-  group: argocd-register-${{ inputs.repo }}
+  group: argocd-register-${{ github.event.client_payload.repo || inputs.repo }}
   cancel-in-progress: false
 
 jobs:
   register:
     runs-on: ubuntu-latest
     steps:
-      - name: Check out consumer argo manifests
+      # --- Inline bundle mode (private repo dispatch) --------------------------
+      - name: Extract inline argocd bundle (repository_dispatch with argocd_bundle)
+        if: github.event_name == 'repository_dispatch' && github.event.client_payload.argocd_bundle != ''
+        run: |
+          mkdir -p consumer/deploy/argocd
+          echo "${{ github.event.client_payload.argocd_bundle }}" \
+            | base64 -d \
+            | tar -xz -C consumer/deploy/argocd --strip-components=0
+          echo "Extracted inline argocd bundle from ${{ github.event.client_payload.repo }}"
+
+      # --- Git checkout mode (workflow_dispatch or public repo) ----------------
+      - name: Check out consumer argo manifests (git checkout mode)
+        if: github.event_name == 'workflow_dispatch' || github.event.client_payload.argocd_bundle == ''
         uses: actions/checkout@v4
         with:
-          repository: ${{ inputs.repo }}
-          ref: ${{ inputs.ref }}
+          repository: ${{ github.event.client_payload.repo || inputs.repo }}
+          ref: ${{ github.event.client_payload.ref || inputs.ref || 'main' }}
           path: consumer
           token: ${{ secrets.GITHUB_TOKEN }}
           sparse-checkout: |
-            ${{ inputs.path }}
+            ${{ inputs.path || 'deploy/argocd' }}
 
       - name: Configure kubectl
         run: |
@@ -67,13 +89,17 @@ jobs:
 
       - name: Register Argo Applications (one-time)
         run: |
-          DIR="consumer/${{ inputs.path }}"
+          REPO="${{ github.event.client_payload.repo || inputs.repo }}"
+          DIR="consumer/deploy/argocd"
+          if [ "${{ github.event_name }}" = 'workflow_dispatch' ]; then
+            DIR="consumer/${{ inputs.path || 'deploy/argocd' }}"
+          fi
           if [ ! -d "$DIR" ]; then
-            echo "::error::No '${{ inputs.path }}' directory in ${{ inputs.repo }}@${{ inputs.ref }} — nothing to register."
+            echo "::error::No argo manifests directory found at $DIR — nothing to register."
             exit 1
           fi
-          echo "Registering Argo manifests from $DIR ..."
+          echo "Registering Argo manifests from $DIR (repo: $REPO)..."
           kubectl apply -f "$DIR/"
           echo ""
           echo "Done. ArgoCD now owns these Applications and will self-sync future"
-          echo "changes to ${{ inputs.path }} — do not re-run this for ordinary edits."
+          echo "changes to deploy/argocd — do not re-run this for ordinary edits."
