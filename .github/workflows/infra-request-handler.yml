@@ -66,7 +66,16 @@ jobs:
         with:
           path: fuzeinfra
 
+      - name: Extract inline terraform bundle
+        if: github.event.client_payload.terraform_bundle != ''
+        run: |
+          mkdir -p consumer/deploy/terraform
+          echo "${{ github.event.client_payload.terraform_bundle }}" \
+            | base64 -d \
+            | tar -xz -C consumer/deploy/terraform --strip-components=0
+
       - name: Check out requesting repo (deploy/terraform only)
+        if: github.event.client_payload.terraform_bundle == ''
         uses: actions/checkout@v4
         with:
           repository: ${{ github.event.client_payload.repo }}
@@ -157,13 +166,13 @@ jobs:
         run: terraform apply -auto-approve -input=false
 
       - name: Configure kubectl
-        if: steps.validate.outputs.decision == 'apply'
+        if: steps.validate.outputs.decision == 'apply' && contains(toJSON(github.event.client_payload.requests), '"role":"workload"')
         run: |
           mkdir -p "$HOME/.kube"
           echo "${{ secrets.KUBE_CONFIG }}" | base64 -d > "$HOME/.kube/config"
 
       - name: Label joined nodes
-        if: steps.validate.outputs.decision == 'apply'
+        if: steps.validate.outputs.decision == 'apply' && contains(toJSON(github.event.client_payload.requests), '"role":"workload"')
         env:
           REQUESTS_JSON: ${{ toJSON(github.event.client_payload.requests) }}
         run: |
