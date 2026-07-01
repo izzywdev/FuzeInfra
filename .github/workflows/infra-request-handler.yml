@@ -5,12 +5,12 @@
 # *declare* infra needs in git and dispatch `repository_dispatch
 # (event_type: infra-request)` at this repo; this workflow reconciles them.
 #
-# This handler is TERRAFORM-ONLY. It reconciles infra (node) provisioning
-# requests from newly-added repos/microservices and nothing else. ArgoCD owns
-# the consumer's argo manifests after the one-time initial registration (see
-# argocd-register.yml), so an ongoing argo-manifest edit must never reach this
-# handler — and if one does dispatch (no `requests` payload) it is a clean
-# no-op, never a gated PR.
+# This handler is TERRAFORM-ONLY. It reconciles a consumer's deploy/terraform —
+# node (VPS) provisioning and, optionally, product DNS via the generic
+# modules/cloudflare-dns module — and nothing else. ArgoCD owns the consumer's
+# argo manifests after the one-time initial registration (see argocd-register.yml),
+# so an ongoing argo-manifest edit must never reach this handler — and if one does
+# dispatch (no `requests` payload) it is a clean no-op, never a gated PR.
 #
 # Flow:
 #   1. Check out THIS repo (module + whitelist + scripts) and the REQUESTING
@@ -29,6 +29,9 @@
 #   K3S_SERVER_URL, K3S_NODE_TOKEN
 #   CONTABO_IMAGE_ID, NODE_SSH_PUBLIC_KEY
 #   KUBE_CONFIG                  # base64 kubeconfig for the k3s server (node labeling backstop)
+#   CLOUDFLARE_API_TOKEN         # DNS:Edit on every family zone; injected as cloudflare_dns_token
+#                                # for consumers that declare the cloudflare-dns module (node-only
+#                                # consumers ignore it — an undeclared tfvar is a harmless warning)
 #   TF_STATE_* backend creds     # for the FuzeInfra-owned remote TF state backend
 #
 # Dispatch client_payload shape (sent by the consumer's infra-dispatch.yml):
@@ -131,8 +134,11 @@ jobs:
         env:
           REQUESTS_JSON: ${{ toJSON(github.event.client_payload.requests) }}
         run: |
-          # Consumer declares `requests`; FuzeInfra injects the credentials/join
-          # params from CI secrets via an auto.tfvars the consumer never sees.
+          # Consumer declares `requests` (+ optionally the cloudflare-dns module);
+          # FuzeInfra injects the credentials/join params + the Cloudflare DNS token
+          # from CI secrets via an auto.tfvars the consumer never sees. A consumer
+          # that doesn't declare cloudflare_dns_token just ignores it (harmless
+          # "undeclared variable" warning).
           cat > handler.auto.tfvars.json <<JSON
           {
             "requests": ${REQUESTS_JSON},
@@ -143,7 +149,8 @@ jobs:
             "k3s_server_url": "${{ secrets.K3S_SERVER_URL }}",
             "k3s_node_token": "${{ secrets.K3S_NODE_TOKEN }}",
             "image_id": "${{ secrets.CONTABO_IMAGE_ID }}",
-            "ssh_public_key": "${{ secrets.NODE_SSH_PUBLIC_KEY }}"
+            "ssh_public_key": "${{ secrets.NODE_SSH_PUBLIC_KEY }}",
+            "cloudflare_dns_token": "${{ secrets.CLOUDFLARE_API_TOKEN }}"
           }
           JSON
 
