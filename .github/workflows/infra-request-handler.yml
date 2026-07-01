@@ -137,9 +137,7 @@ jobs:
             "k3s_server_url": "${{ secrets.K3S_SERVER_URL }}",
             "k3s_node_token": "${{ secrets.K3S_NODE_TOKEN }}",
             "image_id": "${{ secrets.CONTABO_IMAGE_ID }}",
-            "ssh_public_key": "${{ secrets.NODE_SSH_PUBLIC_KEY }}",
-            "argocd_github_deploy_key": "${{ secrets.MENDYS_ARGOCD_DEPLOY_KEY }}",
-            "ghcr_pull_token": "${{ secrets.MENDYS_GHCR_PULL_TOKEN }}"
+            "ssh_public_key": "${{ secrets.NODE_SSH_PUBLIC_KEY }}"
           }
           JSON
 
