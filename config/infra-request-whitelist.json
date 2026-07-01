@@ -2,7 +2,7 @@
   "//": "Auto-apply whitelist for the infra-request-handler. A dispatched request is auto-applied ONLY if EVERY node it declares matches these rules. Any miss routes the whole request to a gated PR (terraform plan, manual approval).",
   "allowed_product_ids": ["V1", "V45", "V46", "V47", "V76", "V92"],
   "allowed_regions": ["EU"],
-  "allowed_roles": ["workload", "standalone-cluster"],
+  "allowed_roles": ["workload"],
   "max_nodes_per_request": 3,
   "allowed_repos": [
     "izzywdev/FuzeFront",
