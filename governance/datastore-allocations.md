@@ -8,12 +8,12 @@ PR (or provisioning run) that creates an allocation. See
 
 | App | Role | Database | Consumer repo | Status |
 |---|---|---|---|---|
-| fuzekeys | `fuzekeys_user` | `fuzekeys` | izzywdev/FuzeKeys | pending (FuzeInfra#136) |
+| fuzekeys | `fuzekeys_user` | `fuzekeys` | izzywdev/FuzeKeys | active (FuzeInfra#136) |
 
 ## Redis (shared `fuzeinfra-redis`)
 
 | App | ACL user | Key prefix | DB index | Consumer repo | Status |
 |---|---|---|---|---|---|
-| fuzekeys | `fuzekeys` | `fuzekeys:` | 1 | izzywdev/FuzeKeys | pending (FuzeInfra#136) |
+| fuzekeys | `fuzekeys` | `fuzekeys:` | 1 | izzywdev/FuzeKeys | active (FuzeInfra#136) |
 
 DB index 0 is reserved for FuzeInfra platform services.
