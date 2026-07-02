@@ -32,6 +32,7 @@ kubectl apply -f "$ARGOCD_DIR/projects/fuzeinfra.yaml"
 # Consumer projects are FuzeInfra-owned + restricted (cannot deploy into the
 # fuzeinfra namespace). Add one per consumer repo.
 kubectl apply -f "$ARGOCD_DIR/projects/fuzefront.yaml"
+kubectl apply -f "$ARGOCD_DIR/projects/fuzeagent.yaml"
 
 case "$ENVIRONMENT" in
   local)
