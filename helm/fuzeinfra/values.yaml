@@ -97,6 +97,16 @@ redis:
   image: redis:7-alpine
   port: 6379
   storage: 2Gi
+  # Per-app ACL persistence. When enabled, redis runs with `--aclfile
+  # /data/users.acl` and a bootstrap initContainer seeds that file (on the PVC)
+  # with the shared no-auth `default` user so existing consumers are unaffected.
+  # Per-app least-privilege ACL users (created imperatively during consumer
+  # onboarding, e.g. `fuzekeys` with `~fuzekeys:* +@all -@admin -@dangerous`)
+  # are written to the file via `ACL SAVE` and survive pod restarts. Passwords
+  # live only on the PVC as hashes — never in git. See
+  # governance/datastore-allocations.md for the per-app allocation registry.
+  acl:
+    enabled: true
   resources:
     requests: { cpu: 50m,  memory: 64Mi }
     limits:   { cpu: 500m, memory: 512Mi }
