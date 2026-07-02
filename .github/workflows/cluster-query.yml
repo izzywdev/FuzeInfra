@@ -4,9 +4,9 @@
 # relay for "what's happening in the cluster" without handing any session the
 # raw kubeconfig.
 #
-# SECURITY: only read verbs are allowed; anything mutating (apply/delete/edit/
-# patch/replace/exec/attach/cp/scale/rollout/annotate/label/drain/cordon/
-# proxy/port-forward/run/create/set) is rejected before kubectl runs.
+# SECURITY: an allowed READ verb must appear as a token, AND no mutating/exec
+# token may appear (apply/delete/edit/patch/replace/exec/attach/cp/scale/
+# rollout/annotate/label/drain/cordon/proxy/port-forward/run/create/set).
 #
 # Secret: KUBE_CONFIG (base64 kubeconfig) — same secret used by
 # apply-cluster-config.yml / argo-outofsync-autofix.yml.
@@ -16,7 +16,7 @@ on:
   workflow_dispatch:
     inputs:
       kubectl_args:
-        description: 'kubectl args, e.g. "-n mendys-prod get pods -o wide". First non-flag token must be a read verb.'
+        description: 'kubectl args, e.g. "-n mendys-prod get pods -o wide". Must contain a read verb (get/describe/logs/…).'
         required: false
         default: 'get nodes'
       curl_url:
@@ -53,21 +53,24 @@ jobs:
         run: |
           set -u
           [ -z "${ARGS// }" ] && { echo "no kubectl_args"; exit 0; }
-          # First non-flag token is the verb.
-          verb=""
-          for tok in $ARGS; do case "$tok" in -*) ;; *) verb="$tok"; break;; esac; done
-          case "$verb" in
-            get|describe|logs|top|events|version|api-resources|api-versions|explain|cluster-info|config)
-              ;;
-            *)
-              echo "::error::Rejected non-read verb: '$verb'. Allowed: get describe logs top events version api-resources api-versions explain cluster-info config."
-              exit 1;;
-          esac
-          # Belt-and-suspenders: reject dangerous subcommands anywhere in args.
-          case " $ARGS " in
-            *" exec "*|*" attach "*|*" cp "*|*" port-forward "*|*" proxy "*|*" run "*|*" delete "*|*" apply "*|*" edit "*|*" patch "*|*" replace "*|*" scale "*|*" rollout "*|*" cordon "*|*" drain "*|*" annotate "*|*" label "*|*" set "*|*" create "*)
-              echo "::error::Rejected: args contain a mutating/exec subcommand."; exit 1;;
-          esac
+          # An allowed read verb must be present as a token (order-independent).
+          read_ok=0
+          for tok in $ARGS; do
+            case "$tok" in
+              get|describe|logs|top|events|version|api-resources|api-versions|explain|cluster-info|config) read_ok=1;;
+            esac
+          done
+          if [ "$read_ok" != 1 ]; then
+            echo "::error::No read verb in args. Allowed: get describe logs top events version api-resources api-versions explain cluster-info config."
+            exit 1
+          fi
+          # Reject any mutating/exec token anywhere in the args.
+          for tok in $ARGS; do
+            case "$tok" in
+              exec|attach|cp|port-forward|proxy|run|delete|apply|edit|patch|replace|scale|rollout|cordon|drain|annotate|label|set|create|taint|uncordon|debug)
+                echo "::error::Rejected mutating/exec token: '$tok'."; exit 1;;
+            esac
+          done
           echo "### kubectl $ARGS"
           # shellcheck disable=SC2086
           kubectl $ARGS 2>&1 | head -c 200000
