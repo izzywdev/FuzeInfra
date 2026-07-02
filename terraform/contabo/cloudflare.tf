@@ -25,7 +25,13 @@ locals {
   # Authentik handles platform auth, not Cloudflare Access. The FuzeFront
   # chart sets its Traefik Ingress host to match (className traefik, TLS off,
   # CF terminates edge TLS). Adding a future public host is a one-line edit.
-  public_vanity_hosts = ["app", "auth"]
+  #
+  # `plan` = FuzePlan (plan.fuzefront.com). FuzeFront's portal loads FuzePlan's
+  # module-federation remoteEntry.js from here, so it must be public (outside the
+  # *.prod Access wildcard); FuzePlan declares its own Traefik Ingress for this
+  # host in izzywdev/FuzePlan. Routing to Traefik is via the catch-all ingress
+  # rule below — no per-host tunnel rule is needed.
+  public_vanity_hosts = ["app", "auth", "plan"]
 }
 
 # 32-byte cryptographically random tunnel secret

@@ -6,6 +6,7 @@
   "max_nodes_per_request": 3,
   "allowed_repos": [
     "izzywdev/FuzeFront",
-    "izzywdev/MendysRobotics"
+    "izzywdev/MendysRobotics",
+    "izzywdev/FuzePlan"
   ]
 }
