@@ -1,12 +1,20 @@
 # =============================================================================
-# argocd-notifications-cm — fire a GitHub repository_dispatch when any app goes
-# OutOfSync. The GitHub workflow (.github/workflows/argo-outofsync-autofix.yml)
-# then does BOTH halves: a Telegram 🔴 alert (link to Argo) AND a devops-engineer
-# Claude auto-fix run. Keeping Telegram in the workflow means the bot token stays
-# in GitHub secrets (TELEGRAM_*) — only a github token is needed in-cluster.
+# argocd-notifications-cm — fire a GitHub repository_dispatch when any app is
+# UNHEALTHY (OutOfSync, Degraded, or Unknown/ComparisonError). The GitHub
+# workflow (.github/workflows/argo-outofsync-autofix.yml) then does BOTH halves:
+# a Telegram 🔴 alert (link to Argo) AND a devops-engineer Claude auto-fix run.
+# Keeping Telegram in the workflow means the bot token stays in GitHub secrets
+# (TELEGRAM_*) — only a github token is needed in-cluster.
 #
 # Secret: argocd-notifications-secret must hold `github-token` (a PAT/OAuth token
 # with repo scope to POST .../dispatches).
+#
+# Coverage note (why three triggers): Argo only reaches `OutOfSync` when it can
+# RENDER the manifests and finds live != desired. If rendering itself fails
+# (bad values/kustomize) the app goes `Unknown` (ComparisonError) and OutOfSync
+# never fires — so on-sync-unknown is required to catch render breakage. Runtime
+# failures (ImagePullBackOff / CrashLoop) show as `Degraded` health with sync
+# often still Synced — so on-health-degraded is required to catch those.
 # =============================================================================
 apiVersion: v1
 kind: ConfigMap
@@ -25,9 +33,12 @@ data:
       - name: User-Agent
         value: argocd-notifications
 
-  # ---- template: the dispatch body (app/sync/health) ----------------------
+  # ---- template: the dispatch body (app/sync/health/repo/conditions) -------
   # app name is validated to a k8s-name charset by the workflow before use.
-  template.app-out-of-sync: |
+  # All interpolations use toJson so status messages containing quotes or
+  # newlines cannot corrupt the JSON body. `repo` + `conditions` let the
+  # workflow route to the owning repo and hand the real error to the fixer.
+  template.app-unhealthy: |
     webhook:
       github-dispatch:
         method: POST
@@ -35,17 +46,31 @@ data:
           {
             "event_type": "argo-out-of-sync",
             "client_payload": {
-              "app": "{{.app.metadata.name}}",
-              "sync": "{{.app.status.sync.status}}",
-              "health": "{{.app.status.health.status}}"
+              "app": {{.app.metadata.name | toJson}},
+              "sync": {{.app.status.sync.status | toJson}},
+              "health": {{.app.status.health.status | toJson}},
+              "repo": {{.app.spec.source.repoURL | toJson}},
+              "conditions": {{.app.status.conditions | toJson}}
             }
           }
 
-  # ---- trigger: on OutOfSync, once per transition (not on every refresh) ---
+  # ---- triggers: fire once per state transition (not on every refresh) -----
+  # OutOfSync: live drifted from a renderable desired state.
   trigger.on-out-of-sync: |
     - when: app.status.sync.status == 'OutOfSync'
       oncePer: app.status.sync.status
-      send: [app-out-of-sync]
+      send: [app-unhealthy]
+  # Unknown: manifest generation failed (ComparisonError) — render is broken.
+  trigger.on-sync-unknown: |
+    - when: app.status.sync.status == 'Unknown'
+      oncePer: app.status.sync.status
+      send: [app-unhealthy]
+  # Degraded: rendered + applied, but the running workload is unhealthy
+  # (ImagePullBackOff, CrashLoopBackOff, failed hooks, unready pods).
+  trigger.on-health-degraded: |
+    - when: app.status.health.status == 'Degraded'
+      oncePer: app.status.health.status
+      send: [app-unhealthy]
 
   # ---- default subscription: all apps in this Argo instance ---------------
   subscriptions: |
@@ -53,3 +78,5 @@ data:
         - github-dispatch
       triggers:
         - on-out-of-sync
+        - on-sync-unknown
+        - on-health-degraded

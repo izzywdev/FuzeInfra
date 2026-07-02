@@ -1,0 +1,85 @@
+# Onboarding a consumer product onto the shared cluster (zero-touch)
+
+How a product repo (e.g. MendysRobotics) goes live on the shared FuzeInfra
+Contabo k3s cluster **without hand-deploys, per-app ingress controllers, or
+plaintext secrets** — the pattern to reuse for every future consumer repo.
+Everything below is GitOps: the consumer commits manifests, Argo (run by
+FuzeInfra) reconciles.
+
+> Boundary: the consumer owns its `deploy/**` (Helm/kustomize + Argo Applications
+> + sealed secrets). FuzeInfra owns the cluster, Argo, the tunnel, and the shared
+> datastores. Consumers never edit FuzeInfra or operate the cluster; they delegate
+> via `@claude` (baseline §1).
+
+## 1. Ingress — reuse Traefik + the Cloudflare Tunnel (do NOT add nginx/cert-manager)
+
+The shared cluster is **CF-tunnel-only**: Traefik is pinned to `ClusterIP`, nothing
+binds host ports 80/443, and Cloudflare terminates TLS at the edge. A consumer that
+adds its own ingress-nginx + cert-manager would open ports and break that invariant.
+
+Instead:
+- Ingress `className: traefik`, **no** `tls:` block, **no** cert-manager annotations
+  (CF does TLS). The cluster is HTTP-only behind the tunnel.
+- Per-product hostnames route through the **existing** tunnel; DNS is proxied CNAMEs
+  in the product's own Cloudflare zone via the generic `modules/cloudflare-dns`
+  Terraform module — **no product hostnames are hard-coded in FuzeInfra** (the
+  tunnel catch-all is generic `→ http://traefik.kube-system:80`).
+- Public sites: no CF Access policy on those hostnames. Admin UIs: add a CF Access
+  app (FuzeInfra `terraform/contabo/cloudflare.tf`).
+
+## 2. Git auth for Argo — one GitHub App for ALL private repos
+
+Argo pulls private consumer repos using a **repo-creds credential template** backed
+by a **GitHub App** (contents+packages: read), scoped by URL prefix
+`https://github.com/izzywdev`. One credential covers every current and future
+`izzywdev` private repo — no per-repo deploy keys.
+
+- Sealed and applied from `argocd/cluster-config/` (see `apply-cluster-config.yml`).
+- **App tokens are short-lived** → they are for Argo *git* auth only. The kubelet
+  cannot use them as image pull secrets (see §3).
+
+## 3. Secrets — zero-touch sealed provisioning
+
+All secrets are Bitnami **SealedSecrets** (only ciphertext in git), synced by the
+consumer's `*-sealed` Argo app. The consumer's `seal-secrets.yml`
+(`workflow_dispatch`, idempotent — skip if the sealed file already exists) seals:
+
+- **Image pull secret** — a `docker-registry` secret (GHCR read) from the repo's
+  `GHCR_PAT`. **Name it consistently** with what the pods reference (a `ghcr` vs
+  `ghcr-pull-secret` name mismatch silently causes `ImagePullBackOff`).
+- **Generated app secrets** — DB passwords, WordPress salts, etc. generated in-
+  workflow (`openssl`) and sealed. No human input, no rotation churn (idempotent).
+- **Operator/3rd-party secrets** — API keys (OpenAI, WooCommerce, etc.) sourced
+  from GitHub Actions secrets, empty-tolerant so a partial launch still starts.
+
+To rotate a generated secret: delete its file under `deploy/argocd/sealed/` and
+re-run the workflow.
+
+## 4. Shared datastores — cross-repo data-tier request
+
+A consumer's backend authenticates to FuzeInfra's shared Postgres/Mongo/Redis/Neo4j
+with a **dedicated least-privilege role**. FuzeInfra owns those datastores, so the
+consumer **requests provisioning via an `@claude` issue on FuzeInfra** (role +
+database per datastore; creds delivered as GH Actions secrets on the consumer repo,
+never in the issue). The consumer composes its connection URLs from those creds +
+the published host/port contract (`fuzeinfra-<svc>.fuzeinfra`).
+
+## 5. Self-heal covers it going forward
+
+Once live, `docs/argo-selfheal-autofix.md` keeps it healthy: any `OutOfSync`,
+`Degraded`, or `Unknown`/ComparisonError on the consumer's Argo apps fires an
+`@claude` issue back to the owning repo automatically.
+
+## Gotchas proven in practice
+
+- **ArgoCD rejects a repo with any out-of-bounds symlink** (repo-wide, before path
+  selection) — e.g. a committed venv's `bin/python3 → /usr/bin/python3`. Manifest
+  generation fails for the whole repo. Don't commit venvs; `.gitignore` them.
+- **Values-file integrity is load-bearing.** A single stray character on line 1 of a
+  Helm values file (a `t>` prefix) makes Helm parse the entire document as a string
+  → `cannot unmarshal string into map` → the app sits in `Unknown` and never rolls.
+- **php-fpm + nginx-sidecar WordPress** must **share the full docroot** (initContainer
+  seeds WP core + baked wp-content into a shared volume both mount at
+  `/var/www/html`). Mounting only `wp-content` into nginx → `403` on `/` because
+  nginx has no `index.php`. (Traefik is the cluster ingress; the pod's nginx is just
+  the web server in front of php-fpm — both layers are expected.)
