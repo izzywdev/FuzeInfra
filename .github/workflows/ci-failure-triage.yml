@@ -1,0 +1,93 @@
+# Surface deploy-path workflow FAILURES as an idempotent @claude triage issue.
+#
+# Why: the existing claude-ci-autofix.yml only watches "Infrastructure Tests" +
+# "Helm Chart Validation" AND requires an associated PR. Deploy workflows that
+# run on repository_dispatch (e.g. infra-request-handler's `terraform apply`) have
+# no PR, so their failures never surfaced anywhere — you had to read the run log.
+# The Argo self-heal loop (argo-outofsync-autofix) covers ArgoCD *app* health, not
+# GitHub Actions runs. This closes that gap for the deploy-critical workflows.
+#
+# Behaviour: on `conclusion == failure`, open ONE issue per (workflow, branch)
+# labelled `ci-failure`, mentioning @claude, with the failing job's error tail.
+# If an open one already exists, comment "recurred" instead of duplicating.
+#
+# NOTE: workflow_run matches by workflow DISPLAY NAME, and only fires for
+# workflows in THIS repo. Consumer repos (build-and-push / seal-secrets, etc.)
+# need their own copy — propagate via FuzeSDLC.
+name: ci-failure-triage
+
+on:
+  workflow_run:
+    workflows:
+      - "infra-request-handler"
+      - "terraform-plan-apply"
+      - "argocd-register"
+      - "rotate-sealed-secret"
+      - "Deploy FuzeInfra – Production"
+      - "Deploy MendysRobotics – Contabo"
+    types: [completed]
+
+permissions:
+  contents: read
+  actions: read
+  issues: write
+
+concurrency:
+  group: ci-failure-triage-${{ github.event.workflow_run.name }}-${{ github.event.workflow_run.head_branch }}
+  cancel-in-progress: false
+
+jobs:
+  triage:
+    # Only on failure; ignore the auto-fix bot's own branches to avoid loops.
+    if: >-
+      ${{ github.event.workflow_run.conclusion == 'failure' &&
+          !startsWith(github.event.workflow_run.head_branch, 'claude/argo-fix-') }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Open or update an idempotent @claude triage issue
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          WF: ${{ github.event.workflow_run.name }}
+          BR: ${{ github.event.workflow_run.head_branch }}
+          EVENT: ${{ github.event.workflow_run.event }}
+          RUN_URL: ${{ github.event.workflow_run.html_url }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+        run: |
+          set -euo pipefail
+          title="CI failure: ${WF} on ${BR}"
+
+          # Best-effort error tail from the failed steps (needs actions:read).
+          tail_log="$(gh run view "$RUN_ID" --repo "$REPO" --log-failed 2>/dev/null | tail -c 3500 || true)"
+          [ -z "$tail_log" ] && tail_log="(could not fetch failed-step log; open the run.)"
+
+          body="$(cat <<EOF
+          @claude the deploy workflow **${WF}** failed on \`${BR}\` (event: \`${EVENT}\`).
+
+          Run: ${RUN_URL}
+
+          This is a **deploy-path** failure (not app CI). Diagnose from the run log. If it's a
+          credential/permission problem (e.g. a token missing a scope), that's an operator action —
+          say so plainly rather than attempting a code fix. Prod stays GitOps (edit repo → Argo).
+
+          <details><summary>failed-step log (tail)</summary>
+
+          \`\`\`
+          ${tail_log}
+          \`\`\`
+          </details>
+          EOF
+          )"
+
+          gh label create ci-failure --repo "$REPO" --color B60205 --description "Deploy workflow failure (self-heal triage)" 2>/dev/null || true
+
+          existing="$(gh issue list --repo "$REPO" --state open --label ci-failure \
+            --search "in:title \"$title\"" --json number --jq '.[0].number // empty' 2>/dev/null || true)"
+
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --repo "$REPO" --body "Recurred: ${RUN_URL}"
+            echo "Updated existing issue #$existing"
+          else
+            gh issue create --repo "$REPO" --label ci-failure --title "$title" --body "$body"
+            echo "Opened new ci-failure issue for $WF / $BR"
+          fi
