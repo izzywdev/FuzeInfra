@@ -1,0 +1,48 @@
+# ===========================================================================
+# apply-cluster-config
+# ===========================================================================
+# Applies FuzeInfra's OWN cluster-scoped manifests — the bootstrap things ArgoCD
+# can't self-seed because they are what LETS ArgoCD work (e.g. the repo-credential
+# template that lets it read private consumer repos). GitOps-triggered: a commit
+# to argocd/cluster-config/** kubectl-applies it to the shared cluster via the
+# KUBE_CONFIG secret — SSH-free, no manual kubectl on prod.
+#
+# This is the generic, reusable path for any future cluster bootstrap manifest
+# (repo-creds, image-pull creds, cluster settings). kubectl apply is idempotent,
+# so re-runs are safe. Sealed Secrets stay ciphertext in git; the in-cluster
+# controller decrypts them.
+#
+# Required repo secret (FuzeInfra CI only):
+#   KUBE_CONFIG   # base64 kubeconfig for the k3s server (same one argocd-register uses)
+
+name: apply-cluster-config
+
+on:
+  push:
+    branches: [main]
+    paths: ['argocd/cluster-config/**']
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: apply-cluster-config
+  cancel-in-progress: false
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure kubectl
+        run: |
+          mkdir -p "$HOME/.kube"
+          echo "${{ secrets.KUBE_CONFIG }}" | base64 -d > "$HOME/.kube/config"
+
+      - name: Apply argocd/cluster-config
+        run: |
+          kubectl apply -f argocd/cluster-config/
+          echo "Applied argocd/cluster-config/ to the shared cluster."
+          echo "SealedSecrets decrypt in-cluster; ArgoCD picks up repo-creds on its next repo access."
