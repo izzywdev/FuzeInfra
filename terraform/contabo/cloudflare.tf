@@ -121,8 +121,9 @@ resource "cloudflare_record" "vanity" {
 # Access wall defined below, and a consumer must NOT be able to punch a bypass
 # hole in FuzeInfra's wall from its own repo. So for shared-zone hosts FuzeInfra
 # holds a DATA registry only (label => owning repo) — generic resources fan out
-# from it. Onboarding a product's public host = one line here, requested via an
-# @claude issue (same flow as governance/datastore-allocations.md).
+# from it. The registry data lives OUTSIDE the bare setup, in
+# materialized/consumers.tfvars (generated from consumer-repo declarations);
+# onboarding a product's public host adds an entry there, never in *.tf.
 #
 # Each entry gets: (a) a proxied CNAME to the shared tunnel (cloudflared
 # catch-all → Traefik → the consumer's namespace Ingress; ClusterIP, HTTP-only,
@@ -131,16 +132,18 @@ resource "cloudflare_record" "vanity" {
 # precedence trick as sealed_secrets_cert) because the app owns its own auth.
 # Admin UIs must NOT go in this registry — they get gated Access apps below.
 # ---------------------------------------------------------------------------
-locals {
-  # label (relative to prod subdomain) => owning consumer repo (documentation).
-  public_app_hosts = {
-    "keys"     = "izzywdev/FuzeKeys" # frontend — keys.prod
-    "api.keys" = "izzywdev/FuzeKeys" # API backend — api.keys.prod
-  }
+# BARE SETUP INVARIANT: this variable defaults to EMPTY and no consumer entry
+# may ever be inlined here. Consumer hosts are materialized into
+# materialized/consumers.tfvars (generated data, loaded via -var-file in CI) so
+# the infra-authored *.tf tree stays consumer-free at all times.
+variable "public_app_hosts" {
+  description = "Public consumer-app host registry: label (relative to prod subdomain) => owning repo. Populated ONLY via materialized/consumers.tfvars."
+  type        = map(string)
+  default     = {}
 }
 
 resource "cloudflare_record" "public_app" {
-  for_each = nonsensitive(local.cloudflare_enabled) ? local.public_app_hosts : {}
+  for_each = nonsensitive(local.cloudflare_enabled) ? var.public_app_hosts : {}
   zone_id  = var.cloudflare_zone_id
   name     = "${each.key}.${var.prod_subdomain}"
   value    = cloudflare_zero_trust_tunnel_cloudflared.fuzeinfra[0].cname
@@ -150,7 +153,7 @@ resource "cloudflare_record" "public_app" {
 }
 
 resource "cloudflare_zero_trust_access_application" "public_app" {
-  for_each             = nonsensitive(local.cloudflare_enabled) ? local.public_app_hosts : {}
+  for_each             = nonsensitive(local.cloudflare_enabled) ? var.public_app_hosts : {}
   account_id           = var.cloudflare_account_id
   name                 = "Public app ${each.key} (${each.value})"
   domain               = "${each.key}.${local.prod_domain}"
@@ -160,7 +163,7 @@ resource "cloudflare_zero_trust_access_application" "public_app" {
 }
 
 resource "cloudflare_zero_trust_access_policy" "public_app_bypass" {
-  for_each       = nonsensitive(local.cloudflare_enabled) ? local.public_app_hosts : {}
+  for_each       = nonsensitive(local.cloudflare_enabled) ? var.public_app_hosts : {}
   account_id     = var.cloudflare_account_id
   application_id = cloudflare_zero_trust_access_application.public_app[each.key].id
   name           = "Bypass — ${each.key} (${each.value} owns auth)"
