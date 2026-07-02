@@ -7,6 +7,10 @@
 # to argocd/cluster-config/** kubectl-applies it to the shared cluster via the
 # KUBE_CONFIG secret — SSH-free, no manual kubectl on prod.
 #
+# Also applies argocd/notifications/** (the argocd-notifications-cm) the same way
+# — the notifications controller hot-reloads the ConfigMap, so a commit to it
+# lands the trigger/template/subscription changes with no manual kubectl.
+#
 # This is the generic, reusable path for any future cluster bootstrap manifest
 # (repo-creds, image-pull creds, cluster settings). kubectl apply is idempotent,
 # so re-runs are safe. Sealed Secrets stay ciphertext in git; the in-cluster
@@ -20,7 +24,9 @@ name: apply-cluster-config
 on:
   push:
     branches: [main]
-    paths: ['argocd/cluster-config/**']
+    paths:
+      - 'argocd/cluster-config/**'
+      - 'argocd/notifications/**'
   workflow_dispatch: {}
 
 permissions:
@@ -46,3 +52,9 @@ jobs:
           kubectl apply -f argocd/cluster-config/
           echo "Applied argocd/cluster-config/ to the shared cluster."
           echo "SealedSecrets decrypt in-cluster; ArgoCD picks up repo-creds on its next repo access."
+
+      - name: Apply argocd/notifications
+        run: |
+          kubectl apply -f argocd/notifications/
+          echo "Applied argocd/notifications/ — the argocd-notifications controller"
+          echo "hot-reloads the ConfigMap; no restart needed."

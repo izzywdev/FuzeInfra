@@ -1,0 +1,57 @@
+# ===========================================================================
+# argo-deploy-notify
+# ===========================================================================
+# The SUCCESS half of the ArgoCD notification loop. ArgoCD Notifications
+# (argocd-notifications-cm, trigger on-deployed) fires a repository_dispatch of
+# type `argo-deployed` when an app's sync operation SUCCEEDS and it becomes
+# Healthy — i.e. a deploy actually finished and the pods are up. This workflow
+# sends a Telegram ✅ message so you know a deploy landed.
+#
+# Mirrors argo-outofsync-autofix.yml's 🔴 alert: the Telegram bot token stays in
+# GitHub secrets (TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID) — nothing extra is put
+# in-cluster. Fires once per synced revision (oncePer in the trigger), so it is
+# one message per shipped commit, not per periodic refresh.
+#
+# Required repo secrets: TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID.
+name: argo-deploy-notify
+
+on:
+  repository_dispatch:
+    types: [argo-deployed]
+
+permissions:
+  contents: read
+
+concurrency:
+  # De-dupe bursts per app (Argo can re-emit around a sync settling).
+  group: argo-deploy-notify-${{ github.event.client_payload.app }}
+  cancel-in-progress: false
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Telegram ✅ deploy notification
+        env:
+          TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          CHAT: ${{ secrets.TELEGRAM_CHAT_ID }}
+          APP: ${{ github.event.client_payload.app }}
+          SYNC: ${{ github.event.client_payload.sync }}
+          HEALTH: ${{ github.event.client_payload.health }}
+          REVISION: ${{ github.event.client_payload.revision }}
+          REPO: ${{ github.event.client_payload.repo }}
+        run: |
+          [ -z "$TOKEN" ] && { echo "::warning::TELEGRAM_BOT_TOKEN unset — skipping notification"; exit 0; }
+          # Validate the app name to a k8s-name charset before putting it in the
+          # Argo URL (same guard as the unhealthy path — untrusted dispatch input).
+          case "$APP" in
+            ''|*[!a-zA-Z0-9._-]*) echo "::warning::rejected app name: '$APP'"; APP_SAFE="app" ;;
+            *) APP_SAFE="$APP" ;;
+          esac
+          SHORT_REV="${REVISION:0:7}"
+          TEXT=$(printf '✅ ArgoCD deploy finished\nApp: %s\nsync=%s health=%s\nrevision=%s\nrepo=%s\nView: https://argocd.prod.fuzefront.com/applications/%s' \
+            "$APP" "$SYNC" "$HEALTH" "$SHORT_REV" "$REPO" "$APP_SAFE")
+          curl -s -X POST "https://api.telegram.org/bot${TOKEN}/sendMessage" \
+            --data-urlencode "chat_id=${CHAT}" \
+            --data-urlencode "text=${TEXT}" \
+            --data "disable_web_page_preview=true" >/dev/null && echo "telegram sent" || echo "::warning::telegram send failed"

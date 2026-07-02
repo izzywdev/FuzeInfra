@@ -1,10 +1,12 @@
 # =============================================================================
-# argocd-notifications-cm — fire a GitHub repository_dispatch when any app is
-# UNHEALTHY (OutOfSync, Degraded, or Unknown/ComparisonError). The GitHub
-# workflow (.github/workflows/argo-outofsync-autofix.yml) then does BOTH halves:
-# a Telegram 🔴 alert (link to Argo) AND a devops-engineer Claude auto-fix run.
-# Keeping Telegram in the workflow means the bot token stays in GitHub secrets
-# (TELEGRAM_*) — only a github token is needed in-cluster.
+# argocd-notifications-cm — fire a GitHub repository_dispatch on app state
+# changes. Two paths, both via the same webhook (Telegram token stays in GitHub
+# secrets — only a github token is needed in-cluster):
+#   • UNHEALTHY (OutOfSync / Degraded / Unknown-ComparisonError) → event_type
+#     argo-out-of-sync → argo-outofsync-autofix.yml: Telegram 🔴 alert + a
+#     devops-engineer Claude auto-fix run.
+#   • DEPLOYED  (sync Succeeded + Healthy) → event_type argo-deployed →
+#     argo-deploy-notify.yml: Telegram ✅ "deploy finished" message.
 #
 # Secret: argocd-notifications-secret must hold `github-token` (a PAT/OAuth token
 # with repo scope to POST .../dispatches).
@@ -54,7 +56,35 @@ data:
             }
           }
 
+  # ---- template: the SUCCESS dispatch body (green "deploy finished") -------
+  # Fires argo-deployed → .github/workflows/argo-deploy-notify.yml sends a
+  # Telegram ✅ message. Same webhook service + same GH-secret-only Telegram
+  # token model as the unhealthy path (nothing extra in-cluster). `revision` is
+  # the synced commit so the message can show what shipped.
+  template.app-deployed: |
+    webhook:
+      github-dispatch:
+        method: POST
+        body: |
+          {
+            "event_type": "argo-deployed",
+            "client_payload": {
+              "app": {{.app.metadata.name | toJson}},
+              "sync": {{.app.status.sync.status | toJson}},
+              "health": {{.app.status.health.status | toJson}},
+              "revision": {{.app.status.sync.revision | toJson}},
+              "repo": {{.app.spec.source.repoURL | toJson}}
+            }
+          }
+
   # ---- triggers: fire once per state transition (not on every refresh) -----
+  # Deployed: a sync operation SUCCEEDED and the app is Healthy — i.e. a deploy
+  # actually finished and the pods are up. oncePer the synced revision so it
+  # fires once per shipped commit, not on every periodic refresh.
+  trigger.on-deployed: |
+    - when: app.status.operationState.phase in ['Succeeded'] and app.status.health.status == 'Healthy'
+      oncePer: app.status.sync.revision
+      send: [app-deployed]
   # OutOfSync: live drifted from a renderable desired state.
   trigger.on-out-of-sync: |
     - when: app.status.sync.status == 'OutOfSync'
@@ -77,6 +107,7 @@ data:
     - recipients:
         - github-dispatch
       triggers:
+        - on-deployed
         - on-out-of-sync
         - on-sync-unknown
         - on-health-degraded
