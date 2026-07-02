@@ -58,26 +58,22 @@ jobs:
           title="CI failure: ${WF} on ${BR}"
 
           # Best-effort error tail from the failed steps (needs actions:read).
-          tail_log="$(gh run view "$RUN_ID" --repo "$REPO" --log-failed 2>/dev/null | tail -c 3500 || true)"
-          [ -z "$tail_log" ] && tail_log="(could not fetch failed-step log; open the run.)"
+          gh run view "$RUN_ID" --repo "$REPO" --log-failed 2>/dev/null | tail -c 3500 > /tmp/tail.log || true
+          [ -s /tmp/tail.log ] || printf '(could not fetch failed-step log; open the run URL.)' > /tmp/tail.log
 
-          body="$(cat <<EOF
-          @claude the deploy workflow **${WF}** failed on \`${BR}\` (event: \`${EVENT}\`).
-
-          Run: ${RUN_URL}
-
-          This is a **deploy-path** failure (not app CI). Diagnose from the run log. If it's a
-          credential/permission problem (e.g. a token missing a scope), that's an operator action —
-          say so plainly rather than attempting a code fix. Prod stays GitOps (edit repo → Argo).
-
-          <details><summary>failed-step log (tail)</summary>
-
-          \`\`\`
-          ${tail_log}
-          \`\`\`
-          </details>
-          EOF
-          )"
+          # Build the issue body with printf (robust; no YAML heredoc).
+          {
+            printf '@claude the deploy workflow **%s** failed on `%s` (event: `%s`).\n\n' "$WF" "$BR" "$EVENT"
+            printf 'Run: %s\n\n' "$RUN_URL"
+            printf 'This is a **deploy-path** failure (not app CI). Diagnose from the run log. '
+            printf 'If it is a credential/permission problem (e.g. a token missing a scope), that is an '
+            printf 'operator action — say so plainly rather than attempting a code fix. Prod stays GitOps '
+            printf '(edit repo -> Argo).\n\n'
+            printf '<details><summary>failed-step log (tail)</summary>\n\n'
+            printf '```\n'
+            cat /tmp/tail.log
+            printf '\n```\n</details>\n'
+          } > /tmp/body.md
 
           gh label create ci-failure --repo "$REPO" --color B60205 --description "Deploy workflow failure (self-heal triage)" 2>/dev/null || true
 
@@ -88,6 +84,6 @@ jobs:
             gh issue comment "$existing" --repo "$REPO" --body "Recurred: ${RUN_URL}"
             echo "Updated existing issue #$existing"
           else
-            gh issue create --repo "$REPO" --label ci-failure --title "$title" --body "$body"
+            gh issue create --repo "$REPO" --label ci-failure --title "$title" --body-file /tmp/body.md
             echo "Opened new ci-failure issue for $WF / $BR"
           fi
