@@ -111,6 +111,61 @@ resource "cloudflare_record" "vanity" {
   ttl      = 1
 }
 
+# ---------------------------------------------------------------------------
+# FuzeKeys — public app hosts (keys + api.keys under prod.fuzefront.com).
+#
+# FuzeKeys (izzywdev/FuzeKeys) runs in the `fuzekeys` namespace and serves a
+# public frontend (keys.prod.fuzefront.com) and API backend
+# (api.keys.prod.fuzefront.com). Both are proxied CNAMEs to the shared tunnel:
+# cloudflared's catch-all ingress_rule routes them to Traefik, which host-routes
+# to the fuzekeys-namespace Ingress declared in the FuzeKeys repo (ClusterIP,
+# HTTP-only, CF terminates edge TLS — matches the tunnel-only invariant).
+#
+# These labels fall UNDER *.prod.fuzefront.com, so the wildcard OTP Access app
+# below would gate them. The MVP exposes no admin UI and FuzeKeys manages its own
+# auth, so a more-specific bypass Access app per host exempts both from the OTP
+# wall (same precedence trick as sealed_secrets_cert), keeping the frontend and
+# API publicly reachable. When the pii-tokenizer/LiteLLM/Vault admin UIs land, a
+# follow-up adds gated apps in this file.
+# ---------------------------------------------------------------------------
+locals {
+  # Labels relative to the prod subdomain: keys.prod / api.keys.prod.fuzefront.com.
+  fuzekeys_hosts = ["keys", "api.keys"]
+}
+
+resource "cloudflare_record" "fuzekeys" {
+  for_each = nonsensitive(local.cloudflare_enabled) ? toset(local.fuzekeys_hosts) : toset([])
+  zone_id  = var.cloudflare_zone_id
+  name     = "${each.value}.${var.prod_subdomain}"
+  value    = cloudflare_zero_trust_tunnel_cloudflared.fuzeinfra[0].cname
+  type     = "CNAME"
+  proxied  = true
+  ttl      = 1
+}
+
+resource "cloudflare_zero_trust_access_application" "fuzekeys_public" {
+  for_each             = nonsensitive(local.cloudflare_enabled) ? toset(local.fuzekeys_hosts) : toset([])
+  account_id           = var.cloudflare_account_id
+  name                 = "FuzeKeys ${each.value} (public)"
+  domain               = "${each.value}.${local.prod_domain}"
+  type                 = "self_hosted"
+  session_duration     = "0s"
+  app_launcher_visible = false
+}
+
+resource "cloudflare_zero_trust_access_policy" "fuzekeys_public_bypass" {
+  for_each       = nonsensitive(local.cloudflare_enabled) ? toset(local.fuzekeys_hosts) : toset([])
+  account_id     = var.cloudflare_account_id
+  application_id = cloudflare_zero_trust_access_application.fuzekeys_public[each.value].id
+  name           = "Bypass — FuzeKeys ${each.value} (app owns auth)"
+  precedence     = 1
+  decision       = "bypass"
+
+  include {
+    everyone = true
+  }
+}
+
 # Cloudflare Access: protect *.prod.fuzefront.com with email OTP.
 # The apex prod.fuzefront.com is NOT matched by *.prod — it stays public.
 resource "cloudflare_zero_trust_access_application" "admin_services" {
