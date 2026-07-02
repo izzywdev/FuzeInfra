@@ -1,17 +1,16 @@
---
-name: cluster-query
-
-# Self-service READ-ONLY introspection of the prod cluster for agent sessions.
-# Dispatch with a kubectl read command (and/or a public URL to curl); read the
-# result from the job log. Replaces the fragile human/Cowork relay for "what's
-# happening in the cluster" without handing any session the raw kubeconfig.
+# cluster-query — self-service READ-ONLY introspection of the prod cluster for
+# agent sessions. Dispatch with a kubectl read command (and/or a public URL to
+# curl); read the result from the job log. Replaces the fragile human/Cowork
+# relay for "what's happening in the cluster" without handing any session the
+# raw kubeconfig.
 #
 # SECURITY: only read verbs are allowed; anything mutating (apply/delete/edit/
 # patch/replace/exec/attach/cp/scale/rollout/annotate/label/drain/cordon/
-# proxy/port-forward/run/create/set/patch) is rejected before kubectl runs.
+# proxy/port-forward/run/create/set) is rejected before kubectl runs.
 #
 # Secret: KUBE_CONFIG (base64 kubeconfig) — same secret used by
 # apply-cluster-config.yml / argo-outofsync-autofix.yml.
+name: cluster-query
 
 on:
   workflow_dispatch:
@@ -64,7 +63,7 @@ jobs:
               echo "::error::Rejected non-read verb: '$verb'. Allowed: get describe logs top events version api-resources api-versions explain cluster-info config."
               exit 1;;
           esac
-          # Extra belt-and-suspenders: reject dangerous substrings.
+          # Belt-and-suspenders: reject dangerous subcommands anywhere in args.
           case " $ARGS " in
             *" exec "*|*" attach "*|*" cp "*|*" port-forward "*|*" proxy "*|*" run "*|*" delete "*|*" apply "*|*" edit "*|*" patch "*|*" replace "*|*" scale "*|*" rollout "*|*" cordon "*|*" drain "*|*" annotate "*|*" label "*|*" set "*|*" create "*)
               echo "::error::Rejected: args contain a mutating/exec subcommand."; exit 1;;
