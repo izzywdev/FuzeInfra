@@ -1,0 +1,87 @@
+--
+name: cluster-query
+
+# Self-service READ-ONLY introspection of the prod cluster for agent sessions.
+# Dispatch with a kubectl read command (and/or a public URL to curl); read the
+# result from the job log. Replaces the fragile human/Cowork relay for "what's
+# happening in the cluster" without handing any session the raw kubeconfig.
+#
+# SECURITY: only read verbs are allowed; anything mutating (apply/delete/edit/
+# patch/replace/exec/attach/cp/scale/rollout/annotate/label/drain/cordon/
+# proxy/port-forward/run/create/set/patch) is rejected before kubectl runs.
+#
+# Secret: KUBE_CONFIG (base64 kubeconfig) — same secret used by
+# apply-cluster-config.yml / argo-outofsync-autofix.yml.
+
+on:
+  workflow_dispatch:
+    inputs:
+      kubectl_args:
+        description: 'kubectl args, e.g. "-n mendys-prod get pods -o wide". First non-flag token must be a read verb.'
+        required: false
+        default: 'get nodes'
+      curl_url:
+        description: 'Optional https URL to probe (only *.mendysrobotics.com / *.prod.fuzefront.com).'
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cluster-query
+  cancel-in-progress: false
+
+jobs:
+  query:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: azure/setup-kubectl@776406bce94f63e41d621b960d78ee25c8b76ede # v4
+
+      - name: Configure kubectl
+        env:
+          KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
+        run: |
+          if [ -z "$KUBE_CONFIG" ]; then echo "::error::KUBE_CONFIG unset"; exit 1; fi
+          mkdir -p "$HOME/.kube"
+          printf '%s' "$KUBE_CONFIG" | base64 -d > "$HOME/.kube/config"
+          chmod 600 "$HOME/.kube/config"
+          echo "KUBECONFIG=$HOME/.kube/config" >> "$GITHUB_ENV"
+
+      - name: Run read-only kubectl
+        env:
+          ARGS: ${{ github.event.inputs.kubectl_args }}
+        run: |
+          set -u
+          [ -z "${ARGS// }" ] && { echo "no kubectl_args"; exit 0; }
+          # First non-flag token is the verb.
+          verb=""
+          for tok in $ARGS; do case "$tok" in -*) ;; *) verb="$tok"; break;; esac; done
+          case "$verb" in
+            get|describe|logs|top|events|version|api-resources|api-versions|explain|cluster-info|config)
+              ;;
+            *)
+              echo "::error::Rejected non-read verb: '$verb'. Allowed: get describe logs top events version api-resources api-versions explain cluster-info config."
+              exit 1;;
+          esac
+          # Extra belt-and-suspenders: reject dangerous substrings.
+          case " $ARGS " in
+            *" exec "*|*" attach "*|*" cp "*|*" port-forward "*|*" proxy "*|*" run "*|*" delete "*|*" apply "*|*" edit "*|*" patch "*|*" replace "*|*" scale "*|*" rollout "*|*" cordon "*|*" drain "*|*" annotate "*|*" label "*|*" set "*|*" create "*)
+              echo "::error::Rejected: args contain a mutating/exec subcommand."; exit 1;;
+          esac
+          echo "### kubectl $ARGS"
+          # shellcheck disable=SC2086
+          kubectl $ARGS 2>&1 | head -c 200000
+
+      - name: Probe public URL
+        if: ${{ github.event.inputs.curl_url != '' }}
+        env:
+          URL: ${{ github.event.inputs.curl_url }}
+        run: |
+          case "$URL" in
+            https://*.mendysrobotics.com|https://*.mendysrobotics.com/*|https://*.prod.fuzefront.com|https://*.prod.fuzefront.com/*)
+              echo "### curl -sSIL $URL"
+              curl -sSIL --max-time 20 "$URL" 2>&1 | head -c 20000;;
+            *)
+              echo "::error::URL not allowlisted (only *.mendysrobotics.com / *.prod.fuzefront.com): $URL"; exit 1;;
+          esac
