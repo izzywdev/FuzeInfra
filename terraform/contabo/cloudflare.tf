@@ -62,10 +62,10 @@ resource "cloudflare_zero_trust_tunnel_cloudflared_config" "fuzeinfra" {
       hostname = "argocd.${local.prod_domain}"
       service  = "http://argocd-server.argocd:80"
     }
-    # Generic catch-all: every other hostname → Traefik, which host-routes by
+    # Generic catch-all: every other hostname �� Traefik, which host-routes by
     # Ingress. This is domain-agnostic: any product on its own domain (its own
     # apex/subdomains) just CNAMEs that host to THIS tunnel and declares a Traefik
-    # Ingress in its OWN repo — no per-product hostname is enumerated here.
+    # Ingress in its OWN repo ��� no per-product hostname is enumerated here.
     # Traefik returns 404 for unconfigured hosts, so this exposes nothing new.
     # CF Access still gates *.prod.fuzefront.com at the edge (see below); other
     # domains are public by default (Authentik / the app owns their auth).
@@ -112,52 +112,58 @@ resource "cloudflare_record" "vanity" {
 }
 
 # ---------------------------------------------------------------------------
-# FuzeKeys — public app hosts (keys + api.keys under prod.fuzefront.com).
+# Public consumer-app host registry (labels under ${var.prod_subdomain}).
 #
-# FuzeKeys (izzywdev/FuzeKeys) runs in the `fuzekeys` namespace and serves a
-# public frontend (keys.prod.fuzefront.com) and API backend
-# (api.keys.prod.fuzefront.com). Both are proxied CNAMEs to the shared tunnel:
-# cloudflared's catch-all ingress_rule routes them to Traefik, which host-routes
-# to the fuzekeys-namespace Ingress declared in the FuzeKeys repo (ClusterIP,
-# HTTP-only, CF terminates edge TLS — matches the tunnel-only invariant).
+# GOVERNANCE (docs/CONSUMER_ONBOARDING_SHARED_CLUSTER.md §1): FuzeInfra never
+# hard-codes product-specific RESOURCES. Products with their own Cloudflare zone
+# own their DNS via modules/cloudflare-dns from their own repo. But labels under
+# the shared prod zone are different: they fall UNDER the *.prod wildcard OTP
+# Access wall defined below, and a consumer must NOT be able to punch a bypass
+# hole in FuzeInfra's wall from its own repo. So for shared-zone hosts FuzeInfra
+# holds a DATA registry only (label => owning repo) — generic resources fan out
+# from it. Onboarding a product's public host = one line here, requested via an
+# @claude issue (same flow as governance/datastore-allocations.md).
 #
-# These labels fall UNDER *.prod.fuzefront.com, so the wildcard OTP Access app
-# below would gate them. The MVP exposes no admin UI and FuzeKeys manages its own
-# auth, so a more-specific bypass Access app per host exempts both from the OTP
-# wall (same precedence trick as sealed_secrets_cert), keeping the frontend and
-# API publicly reachable. When the pii-tokenizer/LiteLLM/Vault admin UIs land, a
-# follow-up adds gated apps in this file.
+# Each entry gets: (a) a proxied CNAME to the shared tunnel (cloudflared
+# catch-all → Traefik → the consumer's namespace Ingress; ClusterIP, HTTP-only,
+# CF terminates edge TLS — tunnel-only invariant preserved), and (b) a
+# more-specific bypass Access app exempting it from the OTP wildcard (same
+# precedence trick as sealed_secrets_cert) because the app owns its own auth.
+# Admin UIs must NOT go in this registry — they get gated Access apps below.
 # ---------------------------------------------------------------------------
 locals {
-  # Labels relative to the prod subdomain: keys.prod / api.keys.prod.fuzefront.com.
-  fuzekeys_hosts = ["keys", "api.keys"]
+  # label (relative to prod subdomain) => owning consumer repo (documentation).
+  public_app_hosts = {
+    "keys"     = "izzywdev/FuzeKeys" # frontend — keys.prod
+    "api.keys" = "izzywdev/FuzeKeys" # API backend — api.keys.prod
+  }
 }
 
-resource "cloudflare_record" "fuzekeys" {
-  for_each = nonsensitive(local.cloudflare_enabled) ? toset(local.fuzekeys_hosts) : toset([])
+resource "cloudflare_record" "public_app" {
+  for_each = nonsensitive(local.cloudflare_enabled) ? local.public_app_hosts : {}
   zone_id  = var.cloudflare_zone_id
-  name     = "${each.value}.${var.prod_subdomain}"
+  name     = "${each.key}.${var.prod_subdomain}"
   value    = cloudflare_zero_trust_tunnel_cloudflared.fuzeinfra[0].cname
   type     = "CNAME"
   proxied  = true
   ttl      = 1
 }
 
-resource "cloudflare_zero_trust_access_application" "fuzekeys_public" {
-  for_each             = nonsensitive(local.cloudflare_enabled) ? toset(local.fuzekeys_hosts) : toset([])
+resource "cloudflare_zero_trust_access_application" "public_app" {
+  for_each             = nonsensitive(local.cloudflare_enabled) ? local.public_app_hosts : {}
   account_id           = var.cloudflare_account_id
-  name                 = "FuzeKeys ${each.value} (public)"
-  domain               = "${each.value}.${local.prod_domain}"
+  name                 = "Public app ${each.key} (${each.value})"
+  domain               = "${each.key}.${local.prod_domain}"
   type                 = "self_hosted"
   session_duration     = "0s"
   app_launcher_visible = false
 }
 
-resource "cloudflare_zero_trust_access_policy" "fuzekeys_public_bypass" {
-  for_each       = nonsensitive(local.cloudflare_enabled) ? toset(local.fuzekeys_hosts) : toset([])
+resource "cloudflare_zero_trust_access_policy" "public_app_bypass" {
+  for_each       = nonsensitive(local.cloudflare_enabled) ? local.public_app_hosts : {}
   account_id     = var.cloudflare_account_id
-  application_id = cloudflare_zero_trust_access_application.fuzekeys_public[each.value].id
-  name           = "Bypass — FuzeKeys ${each.value} (app owns auth)"
+  application_id = cloudflare_zero_trust_access_application.public_app[each.key].id
+  name           = "Bypass — ${each.key} (${each.value} owns auth)"
   precedence     = 1
   decision       = "bypass"
 
@@ -336,7 +342,7 @@ resource "cloudflare_zero_trust_access_policy" "sealed_secrets_cert_bypass" {
 # producing "Error loading: table" on every dashboard open.
 #
 # With caching: first request per file hits the tunnel (single fetch); all
-# subsequent requests are served from the CF edge — no tunnel involved.
+# subsequent requests are served from the CF edge �� no tunnel involved.
 resource "cloudflare_ruleset" "neo4j_browser_cache" {
   count   = local.cloudflare_enabled ? 1 : 0
   zone_id = var.cloudflare_zone_id
