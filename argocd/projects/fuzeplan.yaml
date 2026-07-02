@@ -1,0 +1,39 @@
+# Argo CD AppProject for the FuzePlan consumer — OWNED BY FuzeInfra.
+#
+# ISOLATION BOUNDARY (FuzeInfra#99, mirrors argocd/projects/fuzefront.yaml):
+# consumer apps must NOT be able to deploy into FuzeInfra's own `fuzeinfra`
+# namespace. A consumer that self-granted the `fuzeinfra` namespace could
+# redeploy a *duplicate* FuzeInfra (split-brain datastores, control-plane
+# saturation, cluster-wide 502 — see FuzeFront#95 / FuzeInfra#93).
+#
+# GOVERNANCE RULE: FuzeInfra owns AppProjects (the destination/security boundary);
+# consumers only create Applications WITHIN their assigned, restricted project.
+# FuzePlan's Argo Application (in izzywdev/FuzePlan deploy/argocd/) must set
+# `spec.project: fuzeplan` and target only the `fuzeplan` namespace. Consumers
+# consume FuzeInfra services via in-cluster service DNS (cross-namespace
+# networking) — that needs NO Argo destination into `fuzeinfra`.
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: fuzeplan
+  namespace: argocd
+spec:
+  description: FuzePlan product (consumer of FuzeInfra) — may deploy ONLY into its own namespace.
+  sourceRepos:
+    - https://github.com/izzywdev/FuzePlan.git
+  destinations:
+    # The product's workloads.
+    - namespace: fuzeplan
+      server: https://kubernetes.default.svc
+    # The app-of-apps creates child Application objects here.
+    - namespace: argocd
+      server: https://kubernetes.default.svc
+    # NOTE: `fuzeinfra` is deliberately NOT a destination — that is FuzeInfra's
+    # namespace. A consumer that needs an infra service consumes it via DNS, it
+    # does not deploy into it.
+  clusterResourceWhitelist:
+    - group: "*"
+      kind: "*"
+  namespaceResourceWhitelist:
+    - group: "*"
+      kind: "*"
