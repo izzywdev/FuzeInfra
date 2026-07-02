@@ -46,7 +46,15 @@ jobs:
     steps:
       - name: Open or update an idempotent @claude triage issue
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Use the PAT, not the default GITHUB_TOKEN. GitHub deliberately does
+          # NOT re-dispatch workflow events (here: `issues: opened`) for actions
+          # performed with GITHUB_TOKEN — so an issue created with it would never
+          # wake the @claude responder (claude.yml `on: issues`), leaving the
+          # triage issue sitting unactioned. The PAT makes the mention cascade.
+          # (Same reason argo-outofsync-autofix.yml opens @claude issues with
+          # secrets.GH_TOKEN.) Fall back to GITHUB_TOKEN so the issue is still
+          # filed even if the PAT is unset — it just won't auto-summon @claude.
+          GH_TOKEN: ${{ secrets.GH_TOKEN || secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
           WF: ${{ github.event.workflow_run.name }}
           BR: ${{ github.event.workflow_run.head_branch }}
