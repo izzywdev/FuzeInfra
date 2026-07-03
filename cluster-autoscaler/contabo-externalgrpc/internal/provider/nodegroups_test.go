@@ -2,6 +2,7 @@ package provider_test
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/izzywdev/fuzeinfra/contabo-externalgrpc/internal/contabo"
@@ -55,4 +56,34 @@ func TestNodeGroupForNode_BaselineIsForeign(t *testing.T) {
 	if resp2.NodeGroup.Id != "elastic" {
 		t.Fatalf("elastic node group, got %q", resp2.NodeGroup.Id)
 	}
+}
+
+func TestNodeGroupForNode_ListErrorPropagates(t *testing.T) {
+	fc := &fakeCloudWithError{listErr: errors.New("transient API error")}
+	s := provider.New(provider.Config{ElasticTag: "fuzeinfra-elastic", MinSize: 0, MaxSize: 2}, fc)
+
+	resp, err := s.NodeGroupForNode(context.Background(), &protos.NodeGroupForNodeRequest{Node: &protos.ExternalGrpcNode{Name: "any-node"}})
+	if err == nil {
+		t.Fatalf("want error, got nil")
+	}
+	if resp != nil {
+		t.Fatalf("want nil response on error, got %v", resp)
+	}
+}
+
+// fakeCloudWithError is a test double that allows error injection in ListByTag.
+type fakeCloudWithError struct {
+	listErr error
+}
+
+func (f *fakeCloudWithError) ListByTag(_ context.Context, _ string) ([]contabo.Instance, error) {
+	return nil, f.listErr
+}
+
+func (f *fakeCloudWithError) Create(_ context.Context, req contabo.CreateReq) (contabo.Instance, error) {
+	return contabo.Instance{}, errors.New("not implemented in test double")
+}
+
+func (f *fakeCloudWithError) Delete(_ context.Context, id int64) error {
+	return errors.New("not implemented in test double")
 }

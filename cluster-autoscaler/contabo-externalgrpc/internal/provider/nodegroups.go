@@ -2,6 +2,7 @@ package provider
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/izzywdev/fuzeinfra/contabo-externalgrpc/internal/protos"
 )
@@ -32,8 +33,7 @@ func (s *Server) NodeGroupForNode(ctx context.Context, req *protos.NodeGroupForN
 	// Fetch elastic instances and check if the node matches any of them by name.
 	instances, err := s.cloud.ListByTag(ctx, s.cfg.ElasticTag)
 	if err != nil {
-		// On error, return an empty group (node is not recognized as elastic).
-		return &protos.NodeGroupForNodeResponse{NodeGroup: &protos.NodeGroup{}}, nil
+		return nil, fmt.Errorf("NodeGroupForNode: listing elastic instances: %w", err)
 	}
 
 	// Check if the node's name matches any elastic instance name.
