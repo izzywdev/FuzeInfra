@@ -25,4 +25,10 @@ func TestListByTag(t *testing.T) {
 	if len(got) != 1 || got[0].ID != 42 || got[0].Name != "fuzeinfra-elastic-0" {
 		t.Fatalf("unexpected: %+v", got)
 	}
+	if got[0].PrivateIP != "10.0.0.5" {
+		t.Fatalf("expected PrivateIP=10.0.0.5, got %s", got[0].PrivateIP)
+	}
+	if got[0].Status != "running" {
+		t.Fatalf("expected Status=running, got %s", got[0].Status)
+	}
 }

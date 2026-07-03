@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sync"
 	"time"
 )
 
@@ -52,6 +53,7 @@ type Client interface {
 type HTTPClient struct {
 	cfg        Config
 	hc         *http.Client
+	mu         sync.Mutex
 	tok        string
 	tokExpiry  time.Time
 }
@@ -66,6 +68,9 @@ func NewClient(cfg Config) *HTTPClient {
 
 // token returns a valid OAuth2 bearer token, refreshing if necessary.
 func (c *HTTPClient) token(ctx context.Context) (string, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
 	// Return cached token if not expired
 	if c.tok != "" && time.Now().Before(c.tokExpiry) {
 		return c.tok, nil
@@ -77,8 +82,24 @@ func (c *HTTPClient) token(ctx context.Context) (string, error) {
 		authURL = c.cfg.BaseURL
 	}
 
+	// Build request body with real credentials
+	credBody := struct {
+		ClientID     string `json:"clientId"`
+		ClientSecret string `json:"clientSecret"`
+		Username     string `json:"username"`
+		Password     string `json:"password"`
+	}{
+		ClientID:     c.cfg.ClientID,
+		ClientSecret: c.cfg.ClientSecret,
+		Username:     c.cfg.User,
+		Password:     c.cfg.Pass,
+	}
+	reqBody, err := json.Marshal(credBody)
+	if err != nil {
+		return "", fmt.Errorf("marshal token request: %w", err)
+	}
+
 	// POST password grant to /oauth/token
-	reqBody := []byte(`{"clientId":"","clientSecret":"","username":"","password":""}`)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, authURL+"/oauth/token", bytes.NewReader(reqBody))
 	if err != nil {
 		return "", fmt.Errorf("create token request: %w", err)
@@ -106,8 +127,12 @@ func (c *HTTPClient) token(ctx context.Context) (string, error) {
 	}
 
 	c.tok = result.AccessToken
-	// Cache until 10 seconds before expiry
-	c.tokExpiry = time.Now().Add(time.Duration(result.ExpiresIn-10) * time.Second)
+	// Cache until 10 seconds before expiry (or use full expiry if <= 10 seconds)
+	ttl := result.ExpiresIn
+	if ttl > 10 {
+		ttl -= 10
+	}
+	c.tokExpiry = time.Now().Add(time.Duration(ttl) * time.Second)
 
 	return c.tok, nil
 }
