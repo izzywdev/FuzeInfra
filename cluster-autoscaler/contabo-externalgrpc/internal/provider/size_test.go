@@ -82,9 +82,9 @@ func TestNodeGroupNodes_ReturnsInstancesWithCorrectMapping(t *testing.T) {
 
 func TestNodeGroupNodes_StateMapping(t *testing.T) {
 	tests := []struct {
-		name           string
-		contaboStatus  string
-		protoState     protos.InstanceStatus_InstanceState
+		name          string
+		contaboStatus string
+		protoState    protos.InstanceStatus_InstanceState
 	}{
 		{"provisioning", "provisioning", protos.InstanceStatus_instanceCreating},
 		{"installing", "installing", protos.InstanceStatus_instanceCreating},

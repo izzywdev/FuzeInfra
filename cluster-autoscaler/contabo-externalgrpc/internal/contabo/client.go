@@ -55,11 +55,11 @@ type Client interface {
 
 // HTTPClient implements the Client interface.
 type HTTPClient struct {
-	cfg        Config
-	hc         *http.Client
-	mu         sync.Mutex
-	tok        string
-	tokExpiry  time.Time
+	cfg       Config
+	hc        *http.Client
+	mu        sync.Mutex
+	tok       string
+	tokExpiry time.Time
 }
 
 // NewClient creates a new Contabo API client.
@@ -187,10 +187,10 @@ func (c *HTTPClient) ListByTag(ctx context.Context, tag string) ([]Instance, err
 
 	var result struct {
 		Data []struct {
-			InstanceID int64 `json:"instanceId"`
+			InstanceID  int64  `json:"instanceId"`
 			DisplayName string `json:"displayName"`
-			Status     string `json:"status"`
-			Addresses  struct {
+			Status      string `json:"status"`
+			Addresses   struct {
 				Private []struct {
 					IP string `json:"ip"`
 				} `json:"private"`
@@ -245,12 +245,12 @@ func (c *HTTPClient) Create(ctx context.Context, req CreateReq) (Instance, error
 	doCreate := func(tok string) (Instance, bool, error) {
 		// Prepare the request body
 		createBody := struct {
-			DisplayName string `json:"displayName"`
-			ImageID     string `json:"imageId"`
-			ProductID   string `json:"productId"`
-			Region      string `json:"region"`
+			DisplayName string  `json:"displayName"`
+			ImageID     string  `json:"imageId"`
+			ProductID   string  `json:"productId"`
+			Region      string  `json:"region"`
 			SSHKeys     []int64 `json:"sshKeys"`
-			UserData    string `json:"userData"`
+			UserData    string  `json:"userData"`
 		}{
 			DisplayName: req.Name,
 			ImageID:     req.ImageID,
