@@ -1,0 +1,13 @@
+The files in this directory are VENDORED from the Kubernetes Autoscaler project:
+
+  Source: https://github.com/kubernetes/autoscaler
+  Path:   cluster-autoscaler/cloudprovider/externalgrpc/protos/
+  Branch: cluster-autoscaler-release-1.30
+  License: Apache License 2.0 (c) The Kubernetes Authors
+
+Files:
+  - externalgrpc.proto        (unmodified)
+  - externalgrpc.pb.go        (generated; only the `package` clause was changed
+  - externalgrpc_grpc.pb.go    from `externalgrpc` to `protos` for local import)
+
+No functional code was modified. See each file's retained Apache-2.0 header.
