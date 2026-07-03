@@ -37,9 +37,12 @@ func TestCreateAndDelete(t *testing.T) {
 	var created, deleted bool
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case r.Method == "POST" && strings.Contains(r.URL.Path, "/instances"):
+		case r.Method == "POST" && r.URL.Path == "/v1/compute/instances":
 			created = true
 			w.Write([]byte(`{"data":[{"instanceId":99,"displayName":"fuzeinfra-elastic-1","status":"provisioning"}]}`))
+		case r.Method == "POST" && strings.Contains(r.URL.Path, "/tag-assignments"):
+			// Tag assignment endpoint
+			w.WriteHeader(200)
 		case r.Method == "DELETE" && strings.Contains(r.URL.Path, "/instances/99"):
 			deleted = true
 			w.WriteHeader(204)

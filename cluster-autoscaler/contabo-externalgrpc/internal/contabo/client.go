@@ -3,11 +3,14 @@ package contabo
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"sync"
 	"time"
@@ -75,6 +78,16 @@ func (c *HTTPClient) invalidateToken() {
 	c.tokExpiry = time.Time{}
 }
 
+// newRequestID generates a unique request ID for tracing.
+func newRequestID() string {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		// Fallback: on error, use a timestamp-free counter (but crypto/rand effectively never fails)
+		return fmt.Sprintf("req-%d", time.Now().UnixNano())
+	}
+	return hex.EncodeToString(b)
+}
+
 // token returns a valid OAuth2 bearer token, refreshing if necessary.
 func (c *HTTPClient) token(ctx context.Context) (string, error) {
 	c.mu.Lock()
@@ -114,7 +127,7 @@ func (c *HTTPClient) token(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("create token request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("x-request-id", "auth-token")
+	req.Header.Set("x-request-id", newRequestID())
 
 	resp, err := c.hc.Do(req)
 	if err != nil {
@@ -159,7 +172,7 @@ func (c *HTTPClient) ListByTag(ctx context.Context, tag string) ([]Instance, err
 		return nil, fmt.Errorf("create instances request: %w", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+tok)
-	req.Header.Set("x-request-id", "list-instances")
+	req.Header.Set("x-request-id", newRequestID())
 
 	resp, err := c.hc.Do(req)
 	if err != nil {
@@ -229,7 +242,7 @@ func (c *HTTPClient) ListByTag(ctx context.Context, tag string) ([]Instance, err
 // Create creates a new instance.
 func (c *HTTPClient) Create(ctx context.Context, req CreateReq) (Instance, error) {
 	// Helper to perform the actual create request
-	doCreate := func(tok string) (Instance, error, bool) {
+	doCreate := func(tok string) (Instance, bool, error) {
 		// Prepare the request body
 		createBody := struct {
 			DisplayName string `json:"displayName"`
@@ -249,32 +262,32 @@ func (c *HTTPClient) Create(ctx context.Context, req CreateReq) (Instance, error
 
 		reqBodyBytes, err := json.Marshal(createBody)
 		if err != nil {
-			return Instance{}, fmt.Errorf("marshal create request: %w", err), false
+			return Instance{}, false, fmt.Errorf("marshal create request: %w", err)
 		}
 
 		// POST /v1/compute/instances
 		httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.cfg.BaseURL+"/v1/compute/instances", bytes.NewReader(reqBodyBytes))
 		if err != nil {
-			return Instance{}, fmt.Errorf("create create request: %w", err), false
+			return Instance{}, false, fmt.Errorf("create create request: %w", err)
 		}
 		httpReq.Header.Set("Authorization", "Bearer "+tok)
 		httpReq.Header.Set("Content-Type", "application/json")
-		httpReq.Header.Set("x-request-id", "create-instance")
+		httpReq.Header.Set("x-request-id", newRequestID())
 
 		resp, err := c.hc.Do(httpReq)
 		if err != nil {
-			return Instance{}, fmt.Errorf("create request failed: %w", err), false
+			return Instance{}, false, fmt.Errorf("create request failed: %w", err)
 		}
 		defer resp.Body.Close()
 
 		// On 401, signal to retry with a fresh token
 		if resp.StatusCode == http.StatusUnauthorized {
-			return Instance{}, errors.New("unauthorized"), true
+			return Instance{}, true, errors.New("unauthorized")
 		}
 
 		if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
 			body, _ := io.ReadAll(resp.Body)
-			return Instance{}, fmt.Errorf("create request failed with status %d: %s", resp.StatusCode, string(body)), false
+			return Instance{}, false, fmt.Errorf("create request failed with status %d: %s", resp.StatusCode, string(body))
 		}
 
 		var result struct {
@@ -285,11 +298,11 @@ func (c *HTTPClient) Create(ctx context.Context, req CreateReq) (Instance, error
 			} `json:"data"`
 		}
 		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-			return Instance{}, fmt.Errorf("decode create response: %w", err), false
+			return Instance{}, false, fmt.Errorf("decode create response: %w", err)
 		}
 
 		if len(result.Data) == 0 {
-			return Instance{}, errors.New("create response contains no instance data"), false
+			return Instance{}, false, errors.New("create response contains no instance data")
 		}
 
 		inst := result.Data[0]
@@ -299,7 +312,7 @@ func (c *HTTPClient) Create(ctx context.Context, req CreateReq) (Instance, error
 			tok, err := c.token(ctx)
 			if err != nil {
 				// Log but don't fail if tag assignment fails
-				fmt.Printf("warning: failed to refresh token for tag assignment: %v\n", err)
+				log.Printf("warning: failed to refresh token for tag assignment: %v", err)
 			} else {
 				// POST /v1/compute/instances/{id}/tag-assignments
 				tagBody := struct {
@@ -309,26 +322,26 @@ func (c *HTTPClient) Create(ctx context.Context, req CreateReq) (Instance, error
 				}
 				tagBodyBytes, err := json.Marshal(tagBody)
 				if err != nil {
-					fmt.Printf("warning: failed to marshal tag request: %v\n", err)
+					log.Printf("warning: failed to marshal tag request: %v", err)
 				} else {
 					tagReq, err := http.NewRequestWithContext(ctx, http.MethodPost,
 						fmt.Sprintf("%s/v1/compute/instances/%d/tag-assignments", c.cfg.BaseURL, inst.InstanceID),
 						bytes.NewReader(tagBodyBytes))
 					if err != nil {
-						fmt.Printf("warning: failed to create tag request: %v\n", err)
+						log.Printf("warning: failed to create tag request: %v", err)
 					} else {
 						tagReq.Header.Set("Authorization", "Bearer "+tok)
 						tagReq.Header.Set("Content-Type", "application/json")
-						tagReq.Header.Set("x-request-id", "assign-tags")
+						tagReq.Header.Set("x-request-id", newRequestID())
 						tagResp, err := c.hc.Do(tagReq)
 						if err != nil {
-							fmt.Printf("warning: tag assignment request failed: %v\n", err)
+							log.Printf("warning: tag assignment request failed: %v", err)
 						} else {
-							defer tagResp.Body.Close()
 							if tagResp.StatusCode < 200 || tagResp.StatusCode >= 300 {
 								body, _ := io.ReadAll(tagResp.Body)
-								fmt.Printf("warning: tag assignment failed with status %d: %s\n", tagResp.StatusCode, string(body))
+								log.Printf("warning: tag assignment failed with status %d: %s", tagResp.StatusCode, string(body))
 							}
+							tagResp.Body.Close()
 						}
 					}
 				}
@@ -340,7 +353,7 @@ func (c *HTTPClient) Create(ctx context.Context, req CreateReq) (Instance, error
 			Name:   inst.DisplayName,
 			Status: inst.Status,
 			Tags:   req.Tags,
-		}, nil, false
+		}, false, nil
 	}
 
 	// First attempt
@@ -349,7 +362,7 @@ func (c *HTTPClient) Create(ctx context.Context, req CreateReq) (Instance, error
 		return Instance{}, fmt.Errorf("get token: %w", err)
 	}
 
-	inst, err, shouldRetry := doCreate(tok)
+	inst, shouldRetry, err := doCreate(tok)
 	if !shouldRetry {
 		return inst, err
 	}
@@ -361,41 +374,41 @@ func (c *HTTPClient) Create(ctx context.Context, req CreateReq) (Instance, error
 		return Instance{}, fmt.Errorf("get token (retry): %w", err)
 	}
 
-	inst, err, _ = doCreate(tok)
+	inst, _, err = doCreate(tok)
 	return inst, err
 }
 
 // Delete deletes an instance.
 func (c *HTTPClient) Delete(ctx context.Context, id int64) error {
 	// Helper to perform the actual delete request
-	doDelete := func(tok string) (error, bool) {
+	doDelete := func(tok string) (bool, error) {
 		// DELETE /v1/compute/instances/{id}
 		req, err := http.NewRequestWithContext(ctx, http.MethodDelete,
 			fmt.Sprintf("%s/v1/compute/instances/%d", c.cfg.BaseURL, id), nil)
 		if err != nil {
-			return fmt.Errorf("create delete request: %w", err), false
+			return false, fmt.Errorf("create delete request: %w", err)
 		}
 		req.Header.Set("Authorization", "Bearer "+tok)
-		req.Header.Set("x-request-id", "delete-instance")
+		req.Header.Set("x-request-id", newRequestID())
 
 		resp, err := c.hc.Do(req)
 		if err != nil {
-			return fmt.Errorf("delete request failed: %w", err), false
+			return false, fmt.Errorf("delete request failed: %w", err)
 		}
 		defer resp.Body.Close()
 
 		// On 401, signal to retry with a fresh token
 		if resp.StatusCode == http.StatusUnauthorized {
-			return errors.New("unauthorized"), true
+			return true, errors.New("unauthorized")
 		}
 
 		// Accept both 200 and 204 as success
 		if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
 			body, _ := io.ReadAll(resp.Body)
-			return fmt.Errorf("delete request failed with status %d: %s", resp.StatusCode, string(body)), false
+			return false, fmt.Errorf("delete request failed with status %d: %s", resp.StatusCode, string(body))
 		}
 
-		return nil, false
+		return false, nil
 	}
 
 	// First attempt
@@ -404,7 +417,7 @@ func (c *HTTPClient) Delete(ctx context.Context, id int64) error {
 		return fmt.Errorf("get token: %w", err)
 	}
 
-	err, shouldRetry := doDelete(tok)
+	shouldRetry, err := doDelete(tok)
 	if !shouldRetry {
 		return err
 	}
@@ -416,6 +429,6 @@ func (c *HTTPClient) Delete(ctx context.Context, id int64) error {
 		return fmt.Errorf("get token (retry): %w", err)
 	}
 
-	err, _ = doDelete(tok)
+	_, err = doDelete(tok)
 	return err
 }
