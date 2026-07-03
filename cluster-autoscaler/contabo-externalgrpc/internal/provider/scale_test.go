@@ -196,6 +196,7 @@ func TestIncreaseSize_NamingContinuesFromExisting(t *testing.T) {
 type fakeCloudCapTest struct {
 	instances   []contabo.Instance
 	createCalls int
+	deletedIDs  []int64
 }
 
 func (f *fakeCloudCapTest) ListByTag(_ context.Context, _ string) ([]contabo.Instance, error) {
@@ -214,6 +215,7 @@ func (f *fakeCloudCapTest) Create(_ context.Context, req contabo.CreateReq) (con
 }
 
 func (f *fakeCloudCapTest) Delete(_ context.Context, id int64) error {
+	f.deletedIDs = append(f.deletedIDs, id)
 	for i, inst := range f.instances {
 		if inst.ID == id {
 			f.instances = append(f.instances[:i], f.instances[i+1:]...)
@@ -221,4 +223,69 @@ func (f *fakeCloudCapTest) Delete(_ context.Context, id int64) error {
 		}
 	}
 	return nil
+}
+
+func TestDeleteNodes_DeletesElastic(t *testing.T) {
+	// Pre-load fakeCloud with an elastic instance ID=42
+	fc := &fakeCloudCapTest{
+		instances: []contabo.Instance{
+			{ID: 42, Name: "elastic-node-42", Tags: []string{"fuzeinfra-elastic"}},
+		},
+	}
+	cfg := provider.Config{
+		ElasticTag: "fuzeinfra-elastic",
+	}
+	s := provider.New(cfg, fc)
+
+	// Request to delete the elastic node with ProviderID contabo://42
+	_, err := s.NodeGroupDeleteNodes(context.Background(), &protos.NodeGroupDeleteNodesRequest{
+		Id: "elastic",
+		Nodes: []*protos.ExternalGrpcNode{
+			{ProviderID: "contabo://42"},
+		},
+	})
+
+	if err != nil {
+		t.Fatalf("NodeGroupDeleteNodes error: %v", err)
+	}
+
+	// Verify cloud.Delete(42) was called exactly once
+	if len(fc.deletedIDs) != 1 {
+		t.Fatalf("want 1 delete call, got %d", len(fc.deletedIDs))
+	}
+	if fc.deletedIDs[0] != 42 {
+		t.Fatalf("want deleted ID 42, got %d", fc.deletedIDs[0])
+	}
+}
+
+func TestDeleteNodes_RefusesNonElastic(t *testing.T) {
+	// Pre-load fakeCloud with an elastic instance ID=42 only
+	// (ID=999 is NOT in the elastic set)
+	fc := &fakeCloudCapTest{
+		instances: []contabo.Instance{
+			{ID: 42, Name: "elastic-node-42", Tags: []string{"fuzeinfra-elastic"}},
+		},
+	}
+	cfg := provider.Config{
+		ElasticTag: "fuzeinfra-elastic",
+	}
+	s := provider.New(cfg, fc)
+
+	// Request to delete a node whose ID is NOT elastic (contabo://999)
+	_, err := s.NodeGroupDeleteNodes(context.Background(), &protos.NodeGroupDeleteNodesRequest{
+		Id: "elastic",
+		Nodes: []*protos.ExternalGrpcNode{
+			{ProviderID: "contabo://999"},
+		},
+	})
+
+	// Must return InvalidArgument error
+	if status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("want InvalidArgument, got %v", err)
+	}
+
+	// Must NOT call cloud.Delete at all (fail-closed guard)
+	if len(fc.deletedIDs) != 0 {
+		t.Fatalf("must not delete non-elastic nodes, but got %d delete calls", len(fc.deletedIDs))
+	}
 }

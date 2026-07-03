@@ -137,3 +137,67 @@ func renderUserData(templateStr, nodeName string) (string, error) {
 	return buf.String(), nil
 }
 
+// NodeGroupDeleteNodes deletes nodes from the elastic node group.
+// It enforces a critical safety guard: it will NEVER delete a non-elastic instance.
+// The requested nodes are validated against the elastic set via ListByTag BEFORE any deletion occurs.
+//
+// Returns codes.InvalidArgument if any requested node is not in the elastic set.
+// Returns codes.Unavailable if ListByTag or Delete fails.
+func (s *Server) NodeGroupDeleteNodes(ctx context.Context, req *protos.NodeGroupDeleteNodesRequest) (*protos.NodeGroupDeleteNodesResponse, error) {
+	// Fetch current elastic instances to build the allowed-to-delete set
+	elasticInstances, err := s.cloud.ListByTag(ctx, s.cfg.ElasticTag)
+	if err != nil {
+		return nil, status.Errorf(codes.Unavailable, "NodeGroupDeleteNodes: listing elastic instances: %v", err)
+	}
+
+	// Build a set of elastic instance IDs for membership checking
+	elasticIDs := make(map[int64]bool)
+	for _, inst := range elasticInstances {
+		elasticIDs[inst.ID] = true
+	}
+
+	// Validate ALL requested nodes are elastic BEFORE deleting any (fail-closed guard)
+	for _, node := range req.Nodes {
+		id, err := parseContaboProviderID(node.ProviderID)
+		if err != nil {
+			return nil, status.Errorf(codes.InvalidArgument, "NodeGroupDeleteNodes: parsing ProviderID %q: %v", node.ProviderID, err)
+		}
+
+		if !elasticIDs[id] {
+			return nil, status.Errorf(codes.InvalidArgument, "refusing to delete non-elastic node %s", node.ProviderID)
+		}
+	}
+
+	// All nodes validated as elastic; now delete them
+	for _, node := range req.Nodes {
+		id, _ := parseContaboProviderID(node.ProviderID) // Already validated above
+		if err := s.cloud.Delete(ctx, id); err != nil {
+			return nil, status.Errorf(codes.Unavailable, "NodeGroupDeleteNodes: deleting node %s: %v", node.ProviderID, err)
+		}
+	}
+
+	return &protos.NodeGroupDeleteNodesResponse{}, nil
+}
+
+// NodeGroupDecreaseTargetSize is a no-op for Contabo.
+// Contabo has no reservation or target size concept; the infrastructure is stateless.
+func (s *Server) NodeGroupDecreaseTargetSize(ctx context.Context, req *protos.NodeGroupDecreaseTargetSizeRequest) (*protos.NodeGroupDecreaseTargetSizeResponse, error) {
+	return &protos.NodeGroupDecreaseTargetSizeResponse{}, nil
+}
+
+// parseContaboProviderID parses a ProviderID in the format "contabo://<id>" and returns the numeric id.
+func parseContaboProviderID(providerID string) (int64, error) {
+	const prefix = "contabo://"
+	if !strings.HasPrefix(providerID, prefix) {
+		return 0, fmt.Errorf("ProviderID does not start with %q", prefix)
+	}
+
+	idStr := providerID[len(prefix):]
+	id, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("parsing numeric id from %q: %w", idStr, err)
+	}
+
+	return id, nil
+}
+
