@@ -94,6 +94,9 @@ func TestNodeGroupNodes_StateMapping(t *testing.T) {
 		{"deleting", "deleting", protos.InstanceStatus_instanceDeleting},
 		{"deleted", "deleted", protos.InstanceStatus_instanceDeleting},
 		{"stopping", "stopping", protos.InstanceStatus_instanceDeleting},
+		{"Running (title case)", "Running", protos.InstanceStatus_instanceRunning},
+		{"RUNNING (uppercase)", "RUNNING", protos.InstanceStatus_instanceRunning},
+		{" running (with spaces)", " running ", protos.InstanceStatus_instanceRunning},
 	}
 
 	for _, tt := range tests {
@@ -147,5 +150,39 @@ func TestNodeGroupNodes_ListErrorPropagates(t *testing.T) {
 	}
 	if resp != nil {
 		t.Fatalf("want nil response on error, got %v", resp)
+	}
+}
+
+func TestNodeGroupNodes_EmptyReturnsNoError(t *testing.T) {
+	fc := &fakeCloud{instances: []contabo.Instance{}}
+	cfg := provider.Config{ElasticTag: "fuzeinfra-elastic", MinSize: 0, MaxSize: 10}
+	s := provider.New(cfg, fc)
+
+	resp, err := s.NodeGroupNodes(context.Background(), &protos.NodeGroupNodesRequest{Id: "elastic"})
+	if err != nil {
+		t.Fatalf("NodeGroupNodes error: %v", err)
+	}
+	if resp == nil {
+		t.Fatalf("want non-nil response on success")
+	}
+	if len(resp.Instances) != 0 {
+		t.Fatalf("want 0 instances, got %d", len(resp.Instances))
+	}
+}
+
+func TestNodeGroupTargetSize_EmptyReturnsZero(t *testing.T) {
+	fc := &fakeCloud{instances: []contabo.Instance{}}
+	cfg := provider.Config{ElasticTag: "fuzeinfra-elastic", MinSize: 0, MaxSize: 10}
+	s := provider.New(cfg, fc)
+
+	resp, err := s.NodeGroupTargetSize(context.Background(), &protos.NodeGroupTargetSizeRequest{Id: "elastic"})
+	if err != nil {
+		t.Fatalf("NodeGroupTargetSize error: %v", err)
+	}
+	if resp == nil {
+		t.Fatalf("want non-nil response on success")
+	}
+	if resp.TargetSize != 0 {
+		t.Fatalf("want TargetSize=0, got %d", resp.TargetSize)
 	}
 }

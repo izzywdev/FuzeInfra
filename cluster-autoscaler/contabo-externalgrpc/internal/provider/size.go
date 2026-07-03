@@ -3,6 +3,7 @@ package provider
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/izzywdev/fuzeinfra/contabo-externalgrpc/internal/protos"
 )
@@ -28,14 +29,14 @@ func (s *Server) NodeGroupNodes(ctx context.Context, req *protos.NodeGroupNodesR
 		return nil, fmt.Errorf("NodeGroupNodes: listing elastic instances: %w", err)
 	}
 
-	var protoInstances []*protos.Instance
+	protoInstances := make([]*protos.Instance, 0, len(instances))
 	for _, inst := range instances {
 		state := mapContaboStatusToProtoState(inst.Status)
 		protoInst := &protos.Instance{
 			Id: fmt.Sprintf("contabo://%d", inst.ID),
 			Status: &protos.InstanceStatus{
 				InstanceState: state,
-				ErrorInfo:     nil, // No error info for known states
+				ErrorInfo:     nil,
 			},
 		}
 		protoInstances = append(protoInstances, protoInst)
@@ -49,7 +50,8 @@ func (s *Server) NodeGroupNodes(ctx context.Context, req *protos.NodeGroupNodesR
 // mapContaboStatusToProtoState maps Contabo instance status strings
 // to the corresponding proto InstanceStatus_InstanceState enum values.
 func mapContaboStatusToProtoState(contaboStatus string) protos.InstanceStatus_InstanceState {
-	switch contaboStatus {
+	status := strings.ToLower(strings.TrimSpace(contaboStatus))
+	switch status {
 	// Creating states
 	case "provisioning", "installing", "pending":
 		return protos.InstanceStatus_instanceCreating
