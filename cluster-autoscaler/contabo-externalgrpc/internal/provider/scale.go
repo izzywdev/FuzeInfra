@@ -3,7 +3,6 @@ package provider
 import (
 	"context"
 	"fmt"
-	"regexp"
 	"strconv"
 	"strings"
 	"text/template"
@@ -30,7 +29,7 @@ func (s *Server) NodeGroupIncreaseSize(ctx context.Context, req *protos.NodeGrou
 	// Fetch current elastic instances to check cap
 	instances, err := s.cloud.ListByTag(ctx, s.cfg.ElasticTag)
 	if err != nil {
-		return nil, fmt.Errorf("NodeGroupIncreaseSize: listing elastic instances: %w", err)
+		return nil, status.Errorf(codes.Unavailable, "NodeGroupIncreaseSize: listing elastic instances: %v", err)
 	}
 
 	current := len(instances)
@@ -70,7 +69,7 @@ func (s *Server) NodeGroupIncreaseSize(ctx context.Context, req *protos.NodeGrou
 			Tags:      []string{s.cfg.ElasticTag},
 		})
 		if err != nil {
-			return nil, fmt.Errorf("NodeGroupIncreaseSize: creating %q: %w", instanceName, err)
+			return nil, status.Errorf(codes.Unavailable, "NodeGroupIncreaseSize: creating %q: %v", instanceName, err)
 		}
 	}
 
@@ -81,17 +80,27 @@ func (s *Server) NodeGroupIncreaseSize(ctx context.Context, req *protos.NodeGrou
 // matching the NamePrefix pattern and returns the next index to use.
 // If no matching instances, returns 0.
 func computeNextIndex(instances []contabo.Instance, namePrefix string) int {
-	// Build a pattern to match namePrefix-<digits>
-	pattern := regexp.MustCompile("^" + regexp.QuoteMeta(namePrefix) + "-([0-9]+)$")
-
+	prefix := namePrefix + "-"
 	maxIdx := -1
+
 	for _, inst := range instances {
-		matches := pattern.FindStringSubmatch(inst.Name)
-		if len(matches) == 2 {
-			idx, err := strconv.Atoi(matches[1])
-			if err == nil && idx > maxIdx {
-				maxIdx = idx
-			}
+		// Check if the name starts with the expected prefix
+		if !strings.HasPrefix(inst.Name, prefix) {
+			continue
+		}
+
+		// Extract the suffix after the prefix
+		suffix := inst.Name[len(prefix):]
+
+		// Try to parse the suffix as an integer
+		idx, err := strconv.Atoi(suffix)
+		if err != nil {
+			// Suffix is not a valid integer; skip this instance
+			continue
+		}
+
+		if idx > maxIdx {
+			maxIdx = idx
 		}
 	}
 
