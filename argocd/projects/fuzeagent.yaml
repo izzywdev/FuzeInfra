@@ -1,0 +1,25 @@
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: fuzeagent
+  namespace: argocd
+spec:
+  description: FuzeAgent AI orchestration platform (consumer of FuzeInfra) — may deploy ONLY into its own namespace.
+  sourceRepos:
+    - https://github.com/izzywdev/FuzeAgent.git
+  destinations:
+    # The product's workloads.
+    - namespace: fuzeagent
+      server: https://kubernetes.default.svc
+    # The app-of-apps creates child Application objects here.
+    - namespace: argocd
+      server: https://kubernetes.default.svc
+    # NOTE: `fuzeinfra` is deliberately NOT a destination — that is FuzeInfra's
+    # namespace. FuzeAgent consumes FuzeInfra services via DNS, not by deploying
+    # into the fuzeinfra namespace.
+  clusterResourceWhitelist:
+    - group: "*"
+      kind: "*"
+  namespaceResourceWhitelist:
+    - group: "*"
+      kind: "*"
