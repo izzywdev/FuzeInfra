@@ -35,3 +35,13 @@ dnsmasq:
 #   cloudflareTunnel.enabled=true and set credentials.cloudflare.tunnelToken
 cloudflareTunnel:
   enabled: false
+
+# Cluster Autoscaler / Contabo provider / overprovisioning stay off on kind —
+# there's no Contabo API to call locally. kind uses fake-mode node scaling
+# (see Task 17), not this stack. Base chart defaults already set these to
+# false; listed here explicitly so the overlay stays self-documenting.
+clusterAutoscaler:
+  enabled: false
+
+overprovisioning:
+  enabled: false

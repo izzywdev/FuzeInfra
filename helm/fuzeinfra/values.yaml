@@ -397,6 +397,15 @@ overprovisioning:
 # -----------------------------------------------------------------------------
 clusterAutoscaler:
   enabled: false
+  image: registry.k8s.io/autoscaling/cluster-autoscaler:v1.30.3
+  nodeGroup:
+    minSize: 0
+    maxSize: 2
+  scaleDownUnneededTime: 45m
+  scaleDownDelayAfterAdd: 20m
+  maxNodeProvisionTime: 15m
+  maxTotalUnreadyPercentage: 45
+  expander: least-waste
   provider:
     image: ghcr.io/izzywdev/fuzeinfra-contabo-ca-provider:latest
     existingSecret: fuzeinfra-ca-provider
