@@ -188,3 +188,111 @@ func TestLoadConfig_MaxSizeZero(t *testing.T) {
 		t.Fatalf("loadConfig with MAX_SIZE=0: want error, got nil")
 	}
 }
+
+// fakeCloudEnv returns a minimal environment for FAKE_CLOUD=1 mode: no
+// Contabo/K3S credentials, but with the provider-config fields that must
+// still be validated regardless of fake/real mode.
+func fakeCloudEnv() map[string]string {
+	return map[string]string{
+		"FAKE_CLOUD": "1",
+		"PRODUCT_ID": "V45",
+		"IMAGE_ID":   "img-123",
+		"REGION":     "EU",
+		"SSH_KEY_ID": "12345",
+		"MIN_SIZE":   "1",
+		"MAX_SIZE":   "5",
+	}
+}
+
+func TestLoadConfig_FakeCloud_SucceedsWithoutContaboOrK3SCreds(t *testing.T) {
+	env := fakeCloudEnv()
+	provCfg, _, _, err := loadConfig(getenvFromMap(env))
+	if err != nil {
+		t.Fatalf("loadConfig with FAKE_CLOUD=1 and no Contabo/K3S creds: want success, got error: %v", err)
+	}
+
+	if provCfg.ProductID != "V45" {
+		t.Errorf("ProductID = %q, want V45", provCfg.ProductID)
+	}
+	if provCfg.ImageID != "img-123" {
+		t.Errorf("ImageID = %q, want img-123", provCfg.ImageID)
+	}
+	if provCfg.Region != "EU" {
+		t.Errorf("Region = %q, want EU", provCfg.Region)
+	}
+	if provCfg.MinSize != 1 {
+		t.Errorf("MinSize = %d, want 1", provCfg.MinSize)
+	}
+	if provCfg.MaxSize != 5 {
+		t.Errorf("MaxSize = %d, want 5", provCfg.MaxSize)
+	}
+}
+
+func TestLoadConfig_FakeCloud_TrueVariant(t *testing.T) {
+	env := fakeCloudEnv()
+	env["FAKE_CLOUD"] = "true"
+	_, _, _, err := loadConfig(getenvFromMap(env))
+	if err != nil {
+		t.Fatalf("loadConfig with FAKE_CLOUD=true: want success, got error: %v", err)
+	}
+}
+
+func TestLoadConfig_FakeCloud_StillRequiresProviderFields(t *testing.T) {
+	requiredKeys := []string{
+		"PRODUCT_ID",
+		"IMAGE_ID",
+		"REGION",
+	}
+
+	for _, key := range requiredKeys {
+		t.Run(key, func(t *testing.T) {
+			env := fakeCloudEnv()
+			delete(env, key)
+			_, _, _, err := loadConfig(getenvFromMap(env))
+			if err == nil {
+				t.Fatalf("loadConfig with FAKE_CLOUD=1 and missing %s: want error, got nil", key)
+			}
+		})
+	}
+}
+
+func TestLoadConfig_RealMode_StillRequiresContaboAndK3SCreds(t *testing.T) {
+	// FAKE_CLOUD unset (real mode): the full credential set from fullEnv is
+	// still mandatory. This mirrors TestLoadConfig_MissingRequiredVar but
+	// pins down that FAKE_CLOUD's relaxation does NOT leak into real mode.
+	requiredCredKeys := []string{
+		"CONTABO_CLIENT_ID",
+		"CONTABO_CLIENT_SECRET",
+		"CONTABO_API_USER",
+		"CONTABO_API_PASSWORD",
+		"K3S_SERVER_URL",
+		"K3S_NODE_TOKEN",
+	}
+
+	for _, key := range requiredCredKeys {
+		t.Run(key, func(t *testing.T) {
+			env := fullEnv()
+			// FAKE_CLOUD explicitly unset/false: env map simply omits it.
+			delete(env, key)
+			_, _, _, err := loadConfig(getenvFromMap(env))
+			if err == nil {
+				t.Fatalf("loadConfig in real mode with missing %s: want error, got nil", key)
+			}
+		})
+	}
+}
+
+func TestLoadConfig_FakeCloudFalseVariantsBehaveAsRealMode(t *testing.T) {
+	falseVariants := []string{"", "0", "false", "no", "FAKE"}
+	for _, v := range falseVariants {
+		t.Run(v, func(t *testing.T) {
+			env := fullEnv()
+			env["FAKE_CLOUD"] = v
+			delete(env, "CONTABO_CLIENT_ID")
+			_, _, _, err := loadConfig(getenvFromMap(env))
+			if err == nil {
+				t.Fatalf("loadConfig with FAKE_CLOUD=%q and missing CONTABO_CLIENT_ID: want error, got nil", v)
+			}
+		})
+	}
+}

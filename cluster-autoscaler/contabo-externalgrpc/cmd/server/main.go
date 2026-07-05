@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 
 	"github.com/izzywdev/fuzeinfra/contabo-externalgrpc/internal/contabo"
@@ -61,6 +62,16 @@ import (
 //     therefore reference the k3s join target directly instead of the operator
 //     hand-duplicating the literal values into the template text. If
 //     USER_DATA_TEMPLATE_B64 is empty, an empty UserData is used.
+//   - FAKE_CLOUD              (optional) When "1" or "true", the server backs
+//     the provider with an in-memory fake (internal/contabo.MemClient)
+//     instead of the real Contabo HTTP API, and CONTABO_*/K3S_* credentials
+//     are NOT required. This exists solely to exercise the CA-to-provider
+//     gRPC loop end-to-end (e.g. under kind) without touching real Contabo
+//     infrastructure — see test/integration/kind-autoscaling-test.sh. The
+//     provider config fields that describe *what* to create (PRODUCT_ID,
+//     IMAGE_ID, REGION, MIN_SIZE, MAX_SIZE) are still required and validated
+//     identically in fake mode, since NodeGroupIncreaseSize/DeleteNodes logic
+//     is exercised unchanged. Default: false (real Contabo mode).
 const (
 	defaultContaboBaseURL = "https://api.contabo.com"
 	defaultContaboAuthURL = "https://auth.contabo.com/auth/realms/contabo/protocol/openid-connect/token"
@@ -70,6 +81,14 @@ const (
 	defaultMaxSize        = 2
 	defaultGRPCListen     = ":8086"
 )
+
+// isFakeCloud reports whether FAKE_CLOUD selects the in-memory fake provider
+// backend. Accepts "1" or "true" (case-insensitive), matching the convention
+// documented on the FAKE_CLOUD env var above. Any other value (including
+// unset/empty) means real Contabo mode.
+func isFakeCloud(v string) bool {
+	return v == "1" || strings.EqualFold(v, "true")
+}
 
 // loadConfig builds the provider and contabo configs from environment
 // variables obtained via getenv (injected for testability). It also returns
@@ -85,6 +104,8 @@ func loadConfig(getenv func(string) string) (provider.Config, contabo.Config, st
 		}
 		return def
 	}
+
+	fakeCloud := isFakeCloud(get("FAKE_CLOUD"))
 
 	contaboClientID := get("CONTABO_CLIENT_ID")
 	contaboClientSecret := get("CONTABO_CLIENT_SECRET")
@@ -105,17 +126,23 @@ func loadConfig(getenv func(string) string) (provider.Config, contabo.Config, st
 
 	grpcListen := getDefault("GRPC_LISTEN", defaultGRPCListen)
 
-	// Required string fields.
+	// Required string fields. The provider config (what to create) is always
+	// required, fake mode or not — NodeGroupIncreaseSize/DeleteNodes logic
+	// runs unchanged either way. Contabo/K3S credentials are only required in
+	// real mode; FAKE_CLOUD relaxes those so the CA-to-provider loop can be
+	// exercised (e.g. under kind) with no real Contabo account.
 	required := map[string]string{
-		"CONTABO_CLIENT_ID":     contaboClientID,
-		"CONTABO_CLIENT_SECRET": contaboClientSecret,
-		"CONTABO_API_USER":      contaboAPIUser,
-		"CONTABO_API_PASSWORD":  contaboAPIPassword,
-		"K3S_SERVER_URL":        k3sServerURL,
-		"K3S_NODE_TOKEN":        k3sNodeToken,
-		"PRODUCT_ID":            productID,
-		"IMAGE_ID":              imageID,
-		"REGION":                region,
+		"PRODUCT_ID": productID,
+		"IMAGE_ID":   imageID,
+		"REGION":     region,
+	}
+	if !fakeCloud {
+		required["CONTABO_CLIENT_ID"] = contaboClientID
+		required["CONTABO_CLIENT_SECRET"] = contaboClientSecret
+		required["CONTABO_API_USER"] = contaboAPIUser
+		required["CONTABO_API_PASSWORD"] = contaboAPIPassword
+		required["K3S_SERVER_URL"] = k3sServerURL
+		required["K3S_NODE_TOKEN"] = k3sNodeToken
 	}
 	for name, val := range required {
 		if val == "" {
@@ -208,7 +235,13 @@ func main() {
 		log.Fatalf("config error: %v", err)
 	}
 
-	client := contabo.NewClient(contaboCfg)
+	var client contabo.Client
+	if isFakeCloud(os.Getenv("FAKE_CLOUD")) {
+		log.Println("FAKE_CLOUD enabled: using in-memory fake Contabo client (no real Contabo API calls will be made)")
+		client = contabo.NewMemClient()
+	} else {
+		client = contabo.NewClient(contaboCfg)
+	}
 	srv := provider.New(provCfg, client)
 
 	lis, err := net.Listen("tcp", grpcListen)
