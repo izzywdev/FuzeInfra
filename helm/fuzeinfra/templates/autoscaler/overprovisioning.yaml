@@ -1,0 +1,49 @@
+{{- if .Values.overprovisioning.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fuzeinfra-overprovisioning
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "fuzeinfra.labels" . | nindent 4 }}
+    {{- include "fuzeinfra.selectorLabels" (dict "component" "overprovisioning" "root" $) | nindent 4 }}
+spec:
+  replicas: {{ .Values.overprovisioning.replicas }}
+  selector:
+    matchLabels:
+      {{- include "fuzeinfra.selectorLabels" (dict "component" "overprovisioning" "root" $) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "fuzeinfra.labels" . | nindent 8 }}
+        {{- include "fuzeinfra.selectorLabels" (dict "component" "overprovisioning" "root" $) | nindent 8 }}
+    spec:
+      priorityClassName: fuzeinfra-overprovisioning
+      # Tolerate the elastic node taint so these pods can occupy elastic nodes.
+      tolerations:
+        - key: fuzeinfra.io/elastic
+          operator: Equal
+          value: "true"
+          effect: PreferNoSchedule
+      # Require scheduling on elastic nodes only.
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: fuzeinfra.io/pool
+                    operator: In
+                    values:
+                      - elastic
+      containers:
+        - name: pause
+          image: {{ .Values.overprovisioning.image }}
+          imagePullPolicy: {{ include "fuzeinfra.pullPolicy" . }}
+          resources:
+            requests:
+              cpu: {{ .Values.overprovisioning.resources.cpu }}
+              memory: {{ .Values.overprovisioning.resources.memory }}
+            limits:
+              cpu: {{ .Values.overprovisioning.resources.cpu }}
+              memory: {{ .Values.overprovisioning.resources.memory }}
+{{- end }}
