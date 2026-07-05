@@ -5,8 +5,8 @@
 # terraform. The bare setup (../*.tf) is consumer-free by invariant; CI loads
 # this file via -var-file. Source of truth is each consumer repo's own
 # declaration (deploy/cf/hosts.yaml); entries are materialized here by the
-# consumer-dispatch flow (repository_dispatch → validate against policy →
-# auto-PR → saved-plan gate → deliberate merge applies).
+# consumer-dispatch flow (repository_dispatch -> validate against policy ->
+# auto-PR -> saved-plan gate -> deliberate merge applies).
 #
 # Policy reminders: labels must not collide, no wildcards, bypass only for
 # hosts whose app owns its own auth — admin UIs get gated Access apps in
@@ -23,4 +23,3 @@ public_app_hosts = {
   "fuzecontact" = "izzywdev/FuzeContact" # fuzecontact.prod.fuzefront.com
   "fuzeservice" = "izzywdev/FuzeService" # fuzeservice.prod.fuzefront.com
 }
-# applied: 2026-07-05 — fuzesales/fuzecontact/fuzeservice bypass policies
