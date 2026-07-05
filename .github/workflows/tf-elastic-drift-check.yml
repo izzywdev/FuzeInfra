@@ -1,0 +1,124 @@
+# ===========================================================================
+# tf-elastic-drift-check  —  guard against Terraform touching elastic nodes
+# ===========================================================================
+# Asserts that Terraform NEVER manages instances tagged "fuzeinfra-elastic",
+# which are created out-of-band by the autoscaler and intentionally excluded
+# from Terraform state. This workflow acts as a regression guard.
+#
+#   • Pull request touching terraform/contabo/** or modules/contabo-k3s-node/**
+#     → `terraform plan -json`, inspect plan.json for mutating actions on
+#     elastic-tagged resources → FAIL if any found, PASS otherwise.
+#   • workflow_dispatch → manual trigger for verification.
+#
+# Safety:
+#   • Runs on both terraform/contabo/** (control-plane) and
+#     modules/contabo-k3s-node/** (the node module's potential instance
+#     definitions) to catch drift in module definitions too.
+#   • Fork PRs skip the plan (no creds) but pass the check (to avoid deadlock).
+#   • Empty plans (no resource_changes) are considered clean → pass.
+#
+# Required repo configuration:
+#   Secrets (reused from terraform-plan-apply):
+#     TF_STATE_BUCKET, TF_STATE_REGION, TF_STATE_LOCK_TABLE
+#     TF_STATE_ACCESS_KEY_ID, TF_STATE_SECRET_ACCESS_KEY
+#     CONTABO_CLIENT_ID, CONTABO_CLIENT_SECRET
+#     CONTABO_API_USER, CONTABO_API_PASSWORD
+#     CONTABO_IMAGE_ID, CONTABO_PRODUCT_ID, NODE_SSH_PUBLIC_KEY
+#     CLOUDFLARE_API_TOKEN, CLOUDFLARE_ACCOUNT_ID, CLOUDFLARE_ZONE_ID
+#     GH_TF_TOKEN, CRIT_BRIDGE_TOKEN
+#
+# ---------------------------------------------------------------------------
+
+name: Terraform elastic-node drift check
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'terraform/contabo/**'
+      - 'modules/contabo-k3s-node/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: read
+
+env:
+  TF_ROOT: ${{ vars.TF_ROOT || 'terraform/contabo' }}
+  TERRAFORM_VERSION: "1.15.6"
+  # AWS creds for the S3/DynamoDB backend
+  AWS_ACCESS_KEY_ID: ${{ secrets.TF_STATE_ACCESS_KEY_ID }}
+  AWS_SECRET_ACCESS_KEY: ${{ secrets.TF_STATE_SECRET_ACCESS_KEY }}
+  # Provider inputs injected as TF_VAR_* (least-privilege, scoped creds)
+  TF_VAR_contabo_client_id: ${{ secrets.CONTABO_CLIENT_ID }}
+  TF_VAR_contabo_client_secret: ${{ secrets.CONTABO_CLIENT_SECRET }}
+  TF_VAR_contabo_api_user: ${{ secrets.CONTABO_API_USER }}
+  TF_VAR_contabo_api_password: ${{ secrets.CONTABO_API_PASSWORD }}
+  TF_VAR_image_id: ${{ secrets.CONTABO_IMAGE_ID }}
+  TF_VAR_product_id: ${{ secrets.CONTABO_PRODUCT_ID }}
+  TF_VAR_ssh_public_key: ${{ secrets.NODE_SSH_PUBLIC_KEY }}
+  TF_VAR_cloudflare_api_token: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+  TF_VAR_cloudflare_account_id: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+  TF_VAR_cloudflare_zone_id: ${{ secrets.CLOUDFLARE_ZONE_ID }}
+  TF_VAR_github_token: ${{ secrets.GH_TF_TOKEN }}
+  TF_VAR_crit_bridge_token: ${{ secrets.CRIT_BRIDGE_TOKEN }}
+
+jobs:
+  elastic-drift-check:
+    name: Guard elastic-node exclusion
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Fork PRs have no access to secrets — skip the plan, but pass so the
+      # check does not deadlock the PR. Human review will catch issues.
+      - name: Fork PR — skip creds plan
+        if: github.event.pull_request.head.repo.fork == true
+        run: echo "::notice::Fork PR touches terraform/** — elastic-drift check skipped (no creds). Review must verify no elastic-tagged instances are added."
+
+      - uses: hashicorp/setup-terraform@v3
+        if: github.event.pull_request.head.repo.fork != true && github.event_name != 'workflow_dispatch'
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+
+      - uses: hashicorp/setup-terraform@v3
+        if: github.event_name == 'workflow_dispatch'
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+
+      - name: Terraform init (remote backend)
+        if: github.event.pull_request.head.repo.fork != true
+        working-directory: ${{ env.TF_ROOT }}
+        run: |
+          terraform init -input=false \
+            -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}" \
+            -backend-config="key=fuzeinfra/$(basename "$TF_ROOT")/terraform.tfstate" \
+            -backend-config="region=${{ secrets.TF_STATE_REGION }}" \
+            -backend-config="dynamodb_table=${{ secrets.TF_STATE_LOCK_TABLE }}"
+
+      - name: Terraform plan → JSON
+        if: github.event.pull_request.head.repo.fork != true
+        id: plan
+        working-directory: ${{ env.TF_ROOT }}
+        run: |
+          VAR_FILES=""
+          [ -f materialized/consumers.tfvars ] && VAR_FILES="-var-file=materialized/consumers.tfvars"
+          terraform plan -input=false -lock-timeout=5m $VAR_FILES -json > plan.json 2>&1 || true
+
+      - name: Check plan for fuzeinfra-elastic mutations
+        if: github.event.pull_request.head.repo.fork != true
+        working-directory: ${{ env.TF_ROOT }}
+        run: |
+          # Fails (exit 1) if any resource_change has a non-no-op action AND
+          # includes "fuzeinfra-elastic" in tags (either .change.after.tags or
+          # .change.before.tags). Empty plans (no resource_changes) pass.
+          jq -e '[.resource_changes[] | select(.change.actions | index("no-op") | not) | select((.change.after.tags // []) + (.change.before.tags // []) | index("fuzeinfra-elastic"))] | length == 0' plan.json
+
+          if [ $? -ne 0 ]; then
+            echo "::error::Terraform plan touches instances tagged 'fuzeinfra-elastic' — these are managed by the autoscaler and must NOT be in TF state."
+            echo ""
+            echo "Offending resource changes:"
+            jq '.resource_changes[] | select(.change.actions | index("no-op") | not) | select((.change.after.tags // []) + (.change.before.tags // []) | index("fuzeinfra-elastic")) | {address, actions: .change.actions, tags: ((.change.after.tags // []) + (.change.before.tags // []))}' plan.json
+            exit 1
+          fi
+          echo "✓ Plan is clean: no elastic-tagged resources mutated."
