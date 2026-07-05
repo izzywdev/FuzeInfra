@@ -152,21 +152,21 @@ dnsmasq:
 #   - fuzeservice -> Secret `fuzeservice-db-credentials` key `password`
 serviceDatabases:
   - name: fuzesales
-    enabled: false   # flip to true once fuzesales-db-credentials is sealed into `fuzeinfra`
+    enabled: true
     role: fuzesales_svc
     database: fuzesales
     passwordSecret:
       name: fuzesales-db-credentials
       key: password
   - name: fuzecontact
-    enabled: false   # flip to true once fuzecontact-db-credentials is sealed into `fuzeinfra`
+    enabled: true
     role: fuzecontact_svc
     database: fuzecontact
     passwordSecret:
       name: fuzecontact-db-credentials
       key: password
   - name: fuzeservice
-    enabled: false   # flip to true once fuzeservice-db-credentials is sealed into `fuzeinfra`
+    enabled: true
     role: fuzeservice_svc
     database: fuzeservice
     passwordSecret:
