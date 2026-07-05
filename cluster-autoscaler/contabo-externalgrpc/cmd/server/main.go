@@ -34,10 +34,10 @@ import (
 //   - CONTABO_AUTH_URL        (optional) Contabo OAuth2 token endpoint.
 //     Default: https://auth.contabo.com/auth/realms/contabo/protocol/openid-connect/token
 //   - K3S_SERVER_URL          (required) k3s server URL new elastic nodes join.
-//     Not passed to the Contabo API directly — see USER_DATA_TEMPLATE_B64 below
-//     for how it reaches the created node.
-//   - K3S_NODE_TOKEN          (required) k3s node join token. Same caveat as
-//     K3S_SERVER_URL above.
+//     Not passed to the Contabo API directly — it is exposed to the cloud-init
+//     template as {{.K3SServerURL}}; see USER_DATA_TEMPLATE_B64 below.
+//   - K3S_NODE_TOKEN          (required) k3s node join token. Exposed to the
+//     cloud-init template as {{.K3SNodeToken}}. Same caveat as K3S_SERVER_URL.
 //   - ELASTIC_TAG             (optional) Tag applied to elastic instances.
 //     Default: fuzeinfra-elastic
 //   - ELASTIC_NAME_PREFIX     (optional) Prefix for elastic instance names.
@@ -54,14 +54,12 @@ import (
 //   - GRPC_LISTEN             (optional) gRPC server listen address.
 //     Default: :8086
 //   - USER_DATA_TEMPLATE_B64  (optional) Base64-encoded Go text/template used
-//     as cloud-init UserData for new instances. The ONLY template variable
-//     the provider substitutes is {{.NodeName}} (see internal/provider's
-//     renderUserData). This binary does NOT string-replace K3S_SERVER_URL or
-//     K3S_NODE_TOKEN into the template — if the cloud-init needs those
-//     values, the operator must bake the literal values into the template
-//     text before base64-encoding it (K3S_SERVER_URL / K3S_NODE_TOKEN are
-//     read here only for startup validation, confirming the operator has
-//     configured a k3s join target, not for template substitution). If
+//     as cloud-init UserData for new instances. The template is rendered per
+//     node with three variables (see internal/provider's renderUserData):
+//     {{.NodeName}}, {{.K3SServerURL}} (from K3S_SERVER_URL), and
+//     {{.K3SNodeToken}} (from K3S_NODE_TOKEN). A cloud-init join command can
+//     therefore reference the k3s join target directly instead of the operator
+//     hand-duplicating the literal values into the template text. If
 //     USER_DATA_TEMPLATE_B64 is empty, an empty UserData is used.
 const (
 	defaultContaboBaseURL = "https://api.contabo.com"
@@ -188,6 +186,8 @@ func loadConfig(getenv func(string) string) (provider.Config, contabo.Config, st
 		MaxSize:      maxSize,
 		SSHKeyID:     sshKeyID,
 		UserDataTmpl: userDataTmpl,
+		K3SServerURL: k3sServerURL,
+		K3SNodeToken: k3sNodeToken,
 	}
 
 	contaboCfg := contabo.Config{

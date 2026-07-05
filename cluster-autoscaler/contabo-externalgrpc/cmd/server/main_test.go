@@ -67,6 +67,15 @@ func TestLoadConfig_FullyPopulated(t *testing.T) {
 		t.Errorf("UserDataTmpl = %q, want empty (no USER_DATA_TEMPLATE_B64 set)", provCfg.UserDataTmpl)
 	}
 
+	// K3S join parameters are threaded onto the provider config so the
+	// cloud-init template can reference them ({{.K3SServerURL}}/{{.K3SNodeToken}}).
+	if provCfg.K3SServerURL != "https://k3s.example.com:6443" {
+		t.Errorf("K3SServerURL = %q, want https://k3s.example.com:6443", provCfg.K3SServerURL)
+	}
+	if provCfg.K3SNodeToken != "node-token" {
+		t.Errorf("K3SNodeToken = %q, want node-token", provCfg.K3SNodeToken)
+	}
+
 	if contaboCfg.ClientID != "client-id" {
 		t.Errorf("ClientID = %q, want client-id", contaboCfg.ClientID)
 	}
@@ -93,8 +102,9 @@ func TestLoadConfig_FullyPopulated(t *testing.T) {
 
 func TestLoadConfig_UserDataTemplateDecoded(t *testing.T) {
 	env := fullEnv()
-	// base64("k3s-url={{.NodeName}}") — verifies decoding happens and only
-	// {{.NodeName}} survives as a template variable (no other substitution).
+	// base64("k3s-url={{.NodeName}}") — verifies loadConfig only base64-decodes
+	// the template and stores it verbatim; template rendering happens later in
+	// the provider (see renderUserData), not here.
 	env["USER_DATA_TEMPLATE_B64"] = "azNzLXVybD17ey5Ob2RlTmFtZX19"
 	provCfg, _, _, err := loadConfig(getenvFromMap(env))
 	if err != nil {

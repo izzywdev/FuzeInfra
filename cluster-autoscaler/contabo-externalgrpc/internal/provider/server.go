@@ -29,7 +29,15 @@ type Config struct {
 	// SSHKeyID is the Contabo SSH key ID to inject into created instances.
 	SSHKeyID int64
 	// UserDataTmpl is a Go template string executed at node creation time.
+	// See renderUserData for the fields exposed to the template.
 	UserDataTmpl string
+	// K3SServerURL is the k3s server URL new elastic nodes join. It is exposed
+	// to UserDataTmpl as {{.K3SServerURL}} so the cloud-init join command can
+	// reference it without the operator hand-duplicating the literal value.
+	K3SServerURL string
+	// K3SNodeToken is the k3s node join token. It is exposed to UserDataTmpl as
+	// {{.K3SNodeToken}}. Same rationale as K3SServerURL.
+	K3SNodeToken string
 }
 
 // Server is the gRPC CloudProvider server implementation for Contabo.

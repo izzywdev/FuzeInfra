@@ -53,7 +53,7 @@ func (s *Server) NodeGroupIncreaseSize(ctx context.Context, req *protos.NodeGrou
 		instanceName := fmt.Sprintf("%s-%d", s.cfg.NamePrefix, nextIndex+i)
 
 		// Render UserData from template
-		userData, err := renderUserData(s.cfg.UserDataTmpl, instanceName)
+		userData, err := renderUserData(s.cfg.UserDataTmpl, instanceName, s.cfg.K3SServerURL, s.cfg.K3SNodeToken)
 		if err != nil {
 			return nil, fmt.Errorf("NodeGroupIncreaseSize: rendering UserData for %q: %w", instanceName, err)
 		}
@@ -110,10 +110,13 @@ func computeNextIndex(instances []contabo.Instance, namePrefix string) int {
 	return maxIdx + 1
 }
 
-// renderUserData renders cfg.UserDataTmpl with the provided nodeName.
-// If cfg.UserDataTmpl is empty, returns empty string.
-// The template receives a struct with .NodeName field.
-func renderUserData(templateStr, nodeName string) (string, error) {
+// renderUserData renders cfg.UserDataTmpl with the provided nodeName and the
+// k3s join parameters. If cfg.UserDataTmpl is empty, returns empty string.
+// The template receives a struct with .NodeName, .K3SServerURL, and
+// .K3SNodeToken fields, so a cloud-init template can reference the k3s join
+// target (e.g. {{.K3SServerURL}} / {{.K3SNodeToken}}) without the operator
+// hand-duplicating the literal values into the template text.
+func renderUserData(templateStr, nodeName, k3sServerURL, k3sNodeToken string) (string, error) {
 	if templateStr == "" {
 		return "", nil
 	}
@@ -124,9 +127,13 @@ func renderUserData(templateStr, nodeName string) (string, error) {
 	}
 
 	data := struct {
-		NodeName string
+		NodeName     string
+		K3SServerURL string
+		K3SNodeToken string
 	}{
-		NodeName: nodeName,
+		NodeName:     nodeName,
+		K3SServerURL: k3sServerURL,
+		K3SNodeToken: k3sNodeToken,
 	}
 
 	var buf strings.Builder
