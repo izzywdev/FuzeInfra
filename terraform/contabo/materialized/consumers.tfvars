@@ -23,3 +23,4 @@ public_app_hosts = {
   "fuzecontact" = "izzywdev/FuzeContact" # fuzecontact.prod.fuzefront.com
   "fuzeservice" = "izzywdev/FuzeService" # fuzeservice.prod.fuzefront.com
 }
+# applied: 2026-07-05 — fuzesales/fuzecontact/fuzeservice bypass policies
