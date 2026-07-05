@@ -437,3 +437,48 @@ cloudflareTunnel:
   # Named Tunnel UUID (from `cloudflared tunnel list` or Terraform output).
   # When set, switches to local-config mode with inline ingress rules.
   tunnelId: ""
+
+# -----------------------------------------------------------------------------
+# Cluster Autoscaler overprovisioning
+# Maintains spare capacity on elastic node pools via low-priority pause pods.
+# Disabled by default; enable in environment overlays that use elastic autoscaling.
+# -----------------------------------------------------------------------------
+overprovisioning:
+  enabled: false
+  replicas: 1
+  image: registry.k8s.io/pause:3.9
+  resources:
+    cpu: "1"
+    memory: 2Gi
+
+# Cluster Autoscaler Contabo provider
+# Runs as a standalone gRPC server that scales elastic nodes on Contabo.
+# Disabled by default; enable and configure in environment overlays.
+# The existingSecret must contain: CONTABO_CLIENT_ID, CONTABO_CLIENT_SECRET,
+# CONTABO_API_USER, CONTABO_API_PASSWORD, K3S_NODE_TOKEN, SSH_KEY_ID.
+# (Non-secret values are templated from the provider block below.)
+# -----------------------------------------------------------------------------
+clusterAutoscaler:
+  enabled: false
+  image: registry.k8s.io/autoscaling/cluster-autoscaler:v1.30.3
+  nodeGroup:
+    minSize: 0
+    maxSize: 2
+  scaleDownUnneededTime: 45m
+  scaleDownDelayAfterAdd: 20m
+  maxNodeProvisionTime: 15m
+  maxTotalUnreadyPercentage: 45
+  expander: least-waste
+  provider:
+    image: ghcr.io/izzywdev/fuzeinfra-contabo-ca-provider:latest
+    existingSecret: fuzeinfra-ca-provider
+    productId: ""
+    imageId: ""
+    region: EU
+    k3sServerUrl: ""
+    elasticTag: fuzeinfra-elastic
+    elasticNamePrefix: fuzeinfra-elastic
+    minSize: 0
+    maxSize: 2
+    grpcListen: ":8086"
+    userDataTemplateB64: ""

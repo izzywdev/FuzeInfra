@@ -1,0 +1,11 @@
+{{- if .Values.overprovisioning.enabled }}
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: fuzeinfra-overprovisioning
+  labels:
+    {{- include "fuzeinfra.labels" . | nindent 4 }}
+value: -10
+globalDefault: false
+description: "Low priority for overprovisioning balloon pods; preempted by real workloads."
+{{- end }}

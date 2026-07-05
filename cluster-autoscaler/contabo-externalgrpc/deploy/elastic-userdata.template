@@ -1,0 +1,50 @@
+#cloud-config
+# Canonical cloud-init UserData template for Contabo elastic (autoscaler-managed)
+# nodes. This file is NOT read directly by the provider — it is a source
+# artifact that an operator base64-encodes into the Helm value
+# clusterAutoscaler.provider.userDataTemplateB64 (see helm/fuzeinfra/values-contabo.yaml),
+# which the contabo-externalgrpc server decodes into USER_DATA_TEMPLATE_B64 /
+# provider.Config.UserDataTmpl and renders once per new instance via
+# internal/provider/scale.go's renderUserData.
+#
+# Template variables available (Go text/template, exec'd per node at create
+# time — see renderUserData in internal/provider/scale.go):
+#   {{.NodeName}}     - the elastic instance name, e.g. fuzeinfra-elastic-3
+#   {{.K3SServerURL}} - the k3s server URL to join (from K3S_SERVER_URL env)
+#   {{.K3SNodeToken}} - the k3s agent join token (from K3S_NODE_TOKEN env)
+#
+# IMPORTANT: --kubelet-arg 'provider-id=contabo://{{.NodeName}}' is what makes
+# Cluster Autoscaler's scale-down correlation work. CA identifies which k8s
+# Node to delete via Node.Spec.ProviderID, which NodeGroupNodes (size.go)
+# reports as "contabo://<name>" — a name-based scheme, NOT the numeric Contabo
+# instance id, because the numeric id is not known to the node at boot/join
+# time. If this flag is dropped or the name doesn't match, scale-down breaks:
+# CA will never find a matching node to delete.
+
+write_files:
+  # k3s join secrets land in a root-only env file rather than the process
+  # table, so the token never shows up in `ps`/cloud-init logs as a CLI arg.
+  - path: /etc/k3s-agent.env
+    permissions: "0600"
+    owner: root:root
+    content: |
+      K3S_URL={{.K3SServerURL}}
+      K3S_TOKEN={{.K3SNodeToken}}
+
+runcmd:
+  # Host firewall: agent needs to reach the k3s API (6443) outbound and accept
+  # kubelet (10250) + the flannel overlay from the server. 51820/udp is the
+  # WireGuard backend (wireguard-native) the server is being reprovisioned
+  # onto; 8472/udp (VXLAN) is kept alongside it during the transition.
+  - [ sh, -c, "ufw allow 22/tcp || true" ]
+  - [ sh, -c, "ufw allow 10250/tcp || true" ]
+  - [ sh, -c, "ufw allow 8472/udp || true" ]
+  - [ sh, -c, "ufw allow 51820/udp || true" ]
+  - [ sh, -c, "ufw --force enable || true" ]
+  # Join as a k3s agent using the join secrets written above. --node-name and
+  # --kubelet-arg=provider-id are what let NodeGroupNodes/NodeGroupDeleteNodes
+  # correlate this k8s Node back to this exact Contabo VPS by name (see the
+  # IMPORTANT note above). The pool label + PreferNoSchedule taint mirror
+  # NodeGroupTemplateNodeInfo's scale-from-zero simulation (internal/provider/template.go)
+  # exactly — keep them in sync if either side changes.
+  - [ sh, -c, "set -a; . /etc/k3s-agent.env; set +a; curl -sfL https://get.k3s.io | sh -s - agent --node-name '{{.NodeName}}' --kubelet-arg 'provider-id=contabo://{{.NodeName}}' --node-label 'fuzeinfra.io/pool=elastic' --node-taint 'fuzeinfra.io/elastic=true:PreferNoSchedule'" ]

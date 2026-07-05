@@ -73,6 +73,8 @@ spec:
       {{- include "fuzeinfra.selectorLabels" (dict "component" "prometheus" "root" $) | nindent 6 }}
   template:
     metadata:
+      annotations:
+        cluster-autoscaler.kubernetes.io/safe-to-evict: "false"
       labels:
         {{- include "fuzeinfra.labels" . | nindent 8 }}
         {{- include "fuzeinfra.selectorLabels" (dict "component" "prometheus" "root" $) | nindent 8 }}
@@ -194,6 +196,8 @@ spec:
       {{- include "fuzeinfra.selectorLabels" (dict "component" "alertmanager" "root" $) | nindent 6 }}
   template:
     metadata:
+      annotations:
+        cluster-autoscaler.kubernetes.io/safe-to-evict: "false"
       labels:
         {{- include "fuzeinfra.labels" . | nindent 8 }}
         {{- include "fuzeinfra.selectorLabels" (dict "component" "alertmanager" "root" $) | nindent 8 }}
@@ -271,6 +275,9 @@ spec:
         # whenever they change, so a provisioning edit reloads automatically.
         checksum/monitoring-config: {{ include (print $.Template.BasePath "/configmaps-monitoring.yaml") $ | sha256sum }}
         checksum/dashboards: {{ include (print $.Template.BasePath "/grafana-dashboards.yaml") $ | sha256sum }}
+        {{- if .Values.grafana.persistence.enabled }}
+        cluster-autoscaler.kubernetes.io/safe-to-evict: "false"
+        {{- end }}
       labels:
         {{- include "fuzeinfra.labels" . | nindent 8 }}
         {{- include "fuzeinfra.selectorLabels" (dict "component" "grafana" "root" $) | nindent 8 }}
@@ -448,6 +455,8 @@ spec:
       {{- include "fuzeinfra.selectorLabels" (dict "component" "loki" "root" $) | nindent 6 }}
   template:
     metadata:
+      annotations:
+        cluster-autoscaler.kubernetes.io/safe-to-evict: "false"
       labels:
         {{- include "fuzeinfra.labels" . | nindent 8 }}
         {{- include "fuzeinfra.selectorLabels" (dict "component" "loki" "root" $) | nindent 8 }}

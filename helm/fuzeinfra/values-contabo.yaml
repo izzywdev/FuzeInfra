@@ -134,6 +134,44 @@ dnsmasq:
   enabled: false
 
 # -----------------------------------------------------------------------------
+# Cluster Autoscaler elastic pool (Contabo).
+# Maintains an elastic node pool sized 0:2 (min:max) via the externalgrpc
+# provider (Task 12) + upstream Cluster Autoscaler (this task). Overprovisioning
+# pause pods hold a headroom "ceiling" so the CA has something to evict/scale
+# against before real workloads go unschedulable — bumping overprovisioning
+# replicas raises the effective ceiling (documented target: up to 5 nodes worth
+# of slack against the 0:2 elastic pool + the always-on base node).
+# -----------------------------------------------------------------------------
+# NOTE: kept DISABLED on main. Prod is Argo auto-synced (selfHeal) from main, so
+# enabling here before the fuzeinfra-ca-provider SealedSecret + real product/image/
+# k3sServerUrl + canonical elastic userDataTemplateB64 exist would CrashLoop the
+# provider into prod. Flip to true ONLY as part of the gated Task 18 cutover.
+clusterAutoscaler:
+  enabled: false
+  provider:
+    # TODO: replace with the published image once fuzeinfra-contabo-ca-provider
+    # has a tagged release (see cluster-autoscaler/contabo-externalgrpc).
+    image: ghcr.io/izzywdev/fuzeinfra-contabo-ca-provider:latest
+    existingSecret: fuzeinfra-ca-provider
+    # TODO: fill in the Contabo product/image IDs for the elastic node flavor
+    # (contabo API: GET /v1/compute/instances/images, /v1/pricing).
+    productId: ""
+    imageId: ""
+    region: EU
+    # TODO: set to the k3s server URL the elastic nodes join
+    # (e.g. https://<contabo-server-ip>:6443).
+    k3sServerUrl: ""
+    # TODO: base64 of cluster-autoscaler/contabo-externalgrpc/deploy/elastic-userdata.template
+    # (the canonical elastic-node cloud-init template) — e.g.
+    # `base64 -w0 cluster-autoscaler/contabo-externalgrpc/deploy/elastic-userdata.template`.
+    # See that file's header for the template vars (.NodeName/.K3SServerURL/.K3SNodeToken)
+    # and why --kubelet-arg=provider-id=contabo://{{.NodeName}} is load-bearing for scale-down.
+    userDataTemplateB64: ""
+
+overprovisioning:
+  # Enabled together with clusterAutoscaler during the gated Task 18 cutover.
+  enabled: false
+
 # Per-service Postgres provisioning (issue #153) — PROD.
 #
 # The provisioning hook Job reads each role password via `secretKeyRef` from a

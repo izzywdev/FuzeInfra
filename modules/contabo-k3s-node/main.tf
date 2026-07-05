@@ -30,6 +30,7 @@ resource "contabo_instance" "node" {
     k3s_node_token = var.k3s_node_token
     k3s_channel    = var.k3s_channel
     node_name      = each.value.name
+    role           = each.value.role
     # node-role=<role> first (the contract label), then any extra labels.
     node_labels = join(" ", concat(
       ["--node-label node-role=${each.value.role}"],
