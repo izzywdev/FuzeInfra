@@ -142,8 +142,12 @@ dnsmasq:
 # replicas raises the effective ceiling (documented target: up to 5 nodes worth
 # of slack against the 0:2 elastic pool + the always-on base node).
 # -----------------------------------------------------------------------------
+# NOTE: kept DISABLED on main. Prod is Argo auto-synced (selfHeal) from main, so
+# enabling here before the fuzeinfra-ca-provider SealedSecret + real product/image/
+# k3sServerUrl + canonical elastic userDataTemplateB64 exist would CrashLoop the
+# provider into prod. Flip to true ONLY as part of the gated Task 18 cutover.
 clusterAutoscaler:
-  enabled: true
+  enabled: false
   provider:
     # TODO: replace with the published image once fuzeinfra-contabo-ca-provider
     # has a tagged release (see cluster-autoscaler/contabo-externalgrpc).
@@ -159,4 +163,5 @@ clusterAutoscaler:
     k3sServerUrl: ""
 
 overprovisioning:
-  enabled: true
+  # Enabled together with clusterAutoscaler during the gated Task 18 cutover.
+  enabled: false
