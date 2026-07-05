@@ -54,6 +54,69 @@ credentials:
     tunnelToken: ""
 
 # -----------------------------------------------------------------------------
+# Per-service Postgres provisioning (issue #153).
+#
+# Declaratively provisions per-service roles + databases on the shared
+# `fuzeinfra-postgres` server via an idempotent, GitOps-reconciled hook Job
+# (templates/service-db-provisioning.yaml). This is the declarative successor
+# to the imperative runner-side recipe in governance/datastore-provisioning.md.
+#
+# CROSS-NAMESPACE SECRET CONTRACT (important):
+#   The provisioning Job runs in the `fuzeinfra` namespace so the Postgres
+#   SUPERUSER creds (`fuzeinfra-secrets`) never leave this namespace and never
+#   land in git. The role password MUST equal the password the consuming
+#   service already sealed for its own DATABASE_URL. A Job pod can only read
+#   Secrets in its OWN namespace, so each consuming repo must ALSO ship a
+#   SealedSecret of its DB credentials sealed FOR the `fuzeinfra` namespace
+#   (precedent: `fuzekeys-db-credentials`, `fuzesocial-app-db-credentials`
+#   already exist in `fuzeinfra`). The Job reads that per-service password via
+#   `secretKeyRef` (below) and syncs it onto the role. No plaintext credential
+#   is ever committed here — only Secret NAMES + KEYS.
+#
+# Off by default (base/local/aws): the referenced per-service Secrets only
+# exist on prod. Enable per env in the overlay (see values-contabo.yaml).
+serviceDbProvisioning:
+  image: postgres:15          # matches the server; ships psql/pg_isready
+  host: fuzeinfra-postgres    # in-namespace DNS of the shared Postgres Service
+  # Superuser used to create roles/dbs. Defaults to the chart-managed admin
+  # secret (fuzeinfra-secrets). Never referenced by value — only by key.
+  adminSecret:
+    name: ""                  # "" -> fuzeinfra.secretName (fuzeinfra-secrets)
+    userKey: POSTGRES_USER
+    passwordKey: POSTGRES_PASSWORD
+
+# List of services to provision. Each entry gates itself via `enabled`.
+#   name:     logical service name (used to derive the password env var)
+#   role:     Postgres LOGIN role to ensure (issue #153 convention: <svc>_svc)
+#   database: database to ensure, owned by `role`
+#   passwordSecret.{name,key}: the per-service Secret (sealed for the
+#     `fuzeinfra` namespace by the consumer repo) holding the role password.
+# Defaults are OFF; prod overlay flips `enabled: true` once the SealedSecrets
+# are present in the `fuzeinfra` namespace.
+serviceDatabases:
+  - name: fuzesales
+    enabled: false
+    role: fuzesales_svc
+    database: fuzesales
+    passwordSecret:
+      name: fuzesales-db-credentials
+      key: password
+  - name: fuzecontact
+    enabled: false
+    role: fuzecontact_svc
+    database: fuzecontact
+    passwordSecret:
+      name: fuzecontact-db-credentials
+      key: password
+  - name: fuzeservice
+    enabled: false
+    role: fuzeservice_svc
+    database: fuzeservice
+    passwordSecret:
+      name: fuzeservice-db-credentials
+      key: password
+
+# -----------------------------------------------------------------------------
 # Ingress (replaces the docker-compose nginx reverse proxy). Web UIs are exposed
 # at <service>.<global.domain>. Requires an ingress controller (ingress-nginx),
 # installed by the bootstrap scripts for kind and as an EKS addon path.
