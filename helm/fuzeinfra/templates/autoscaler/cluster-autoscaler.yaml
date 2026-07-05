@@ -194,6 +194,16 @@ spec:
             - --expander={{ .Values.clusterAutoscaler.expander | default "least-waste" }}
             - --balance-similar-node-groups=false
             - --v=4
+          # CA's default healthz endpoint is served on :8085 at /health-check
+          # (no --address flag needed — that's the built-in default). Wiring a
+          # liveness probe to it means a wedged/deadlocked CA gets restarted by
+          # kubelet instead of silently sitting idle while nodes need scaling.
+          livenessProbe:
+            httpGet:
+              path: /health-check
+              port: 8085
+            initialDelaySeconds: 30
+            periodSeconds: 10
           volumeMounts:
             - name: cloud-config
               mountPath: /etc/ca

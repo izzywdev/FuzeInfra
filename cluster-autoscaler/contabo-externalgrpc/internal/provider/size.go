@@ -32,8 +32,19 @@ func (s *Server) NodeGroupNodes(ctx context.Context, req *protos.NodeGroupNodesR
 	protoInstances := make([]*protos.Instance, 0, len(instances))
 	for _, inst := range instances {
 		state := mapContaboStatusToProtoState(inst.Status)
+		// The providerID is name-based (contabo://<name>), NOT the numeric Contabo
+		// instance ID. This is required because CA correlates a k8s Node to a
+		// cloud instance via Node.Spec.ProviderID, which is set at node-join time
+		// via the --kubelet-arg=provider-id=contabo://<node-name> flag in cloud-init
+		// (see deploy/elastic-userdata.template). The numeric Contabo id is not
+		// known to the node at join time (it's assigned by the Contabo API before
+		// the node boots, but nothing threads it into the kubelet flags), so using
+		// it here would mean no real k8s node ever has a matching ProviderID and
+		// scale-down (NodeGroupDeleteNodes) could never resolve which node to
+		// delete. The name IS known at render time on both sides, so it's the only
+		// value that reliably correlates a k8s Node object with its Contabo VPS.
 		protoInst := &protos.Instance{
-			Id: fmt.Sprintf("contabo://%d", inst.ID),
+			Id: "contabo://" + inst.Name,
 			Status: &protos.InstanceStatus{
 				InstanceState: state,
 				ErrorInfo:     nil,

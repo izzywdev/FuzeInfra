@@ -51,8 +51,8 @@ func TestNodeGroupNodes_ReturnsInstancesWithCorrectMapping(t *testing.T) {
 
 	// Check instance 1 (running)
 	inst1 := resp.Instances[0]
-	if inst1.Id != "contabo://100" {
-		t.Fatalf("instance 1: want Id=contabo://100, got %q", inst1.Id)
+	if inst1.Id != "contabo://elastic-node-1" {
+		t.Fatalf("instance 1: want Id=contabo://elastic-node-1, got %q", inst1.Id)
 	}
 	if inst1.Status == nil {
 		t.Fatalf("instance 1: Status is nil")
@@ -66,8 +66,8 @@ func TestNodeGroupNodes_ReturnsInstancesWithCorrectMapping(t *testing.T) {
 
 	// Check instance 2 (provisioning -> creating)
 	inst2 := resp.Instances[1]
-	if inst2.Id != "contabo://101" {
-		t.Fatalf("instance 2: want Id=contabo://101, got %q", inst2.Id)
+	if inst2.Id != "contabo://elastic-node-2" {
+		t.Fatalf("instance 2: want Id=contabo://elastic-node-2, got %q", inst2.Id)
 	}
 	if inst2.Status == nil {
 		t.Fatalf("instance 2: Status is nil")

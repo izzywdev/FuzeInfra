@@ -161,6 +161,12 @@ clusterAutoscaler:
     # TODO: set to the k3s server URL the elastic nodes join
     # (e.g. https://<contabo-server-ip>:6443).
     k3sServerUrl: ""
+    # TODO: base64 of cluster-autoscaler/contabo-externalgrpc/deploy/elastic-userdata.template
+    # (the canonical elastic-node cloud-init template) — e.g.
+    # `base64 -w0 cluster-autoscaler/contabo-externalgrpc/deploy/elastic-userdata.template`.
+    # See that file's header for the template vars (.NodeName/.K3SServerURL/.K3SNodeToken)
+    # and why --kubelet-arg=provider-id=contabo://{{.NodeName}} is load-bearing for scale-down.
+    userDataTemplateB64: ""
 
 overprovisioning:
   # Enabled together with clusterAutoscaler during the gated Task 18 cutover.

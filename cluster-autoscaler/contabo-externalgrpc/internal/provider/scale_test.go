@@ -226,10 +226,12 @@ func (f *fakeCloudCapTest) Delete(_ context.Context, id int64) error {
 }
 
 func TestDeleteNodes_DeletesElastic(t *testing.T) {
-	// Pre-load fakeCloud with an elastic instance ID=42
+	// Pre-load fakeCloud with an elastic instance named fuzeinfra-elastic-0, numeric ID=42.
+	// The providerID is name-based (contabo://<name>); the fake resolves name->id via
+	// ListByTag, mirroring how the real Contabo-backed NodeGroupDeleteNodes resolves it.
 	fc := &fakeCloudCapTest{
 		instances: []contabo.Instance{
-			{ID: 42, Name: "elastic-node-42", Tags: []string{"fuzeinfra-elastic"}},
+			{ID: 42, Name: "fuzeinfra-elastic-0", Tags: []string{"fuzeinfra-elastic"}},
 		},
 	}
 	cfg := provider.Config{
@@ -237,11 +239,11 @@ func TestDeleteNodes_DeletesElastic(t *testing.T) {
 	}
 	s := provider.New(cfg, fc)
 
-	// Request to delete the elastic node with ProviderID contabo://42
+	// Request to delete the elastic node with ProviderID contabo://fuzeinfra-elastic-0
 	_, err := s.NodeGroupDeleteNodes(context.Background(), &protos.NodeGroupDeleteNodesRequest{
 		Id: "elastic",
 		Nodes: []*protos.ExternalGrpcNode{
-			{ProviderID: "contabo://42"},
+			{ProviderID: "contabo://fuzeinfra-elastic-0"},
 		},
 	})
 
@@ -249,21 +251,21 @@ func TestDeleteNodes_DeletesElastic(t *testing.T) {
 		t.Fatalf("NodeGroupDeleteNodes error: %v", err)
 	}
 
-	// Verify cloud.Delete(42) was called exactly once
+	// Verify cloud.Delete resolved the name to numeric ID 42 and was called exactly once
 	if len(fc.deletedIDs) != 1 {
 		t.Fatalf("want 1 delete call, got %d", len(fc.deletedIDs))
 	}
 	if fc.deletedIDs[0] != 42 {
-		t.Fatalf("want deleted ID 42, got %d", fc.deletedIDs[0])
+		t.Fatalf("want deleted ID 42 (resolved from name fuzeinfra-elastic-0), got %d", fc.deletedIDs[0])
 	}
 }
 
 func TestDeleteNodes_RefusesNonElastic(t *testing.T) {
-	// Pre-load fakeCloud with an elastic instance ID=42 only
-	// (ID=999 is NOT in the elastic set)
+	// Pre-load fakeCloud with an elastic instance named fuzeinfra-elastic-0 only
+	// (fuzeinfra-elastic-99 is NOT in the elastic set)
 	fc := &fakeCloudCapTest{
 		instances: []contabo.Instance{
-			{ID: 42, Name: "elastic-node-42", Tags: []string{"fuzeinfra-elastic"}},
+			{ID: 42, Name: "fuzeinfra-elastic-0", Tags: []string{"fuzeinfra-elastic"}},
 		},
 	}
 	cfg := provider.Config{
@@ -271,11 +273,11 @@ func TestDeleteNodes_RefusesNonElastic(t *testing.T) {
 	}
 	s := provider.New(cfg, fc)
 
-	// Request to delete a node whose ID is NOT elastic (contabo://999)
+	// Request to delete a node whose name is NOT elastic (contabo://fuzeinfra-elastic-99)
 	_, err := s.NodeGroupDeleteNodes(context.Background(), &protos.NodeGroupDeleteNodesRequest{
 		Id: "elastic",
 		Nodes: []*protos.ExternalGrpcNode{
-			{ProviderID: "contabo://999"},
+			{ProviderID: "contabo://fuzeinfra-elastic-99"},
 		},
 	})
 
@@ -287,5 +289,35 @@ func TestDeleteNodes_RefusesNonElastic(t *testing.T) {
 	// Must NOT call cloud.Delete at all (fail-closed guard)
 	if len(fc.deletedIDs) != 0 {
 		t.Fatalf("must not delete non-elastic nodes, but got %d delete calls", len(fc.deletedIDs))
+	}
+}
+
+func TestDeleteNodes_MalformedProviderIDRejected(t *testing.T) {
+	// A ProviderID without the contabo:// prefix, or with an empty name suffix,
+	// must be rejected as InvalidArgument (fail-closed guard) without deleting anything.
+	fc := &fakeCloudCapTest{
+		instances: []contabo.Instance{
+			{ID: 42, Name: "fuzeinfra-elastic-0", Tags: []string{"fuzeinfra-elastic"}},
+		},
+	}
+	cfg := provider.Config{
+		ElasticTag: "fuzeinfra-elastic",
+	}
+	s := provider.New(cfg, fc)
+
+	for _, providerID := range []string{"fuzeinfra-elastic-0", "contabo://", ""} {
+		_, err := s.NodeGroupDeleteNodes(context.Background(), &protos.NodeGroupDeleteNodesRequest{
+			Id: "elastic",
+			Nodes: []*protos.ExternalGrpcNode{
+				{ProviderID: providerID},
+			},
+		})
+		if status.Code(err) != codes.InvalidArgument {
+			t.Fatalf("providerID %q: want InvalidArgument, got %v", providerID, err)
+		}
+	}
+
+	if len(fc.deletedIDs) != 0 {
+		t.Fatalf("must not delete on malformed ProviderID, but got %d delete calls", len(fc.deletedIDs))
 	}
 }

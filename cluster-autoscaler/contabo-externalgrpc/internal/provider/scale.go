@@ -148,37 +148,51 @@ func renderUserData(templateStr, nodeName, k3sServerURL, k3sNodeToken string) (s
 // It enforces a critical safety guard: it will NEVER delete a non-elastic instance.
 // The requested nodes are validated against the elastic set via ListByTag BEFORE any deletion occurs.
 //
-// Returns codes.InvalidArgument if any requested node is not in the elastic set.
+// ProviderIDs are name-based (contabo://<node-name>), matching what NodeGroupNodes
+// returns and what cloud-init sets via --kubelet-arg=provider-id at join time (see
+// deploy/elastic-userdata.template). The numeric Contabo instance id needed for the
+// actual Delete call is resolved by looking up the parsed name in the ListByTag
+// result, which is fetched once and reused for both the membership check and the
+// name->id resolution.
+//
+// Returns codes.InvalidArgument if any requested node is not in the elastic set
+// (including a malformed ProviderID or a name that resolves to no known instance).
 // Returns codes.Unavailable if ListByTag or Delete fails.
 func (s *Server) NodeGroupDeleteNodes(ctx context.Context, req *protos.NodeGroupDeleteNodesRequest) (*protos.NodeGroupDeleteNodesResponse, error) {
 	// Fetch current elastic instances to build the allowed-to-delete set
+	// and the name->instance lookup used to resolve the numeric Contabo id.
 	elasticInstances, err := s.cloud.ListByTag(ctx, s.cfg.ElasticTag)
 	if err != nil {
 		return nil, status.Errorf(codes.Unavailable, "NodeGroupDeleteNodes: listing elastic instances: %v", err)
 	}
 
-	// Build a set of elastic instance IDs for membership checking
-	elasticIDs := make(map[int64]bool)
+	// Build a name -> instance map for membership checking and id resolution.
+	elasticByName := make(map[string]contabo.Instance, len(elasticInstances))
 	for _, inst := range elasticInstances {
-		elasticIDs[inst.ID] = true
+		elasticByName[inst.Name] = inst
 	}
 
-	// Validate ALL requested nodes are elastic BEFORE deleting any (fail-closed guard)
-	for _, node := range req.Nodes {
-		id, err := parseContaboProviderID(node.ProviderID)
+	// Validate ALL requested nodes are elastic BEFORE deleting any (fail-closed guard).
+	// Resolve the numeric ids up front so the delete loop below cannot fail this
+	// lookup after already having deleted some nodes.
+	ids := make([]int64, len(req.Nodes))
+	for i, node := range req.Nodes {
+		name, err := parseContaboNodeName(node.ProviderID)
 		if err != nil {
 			return nil, status.Errorf(codes.InvalidArgument, "NodeGroupDeleteNodes: parsing ProviderID %q: %v", node.ProviderID, err)
 		}
 
-		if !elasticIDs[id] {
+		inst, ok := elasticByName[name]
+		if !ok {
 			return nil, status.Errorf(codes.InvalidArgument, "refusing to delete non-elastic node %s", node.ProviderID)
 		}
+
+		ids[i] = inst.ID
 	}
 
-	// All nodes validated as elastic; now delete them
-	for _, node := range req.Nodes {
-		id, _ := parseContaboProviderID(node.ProviderID) // Already validated above
-		if err := s.cloud.Delete(ctx, id); err != nil {
+	// All nodes validated as elastic; now delete them by their resolved numeric id.
+	for i, node := range req.Nodes {
+		if err := s.cloud.Delete(ctx, ids[i]); err != nil {
 			return nil, status.Errorf(codes.Unavailable, "NodeGroupDeleteNodes: deleting node %s: %v", node.ProviderID, err)
 		}
 	}
@@ -192,18 +206,19 @@ func (s *Server) NodeGroupDecreaseTargetSize(ctx context.Context, req *protos.No
 	return &protos.NodeGroupDecreaseTargetSizeResponse{}, nil
 }
 
-// parseContaboProviderID parses a ProviderID in the format "contabo://<id>" and returns the numeric id.
-func parseContaboProviderID(providerID string) (int64, error) {
+// parseContaboNodeName parses a ProviderID in the format "contabo://<name>" and
+// returns the node name suffix. The scheme is name-based (see NodeGroupNodes in
+// size.go for why), so this returns a string rather than a numeric id.
+func parseContaboNodeName(providerID string) (string, error) {
 	const prefix = "contabo://"
 	if !strings.HasPrefix(providerID, prefix) {
-		return 0, fmt.Errorf("ProviderID does not start with %q", prefix)
+		return "", fmt.Errorf("ProviderID does not start with %q", prefix)
 	}
 
-	idStr := providerID[len(prefix):]
-	id, err := strconv.ParseInt(idStr, 10, 64)
-	if err != nil {
-		return 0, fmt.Errorf("parsing numeric id from %q: %w", idStr, err)
+	name := providerID[len(prefix):]
+	if name == "" {
+		return "", fmt.Errorf("ProviderID %q has empty name suffix", providerID)
 	}
 
-	return id, nil
+	return name, nil
 }
