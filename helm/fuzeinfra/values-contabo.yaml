@@ -150,11 +150,15 @@ dnsmasq:
 # -----------------------------------------------------------------------------
 # Cluster Autoscaler elastic pool (Contabo).
 # Maintains an elastic node pool sized 0:2 (min:max) via the externalgrpc
-# provider (Task 12) + upstream Cluster Autoscaler (this task). Overprovisioning
-# pause pods hold a headroom "ceiling" so the CA has something to evict/scale
-# against before real workloads go unschedulable — bumping overprovisioning
-# replicas raises the effective ceiling (documented target: up to 5 nodes worth
-# of slack against the 0:2 elastic pool + the always-on base node).
+# provider (Task 12) + upstream Cluster Autoscaler (this task). This is up to 2
+# elastic nodes ADDED ON TOP of the existing (floating) baseline — the
+# control-plane plus however many worker nodes consumer repos have currently
+# dispatched via infra-request-handler. There is no fixed baseline count here;
+# the elastic pool only ever adds/removes the nodes it tagged itself
+# (`fuzeinfra-elastic`) and never touches the baseline. Overprovisioning pause
+# pods hold a headroom buffer so the CA has something to evict/scale against
+# before real workloads go unschedulable — bumping overprovisioning replicas
+# raises how much of the 0:2 elastic pool is proactively reserved.
 # -----------------------------------------------------------------------------
 # NOTE: kept DISABLED on main. Prod is Argo auto-synced (selfHeal) from main, so
 # enabling here before the fuzeinfra-ca-provider SealedSecret + real product/image/

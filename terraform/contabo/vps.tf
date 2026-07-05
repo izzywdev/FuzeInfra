@@ -29,17 +29,12 @@ resource "contabo_instance" "prod" {
       # inbound 10250 is needed and exposing it would be an unnecessary risk.
       # 8472 Anywhere here is a rebuild bootstrap default; the live runtime rule is
       # scoped to node IPs (durable fix: wireguard-native overlay / private VLAN).
-      # 51820/udp = Flannel WireGuard-native overlay (see provisioning.tf for the
-      # --flannel-backend=wireguard-native install flag). Opened ALONGSIDE 8472/udp
-      # during the transition: the flag is inert on the already-running prod
-      # server (flannel backend is fixed at k3s install time), so the live server
-      # still speaks VXLAN on 8472 until a deliberate, human-scheduled reprovision
-      # cuts it over to WireGuard on 51820. Once that cutover happens and all
-      # nodes are confirmed on WireGuard, 8472 can be closed.
+      # WireGuard overlay is a separate, cluster-wide hardening initiative —
+      # intentionally NOT coupled to autoscaling. Elastic nodes join via the
+      # same public-IP + VXLAN path the existing consumer-dispatched workers use.
       - ufw allow 22/tcp
       - ufw allow 6443/tcp
       - ufw allow 8472/udp
-      - ufw allow 51820/udp
       - ufw --force enable
   EOT
 

@@ -8,8 +8,8 @@ cluster state happens by committing to `main` and letting Argo sync, never by
 
 Do not start this runbook until:
 
-- The cutover-prep PR (name-based providerID, CA liveness probe, WireGuard
-  firewall rule, canonical `deploy/elastic-userdata.template`) is merged to `main`.
+- The cutover-prep PR (name-based providerID, CA liveness probe, canonical
+  `deploy/elastic-userdata.template`) is merged to `main`.
 - You have a maintenance window — the spike test at the end intentionally
   provisions and destroys a real Contabo VPS.
 
@@ -22,35 +22,27 @@ Do not start this runbook until:
   permission to create/delete/tag VPS instances, and an existing Contabo SSH
   key ID to inject into new nodes.
 
-## 1. WireGuard server reprovision caveat
+## 1. Elastic nodes join via the existing public-IP + VXLAN path
 
-`modules/contabo-k3s-node/cloud-init.tftpl` and the new
-`deploy/elastic-userdata.template` both open `51820/udp` (WireGuard) alongside
-the existing `8472/udp` (VXLAN) so agent nodes work under either flannel
-backend during the transition.
+Elastic nodes join the cluster exactly the way the existing
+consumer-dispatched worker nodes already do today: public IP + Flannel VXLAN
+(`8472/udp`). This is **not** an overlay-network change — the k3s server keeps
+its current flannel backend, untouched. (A cluster-wide move to WireGuard, if
+ever undertaken, is a separate hardening initiative, deliberately decoupled
+from this autoscaling feature — see
+`docs/superpowers/specs/2026-07-03-cluster-node-autoscaling-design.md`.)
 
-- The **k3s server** must be reprovisioned (or reconfigured) onto
-  `--flannel-backend=wireguard-native` before elastic agents are expected to
-  actually route pod traffic over WireGuard. Until that happens, agents joining
-  with only the new firewall rule will still fall back to VXLAN (8472/udp) —
-  which is fine and expected during the transition, but don't assume WireGuard
-  is "live" just because the port is open.
-- This is a **server-side change with a network blip**: flannel backend
-  changes typically require restarting k3s server and re-establishing the
-  overlay. Plan this as its own change window, ideally BEFORE the elastic pool
-  is enabled, so a flaky backend switch doesn't get confused with an
-  autoscaler bug.
-- Verify after the switch: `kubectl -n kube-system get pods -l app=flannel`
-  (or equivalent) healthy, and existing pod-to-pod traffic across nodes still
-  works, before proceeding.
+## 2. Confirm the current (floating) baseline + set the k3s node token
 
-## 2. Bring up the 3-node baseline + set the k3s node token
-
-- Confirm the baseline (non-elastic) 3-node k3s cluster is up via the existing
-  `terraform/contabo` module and `modules/contabo-k3s-node`.
+- The baseline is **whatever nodes exist right now** — it is not a fixed
+  count and FuzeInfra's Terraform does not provision it. Today that's 1
+  control-plane (TF-managed, `terraform/contabo`) + 2 worker nodes dispatched
+  out-of-band by consumer repos via `infra-request-handler` (outside this
+  Terraform's state). Confirm the current node count with
+  `kubectl get nodes` — whatever it is, is the baseline the autoscaler adds on
+  top of.
 - Retrieve the k3s node join token from the server:
-  `sudo cat /var/lib/rancher/k3s/server/node-token` (or wherever your
-  `k3s_node_token` Terraform variable sources it from).
+  `sudo cat /var/lib/rancher/k3s/server/node-token`.
 - This token becomes `K3S_NODE_TOKEN` in step 3 — treat it as a secret; it is
   never committed to git.
 
@@ -163,11 +155,13 @@ on the grpc port) and the CA's own `/health-check` on `:8085` are green
 
 ## 7. Gated spike test
 
-With both pools enabled and floor at the baseline (3 nodes, elastic min=0):
+With both pools enabled and the elastic pool at min=0 (baseline is whatever
+`kubectl get nodes` shows right now — record that count before starting, e.g.
+3 nodes today):
 
 1. Apply load that forces at least one pod to go unschedulable against the
-   baseline + overprovisioning ceiling (e.g. scale a test Deployment with
-   resource requests sized to exceed remaining headroom).
+   current baseline + overprovisioning ceiling (e.g. scale a test Deployment
+   with resource requests sized to exceed remaining headroom).
 2. **Watch elastic node provision**: `kubectl -n fuzeinfra logs -f deploy/fuzeinfra-cluster-autoscaler`
    should show a `NodeGroupIncreaseSize` call; confirm a new Contabo VPS
    appears (`ListByTag` / Contabo dashboard) named `fuzeinfra-elastic-N`.
@@ -186,8 +180,10 @@ With both pools enabled and floor at the baseline (3 nodes, elastic min=0):
 6. **Confirm TF plan stays clean**: `terraform plan` in `terraform/contabo`
    should show no drift — the elastic node lifecycle is entirely
    provider/CA-managed and must never appear in Terraform's state.
-7. **Confirm the floor returns to 3**: once the elastic node is deleted,
-   `kubectl get nodes` should show exactly the 3 baseline nodes again, and
+7. **Confirm the floor returns to the recorded baseline**: once the elastic
+   node is deleted, `kubectl get nodes` should show exactly the baseline node
+   count recorded before step 1 (no fewer — the autoscaler only ever
+   adds/removes its own `fuzeinfra-elastic`-tagged nodes above it), and
    `NodeGroupTargetSize` (queryable via the provider's gRPC or CA's own
    metrics) reports 0 elastic nodes.
 
