@@ -17,4 +17,9 @@ public_app_hosts = {
   # izzywdev/FuzeKeys (FuzeInfra#136 / #140)
   "keys"     = "izzywdev/FuzeKeys" # frontend    — keys.prod.fuzefront.com
   "api.keys" = "izzywdev/FuzeKeys" # API backend — api.keys.prod.fuzefront.com
+
+  # MFE product apps — registered as FuzeFront micro-frontends
+  "fuzesales"   = "izzywdev/FuzeSales"   # fuzesales.prod.fuzefront.com
+  "fuzecontact" = "izzywdev/FuzeContact" # fuzecontact.prod.fuzefront.com
+  "fuzeservice" = "izzywdev/FuzeService" # fuzeservice.prod.fuzefront.com
 }
