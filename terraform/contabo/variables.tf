@@ -184,9 +184,9 @@ variable "crit_bridge_token" {
 # entirely separate from — and invisible to — the autoscaler.
 # ---------------------------------------------------------------------------
 variable "baseline_worker_count" {
-  description = "Number of TF-managed baseline worker nodes to provision (in addition to the control-plane VPS). Default 2 → 1 control-plane + 2 workers = 3-node baseline floor."
+  description = "Number of TF-managed baseline worker nodes to provision (in addition to the control-plane VPS). DEFAULT 0 so a plain merge provisions NO billable VPS (the merge-to-apply CD would otherwise spin these up immediately). The gated Task 18 cutover sets this to 2 → 1 control-plane + 2 workers = 3-node baseline floor. See docs/runbooks/contabo-autoscaling-cutover.md."
   type        = number
-  default     = 2
+  default     = 0
 
   validation {
     condition     = var.baseline_worker_count >= 0

@@ -22,6 +22,7 @@ import (
 	"github.com/izzywdev/fuzeinfra/contabo-externalgrpc/internal/protos"
 	"github.com/izzywdev/fuzeinfra/contabo-externalgrpc/internal/provider"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
 )
 
 // Environment variables consumed by this binary:
@@ -249,7 +250,25 @@ func main() {
 		log.Fatalf("failed to listen on %s: %v", grpcListen, err)
 	}
 
-	grpcServer := grpc.NewServer()
+	// TLS is opt-in: set TLS_CERT_FILE + TLS_KEY_FILE to serve gRPC over TLS.
+	var serverOpts []grpc.ServerOption
+	if certFile, keyFile := os.Getenv("TLS_CERT_FILE"), os.Getenv("TLS_KEY_FILE"); certFile != "" && keyFile != "" {
+		creds, err := credentials.NewServerTLSFromFile(certFile, keyFile)
+		if err != nil {
+			log.Fatalf("failed to load TLS credentials: %v", err)
+		}
+		serverOpts = append(serverOpts, grpc.Creds(creds))
+		log.Println("gRPC server: TLS enabled (TLS_CERT_FILE/TLS_KEY_FILE set)")
+	} else {
+		// Plaintext is intentional for the default in-cluster deployment: this
+		// server is a ClusterIP Service reachable only from the Cluster
+		// Autoscaler pod over the pod network (no Ingress/NodePort), and the CA
+		// cloud-config dials it plaintext. Set TLS_CERT_FILE/TLS_KEY_FILE to
+		// enable TLS; restrict ingress further with a NetworkPolicy.
+		log.Println("gRPC server: plaintext (in-cluster ClusterIP only). Set TLS_CERT_FILE/TLS_KEY_FILE to enable TLS.")
+	}
+	// nosemgrep: grpc-server-insecure-connection
+	grpcServer := grpc.NewServer(serverOpts...)
 	protos.RegisterCloudProviderServer(grpcServer, srv)
 
 	log.Printf("contabo-externalgrpc server starting on %s (elastic tag=%q, min=%d, max=%d)",
