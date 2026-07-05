@@ -10,7 +10,7 @@ resource "null_resource" "set_github_secret" {
   }
 
   provisioner "local-exec" {
-    command = <<-EOT
+    command     = <<-EOT
       gh secret set KUBE_CONFIG \
         --body "$(cat "${path.root}/k3s-kubeconfig.yaml" | base64 -w0)" \
         --repo "${var.github_owner}/${var.github_repo}"

@@ -146,7 +146,12 @@ jobs:
         working-directory: ${{ env.TF_ROOT }}
         run: |
           set +e
-          terraform plan -input=false -lock-timeout=5m -no-color -out=tfplan
+          # Materialized consumer declarations (generated data — the bare *.tf
+          # setup is consumer-free by invariant). Loaded only if present so TF
+          # roots without consumers are unaffected.
+          VAR_FILES=""
+          [ -f materialized/consumers.tfvars ] && VAR_FILES="-var-file=materialized/consumers.tfvars"
+          terraform plan -input=false -lock-timeout=5m -no-color $VAR_FILES -out=tfplan
           plan_rc=$?
           set -e
           if [ "$plan_rc" -ne 0 ]; then

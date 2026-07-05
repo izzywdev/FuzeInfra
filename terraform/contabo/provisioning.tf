@@ -81,7 +81,16 @@ resource "null_resource" "provision" {
       # scoped — the live rule allows 8472 only from the specific node IPs, and the
       # node-join path should add a scoped per-worker rule. The durable fix is moving
       # the overlay onto flannel wireguard-native or a Contabo private VLAN (tracked).
-      "ufw allow 22/tcp && ufw allow 6443/tcp && ufw allow 8472/udp && ufw --force enable 2>/dev/null || true",
+      #
+      # 51820/udp = Flannel WireGuard-native overlay, opened ALONGSIDE 8472/udp for
+      # the transition period. See the --flannel-backend=wireguard-native comment
+      # below: this flag is inert on the CURRENTLY RUNNING prod server (flannel
+      # backend is fixed at k3s install time), so today's live traffic still runs
+      # over VXLAN/8472. 51820 is opened now so it's already available for the day
+      # a deliberate reprovision switches the running backend to WireGuard — at
+      # that point 8472 can be closed. Until then both stay open, no functional
+      # change to current traffic.
+      "ufw allow 22/tcp && ufw allow 6443/tcp && ufw allow 8472/udp && ufw allow 51820/udp && ufw --force enable 2>/dev/null || true",
       "ufw delete allow 80/tcp 2>/dev/null || true",
       "ufw delete allow 443/tcp 2>/dev/null || true",
 
@@ -90,11 +99,33 @@ resource "null_resource" "provision" {
       # worker nodes, keeping the single control-plane node (apiserver + Traefik +
       # CoreDNS + Postgres) from saturating under tenant churn (FuzeInfra#92). The
       # live node already carries this taint; this makes it survive a VPS rebuild.
+      #
+      # --flannel-backend=wireguard-native switches the pod overlay off plain
+      # VXLAN so elastic autoscaler nodes (joining over PUBLIC IPs, not a
+      # private VLAN) get an encrypted, NAT-friendly tunnel instead of raw UDP
+      # VXLAN across the public internet.
+      #
+      # *** CRITICAL: THIS FLAG IS INERT ON THE ALREADY-RUNNING PROD SERVER. ***
+      # Flannel's backend is chosen ONCE, at first `k3s server` install, and
+      # persisted in /var/lib/rancher/k3s/server/db — it is NOT reconfigured by
+      # re-running the installer with a different INSTALL_K3S_EXEC (the "else"
+      # upgrade-check branch below is a no-op for this flag on an existing
+      # server; k3s does not support changing the backend live). Adding this
+      # flag here only takes effect for a brand-new server (server_ip changes,
+      # i.e. a deliberate VPS replace/reprovision) — it does NOT retroactively
+      # migrate the current prod control-plane from VXLAN to WireGuard.
+      # Cutover to WireGuard on the LIVE server requires a separate, disruptive,
+      # human-scheduled step (stop k3s, edit /etc/systemd/system/k3s.service or
+      # re-run the installer with --flannel-backend=wireguard-native, restart,
+      # verify flannel.wireguard interface + cross-node pod connectivity) and is
+      # OUT OF SCOPE for this Terraform change. Do not taint/recreate the server
+      # null_resource or the VPS to force this — track the cutover as its own
+      # change window. See task-15-report.md for the cutover plan.
       "if ! command -v k3s &>/dev/null; then",
-      "  curl -sfL https://get.k3s.io | INSTALL_K3S_EXEC='--tls-san ${local.server_ip} --node-taint node-role.kubernetes.io/control-plane=:PreferNoSchedule' sh -",
+      "  curl -sfL https://get.k3s.io | INSTALL_K3S_EXEC='--tls-san ${local.server_ip} --node-taint node-role.kubernetes.io/control-plane=:PreferNoSchedule --flannel-backend=wireguard-native' sh -",
       "else",
-      "  echo 'k3s already installed, running upgrade check'",
-      "  curl -sfL https://get.k3s.io | INSTALL_K3S_EXEC='--tls-san ${local.server_ip} --node-taint node-role.kubernetes.io/control-plane=:PreferNoSchedule' sh - || true",
+      "  echo 'k3s already installed, running upgrade check (flannel backend flag has NO effect on an existing install — see comment above)'",
+      "  curl -sfL https://get.k3s.io | INSTALL_K3S_EXEC='--tls-san ${local.server_ip} --node-taint node-role.kubernetes.io/control-plane=:PreferNoSchedule --flannel-backend=wireguard-native' sh - || true",
       "fi",
       "sleep 15",
       "kubectl wait --for=condition=ready node --all --timeout=120s",

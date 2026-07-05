@@ -1,0 +1,88 @@
+{{- if .Values.clusterAutoscaler.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fuzeinfra-contabo-ca-provider
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "fuzeinfra.labels" . | nindent 4 }}
+    {{- include "fuzeinfra.selectorLabels" (dict "component" "contabo-ca-provider" "root" $) | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "fuzeinfra.selectorLabels" (dict "component" "contabo-ca-provider" "root" $) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "fuzeinfra.labels" . | nindent 8 }}
+        {{- include "fuzeinfra.selectorLabels" (dict "component" "contabo-ca-provider" "root" $) | nindent 8 }}
+    spec:
+      containers:
+        - name: provider
+          image: {{ .Values.clusterAutoscaler.provider.image }}
+          imagePullPolicy: {{ include "fuzeinfra.pullPolicy" . }}
+          ports:
+            - name: grpc
+              containerPort: 8086
+              protocol: TCP
+          envFrom:
+            - secretRef:
+                name: {{ .Values.clusterAutoscaler.provider.existingSecret }}
+          env:
+            - name: PRODUCT_ID
+              value: {{ .Values.clusterAutoscaler.provider.productId | quote }}
+            - name: IMAGE_ID
+              value: {{ .Values.clusterAutoscaler.provider.imageId | quote }}
+            - name: REGION
+              value: {{ .Values.clusterAutoscaler.provider.region | quote }}
+            - name: K3S_SERVER_URL
+              value: {{ .Values.clusterAutoscaler.provider.k3sServerUrl | quote }}
+            - name: ELASTIC_TAG
+              value: {{ .Values.clusterAutoscaler.provider.elasticTag | quote }}
+            - name: ELASTIC_NAME_PREFIX
+              value: {{ .Values.clusterAutoscaler.provider.elasticNamePrefix | quote }}
+            - name: MIN_SIZE
+              value: {{ .Values.clusterAutoscaler.provider.minSize | quote }}
+            - name: MAX_SIZE
+              value: {{ .Values.clusterAutoscaler.provider.maxSize | quote }}
+            - name: GRPC_LISTEN
+              value: {{ .Values.clusterAutoscaler.provider.grpcListen | quote }}
+            - name: USER_DATA_TEMPLATE_B64
+              value: {{ .Values.clusterAutoscaler.provider.userDataTemplateB64 | quote }}
+          livenessProbe:
+            tcpSocket:
+              port: grpc
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            tcpSocket:
+              port: grpc
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: contabo-ca-provider
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "fuzeinfra.labels" . | nindent 4 }}
+    {{- include "fuzeinfra.selectorLabels" (dict "component" "contabo-ca-provider" "root" $) | nindent 4 }}
+spec:
+  type: ClusterIP
+  ports:
+    - name: grpc
+      port: 8086
+      targetPort: grpc
+      protocol: TCP
+  selector:
+    {{- include "fuzeinfra.selectorLabels" (dict "component" "contabo-ca-provider" "root" $) | nindent 4 }}
+{{- end }}

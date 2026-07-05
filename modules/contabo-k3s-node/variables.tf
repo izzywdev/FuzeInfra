@@ -10,10 +10,10 @@ variable "requests" {
   description = "List of node requests to reconcile. Each becomes one Contabo VPS joined to the cluster as a k3s agent."
   type = list(object({
     name       = string                       # stable node name (also the Contabo display name + k3s --node-name)
-    product_id = string                        # Contabo product/plan ID (e.g. V45 / VPS tier). Validated by the handler whitelist.
-    region     = optional(string, "EU")        # Contabo region. Whitelist restricts auto-apply to EU.
-    role       = optional(string, "workload")  # node role → applied as the `node-role=<role>` label
-    labels     = optional(map(string), {})     # extra k3s node labels (key=value)
+    product_id = string                       # Contabo product/plan ID (e.g. V45 / VPS tier). Validated by the handler whitelist.
+    region     = optional(string, "EU")       # Contabo region. Whitelist restricts auto-apply to EU.
+    role       = optional(string, "workload") # node role → applied as the `node-role=<role>` label
+    labels     = optional(map(string), {})    # extra k3s node labels (key=value)
   }))
 
   validation {

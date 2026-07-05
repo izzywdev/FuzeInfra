@@ -54,6 +54,69 @@ credentials:
     tunnelToken: ""
 
 # -----------------------------------------------------------------------------
+# Per-service Postgres provisioning (issue #153).
+#
+# Declaratively provisions per-service roles + databases on the shared
+# `fuzeinfra-postgres` server via an idempotent, GitOps-reconciled hook Job
+# (templates/service-db-provisioning.yaml). This is the declarative successor
+# to the imperative runner-side recipe in governance/datastore-provisioning.md.
+#
+# CROSS-NAMESPACE SECRET CONTRACT (important):
+#   The provisioning Job runs in the `fuzeinfra` namespace so the Postgres
+#   SUPERUSER creds (`fuzeinfra-secrets`) never leave this namespace and never
+#   land in git. The role password MUST equal the password the consuming
+#   service already sealed for its own DATABASE_URL. A Job pod can only read
+#   Secrets in its OWN namespace, so each consuming repo must ALSO ship a
+#   SealedSecret of its DB credentials sealed FOR the `fuzeinfra` namespace
+#   (precedent: `fuzekeys-db-credentials`, `fuzesocial-app-db-credentials`
+#   already exist in `fuzeinfra`). The Job reads that per-service password via
+#   `secretKeyRef` (below) and syncs it onto the role. No plaintext credential
+#   is ever committed here — only Secret NAMES + KEYS.
+#
+# Off by default (base/local/aws): the referenced per-service Secrets only
+# exist on prod. Enable per env in the overlay (see values-contabo.yaml).
+serviceDbProvisioning:
+  image: postgres:15          # matches the server; ships psql/pg_isready
+  host: fuzeinfra-postgres    # in-namespace DNS of the shared Postgres Service
+  # Superuser used to create roles/dbs. Defaults to the chart-managed admin
+  # secret (fuzeinfra-secrets). Never referenced by value — only by key.
+  adminSecret:
+    name: ""                  # "" -> fuzeinfra.secretName (fuzeinfra-secrets)
+    userKey: POSTGRES_USER
+    passwordKey: POSTGRES_PASSWORD
+
+# List of services to provision. Each entry gates itself via `enabled`.
+#   name:     logical service name (used to derive the password env var)
+#   role:     Postgres LOGIN role to ensure (issue #153 convention: <svc>_svc)
+#   database: database to ensure, owned by `role`
+#   passwordSecret.{name,key}: the per-service Secret (sealed for the
+#     `fuzeinfra` namespace by the consumer repo) holding the role password.
+# Defaults are OFF; prod overlay flips `enabled: true` once the SealedSecrets
+# are present in the `fuzeinfra` namespace.
+serviceDatabases:
+  - name: fuzesales
+    enabled: false
+    role: fuzesales_svc
+    database: fuzesales
+    passwordSecret:
+      name: fuzesales-db-credentials
+      key: password
+  - name: fuzecontact
+    enabled: false
+    role: fuzecontact_svc
+    database: fuzecontact
+    passwordSecret:
+      name: fuzecontact-db-credentials
+      key: password
+  - name: fuzeservice
+    enabled: false
+    role: fuzeservice_svc
+    database: fuzeservice
+    passwordSecret:
+      name: fuzeservice-db-credentials
+      key: password
+
+# -----------------------------------------------------------------------------
 # Ingress (replaces the docker-compose nginx reverse proxy). Web UIs are exposed
 # at <service>.<global.domain>. Requires an ingress controller (ingress-nginx),
 # installed by the bootstrap scripts for kind and as an EKS addon path.
@@ -97,6 +160,16 @@ redis:
   image: redis:7-alpine
   port: 6379
   storage: 2Gi
+  # Per-app ACL persistence. When enabled, redis runs with `--aclfile
+  # /data/users.acl` and a bootstrap initContainer seeds that file (on the PVC)
+  # with the shared no-auth `default` user so existing consumers are unaffected.
+  # Per-app least-privilege ACL users (created imperatively during consumer
+  # onboarding, e.g. `fuzekeys` with `~fuzekeys:* +@all -@admin -@dangerous`)
+  # are written to the file via `ACL SAVE` and survive pod restarts. Passwords
+  # live only on the PVC as hashes — never in git. See
+  # governance/datastore-allocations.md for the per-app allocation registry.
+  acl:
+    enabled: true
   resources:
     requests: { cpu: 50m,  memory: 64Mi }
     limits:   { cpu: 500m, memory: 512Mi }
@@ -364,3 +437,48 @@ cloudflareTunnel:
   # Named Tunnel UUID (from `cloudflared tunnel list` or Terraform output).
   # When set, switches to local-config mode with inline ingress rules.
   tunnelId: ""
+
+# -----------------------------------------------------------------------------
+# Cluster Autoscaler overprovisioning
+# Maintains spare capacity on elastic node pools via low-priority pause pods.
+# Disabled by default; enable in environment overlays that use elastic autoscaling.
+# -----------------------------------------------------------------------------
+overprovisioning:
+  enabled: false
+  replicas: 1
+  image: registry.k8s.io/pause:3.9
+  resources:
+    cpu: "1"
+    memory: 2Gi
+
+# Cluster Autoscaler Contabo provider
+# Runs as a standalone gRPC server that scales elastic nodes on Contabo.
+# Disabled by default; enable and configure in environment overlays.
+# The existingSecret must contain: CONTABO_CLIENT_ID, CONTABO_CLIENT_SECRET,
+# CONTABO_API_USER, CONTABO_API_PASSWORD, K3S_NODE_TOKEN, SSH_KEY_ID.
+# (Non-secret values are templated from the provider block below.)
+# -----------------------------------------------------------------------------
+clusterAutoscaler:
+  enabled: false
+  image: registry.k8s.io/autoscaling/cluster-autoscaler:v1.30.3
+  nodeGroup:
+    minSize: 0
+    maxSize: 2
+  scaleDownUnneededTime: 45m
+  scaleDownDelayAfterAdd: 20m
+  maxNodeProvisionTime: 15m
+  maxTotalUnreadyPercentage: 45
+  expander: least-waste
+  provider:
+    image: ghcr.io/izzywdev/fuzeinfra-contabo-ca-provider:latest
+    existingSecret: fuzeinfra-ca-provider
+    productId: ""
+    imageId: ""
+    region: EU
+    k3sServerUrl: ""
+    elasticTag: fuzeinfra-elastic
+    elasticNamePrefix: fuzeinfra-elastic
+    minSize: 0
+    maxSize: 2
+    grpcListen: ":8086"
+    userDataTemplateB64: ""

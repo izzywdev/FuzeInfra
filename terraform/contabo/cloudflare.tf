@@ -25,7 +25,13 @@ locals {
   # Authentik handles platform auth, not Cloudflare Access. The FuzeFront
   # chart sets its Traefik Ingress host to match (className traefik, TLS off,
   # CF terminates edge TLS). Adding a future public host is a one-line edit.
-  public_vanity_hosts = ["app", "auth"]
+  #
+  # `plan` = FuzePlan (plan.fuzefront.com). FuzeFront's portal loads FuzePlan's
+  # module-federation remoteEntry.js from here, so it must be public (outside the
+  # *.prod Access wildcard); FuzePlan declares its own Traefik Ingress for this
+  # host in izzywdev/FuzePlan. Routing to Traefik is via the catch-all ingress
+  # rule below — no per-host tunnel rule is needed.
+  public_vanity_hosts = ["app", "auth", "plan"]
 }
 
 # 32-byte cryptographically random tunnel secret
@@ -56,10 +62,10 @@ resource "cloudflare_zero_trust_tunnel_cloudflared_config" "fuzeinfra" {
       hostname = "argocd.${local.prod_domain}"
       service  = "http://argocd-server.argocd:80"
     }
-    # Generic catch-all: every other hostname → Traefik, which host-routes by
+    # Generic catch-all: every other hostname �� Traefik, which host-routes by
     # Ingress. This is domain-agnostic: any product on its own domain (its own
     # apex/subdomains) just CNAMEs that host to THIS tunnel and declares a Traefik
-    # Ingress in its OWN repo — no per-product hostname is enumerated here.
+    # Ingress in its OWN repo ��� no per-product hostname is enumerated here.
     # Traefik returns 404 for unconfigured hosts, so this exposes nothing new.
     # CF Access still gates *.prod.fuzefront.com at the edge (see below); other
     # domains are public by default (Authentik / the app owns their auth).
@@ -103,6 +109,70 @@ resource "cloudflare_record" "vanity" {
   type     = "CNAME"
   proxied  = true
   ttl      = 1
+}
+
+# ---------------------------------------------------------------------------
+# Public consumer-app host registry (labels under ${var.prod_subdomain}).
+#
+# GOVERNANCE (docs/CONSUMER_ONBOARDING_SHARED_CLUSTER.md §1): FuzeInfra never
+# hard-codes product-specific RESOURCES. Products with their own Cloudflare zone
+# own their DNS via modules/cloudflare-dns from their own repo. But labels under
+# the shared prod zone are different: they fall UNDER the *.prod wildcard OTP
+# Access wall defined below, and a consumer must NOT be able to punch a bypass
+# hole in FuzeInfra's wall from its own repo. So for shared-zone hosts FuzeInfra
+# holds a DATA registry only (label => owning repo) — generic resources fan out
+# from it. The registry data lives OUTSIDE the bare setup, in
+# materialized/consumers.tfvars (generated from consumer-repo declarations);
+# onboarding a product's public host adds an entry there, never in *.tf.
+#
+# Each entry gets: (a) a proxied CNAME to the shared tunnel (cloudflared
+# catch-all → Traefik → the consumer's namespace Ingress; ClusterIP, HTTP-only,
+# CF terminates edge TLS — tunnel-only invariant preserved), and (b) a
+# more-specific bypass Access app exempting it from the OTP wildcard (same
+# precedence trick as sealed_secrets_cert) because the app owns its own auth.
+# Admin UIs must NOT go in this registry — they get gated Access apps below.
+# ---------------------------------------------------------------------------
+# BARE SETUP INVARIANT: this variable defaults to EMPTY and no consumer entry
+# may ever be inlined here. Consumer hosts are materialized into
+# materialized/consumers.tfvars (generated data, loaded via -var-file in CI) so
+# the infra-authored *.tf tree stays consumer-free at all times.
+variable "public_app_hosts" {
+  description = "Public consumer-app host registry: label (relative to prod subdomain) => owning repo. Populated ONLY via materialized/consumers.tfvars."
+  type        = map(string)
+  default     = {}
+}
+
+resource "cloudflare_record" "public_app" {
+  for_each = nonsensitive(local.cloudflare_enabled) ? var.public_app_hosts : {}
+  zone_id  = var.cloudflare_zone_id
+  name     = "${each.key}.${var.prod_subdomain}"
+  value    = cloudflare_zero_trust_tunnel_cloudflared.fuzeinfra[0].cname
+  type     = "CNAME"
+  proxied  = true
+  ttl      = 1
+}
+
+resource "cloudflare_zero_trust_access_application" "public_app" {
+  for_each             = nonsensitive(local.cloudflare_enabled) ? var.public_app_hosts : {}
+  account_id           = var.cloudflare_account_id
+  name                 = "Public app ${each.key} (${each.value})"
+  domain               = "${each.key}.${local.prod_domain}"
+  type                 = "self_hosted"
+  session_duration     = "0s"
+  app_launcher_visible = false
+}
+
+resource "cloudflare_zero_trust_access_policy" "public_app_bypass" {
+  for_each       = nonsensitive(local.cloudflare_enabled) ? var.public_app_hosts : {}
+  account_id     = var.cloudflare_account_id
+  application_id = cloudflare_zero_trust_access_application.public_app[each.key].id
+  name           = "Bypass — ${each.key} (${each.value} owns auth)"
+  precedence     = 1
+  decision       = "bypass"
+
+  include {
+    everyone = true
+  }
 }
 
 # Cloudflare Access: protect *.prod.fuzefront.com with email OTP.
@@ -275,7 +345,7 @@ resource "cloudflare_zero_trust_access_policy" "sealed_secrets_cert_bypass" {
 # producing "Error loading: table" on every dashboard open.
 #
 # With caching: first request per file hits the tunnel (single fetch); all
-# subsequent requests are served from the CF edge — no tunnel involved.
+# subsequent requests are served from the CF edge �� no tunnel involved.
 resource "cloudflare_ruleset" "neo4j_browser_cache" {
   count   = local.cloudflare_enabled ? 1 : 0
   zone_id = var.cloudflare_zone_id

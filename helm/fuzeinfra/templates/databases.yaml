@@ -30,6 +30,8 @@ spec:
       {{- include "fuzeinfra.selectorLabels" (dict "component" "postgres" "root" $) | nindent 6 }}
   template:
     metadata:
+      annotations:
+        cluster-autoscaler.kubernetes.io/safe-to-evict: "false"
       labels:
         {{- include "fuzeinfra.labels" . | nindent 8 }}
         {{- include "fuzeinfra.selectorLabels" (dict "component" "postgres" "root" $) | nindent 8 }}
@@ -112,6 +114,8 @@ spec:
       {{- include "fuzeinfra.selectorLabels" (dict "component" "mongodb" "root" $) | nindent 6 }}
   template:
     metadata:
+      annotations:
+        cluster-autoscaler.kubernetes.io/safe-to-evict: "false"
       labels:
         {{- include "fuzeinfra.labels" . | nindent 8 }}
         {{- include "fuzeinfra.selectorLabels" (dict "component" "mongodb" "root" $) | nindent 8 }}
@@ -192,15 +196,50 @@ spec:
       {{- include "fuzeinfra.selectorLabels" (dict "component" "redis" "root" $) | nindent 6 }}
   template:
     metadata:
+      annotations:
+        cluster-autoscaler.kubernetes.io/safe-to-evict: "false"
       labels:
         {{- include "fuzeinfra.labels" . | nindent 8 }}
         {{- include "fuzeinfra.selectorLabels" (dict "component" "redis" "root" $) | nindent 8 }}
     spec:
+      {{- if .Values.redis.acl.enabled }}
+      initContainers:
+        # Ensure an ACL file exists on the PVC before redis starts, seeded with
+        # the shared no-auth `default` user so existing consumers keep working.
+        # Per-app ACL users (e.g. `fuzekeys`) are added imperatively during
+        # onboarding and written here by `ACL SAVE`; they then survive restarts.
+        # Only the password *hash* ever lands on the PVC — never plaintext, never git.
+        - name: redis-acl-bootstrap
+          image: {{ .Values.redis.image }}
+          imagePullPolicy: {{ include "fuzeinfra.pullPolicy" . }}
+          command:
+            - sh
+            - -c
+            - |
+              set -eu
+              ACL=/data/users.acl
+              if [ ! -f "$ACL" ]; then
+                echo "seeding $ACL with shared no-auth default user"
+                printf 'user default on nopass sanitize-payload ~* &* +@all\n' > "$ACL"
+              else
+                echo "$ACL already present; leaving persisted ACL users intact"
+              fi
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      {{- end }}
       containers:
         - name: redis
           image: {{ .Values.redis.image }}
           imagePullPolicy: {{ include "fuzeinfra.pullPolicy" . }}
-          args: ["redis-server", "--appendonly", "yes"]
+          args:
+            - "redis-server"
+            - "--appendonly"
+            - "yes"
+            {{- if .Values.redis.acl.enabled }}
+            - "--aclfile"
+            - "/data/users.acl"
+            {{- end }}
           ports:
             - containerPort: 6379
               name: redis
@@ -264,6 +303,8 @@ spec:
       {{- include "fuzeinfra.selectorLabels" (dict "component" "neo4j" "root" $) | nindent 6 }}
   template:
     metadata:
+      annotations:
+        cluster-autoscaler.kubernetes.io/safe-to-evict: "false"
       labels:
         {{- include "fuzeinfra.labels" . | nindent 8 }}
         {{- include "fuzeinfra.selectorLabels" (dict "component" "neo4j" "root" $) | nindent 8 }}
@@ -357,6 +398,8 @@ spec:
       {{- include "fuzeinfra.selectorLabels" (dict "component" "elasticsearch" "root" $) | nindent 6 }}
   template:
     metadata:
+      annotations:
+        cluster-autoscaler.kubernetes.io/safe-to-evict: "false"
       labels:
         {{- include "fuzeinfra.labels" . | nindent 8 }}
         {{- include "fuzeinfra.selectorLabels" (dict "component" "elasticsearch" "root" $) | nindent 8 }}
@@ -441,6 +484,8 @@ spec:
       {{- include "fuzeinfra.selectorLabels" (dict "component" "chromadb" "root" $) | nindent 6 }}
   template:
     metadata:
+      annotations:
+        cluster-autoscaler.kubernetes.io/safe-to-evict: "false"
       labels:
         {{- include "fuzeinfra.labels" . | nindent 8 }}
         {{- include "fuzeinfra.selectorLabels" (dict "component" "chromadb" "root" $) | nindent 8 }}

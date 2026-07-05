@@ -33,6 +33,8 @@ spec:
       {{- include "fuzeinfra.selectorLabels" (dict "component" "kafka" "root" $) | nindent 6 }}
   template:
     metadata:
+      annotations:
+        cluster-autoscaler.kubernetes.io/safe-to-evict: "false"
       labels:
         {{- include "fuzeinfra.labels" . | nindent 8 }}
         {{- include "fuzeinfra.selectorLabels" (dict "component" "kafka" "root" $) | nindent 8 }}
@@ -202,6 +204,8 @@ spec:
       {{- include "fuzeinfra.selectorLabels" (dict "component" "rabbitmq" "root" $) | nindent 6 }}
   template:
     metadata:
+      annotations:
+        cluster-autoscaler.kubernetes.io/safe-to-evict: "false"
       labels:
         {{- include "fuzeinfra.labels" . | nindent 8 }}
         {{- include "fuzeinfra.selectorLabels" (dict "component" "rabbitmq" "root" $) | nindent 8 }}

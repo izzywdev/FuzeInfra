@@ -1,0 +1,144 @@
+{{- /*
+============================ Per-service Postgres provisioning ============================
+Declarative, GitOps-reconciled, idempotent provisioning of per-service Postgres
+roles + databases on the shared `fuzeinfra-postgres` server.
+
+For each entry in `.Values.serviceDatabases` (that is `enabled`) this Job:
+  1. ensures LOGIN role `<role>` exists and (re)syncs its password to match the
+     value the consuming service already sealed (so its DATABASE_URL connects);
+  2. ensures database `<database>` exists, owned by `<role>`;
+  3. grants ALL privileges on the database to `<role>` and locks out PUBLIC.
+
+Design notes:
+  - The Job runs in the `fuzeinfra` namespace, so the Postgres SUPERUSER
+    credentials (`fuzeinfra-secrets`) never leave this namespace and never
+    land in git. The per-service password is read via `secretKeyRef` from a
+    Secret the consuming repo seals FOR the `fuzeinfra` namespace
+    (e.g. `fuzesales-db-credentials`). No plaintext credential is committed.
+  - post-install/post-upgrade + Argo PostSync hooks: the provisioning runs
+    AFTER the Postgres StatefulSet exists (a pre-* hook would race an
+    absent/unready DB). An explicit `pg_isready`/`psql` wait loop guards startup.
+  - Idempotent: re-runs on every sync must not fail. Role create is guarded by
+    a DO block; the password is re-applied with ALTER ROLE every run; database
+    create uses `\gexec` (CREATE DATABASE cannot run inside a txn/DO block).
+  - Uses `postgres:15` (matches the server) which ships `psql`.
+*/ -}}
+{{- if .Values.serviceDatabases }}
+{{- $enabled := list -}}
+{{- range .Values.serviceDatabases }}
+  {{- if .enabled }}{{- $enabled = append $enabled . }}{{- end }}
+{{- end }}
+{{- if $enabled }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: fuzeinfra-service-db-provision
+  labels:
+    {{- include "fuzeinfra.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "1"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+    "argocd.argoproj.io/hook": PostSync
+    "argocd.argoproj.io/hook-delete-policy": BeforeHookCreation
+spec:
+  backoffLimit: 6
+  template:
+    metadata:
+      labels:
+        {{- include "fuzeinfra.labels" . | nindent 8 }}
+        {{- include "fuzeinfra.selectorLabels" (dict "component" "service-db-provision" "root" $) | nindent 8 }}
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: provision
+          image: {{ .Values.serviceDbProvisioning.image | default "postgres:15" }}
+          imagePullPolicy: {{ include "fuzeinfra.pullPolicy" . }}
+          env:
+            # --- Postgres superuser (admin) — local to the fuzeinfra namespace ---
+            - name: PGHOST
+              value: {{ .Values.serviceDbProvisioning.host | default "fuzeinfra-postgres" | quote }}
+            - name: PGPORT
+              value: {{ .Values.postgres.port | quote }}
+            - name: ADMIN_USER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.serviceDbProvisioning.adminSecret.name | default (include "fuzeinfra.secretName" .) }}
+                  key: {{ .Values.serviceDbProvisioning.adminSecret.userKey | default "POSTGRES_USER" }}
+            - name: ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.serviceDbProvisioning.adminSecret.name | default (include "fuzeinfra.secretName" .) }}
+                  key: {{ .Values.serviceDbProvisioning.adminSecret.passwordKey | default "POSTGRES_PASSWORD" }}
+            {{- /* One password env per enabled service, sourced from that
+                   service's Secret sealed for the fuzeinfra namespace. */ -}}
+            {{- range $enabled }}
+            - name: SVC_PW_{{ .name | upper | replace "-" "_" }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ required (printf "serviceDatabases[%s].passwordSecret.name is required" .name) .passwordSecret.name }}
+                  key: {{ required (printf "serviceDatabases[%s].passwordSecret.key is required" .name) .passwordSecret.key }}
+            {{- end }}
+          command:
+            - bash
+            - -c
+            - |
+              set -euo pipefail
+              export PGPASSWORD="$ADMIN_PASSWORD"
+              # SQL is fed on stdin (psql -f -) rather than via an indented
+              # heredoc, so the YAML block-scalar indentation never leaks into
+              # the here-doc terminator (a classic broken-script trap). Server-
+              # side format(%I/%L) + psql -v quoting prevent SQL injection.
+              psql_admin() { psql -v ON_ERROR_STOP=1 -h "$PGHOST" -p "$PGPORT" -U "$ADMIN_USER" -f - "$@"; }
+
+              echo "Waiting for PostgreSQL at $PGHOST:$PGPORT ..."
+              until pg_isready -h "$PGHOST" -p "$PGPORT" -U "$ADMIN_USER" >/dev/null 2>&1; do
+                sleep 2
+              done
+              echo "PostgreSQL is ready."
+
+              provision() {
+                local role="$1" db="$2" pw="$3"
+                echo "== Provisioning role='$role' database='$db' =="
+
+                # 1) Role: create if absent, then always (re)sync the password so it
+                #    matches what the consuming service sealed.
+                printf '%s\n' \
+                  "SELECT format('CREATE ROLE %I LOGIN PASSWORD %L', :'role', :'pw') WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = :'role') \gexec" \
+                  "SELECT format('ALTER ROLE %I WITH LOGIN PASSWORD %L', :'role', :'pw') \gexec" \
+                  | psql_admin -d postgres -v role="$role" -v pw="$pw"
+
+                # 2) Database: CREATE DATABASE cannot run in a txn/DO block, so guard
+                #    with \gexec. Owner is set on creation and re-asserted below.
+                printf '%s\n' \
+                  "SELECT format('CREATE DATABASE %I OWNER %I', :'db', :'role') WHERE NOT EXISTS (SELECT 1 FROM pg_database WHERE datname = :'db') \gexec" \
+                  | psql_admin -d postgres -v role="$role" -v db="$db"
+
+                # 3) Ownership + privileges (idempotent). Lock out PUBLIC so only the
+                #    service role can connect.
+                printf '%s\n' \
+                  "SELECT format('ALTER DATABASE %I OWNER TO %I', :'db', :'role') \gexec" \
+                  "SELECT format('GRANT ALL PRIVILEGES ON DATABASE %I TO %I', :'db', :'role') \gexec" \
+                  "SELECT format('REVOKE CONNECT ON DATABASE %I FROM PUBLIC', :'db') \gexec" \
+                  | psql_admin -d postgres -v role="$role" -v db="$db"
+
+                # 4) Grant the role full control of the public schema inside its DB
+                #    (Postgres 15 revokes CREATE on public from non-owners by default).
+                printf '%s\n' \
+                  "SELECT format('ALTER SCHEMA public OWNER TO %I', :'role') \gexec" \
+                  "SELECT format('GRANT ALL ON SCHEMA public TO %I', :'role') \gexec" \
+                  | psql_admin -d "$db" -v role="$role"
+
+                echo "== Done role='$role' database='$db' =="
+              }
+
+              {{- range $enabled }}
+              provision {{ .role | quote }} {{ .database | quote }} "$SVC_PW_{{ .name | upper | replace "-" "_" }}"
+              {{- end }}
+
+              echo "All service databases provisioned."
+          resources:
+            requests: { cpu: 50m, memory: 64Mi }
+            limits:   { cpu: 250m, memory: 128Mi }
+{{- end }}
+{{- end }}
