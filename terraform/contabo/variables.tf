@@ -173,52 +173,6 @@ variable "crit_bridge_token" {
   sensitive   = true
 }
 
-# ---------------------------------------------------------------------------
-# Baseline worker pool (terraform/contabo/baseline.tf)
-#
-# TF-managed, fixed-size worker pool that joins the existing control-plane via
-# modules/contabo-k3s-node. Together with the single control-plane VPS in
-# vps.tf this forms the 3-node baseline floor that the cluster autoscaler's
-# elastic pool scales ON TOP OF (see docs/superpowers/specs/
-# 2026-07-03-cluster-node-autoscaling-design.md, section 5). This pool is
-# entirely separate from — and invisible to — the autoscaler.
-# ---------------------------------------------------------------------------
-variable "baseline_worker_count" {
-  description = "Number of TF-managed baseline worker nodes to provision (in addition to the control-plane VPS). DEFAULT 0 so a plain merge provisions NO billable VPS (the merge-to-apply CD would otherwise spin these up immediately). The gated Task 18 cutover sets this to 2 → 1 control-plane + 2 workers = 3-node baseline floor. See docs/runbooks/contabo-autoscaling-cutover.md."
-  type        = number
-  default     = 0
-
-  validation {
-    condition     = var.baseline_worker_count >= 0
-    error_message = "baseline_worker_count must be >= 0."
-  }
-}
-
-variable "baseline_worker_product_id" {
-  description = "Contabo product/plan UUID for baseline worker nodes. Defaults to the same plan as the control-plane VPS (var.product_id) unless overridden."
-  type        = string
-  default     = ""
-}
-
-variable "baseline_worker_region" {
-  description = "Contabo region for baseline worker nodes."
-  type        = string
-  default     = "EU"
-}
-
-variable "k3s_node_token" {
-  description = "k3s node-token from the running server (/var/lib/rancher/k3s/server/node-token), used to join baseline worker nodes as k3s agents. Same secret already used by the infra-request-handler workflow (K3S_NODE_TOKEN) and modules/contabo-k3s-node — sourced from CI secrets / terraform.tfvars, never hardcoded."
-  type        = string
-  sensitive   = true
-  default     = ""
-}
-
-variable "k3s_channel" {
-  description = "k3s release channel/version pin for baseline worker nodes (INSTALL_K3S_CHANNEL). Should match the control-plane's installed k3s version to avoid version skew."
-  type        = string
-  default     = "stable"
-}
-
 variable "enable_argocd_provisioner" {
   description = <<-EOT
     Run null_resource.argocd_sync, which SSHes to the server (using

@@ -22,14 +22,14 @@ write_files:
 
 runcmd:
   # Host firewall: agent needs to reach the API (6443) outbound and accept
-  # kubelet (10250) + the flannel overlay from the server. 51820/udp is the
-  # WireGuard backend (wireguard-native) the server is being reprovisioned onto;
-  # 8472/udp (VXLAN) is kept alongside it during the transition so agent nodes
-  # work against either backend depending on which the server currently runs.
+  # kubelet (10250) + the flannel VXLAN overlay (8472/udp) from the server.
+  # WireGuard overlay is a separate, cluster-wide hardening initiative —
+  # intentionally NOT coupled to autoscaling; nodes provisioned by this module
+  # join over the same public-IP + VXLAN path as existing consumer-dispatched
+  # workers.
   - [ sh, -c, "ufw allow 22/tcp || true" ]
   - [ sh, -c, "ufw allow 10250/tcp || true" ]
   - [ sh, -c, "ufw allow 8472/udp || true" ]
-  - [ sh, -c, "ufw allow 51820/udp || true" ]
   - [ sh, -c, "ufw --force enable || true" ]
   # Join as a k3s agent and label the node. Secrets come from the env file above;
   # --node-name and the labels are baked in by Terraform per request.
