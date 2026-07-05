@@ -387,3 +387,26 @@ overprovisioning:
   resources:
     cpu: "1"
     memory: 2Gi
+
+# Cluster Autoscaler Contabo provider
+# Runs as a standalone gRPC server that scales elastic nodes on Contabo.
+# Disabled by default; enable and configure in environment overlays.
+# The existingSecret must contain: CONTABO_CLIENT_ID, CONTABO_CLIENT_SECRET,
+# CONTABO_API_USER, CONTABO_API_PASSWORD, K3S_NODE_TOKEN, SSH_KEY_ID.
+# (Non-secret values are templated from the provider block below.)
+# -----------------------------------------------------------------------------
+clusterAutoscaler:
+  enabled: false
+  provider:
+    image: ghcr.io/izzywdev/fuzeinfra-contabo-ca-provider:latest
+    existingSecret: fuzeinfra-ca-provider
+    productId: ""
+    imageId: ""
+    region: EU
+    k3sServerUrl: ""
+    elasticTag: fuzeinfra-elastic
+    elasticNamePrefix: fuzeinfra-elastic
+    minSize: 0
+    maxSize: 2
+    grpcListen: ":8086"
+    userDataTemplateB64: ""
