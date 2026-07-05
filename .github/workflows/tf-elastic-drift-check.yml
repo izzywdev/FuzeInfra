@@ -1,31 +1,30 @@
 # ===========================================================================
-# tf-elastic-drift-check  —  guard against Terraform touching elastic nodes
+# tf-elastic-drift-check  —  static guard against elastic-node adoption
 # ===========================================================================
 # Asserts that Terraform NEVER manages instances tagged "fuzeinfra-elastic",
-# which are created out-of-band by the autoscaler and intentionally excluded
-# from Terraform state. This workflow acts as a regression guard.
+# which are created out-of-band by the cluster autoscaler and intentionally
+# excluded from Terraform state. This workflow enforces the elastic-exclusion
+# invariant via STATIC HCL analysis (no credentials, no terraform init/plan).
 #
 #   • Pull request touching terraform/contabo/** or modules/contabo-k3s-node/**
-#     → `terraform plan -json`, inspect plan.json for mutating actions on
-#     elastic-tagged resources → FAIL if any found, PASS otherwise.
+#     → static HCL pattern check → FAIL if dangerous patterns found, PASS otherwise.
 #   • workflow_dispatch → manual trigger for verification.
 #
-# Safety:
-#   • Runs on both terraform/contabo/** (control-plane) and
-#     modules/contabo-k3s-node/** (the node module's potential instance
-#     definitions) to catch drift in module definitions too.
-#   • Fork PRs skip the plan (no creds) but pass the check (to avoid deadlock).
-#   • Empty plans (no resource_changes) are considered clean → pass.
+# The invariant (see terraform/contabo/main.tf lines 23-33):
+#   1. No broad instance enumeration: no `data "contabo_instance"` anywhere.
+#      (Broad enumeration is the only mechanism by which TF could adopt
+#      an elastic node.)
+#   2. No self-tagging: no managed `resource "contabo_instance"` carries the
+#      `fuzeinfra-elastic` tag.
 #
-# Required repo configuration:
-#   Secrets (reused from terraform-plan-apply):
-#     TF_STATE_BUCKET, TF_STATE_REGION, TF_STATE_LOCK_TABLE
-#     TF_STATE_ACCESS_KEY_ID, TF_STATE_SECRET_ACCESS_KEY
-#     CONTABO_CLIENT_ID, CONTABO_CLIENT_SECRET
-#     CONTABO_API_USER, CONTABO_API_PASSWORD
-#     CONTABO_IMAGE_ID, CONTABO_PRODUCT_ID, NODE_SSH_PUBLIC_KEY
-#     CLOUDFLARE_API_TOKEN, CLOUDFLARE_ACCOUNT_ID, CLOUDFLARE_ZONE_ID
-#     GH_TF_TOKEN, CRIT_BRIDGE_TOKEN
+# Safety / Why static analysis:
+#   • Requires NO credentials, NO S3/DynamoDB/Contabo/Cloudflare auth.
+#   • Requires NO terraform init/plan/backends.
+#   • Runs on EVERY PR (fork PRs included) and NEVER fails open.
+#   • The invariant is STRUCTURAL — it is about source code, not live state.
+#   • Proof: if no data source exists in code, terraform apply cannot enumerate.
+#
+# Scope: terraform/contabo/** and modules/contabo-k3s-node/** only.
 #
 # ---------------------------------------------------------------------------
 
@@ -41,87 +40,13 @@ on:
 
 permissions:
   contents: read
-  pull-requests: read
-
-env:
-  TF_ROOT: ${{ vars.TF_ROOT || 'terraform/contabo' }}
-  TERRAFORM_VERSION: "1.15.6"
-  # AWS creds for the S3/DynamoDB backend
-  AWS_ACCESS_KEY_ID: ${{ secrets.TF_STATE_ACCESS_KEY_ID }}
-  AWS_SECRET_ACCESS_KEY: ${{ secrets.TF_STATE_SECRET_ACCESS_KEY }}
-  # Provider inputs injected as TF_VAR_* (least-privilege, scoped creds)
-  TF_VAR_contabo_client_id: ${{ secrets.CONTABO_CLIENT_ID }}
-  TF_VAR_contabo_client_secret: ${{ secrets.CONTABO_CLIENT_SECRET }}
-  TF_VAR_contabo_api_user: ${{ secrets.CONTABO_API_USER }}
-  TF_VAR_contabo_api_password: ${{ secrets.CONTABO_API_PASSWORD }}
-  TF_VAR_image_id: ${{ secrets.CONTABO_IMAGE_ID }}
-  TF_VAR_product_id: ${{ secrets.CONTABO_PRODUCT_ID }}
-  TF_VAR_ssh_public_key: ${{ secrets.NODE_SSH_PUBLIC_KEY }}
-  TF_VAR_cloudflare_api_token: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-  TF_VAR_cloudflare_account_id: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-  TF_VAR_cloudflare_zone_id: ${{ secrets.CLOUDFLARE_ZONE_ID }}
-  TF_VAR_github_token: ${{ secrets.GH_TF_TOKEN }}
-  TF_VAR_crit_bridge_token: ${{ secrets.CRIT_BRIDGE_TOKEN }}
 
 jobs:
   elastic-drift-check:
-    name: Guard elastic-node exclusion
-    runs-on: staging
+    name: Guard elastic-node exclusion (static HCL analysis)
+    runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v4
 
-      # Fork PRs have no access to secrets — skip the plan, but pass so the
-      # check does not deadlock the PR. Human review will catch issues.
-      - name: Fork PR — skip creds plan
-        if: github.event.pull_request.head.repo.fork == true
-        run: echo "::notice::Fork PR touches terraform/** — elastic-drift check skipped (no creds). Review must verify no elastic-tagged instances are added."
-
-      - uses: hashicorp/setup-terraform@v4
-        if: github.event.pull_request.head.repo.fork != true && github.event_name != 'workflow_dispatch'
-        with:
-          terraform_version: ${{ env.TERRAFORM_VERSION }}
-
-      - uses: hashicorp/setup-terraform@v4
-        if: github.event_name == 'workflow_dispatch'
-        with:
-          terraform_version: ${{ env.TERRAFORM_VERSION }}
-
-      # One step: init → plan (-out) → show -json → jq guard.
-      # The S3 backend authenticates via GitHub OIDC, and OIDC tokens are NOT
-      # issued on pull_request events — so init/plan cannot authenticate on PRs
-      # and would error with "error in getting jwt token". In that case we SKIP
-      # (pass), because the guard runs for real on push/merge where OIDC works.
-      # The job ONLY fails on a genuine fuzeinfra-elastic mutation in the plan.
-      - name: Elastic-exclusion guard (init → plan → check)
-        if: github.event.pull_request.head.repo.fork != true
-        working-directory: ${{ env.TF_ROOT }}
-        run: |
-          set -uo pipefail
-          if ! terraform init -input=false \
-                -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}" \
-                -backend-config="key=fuzeinfra/$(basename "$TF_ROOT")/terraform.tfstate" \
-                -backend-config="region=${{ secrets.TF_STATE_REGION }}" \
-                -backend-config="dynamodb_table=${{ secrets.TF_STATE_LOCK_TABLE }}" ; then
-            echo "::notice::terraform init could not authenticate (no OIDC/creds on this event) — elastic-drift check skipped; it runs for real on push/merge."
-            exit 0
-          fi
-          VAR_FILES=""
-          [ -f materialized/consumers.tfvars ] && VAR_FILES="-var-file=materialized/consumers.tfvars"
-          # NOTE: use plan -out + show -json to get the real resource_changes
-          # document (plain `plan -json` emits streaming log lines, NOT that shape).
-          if ! terraform plan -input=false -lock-timeout=5m $VAR_FILES -out=tfplan ; then
-            echo "::notice::terraform plan could not complete (auth/OIDC unavailable on this event) — elastic-drift check skipped."
-            exit 0
-          fi
-          terraform show -json tfplan > plan.json
-          if ! jq empty plan.json 2>/dev/null; then
-            echo "::notice::plan JSON not parseable — skipping."
-            exit 0
-          fi
-          OFFENDING=$(jq '[.resource_changes[]? | select(.change.actions | index("no-op") | not) | select(((.change.after.tags // []) + (.change.before.tags // [])) | index("fuzeinfra-elastic"))]' plan.json)
-          if [ "$(echo "$OFFENDING" | jq 'length')" -ne 0 ]; then
-            echo "::error::Terraform plan touches instances tagged 'fuzeinfra-elastic' — these are autoscaler-managed and must NOT be in TF state."
-            echo "$OFFENDING" | jq '.[] | {address, actions: .change.actions}'
-            exit 1
-          fi
-          echo "✓ Plan is clean: no elastic-tagged resources mutated."
+      - name: Elastic-exclusion guard (static HCL check)
+        run: python3 scripts-tools/check-elastic-exclusion.py
