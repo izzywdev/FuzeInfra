@@ -1,0 +1,6 @@
+[allowlist]
+  description = "SealedSecrets are encrypted ciphertext — not plaintext secrets"
+  paths = [
+    "deploy/sealed-secrets/",
+    ".gitleaks.toml",
+  ]

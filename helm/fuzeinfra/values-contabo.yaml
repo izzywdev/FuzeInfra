@@ -132,3 +132,43 @@ cloudflareTunnel:
 # dnsmasq not needed on a remote server (use real DNS / nip.io)
 dnsmasq:
   enabled: false
+
+# -----------------------------------------------------------------------------
+# Per-service Postgres provisioning (issue #153) — PROD.
+#
+# The provisioning hook Job reads each role password via `secretKeyRef` from a
+# Secret the consumer repo seals FOR the `fuzeinfra` namespace. Helm replaces
+# (does NOT deep-merge) lists, so the full list is restated here.
+#
+# GITOPS GATE: each service stays `enabled: false` until its SealedSecret is
+# present in the `fuzeinfra` namespace. Flipping `enabled: true` before the
+# secret exists makes the hook Job fail to start (unresolvable secretKeyRef),
+# degrading the Argo sync. Flip each to `true` in the SAME change that lands its
+# secret. As of this PR none of the three secrets exist yet (verified via
+# read-only kubectl) — cross-repo hand-off issues track sealing them into
+# `fuzeinfra`:
+#   - fuzesales   -> Secret `fuzesales-db-credentials`   key `password`
+#   - fuzecontact -> Secret `fuzecontact-db-credentials` key `password`
+#   - fuzeservice -> Secret `fuzeservice-db-credentials` key `password`
+serviceDatabases:
+  - name: fuzesales
+    enabled: true
+    role: fuzesales_svc
+    database: fuzesales
+    passwordSecret:
+      name: fuzesales-db-credentials
+      key: password
+  - name: fuzecontact
+    enabled: true
+    role: fuzecontact_svc
+    database: fuzecontact
+    passwordSecret:
+      name: fuzecontact-db-credentials
+      key: password
+  - name: fuzeservice
+    enabled: true
+    role: fuzeservice_svc
+    database: fuzeservice
+    passwordSecret:
+      name: fuzeservice-db-credentials
+      key: password
