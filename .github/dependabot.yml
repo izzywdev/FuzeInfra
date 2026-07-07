@@ -1,0 +1,20 @@
+# Dependabot — keeps the SHA-pinned third-party actions current.
+#
+# The @claude handlers (claude.yml, governance-nightly.yml, nightly-integration.yml)
+# and other workflows pin actions to full commit SHAs for supply-chain hardening
+# (see docs/claude-handler-hardening.md §4 and guardrail #3 of issue #169). SHA pins
+# don't float, so without this config they silently rot. Dependabot opens PRs that
+# bump the SHA *and* the trailing `# vX.Y.Z` version comment together — those PRs go
+# through the actionlint gate + CODEOWNERS review before merge.
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 10
+    commit-message:
+      prefix: "chore(ci)"
+    labels:
+      - "ci"
+      - "dependencies"
