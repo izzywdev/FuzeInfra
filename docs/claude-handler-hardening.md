@@ -122,3 +122,69 @@ namespace already isolates the SA identity from workload namespaces.
 These RBAC controls **complement** — they do not replace — the existing controls from
 #77 (author gate, guard shims, SHA-pinned actions). The shims still provide a fast,
 in-band block; RBAC is the backstop the API server enforces unconditionally.
+
+---
+
+## 4. Editing the @claude handler — runbook
+
+> **Context:** On 2026-07-07, a bad SHA (`428971d...`) was pinned as "v1" of the
+> claude-code-action. That commit was a dev/test commit in the action repo; its
+> action code ran the action's own e2e playwright suite instead of the delegated
+> task. Claude finished in 0s with no commits; the subsequent branch-compare step
+> 404'd. This section documents how to prevent recurrence.
+
+### The one rule: always verify the SHA before pinning
+
+The `uses:` line in a GitHub Actions step pins to a **commit SHA in the action's own
+repository**, not the consuming repo. If the SHA points to a development commit, the
+action's dev/test code runs inside your job.
+
+**How to get the correct SHA for a release tag:**
+
+```bash
+# Look up the SHA the upstream tag points to:
+git ls-remote https://github.com/anthropics/claude-code-action.git refs/tags/v1.0.166
+# → f87768c6d25f92ae6efa7175e223ef77d4cbf97f  refs/tags/v1.0.166
+
+# Then use:
+uses: anthropics/claude-code-action@f87768c6d25f92ae6efa7175e223ef77d4cbf97f  # v1.0.166
+```
+
+Or check the upstream releases page: https://github.com/anthropics/claude-code-action/releases
+
+### What NOT to put in the prompt / system-prompt
+
+- **No repo-specific test commands** (npm test, pytest, playwright, etc.). These
+  belong in separate workflow steps, not inside the claude step's prompt/args.
+- **No absolute paths** that assume a specific checkout layout.
+- **No secrets in plaintext**. All secrets must be passed via `${{ secrets.NAME }}`.
+
+### Valid inputs for claude-code-action@v1
+
+| Input | Purpose | Notes |
+|---|---|---|
+| `anthropic_api_key` | Anthropic API key | Required |
+| `prompt` | Task instructions | Omit for event-driven mode (reads issue/comment) |
+| `claude_args` | Extra CLI flags | e.g. `--permission-mode bypassPermissions --max-turns 60` |
+| `additional_permissions` | Extra tool grants (newline list) | e.g. `Bash`, `Write`, `Edit` |
+| `github_token` | Override GitHub token | Defaults to `GITHUB_TOKEN` |
+| `use_sticky_comment` | Collapse updates into one comment | Boolean |
+
+Inputs **NOT** valid in v1: `allowed_tools`, `permission_mode`, `direct_prompt`,
+`override_prompt` (all removed in v1; see migration guide).
+
+### Testing a handler change
+
+1. Create a draft PR for the change.
+2. Open a test issue in this repo (or a sandbox repo) with the body `@claude hello`.
+3. Verify the handler posts a real response (not "Claude finished ... in 0s").
+4. Check the Actions run logs: the Claude step should show actual tool calls, not
+   a 0-second exit.
+5. Verify no branches are left dangling (clean up `claude/test-*` branches).
+
+### Required status checks
+
+The `actionlint` workflow (`.github/workflows/actionlint.yml`) must pass on every PR
+touching `.github/workflows/**`. Make it a REQUIRED status check in branch protection.
+CODEOWNERS requires a review from `@izzywdev` for all `claude*.yml` and related handler
+files — this is enforced by the repo's branch protection ruleset.
