@@ -68,7 +68,7 @@ jobs:
       AWS_SECRET_ACCESS_KEY: ${{ secrets.TF_STATE_SECRET_ACCESS_KEY }}
     steps:
       - name: Check out FuzeInfra (module + whitelist + scripts)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           path: fuzeinfra
 
@@ -84,7 +84,7 @@ jobs:
 
       - name: Check out requesting repo (deploy/terraform only)
         if: github.event.client_payload.terraform_bundle == ''
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: ${{ github.event.client_payload.repo }}
           ref: ${{ github.event.client_payload.ref || 'main' }}
