@@ -1,0 +1,44 @@
+name: Actionlint
+
+# Lints all GitHub Actions workflow files on any PR that touches them.
+# Catches: invalid inputs (like the allowed_tools/permission_mode typos that
+# triggered the claude-handler breakage), bad expressions, missing permissions,
+# and unpinned action refs.
+#
+# Make "actionlint" a REQUIRED status check in the repo's branch protection
+# settings so handler edits can't merge without passing this gate.
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: actionlint-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  actionlint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Install actionlint
+        run: |
+          # Pin version; bump via Dependabot (package-ecosystem: github-actions).
+          curl -sSL https://github.com/rhysd/actionlint/releases/download/v1.7.7/actionlint_1.7.7_linux_amd64.tar.gz \
+            | tar xz -C /usr/local/bin actionlint
+
+      - name: Run actionlint
+        run: |
+          # -ignore for third-party action input mismatches (actionlint can't fetch
+          # remote action schemas) and for the shell-check false-positives on here-docs.
+          actionlint \
+            -ignore 'input ".+" is not defined in action' \
+            -ignore 'shellcheck reported issue in this script' \
+            .github/workflows/*.yml

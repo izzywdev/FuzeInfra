@@ -188,6 +188,9 @@ overprovisioning:
 #   - fuzesales   -> Secret `fuzesales-db-credentials`   key `password`
 #   - fuzecontact -> Secret `fuzecontact-db-credentials` key `password`
 #   - fuzeservice -> Secret `fuzeservice-db-credentials` key `password`
+#   - mendys      -> Secret `mendys-db-credentials`      key `password`
+#                    (SealedSecret must be committed to izzywdev/MendysRobotics
+#                     sealed for namespace=fuzeinfra before enabling here)
 serviceDatabases:
   - name: fuzesales
     enabled: true
@@ -209,4 +212,12 @@ serviceDatabases:
     database: fuzeservice
     passwordSecret:
       name: fuzeservice-db-credentials
+      key: password
+  # Enable once izzywdev/MendysRobotics seals mendys-db-credentials for fuzeinfra.
+  - name: mendys
+    enabled: false
+    role: mendys_svc
+    database: mendys
+    passwordSecret:
+      name: mendys-db-credentials
       key: password

@@ -2,3 +2,11 @@
 # Required by the "Protect default branch" ruleset (code-owner review).
 # See https://docs.github.com/articles/about-code-owners
 *       @izzywdev
+
+# Claude handler workflows: require explicit review before merge.
+# These files hold prod cluster creds + PAT access; a bad SHA or injected
+# prompt can silently break cross-repo delegation or exfiltrate secrets.
+.github/workflows/claude*.yml   @izzywdev
+.github/workflows/ci-failure-triage.yml  @izzywdev
+.github/workflows/argo-outofsync-autofix.yml  @izzywdev
+.github/workflows/grafana-crit-fix.yml  @izzywdev

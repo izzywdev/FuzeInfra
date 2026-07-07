@@ -118,7 +118,7 @@ jobs:
           echo "$GUARD" >> "$GITHUB_PATH"
 
       - name: Run Claude
-        uses: anthropics/claude-code-action@428971d2ecd6e3a7cb0ee0da2a3a8b33fdb3678d # v1
+        uses: anthropics/claude-code-action@f87768c6d25f92ae6efa7175e223ef77d4cbf97f # v1.0.166
         env:
           # KUBECONFIG (set above) + a real-user PAT for things GITHUB_TOKEN can't
           # do (GHCR package visibility, cross-repo gh api). The agent reads any

@@ -9,6 +9,7 @@ Set `<USER>_PASSWORD` env vars in the consuming repo's SealedSecret.
 |------|----|------|------|
 | FuzePlan (main app) | FuzePlan | fuzeplan_app | readWrite |
 | FuzePlan (claude-runner) | FuzePlan | claude_runner_user | readWrite |
+| MendysRobotics | mendys | mendys_app | readWrite |
 
 ## Adding a new consumer
 1. Add user to `docker/mongo/init/00-<repo>.js`
