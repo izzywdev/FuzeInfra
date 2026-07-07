@@ -115,6 +115,15 @@ serviceDatabases:
     passwordSecret:
       name: fuzeservice-db-credentials
       key: password
+  # MendysRobotics app DB — enabled in values-contabo.yaml once the
+  # mendys-db-credentials SealedSecret is present in the fuzeinfra namespace.
+  - name: mendys
+    enabled: false
+    role: mendys_svc
+    database: mendys
+    passwordSecret:
+      name: mendys-db-credentials
+      key: password
 
 # -----------------------------------------------------------------------------
 # Ingress (replaces the docker-compose nginx reverse proxy). Web UIs are exposed
