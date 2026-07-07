@@ -188,3 +188,87 @@ The `actionlint` workflow (`.github/workflows/actionlint.yml`) must pass on ever
 touching `.github/workflows/**`. Make it a REQUIRED status check in branch protection.
 CODEOWNERS requires a review from `@izzywdev` for all `claude*.yml` and related handler
 files — this is enforced by the repo's branch protection ruleset.
+
+### Dependabot keeps the SHA pins current
+
+`.github/dependabot.yml` runs the `github-actions` ecosystem weekly. SHA pins don't
+float, so without Dependabot they silently go stale (and can drift onto a yanked or
+dev commit again). Its PRs bump the SHA + the `# vX.Y.Z` comment together and are gated
+by `actionlint` + CODEOWNERS before merge.
+
+---
+
+## 5. Smoke check (guardrail #4 — catch a 0s regression fast)
+
+> **Why this lives in the runbook and not as a committed workflow yet:** the GitHub App
+> backing the `@claude` handler cannot create or edit files under `.github/workflows/`
+> (same limitation noted in §2). A human must commit the file below. Once committed, it
+> gives you a one-click / scheduled way to confirm the handler still does real work.
+
+Create `.github/workflows/claude-smoke.yml` with the content below. It posts `@claude`
+on a dedicated sandbox issue and later asserts the handler left a **non-empty, non-"0s"**
+reply — i.e. the exact failure mode from #169 (Claude finishes in 0s, no branch, no work).
+
+```yaml
+name: Claude handler smoke check
+
+# Guardrail #4 (issue #169): proves the @claude handler still does REAL work.
+# The #169 breakage (bad action SHA → e2e suite ran → "Claude finished ... in 0s",
+# no branch, compare 404) passed every static check — only *exercising* the handler
+# catches it. Run on a schedule + manually.
+on:
+  schedule:
+    - cron: "0 8 * * 1"        # Mondays 08:00 UTC
+  workflow_dispatch:
+    inputs:
+      issue_number:
+        description: "Sandbox issue number to mention @claude on"
+        required: true
+        default: "1"            # set to your dedicated 'claude-smoke' sandbox issue
+
+permissions:
+  issues: write
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Post @claude mention
+        id: post
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE: ${{ github.event.inputs.issue_number || '1' }}
+          REPO: ${{ github.repository }}
+        run: |
+          BODY="@claude smoke check — please reply 'ack' with a one-line status. (run ${{ github.run_id }})"
+          gh api "repos/$REPO/issues/$ISSUE/comments" -f body="$BODY" --jq .id > mention_id.txt
+          echo "since=$(date -u +%FT%TZ)" >> "$GITHUB_OUTPUT"
+
+      - name: Wait for the handler to respond
+        run: sleep 240   # give the handler time to check out, run, and comment
+
+      - name: Assert a real (non-0s) response landed
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE: ${{ github.event.inputs.issue_number || '1' }}
+          REPO: ${{ github.repository }}
+          SINCE: ${{ steps.post.outputs.since }}
+        run: |
+          set -euo pipefail
+          # Grab comments authored by the bot after we posted the mention.
+          REPLY=$(gh api "repos/$REPO/issues/$ISSUE/comments" \
+            --jq "[.[] | select(.created_at > \"$SINCE\") | select(.user.login|test(\"claude|github-actions\")) | .body] | last // \"\"")
+          echo "Handler reply: $REPLY"
+          if [ -z "$REPLY" ]; then
+            echo "::error::No handler reply within the wait window — handler may be broken (0s regression)."; exit 1
+          fi
+          if echo "$REPLY" | grep -qiE 'finished .* in 0s|in 0 seconds'; then
+            echo "::error::Handler replied with a 0s no-op — regression detected (see issue #169)."; exit 1
+          fi
+          echo "Smoke check passed: handler produced a real response."
+```
+
+Setup once: open a throwaway issue titled `claude-smoke` in this repo, note its number,
+and set it as the `workflow_dispatch` default (or pass it via `issue_number`). Tune the
+`sleep` if the handler is slow under load. Because the smoke run posts a real `@claude`
+mention, the handler must remain gated to trusted authors (it is — see `claude.yml`).
