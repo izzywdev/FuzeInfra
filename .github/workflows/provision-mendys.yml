@@ -1,0 +1,126 @@
+name: Provision mendys datastores
+
+# One-shot provisioning workflow for MendysRobotics (#166).
+# Generates credentials, seals them for the fuzeinfra cluster, commits the
+# SealedSecrets, and pushes the four credential values as GH Actions secrets
+# to izzywdev/MendysRobotics — all without plaintext ever appearing in logs.
+#
+# Run ONCE (workflow_dispatch) after the Helm chart changes are merged. The
+# SealedSecrets committed by this workflow unlock the Postgres + MongoDB
+# provisioning Jobs that run on the next Argo PostSync.
+#
+# Prerequisites:
+#   GH_TOKEN secret must have `secrets` write permission on izzywdev/MendysRobotics.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  provision:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Install kubeseal
+        run: |
+          set -euo pipefail
+          VER="0.27.1"
+          curl -fsSL -o /tmp/ks.tgz \
+            "https://github.com/bitnami-labs/sealed-secrets/releases/download/v${VER}/kubeseal-${VER}-linux-amd64.tar.gz"
+          tar -xzf /tmp/ks.tgz -C /tmp kubeseal
+          sudo install -m0755 /tmp/kubeseal /usr/local/bin/kubeseal
+          kubeseal --version
+
+      - name: Generate credentials + seal (offline, public cert)
+        id: seal
+        run: |
+          set -euo pipefail
+          umask 077
+
+          # Alphanumeric only — shell metacharacters break the provisioning Job
+          # (CLAUDE.md gotcha: CI password generation must be alphanumeric only).
+          PG_PW=$(openssl rand -base64 48 | tr -dc 'A-Za-z0-9' | head -c 40)
+          MONGO_PW=$(openssl rand -base64 48 | tr -dc 'A-Za-z0-9' | head -c 40)
+
+          PG_TMP=$(mktemp); MONGO_TMP=$(mktemp)
+          trap 'rm -f "$PG_TMP" "$MONGO_TMP"' EXIT
+          printf '%s' "$PG_PW"    > "$PG_TMP"
+          printf '%s' "$MONGO_PW" > "$MONGO_TMP"
+
+          bash scripts/seal-secret.sh fuzeinfra/mendys-db-credentials \
+            "password=@${PG_TMP}" \
+            --out deploy/sealed-secrets/mendys-db-credentials.yaml
+
+          bash scripts/seal-secret.sh fuzeinfra/mendys-mongo-credentials \
+            "password=@${MONGO_TMP}" \
+            --out deploy/sealed-secrets/mendys-mongo-credentials.yaml
+
+          # Mask values in runner logs immediately after writing them.
+          echo "::add-mask::$PG_PW"
+          echo "::add-mask::$MONGO_PW"
+
+          # Pass to next step via GITHUB_OUTPUT (values are masked above).
+          printf 'pg_pw=%s\n'    "$PG_PW"    >> "$GITHUB_OUTPUT"
+          printf 'mongo_pw=%s\n' "$MONGO_PW" >> "$GITHUB_OUTPUT"
+
+      - name: Push credentials to MendysRobotics GH secrets
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+          PG_PW: ${{ steps.seal.outputs.pg_pw }}
+          MONGO_PW: ${{ steps.seal.outputs.mongo_pw }}
+        run: |
+          set -euo pipefail
+          gh secret set MENDYS_PG_USERNAME    --body "mendys_svc"  --repo izzywdev/MendysRobotics
+          gh secret set MENDYS_PG_PASSWORD    --body "$PG_PW"      --repo izzywdev/MendysRobotics
+          gh secret set MENDYS_MONGO_USERNAME --body "mendys_app"  --repo izzywdev/MendysRobotics
+          gh secret set MENDYS_MONGO_PASSWORD --body "$MONGO_PW"   --repo izzywdev/MendysRobotics
+          echo "Secrets pushed to izzywdev/MendysRobotics"
+
+      - name: Commit SealedSecrets + open PR
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN || secrets.GITHUB_TOKEN }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          git config user.name  "FuzeInfra Provisioning"
+          git config user.email "provisioning@fuzeinfra"
+
+          BRANCH="provision/mendys-${RUN_ID}"
+          git checkout -b "$BRANCH"
+          git add deploy/sealed-secrets/mendys-db-credentials.yaml \
+                  deploy/sealed-secrets/mendys-mongo-credentials.yaml
+          git commit -m "feat(secrets): seal mendys Postgres + MongoDB credentials (#166)
+
+Provisioned by the provision-mendys workflow (run ${RUN_ID}).
+SealedSecrets sealed offline against the published public cert; plaintext
+never logged. GH secrets pushed to izzywdev/MendysRobotics in the same run.
+
+On merge, Argo CD PostSync Jobs will create:
+  - Postgres role mendys_svc + database mendys (service-db-provisioning Job)
+  - MongoDB user mendys_app + database mendys (service-mongo-provisioning Job)"
+
+          git push origin "$BRANCH"
+          gh pr create --base main --head "$BRANCH" \
+            --title "feat(secrets): seal mendys credentials + enable Postgres/MongoDB provisioning (#166)" \
+            --body "$(cat <<'EOF'
+Seals the Postgres and MongoDB credentials for MendysRobotics (#166).
+
+## What this PR does
+- \`deploy/sealed-secrets/mendys-db-credentials.yaml\` — Postgres password SealedSecret (scope: fuzeinfra/mendys-db-credentials)
+- \`deploy/sealed-secrets/mendys-mongo-credentials.yaml\` — MongoDB password SealedSecret (scope: fuzeinfra/mendys-mongo-credentials)
+
+Note: \`values-contabo.yaml\` already has \`mendys.enabled: true\` for both serviceDatabases and serviceMongoDatabases (set in the Helm chart PR). Once this merges, Argo CD runs the PostSync provisioning Jobs.
+
+## GH secrets already set
+The four MendysRobotics secrets were set in the same workflow run (never in logs):
+- \`MENDYS_PG_USERNAME\` = mendys_svc
+- \`MENDYS_PG_PASSWORD\` = (sealed)
+- \`MENDYS_MONGO_USERNAME\` = mendys_app
+- \`MENDYS_MONGO_PASSWORD\` = (sealed)
+
+Closes #166
+EOF
+)"

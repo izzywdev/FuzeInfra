@@ -1,0 +1,116 @@
+{{- /*
+============================ Per-service MongoDB provisioning ============================
+Declarative, GitOps-reconciled, idempotent provisioning of per-service MongoDB
+users on the shared `fuzeinfra-mongodb` server.
+
+For each entry in `.Values.serviceMongoDatabases` (that is `enabled`) this Job:
+  1. Waits until the MongoDB pod is ready (mongosh ping loop).
+  2. Creates a user `<user>` with `readWrite` role on database `<database>` if
+     the user does not already exist (idempotent on re-run).
+  3. Syncs the password via `db.updateUser` on every run, so a password
+     rotation (rotate-sealed-secret) propagates automatically.
+
+Design notes:
+  - Runs in the `fuzeinfra` namespace. Admin credentials (`MONGODB_USER` /
+    `MONGODB_PASSWORD`) are sourced from the chart-managed `fuzeinfra-secrets`
+    Secret and never committed in plaintext.
+  - The per-service password is read via `secretKeyRef` from a SealedSecret
+    the provisioning workflow seals for this namespace.
+  - post-install/post-upgrade + Argo PostSync hooks: runs after MongoDB is up.
+  - Idempotent: `db.createUser` guarded by `db.getUser`; uses `db.updateUser`
+    to sync the password on every run — re-runs cannot fail.
+*/ -}}
+{{- if .Values.serviceMongoDatabases }}
+{{- $enabled := list -}}
+{{- range .Values.serviceMongoDatabases }}
+  {{- if .enabled }}{{- $enabled = append $enabled . }}{{- end }}
+{{- end }}
+{{- if $enabled }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: fuzeinfra-service-mongo-provision
+  labels:
+    {{- include "fuzeinfra.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "1"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+    "argocd.argoproj.io/hook": PostSync
+    "argocd.argoproj.io/hook-delete-policy": BeforeHookCreation
+spec:
+  backoffLimit: 6
+  template:
+    metadata:
+      labels:
+        {{- include "fuzeinfra.labels" . | nindent 8 }}
+        {{- include "fuzeinfra.selectorLabels" (dict "component" "service-mongo-provision" "root" $) | nindent 8 }}
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: provision
+          image: {{ .Values.mongodb.image }}
+          imagePullPolicy: {{ include "fuzeinfra.pullPolicy" . }}
+          env:
+            - name: MONGO_HOST
+              value: {{ .Values.serviceMongoProvisioning.host | default "fuzeinfra-mongodb" | quote }}
+            - name: MONGO_PORT
+              value: {{ .Values.mongodb.port | quote }}
+            - name: ADMIN_USER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "fuzeinfra.secretName" . }}
+                  key: MONGODB_USER
+            - name: ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "fuzeinfra.secretName" . }}
+                  key: MONGODB_PASSWORD
+            {{- range $enabled }}
+            - name: SVC_PW_{{ .name | upper | replace "-" "_" }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ required (printf "serviceMongoDatabases[%s].passwordSecret.name is required" .name) .passwordSecret.name }}
+                  key: {{ required (printf "serviceMongoDatabases[%s].passwordSecret.key is required" .name) .passwordSecret.key }}
+            {{- end }}
+          command:
+            - bash
+            - -c
+            - |
+              set -euo pipefail
+
+              MONGO_URI="mongodb://${ADMIN_USER}:${ADMIN_PASSWORD}@${MONGO_HOST}:${MONGO_PORT}/admin?authSource=admin"
+
+              echo "Waiting for MongoDB at ${MONGO_HOST}:${MONGO_PORT} ..."
+              until mongosh --quiet "$MONGO_URI" --eval "db.adminCommand('ping')" >/dev/null 2>&1; do
+                sleep 3
+              done
+              echo "MongoDB is ready."
+
+              provision_user() {
+                local db="$1" user="$2" pw="$3"
+                echo "== Provisioning user='$user' on db='$db' =="
+                mongosh --quiet "$MONGO_URI" --eval "
+                  var db = db.getSiblingDB('$db');
+                  var existing = db.getUser('$user');
+                  if (!existing) {
+                    db.createUser({ user: '$user', pwd: '$pw', roles: [{ role: 'readWrite', db: '$db' }] });
+                    print('created: $user');
+                  } else {
+                    db.updateUser('$user', { pwd: '$pw', roles: [{ role: 'readWrite', db: '$db' }] });
+                    print('updated: $user');
+                  }
+                "
+                echo "== Done user='$user' db='$db' =="
+              }
+
+              {{- range $enabled }}
+              provision_user {{ .database | quote }} {{ .user | quote }} "$SVC_PW_{{ .name | upper | replace "-" "_" }}"
+              {{- end }}
+
+              echo "All MongoDB users provisioned."
+          resources:
+            requests: { cpu: 50m, memory: 64Mi }
+            limits:   { cpu: 250m, memory: 128Mi }
+{{- end }}
+{{- end }}
