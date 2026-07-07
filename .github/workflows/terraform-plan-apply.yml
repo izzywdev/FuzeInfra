@@ -173,7 +173,7 @@ jobs:
 
       - name: Save the reviewed plan
         if: success() && steps.detect.outputs.tf == 'true' && github.event.pull_request.head.repo.fork != true
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           # Keyed by PR head SHA so the merge job applies the EXACT reviewed plan.
           name: tfplan-${{ github.event.pull_request.head.sha }}
