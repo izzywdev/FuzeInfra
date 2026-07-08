@@ -52,6 +52,26 @@ jobs:
             echo "No listener pod found"
           fi
 
+      - name: EphemeralRunner pods + logs
+        run: |
+          echo "=== EphemeralRunners (CRD) ==="
+          kubectl -n arc-runners get ephemeralrunners 2>/dev/null || echo "(no EphemeralRunner CRD or none)"
+          echo "=== All arc-runners pods (including Completed/Failed) ==="
+          kubectl -n arc-runners get pods --all-namespaces=false -o wide 2>/dev/null
+          echo "=== Runner pod logs (last 3 pods, 50 lines each) ==="
+          PODS=$(kubectl -n arc-runners get pods --sort-by='.metadata.creationTimestamp' \
+            -o jsonpath='{.items[-3:].metadata.name}' 2>/dev/null || echo "")
+          for POD in $PODS; do
+            echo "--- logs: $POD ---"
+            kubectl -n arc-runners logs "$POD" --all-containers --tail=50 2>/dev/null \
+              || kubectl -n arc-runners logs "$POD" --all-containers --previous --tail=50 2>/dev/null \
+              || echo "(no logs)"
+          done
+          echo "=== ARC controller logs (last 30) ==="
+          CTRL=$(kubectl -n arc-systems get pods -l app.kubernetes.io/name=gha-rs-controller \
+            -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")
+          [ -n "$CTRL" ] && kubectl -n arc-systems logs "$CTRL" --tail=30 2>/dev/null || true
+
       - name: arc-runners RBAC
         run: |
           echo "=== RoleBindings in arc-runners ==="
