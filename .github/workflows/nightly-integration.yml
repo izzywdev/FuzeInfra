@@ -28,7 +28,7 @@ concurrency:
 
 jobs:
   integration:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, staging]
     outputs:
       ran: ${{ steps.detect.outputs.ran }}
     steps:
@@ -124,7 +124,7 @@ jobs:
       ${{ always() && needs.integration.result == 'failure' &&
           needs.integration.outputs.ran == 'true' &&
           !startsWith(github.ref_name, 'nightly-autofix-') }}
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, staging]
     steps:
       - uses: actions/checkout@v7
         with:

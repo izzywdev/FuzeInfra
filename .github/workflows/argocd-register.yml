@@ -58,7 +58,7 @@ concurrency:
 
 jobs:
   register:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, staging]
     steps:
       # --- Inline bundle mode (private repo dispatch) --------------------------
       - name: Extract inline argocd bundle (repository_dispatch with argocd_bundle)

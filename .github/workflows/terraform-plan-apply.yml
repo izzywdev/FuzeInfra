@@ -81,6 +81,8 @@ env:
   # crit-alert bridge token — MUST be wired, else the plan sees crit_bridge_token=""
   # and DESTROYS the crit-bridge CF worker/route/secret (count gates on it != "").
   TF_VAR_crit_bridge_token: ${{ secrets.CRIT_BRIDGE_TOKEN }}
+  TF_VAR_k3s_node_token: ${{ secrets.K3S_NODE_TOKEN }}
+  TF_VAR_ci_worker_count: "1"
 
 jobs:
   # =========================================================================
@@ -89,7 +91,7 @@ jobs:
   plan:
     if: github.event_name == 'pull_request'
     name: plan (${{ vars.TF_ROOT || 'terraform/contabo' }})
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, staging]
     steps:
       - uses: actions/checkout@v7
 
@@ -227,7 +229,7 @@ jobs:
   apply:
     if: github.event_name == 'push'
     name: apply (saved plan)
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, staging]
     concurrency:
       # Never let two applies touch state at once (backstops DynamoDB locking).
       group: terraform-apply-${{ vars.TF_ROOT || 'terraform/contabo' }}

@@ -34,4 +34,4 @@ runcmd:
   # Join as a k3s agent and label the node. Secrets come from the env file above;
   # --node-name and the labels are baked in by Terraform per request.
   # For elastic nodes, also apply a PreferNoSchedule taint to keep stateless workloads there.
-  - [ sh, -c, "set -a; . /etc/k3s-agent.env; set +a; curl -sfL https://get.k3s.io | sh -s - agent --node-name '${node_name}' --node-label 'fuzeinfra.io/pool=${role}' ${node_labels}%{ if role == "elastic" } --node-taint 'fuzeinfra.io/elastic=true:PreferNoSchedule'%{ endif }" ]
+  - [ sh, -c, "set -a; . /etc/k3s-agent.env; set +a; curl -sfL https://get.k3s.io | sh -s - agent --node-name '${node_name}' --node-label 'fuzeinfra.io/pool=${role}' ${node_labels}%{ if role == "elastic" } --node-taint 'fuzeinfra.io/elastic=true:PreferNoSchedule'%{ endif }%{ if role == "ci" } --node-taint 'fuzeinfra.io/ci=true:NoSchedule'%{ endif }" ]
