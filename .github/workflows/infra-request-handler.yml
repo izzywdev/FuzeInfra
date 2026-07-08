@@ -58,7 +58,7 @@ concurrency:
 
 jobs:
   reconcile:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, staging]
     # AWS creds for the S3 remote backend — needed by EVERY terraform step
     # (init/plan/apply), not just init. Without these on the plan/apply steps the
     # S3 backend can't refresh state ("No valid credential sources found"), which

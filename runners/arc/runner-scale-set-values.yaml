@@ -62,13 +62,13 @@ template:
           - name: DISABLE_RUNNER_UPDATE
             value: "1"
 
-    # No tolerations/nodeSelector by default; add here to pin to staging nodes.
-    # nodeSelector:
-    #   node-role: staging
-    # tolerations:
-    #   - key: staging
-    #     operator: Exists
-    #     effect: NoSchedule
+    # Pin runner pods to the dedicated CI node (tainted fuzeinfra.io/ci=true:NoSchedule).
+    nodeSelector:
+      fuzeinfra.io/pool: ci
+    tolerations:
+      - key: fuzeinfra.io/ci
+        operator: Exists
+        effect: NoSchedule
 
 # ---- ARC controller reference -----------------------------------------------
 controllerServiceAccount:

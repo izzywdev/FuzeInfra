@@ -23,7 +23,7 @@ concurrency:
 
 jobs:
   reconcile:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, staging]
     steps:
       - uses: actions/checkout@v7
         with:

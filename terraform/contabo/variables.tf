@@ -206,6 +206,23 @@ variable "baseline_worker_region" {
   default     = "EU"
 }
 
+variable "ci_worker_count" {
+  description = "Number of TF-managed CI runner nodes to provision. DEFAULT 0 so a plain merge provisions nothing. Set to 1 (or more) in terraform.tfvars to spin up the dedicated CI node. CI nodes are tainted fuzeinfra.io/ci=true:NoSchedule so only ARC runner pods land there."
+  type        = number
+  default     = 0
+
+  validation {
+    condition     = var.ci_worker_count >= 0
+    error_message = "ci_worker_count must be >= 0."
+  }
+}
+
+variable "ci_worker_product_id" {
+  description = "Contabo product/plan UUID for CI runner nodes. Defaults to the same plan as the control-plane (var.product_id) unless overridden. The cheapest VPS S tier is sufficient for most CI workloads."
+  type        = string
+  default     = ""
+}
+
 variable "k3s_node_token" {
   description = "k3s node-token from the running server (/var/lib/rancher/k3s/server/node-token), used to join baseline worker nodes as k3s agents. Same secret already used by the infra-request-handler workflow (K3S_NODE_TOKEN) and modules/contabo-k3s-node — sourced from CI secrets / terraform.tfvars, never hardcoded."
   type        = string
