@@ -207,7 +207,7 @@ variable "baseline_worker_region" {
 }
 
 variable "ci_worker_count" {
-  description = "Number of TF-managed CI runner nodes to provision. DEFAULT 0 so a plain merge provisions nothing. Set to 1 (or more) in terraform.tfvars to spin up the dedicated CI node. CI nodes are tainted fuzeinfra.io/ci=true:NoSchedule so only ARC runner pods land there."
+  description = "Number of TF-managed CI runner nodes to provision. DEFAULT 0 so a plain merge provisions nothing. Set to 1 in CI env (TF_VAR_ci_worker_count) to spin up the dedicated CI node. CI nodes are tainted fuzeinfra.io/ci=true:NoSchedule so only ARC runner pods land there."
   type        = number
   default     = 0
 
