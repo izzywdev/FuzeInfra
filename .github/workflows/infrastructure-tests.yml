@@ -19,7 +19,7 @@ permissions:
 
 jobs:
   test-infrastructure:
-    runs-on: [self-hosted, staging]
+    runs-on: staging
     
     steps:
     - name: Checkout code

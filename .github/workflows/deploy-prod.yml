@@ -17,7 +17,7 @@ on:
 jobs:
   validate-and-sync:
     name: Validate → ArgoCD sync
-    runs-on: [self-hosted, staging]
+    runs-on: staging
     environment: production
 
     steps:
