@@ -91,7 +91,7 @@ jobs:
   plan:
     if: github.event_name == 'pull_request'
     name: plan (${{ vars.TF_ROOT || 'terraform/contabo' }})
-    runs-on: [self-hosted, staging]
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
 
@@ -229,7 +229,7 @@ jobs:
   apply:
     if: github.event_name == 'push'
     name: apply (saved plan)
-    runs-on: [self-hosted, staging]
+    runs-on: ubuntu-latest
     concurrency:
       # Never let two applies touch state at once (backstops DynamoDB locking).
       group: terraform-apply-${{ vars.TF_ROOT || 'terraform/contabo' }}
