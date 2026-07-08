@@ -33,7 +33,7 @@ concurrency:
 
 jobs:
   reapply-approved:
-    runs-on: [self-hosted, staging]
+    runs-on: staging
     steps:
       - uses: actions/checkout@v7
         with:

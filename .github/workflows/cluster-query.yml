@@ -33,7 +33,7 @@ concurrency:
 
 jobs:
   query:
-    runs-on: [self-hosted, staging]
+    runs-on: staging
     steps:
       - uses: azure/setup-kubectl@829323503d1be3d00ca8346e5391ca0b07a9ab0d # v5.1.0
 
