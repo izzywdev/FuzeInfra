@@ -37,7 +37,8 @@ jobs:
         run: |
           echo "=== Installing fresh scale set ==="
           helm upgrade --install staging \
-            oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set:0.14.2 \
+            oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set \
+            --version 0.14.2 \
             --namespace arc-runners \
             --values runners/arc/runner-scale-set-values.yaml \
             --wait --timeout 5m
