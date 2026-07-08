@@ -1,0 +1,132 @@
+# ===========================================================================
+# arc-bootstrap  —  ONE-TIME bootstrap of the ARC controller + runner secret
+# ===========================================================================
+# Runs on ubuntu-latest (NOT self-hosted) so it can create the self-hosted
+# runner infrastructure from scratch.
+#
+# What it does:
+#   1. Creates the "staging-runners" org runner group (idempotent)
+#   2. Creates the arc-runner-github-app k8s Secret in arc-runners namespace
+#   3. Helm-installs the ARC controller in arc-systems namespace
+#   4. Applies the arc-runners Argo Application so ArgoCD owns the scale set
+#
+# Required secrets: KUBE_CONFIG, GH_TF_TOKEN
+# Trigger: workflow_dispatch (manual, one-time)
+# ===========================================================================
+
+name: arc-bootstrap
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  bootstrap:
+    name: Bootstrap ARC controller + runner secret
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up kubectl
+        run: |
+          mkdir -p "$HOME/.kube"
+          echo "${{ secrets.KUBE_CONFIG }}" | base64 -d > "$HOME/.kube/config"
+          chmod 600 "$HOME/.kube/config"
+          kubectl version --client
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: "3.14.0"
+
+      - name: Verify cluster connectivity
+        run: |
+          kubectl get nodes -o wide
+          echo "Cluster is reachable."
+
+      - name: Create namespaces
+        run: |
+          kubectl create namespace arc-systems --dry-run=client -o yaml | kubectl apply -f -
+          kubectl create namespace arc-runners  --dry-run=client -o yaml | kubectl apply -f -
+
+      - name: Create arc-runner-github-app Secret
+        run: |
+          # Use GH_TF_TOKEN as the runner PAT — it needs manage_runners:org scope.
+          # If the token lacks that scope, replace GH_TF_TOKEN with a dedicated secret.
+          kubectl -n arc-runners create secret generic arc-runner-github-app \
+            --from-literal=github_token="${{ secrets.GH_TF_TOKEN }}" \
+            --dry-run=client -o yaml | kubectl apply -f -
+          echo "Secret arc-runner-github-app applied in arc-runners namespace."
+
+      - name: Create arc-runner-sa ServiceAccount
+        run: |
+          kubectl apply -f - <<'EOF'
+          apiVersion: v1
+          kind: ServiceAccount
+          metadata:
+            name: arc-runner-sa
+            namespace: arc-runners
+            labels:
+              app.kubernetes.io/component: runner
+              app.kubernetes.io/part-of: arc-staging
+          EOF
+
+      - name: Install / upgrade ARC controller
+        run: |
+          helm upgrade --install arc-controller \
+            oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set-controller \
+            --namespace arc-systems \
+            --values runners/arc/controller-values.yaml \
+            --wait --timeout 5m
+
+      - name: Apply arc-runners Argo Application
+        run: |
+          kubectl apply -f argocd/applications/arc-runners.yaml
+          echo "arc-runners-staging Argo Application applied — ArgoCD will sync the scale set."
+
+      - name: Create staging-runners org runner group (idempotent)
+        env:
+          GH_TOKEN: ${{ secrets.GH_TF_TOKEN }}
+        run: |
+          # Check if group already exists
+          EXISTS=$(gh api orgs/izzywdev/actions/runner-groups \
+            --jq '.runner_groups[] | select(.name=="staging-runners") | .id' 2>/dev/null || echo "")
+          if [ -n "$EXISTS" ]; then
+            echo "Runner group 'staging-runners' already exists (id=$EXISTS)."
+          else
+            gh api orgs/izzywdev/actions/runner-groups \
+              -X POST \
+              -f name=staging-runners \
+              -f visibility=selected \
+              --silent
+            echo "Runner group 'staging-runners' created."
+          fi
+          # Add FuzeInfra repo to the allowlist
+          REPO_ID=$(gh api repos/izzywdev/FuzeInfra --jq '.id')
+          GROUP_ID=$(gh api orgs/izzywdev/actions/runner-groups \
+            --jq '.runner_groups[] | select(.name=="staging-runners") | .id')
+          gh api "orgs/izzywdev/actions/runner-groups/${GROUP_ID}/repositories/${REPO_ID}" \
+            -X PUT --silent 2>/dev/null || true
+          echo "FuzeInfra repo added to staging-runners group."
+
+      - name: Wait for runner to register (up to 10 min)
+        env:
+          GH_TOKEN: ${{ secrets.GH_TF_TOKEN }}
+        run: |
+          echo "Waiting for a [self-hosted, staging] runner to appear..."
+          for i in $(seq 1 20); do
+            COUNT=$(gh api repos/izzywdev/FuzeInfra/actions/runners \
+              --jq '[.runners[] | select(.labels[].name == "staging")] | length' 2>/dev/null || echo "0")
+            echo "  attempt $i/20: $COUNT staging runner(s) registered"
+            if [ "$COUNT" -gt "0" ]; then
+              echo "Runner is online!"
+              gh api repos/izzywdev/FuzeInfra/actions/runners \
+                --jq '.runners[] | select(.labels[].name == "staging") | "  \(.name) status=\(.status)"'
+              exit 0
+            fi
+            sleep 30
+          done
+          echo "::warning::No staging runner appeared after 10 min. Check ARC pod logs: kubectl -n arc-runners get pods"
+          exit 1
