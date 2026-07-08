@@ -92,15 +92,16 @@ jobs:
           git checkout -b "$BRANCH"
           git add deploy/sealed-secrets/mendys-db-credentials.yaml \
                   deploy/sealed-secrets/mendys-mongo-credentials.yaml
-          git commit -m "feat(secrets): seal mendys Postgres + MongoDB credentials (#166)
-
-Provisioned by the provision-mendys workflow (run ${RUN_ID}).
-SealedSecrets sealed offline against the published public cert; plaintext
-never logged. GH secrets pushed to izzywdev/MendysRobotics in the same run.
-
-On merge, Argo CD PostSync Jobs will create:
-  - Postgres role mendys_svc + database mendys (service-db-provisioning Job)
-  - MongoDB user mendys_app + database mendys (service-mongo-provisioning Job)"
+          {
+            printf 'feat(secrets): seal mendys Postgres + MongoDB credentials (#166)\n\n'
+            printf 'Provisioned by the provision-mendys workflow (run %s).\n' "$RUN_ID"
+            printf 'SealedSecrets sealed offline against the published public cert; plaintext\n'
+            printf 'never logged. GH secrets pushed to izzywdev/MendysRobotics in the same run.\n\n'
+            printf 'On merge, Argo CD PostSync Jobs will create:\n'
+            printf '  - Postgres role mendys_svc + database mendys (service-db-provisioning Job)\n'
+            printf '  - MongoDB user mendys_app + database mendys (service-mongo-provisioning Job)\n'
+          } > /tmp/commit_msg.txt
+          git commit -F /tmp/commit_msg.txt
 
           git push origin "$BRANCH"
           gh pr create --base main --head "$BRANCH" \
