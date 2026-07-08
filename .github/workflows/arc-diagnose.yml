@@ -37,3 +37,24 @@ jobs:
         run: |
           kubectl -n arc-runners get autoscalingrunnersets 2>/dev/null || echo "CRD not found"
           kubectl -n arc-runners describe autoscalingrunnersets staging 2>/dev/null || true
+
+      - name: Listener pod status
+        run: |
+          echo "=== arc-systems all pods ==="
+          kubectl -n arc-systems get pods -o wide
+          echo "=== listener pod describe ==="
+          LPOD=$(kubectl -n arc-systems get pods -o name 2>/dev/null | grep listener || echo "")
+          if [ -n "$LPOD" ]; then
+            kubectl -n arc-systems describe $LPOD
+            echo "=== listener pod logs ==="
+            kubectl -n arc-systems logs $LPOD --tail=50 2>/dev/null || echo "(no logs yet)"
+          else
+            echo "No listener pod found"
+          fi
+
+      - name: arc-runners RBAC
+        run: |
+          echo "=== RoleBindings in arc-runners ==="
+          kubectl -n arc-runners get rolebindings -o wide 2>/dev/null
+          echo "=== Roles in arc-runners ==="
+          kubectl -n arc-runners get roles 2>/dev/null
