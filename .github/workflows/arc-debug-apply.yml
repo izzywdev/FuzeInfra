@@ -1,0 +1,48 @@
+name: arc-debug-apply
+on: [workflow_dispatch]
+permissions:
+  contents: read
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: claude/arc-diag
+      - name: Setup kubectl + helm
+        run: |
+          mkdir -p ~/.kube
+          echo "${{ secrets.KUBE_CONFIG }}" | base64 -d > ~/.kube/config
+          chmod 600 ~/.kube/config
+      - uses: azure/setup-helm@v4
+        with:
+          version: "3.14.0"
+      - name: Upgrade scale set with debug values
+        run: |
+          helm upgrade --install staging \
+            oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set \
+            --namespace arc-runners \
+            --values runners/arc/runner-scale-set-values.yaml \
+            --wait --timeout 3m
+          echo "=== Scale set updated ==="
+          kubectl -n arc-runners get pods -o wide
+      - name: Wait for a debug runner pod and show its logs
+        run: |
+          echo "Waiting up to 90s for a runner pod to start..."
+          for i in $(seq 1 18); do
+            POD=$(kubectl -n arc-runners get pods --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")
+            if [ -n "$POD" ]; then
+              echo "Runner pod found: $POD — following logs..."
+              timeout 60 kubectl -n arc-runners logs -f "$POD" 2>&1 || true
+              break
+            fi
+            echo "  $i/18: no running pod yet, waiting 5s..."
+            sleep 5
+          done
+          echo "=== All arc-runners pods (final) ==="
+          kubectl -n arc-runners get pods -o wide
+          echo "=== Logs from completed pods ==="
+          for POD in $(kubectl -n arc-runners get pods -o jsonpath='{.items[*].metadata.name}' 2>/dev/null); do
+            echo "--- $POD ---"
+            kubectl -n arc-runners logs "$POD" --all-containers 2>/dev/null | head -40 || echo "(no logs)"
+          done
