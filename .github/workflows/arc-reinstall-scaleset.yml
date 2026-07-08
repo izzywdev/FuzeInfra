@@ -1,0 +1,64 @@
+name: arc-reinstall-scaleset
+# Cleanly uninstalls and reinstalls the ARC runner scale set.
+# This forces a fresh broker registration, clearing any stale job assignments.
+# Use when: runners complete immediately (exit 0) but jobs stay queued indefinitely.
+on: [workflow_dispatch]
+permissions:
+  contents: read
+jobs:
+  reinstall:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup kubectl + helm
+        run: |
+          mkdir -p ~/.kube
+          echo "${{ secrets.KUBE_CONFIG }}" | base64 -d > ~/.kube/config
+          chmod 600 ~/.kube/config
+
+      - name: Setup Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: "3.14.0"
+
+      - name: Uninstall scale set (deregisters from GitHub broker)
+        run: |
+          echo "=== Current autoscalingrunnersets ==="
+          kubectl -n arc-runners get autoscalingrunnersets 2>/dev/null || echo "(none)"
+          echo "=== Uninstalling helm release 'staging' ==="
+          helm uninstall staging -n arc-runners --wait --timeout 2m 2>/dev/null || echo "(not installed — nothing to uninstall)"
+          echo "=== Pausing 10s for GitHub broker to deregister ==="
+          sleep 10
+          echo "=== Remaining resources ==="
+          kubectl -n arc-runners get all 2>/dev/null || echo "(namespace empty)"
+
+      - name: Reinstall scale set (fresh broker registration)
+        run: |
+          echo "=== Installing fresh scale set ==="
+          helm upgrade --install staging \
+            oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set:0.14.2 \
+            --namespace arc-runners \
+            --values runners/arc/runner-scale-set-values.yaml \
+            --wait --timeout 5m
+          echo "Scale set reinstalled."
+          kubectl -n arc-runners get autoscalingrunnersets
+
+      - name: Delete listener pod to reconnect with fresh broker session
+        run: |
+          kubectl -n arc-systems delete pods \
+            -l app.kubernetes.io/component=runner-scale-set-listener \
+            --ignore-not-found
+          kubectl -n arc-systems wait pods \
+            -l app.kubernetes.io/component=runner-scale-set-listener \
+            --for=condition=Ready --timeout=60s
+          echo "=== Listener pod ==="
+          kubectl -n arc-systems get pods | grep listener
+
+      - name: Verify broker connection (listener logs)
+        run: |
+          sleep 10
+          LPOD=$(kubectl -n arc-systems get pods -o name | grep listener | head -1)
+          if [ -n "$LPOD" ]; then
+            kubectl -n arc-systems logs "$LPOD" --tail=20 2>/dev/null || echo "(no logs yet)"
+          fi
