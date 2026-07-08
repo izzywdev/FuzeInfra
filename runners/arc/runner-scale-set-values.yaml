@@ -19,7 +19,7 @@ githubConfigSecret: arc-runner-github-app
 # ---- Runner group -----------------------------------------------------------
 # Org runner group created at: Settings → Actions → Runner groups.
 # Set "Repository access" to the explicit repo allowlist (NOT "All repositories").
-runnerGroup: "staging-runners"
+runnerGroup: "Default"
 
 # ---- Scale set label --------------------------------------------------------
 # This value becomes the runner's primary label.  Combined with the automatic

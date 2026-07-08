@@ -86,31 +86,6 @@ jobs:
           kubectl apply -f argocd/applications/arc-runners.yaml
           echo "arc-runners-staging Argo Application applied — ArgoCD will sync the scale set."
 
-      - name: Create staging-runners org runner group (idempotent)
-        env:
-          GH_TOKEN: ${{ secrets.GH_TF_TOKEN }}
-        run: |
-          # Check if group already exists
-          EXISTS=$(gh api orgs/izzywdev/actions/runner-groups \
-            --jq '.runner_groups[] | select(.name=="staging-runners") | .id' 2>/dev/null || echo "")
-          if [ -n "$EXISTS" ]; then
-            echo "Runner group 'staging-runners' already exists (id=$EXISTS)."
-          else
-            gh api orgs/izzywdev/actions/runner-groups \
-              -X POST \
-              -f name=staging-runners \
-              -f visibility=selected \
-              --silent
-            echo "Runner group 'staging-runners' created."
-          fi
-          # Add FuzeInfra repo to the allowlist
-          REPO_ID=$(gh api repos/izzywdev/FuzeInfra --jq '.id')
-          GROUP_ID=$(gh api orgs/izzywdev/actions/runner-groups \
-            --jq '.runner_groups[] | select(.name=="staging-runners") | .id')
-          gh api "orgs/izzywdev/actions/runner-groups/${GROUP_ID}/repositories/${REPO_ID}" \
-            -X PUT --silent 2>/dev/null || true
-          echo "FuzeInfra repo added to staging-runners group."
-
       - name: Wait for runner to register (up to 10 min)
         env:
           GH_TOKEN: ${{ secrets.GH_TF_TOKEN }}
