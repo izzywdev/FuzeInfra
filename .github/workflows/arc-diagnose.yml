@@ -1,0 +1,39 @@
+name: arc-diagnose
+on: [workflow_dispatch]
+permissions:
+  contents: read
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Setup kubectl
+        run: |
+          mkdir -p ~/.kube
+          echo "${{ secrets.KUBE_CONFIG }}" | base64 -d > ~/.kube/config
+          chmod 600 ~/.kube/config
+
+      - name: Cluster nodes
+        run: kubectl get nodes -o wide --show-labels
+
+      - name: ARC namespaces
+        run: |
+          echo "=== arc-systems pods ==="
+          kubectl -n arc-systems get pods -o wide 2>/dev/null || echo "namespace missing or empty"
+          echo "=== arc-runners pods ==="
+          kubectl -n arc-runners get pods -o wide 2>/dev/null || echo "namespace missing or empty"
+          echo "=== arc-runners secrets ==="
+          kubectl -n arc-runners get secrets 2>/dev/null
+
+      - name: ARC controller logs (last 50 lines)
+        run: |
+          POD=$(kubectl -n arc-systems get pods -l app.kubernetes.io/name=gha-rs-controller -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")
+          if [ -n "$POD" ]; then
+            kubectl -n arc-systems logs "$POD" --tail=50
+          else
+            echo "No ARC controller pod found"
+          fi
+
+      - name: AutoscalingRunnerSet status
+        run: |
+          kubectl -n arc-runners get autoscalingrunnersets 2>/dev/null || echo "CRD not found"
+          kubectl -n arc-runners describe autoscalingrunnersets staging 2>/dev/null || true
