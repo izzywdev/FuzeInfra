@@ -36,12 +36,6 @@
 # ---------------------------------------------------------------------------
 
 module "baseline_workers" {
-  # NOTE: this module declares its own `provider "contabo" {}` block (a
-  # "legacy" module in Terraform's terms), so it cannot be used with `count`,
-  # `for_each`, or `depends_on` at the call site. Scaling to zero nodes is
-  # expressed instead by passing an empty `requests` list — the module already
-  # supports that (its `for_each` is keyed on `local.requests`, which is `{}`
-  # for an empty list), so `baseline_worker_count = 0` is still valid.
   source = "../../modules/contabo-k3s-node"
 
   requests = [

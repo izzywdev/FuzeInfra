@@ -1,10 +1,3 @@
-provider "contabo" {
-  oauth2_client_id     = var.contabo_client_id
-  oauth2_client_secret = var.contabo_client_secret
-  oauth2_user          = var.contabo_api_user
-  oauth2_pass          = var.contabo_api_password
-}
-
 locals {
   # Key the instances by request name so adding/removing a request only touches
   # that node (a positional list would force-recreate everything after an insert).
