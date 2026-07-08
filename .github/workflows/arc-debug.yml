@@ -1,6 +1,5 @@
 name: arc-debug
-on:
-  workflow_dispatch:
+on: [workflow_dispatch]
 permissions:
   contents: read
 jobs:
@@ -19,37 +18,16 @@ jobs:
           kubectl -n arc-runners get ephemeralrunners 2>/dev/null || echo "(none)"
           echo "=== All runner pods ==="
           kubectl -n arc-runners get pods -o wide 2>/dev/null
-          echo "=== Runner pod specs (JITCONFIG presence) ==="
+          echo "=== Runner pod JITCONFIG env check ==="
           for POD in $(kubectl -n arc-runners get pods -o jsonpath='{.items[*].metadata.name}' 2>/dev/null); do
             echo "--- pod: $POD ---"
-            kubectl -n arc-runners get pod "$POD" -o json 2>/dev/null | python3 -c "
-import json,sys
-d=json.load(sys.stdin)
-for c in d['spec']['containers']:
-    print('container:', c['name'])
-    for e in c.get('env',[]):
-        n=e['name']; val=e.get('value','')
-        ref=e.get('valueFrom',{})
-        if any(k in n for k in ['JITCONFIG','RUNNER','ACTIONS','DISABLE']):
-            print('  ENV', n, '=', val[:40] if val else ('(secretKeyRef: '+str(ref)+')'))
-    for ef in c.get('envFrom',[]):
-        print('  envFrom:', ef)
-    print('  image:', c['image'])
-    print('  command:', c.get('command','(default)'))
-print('phase:', d['status'].get('phase'))
-for cs in d['status'].get('containerStatuses',[]):
-    print('containerStatus:', cs['name'], cs.get('state'))
-" 2>/dev/null || echo "(pod gone)"
-            echo "  === logs ==="
-            kubectl -n arc-runners logs "$POD" --all-containers 2>/dev/null \
-              || kubectl -n arc-runners logs "$POD" --all-containers --previous 2>/dev/null \
-              || echo "  (no logs)"
+            kubectl -n arc-runners get pod "$POD" -o jsonpath='{range .spec.containers[*]}{.name}{"\n"}{range .env[*]}  env: {.name}={.value}{.valueFrom}{"\n"}{end}{range .envFrom[*]}  envFrom: {.secretRef}{"\n"}{end}{end}' 2>/dev/null || echo "(pod gone)"
+            echo "  phase: $(kubectl -n arc-runners get pod $POD -o jsonpath='{.status.phase}' 2>/dev/null)"
+            echo "  --- logs ---"
+            kubectl -n arc-runners logs "$POD" --all-containers 2>/dev/null || kubectl -n arc-runners logs "$POD" --all-containers --previous 2>/dev/null || echo "  (no logs)"
           done
           echo "=== JIT secret keys in arc-runners ==="
-          for S in $(kubectl -n arc-runners get secrets -o name 2>/dev/null | grep runner); do
-            KEYS=$(kubectl -n arc-runners get $S -o jsonpath='{.data}' 2>/dev/null | python3 -c 'import json,sys; print(list(json.load(sys.stdin).keys()))' 2>/dev/null)
-            echo "  $S: $KEYS"
-          done
+          kubectl -n arc-runners get secrets -o jsonpath='{range .items[*]}{.metadata.name}: {range $k,$v:=.data}{$k} {end}{"\n"}{end}' 2>/dev/null || true
           echo "=== ARC controller logs (last 20) ==="
           CTRL=$(kubectl -n arc-systems get pods -l app.kubernetes.io/name=gha-rs-controller -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
           [ -n "$CTRL" ] && kubectl -n arc-systems logs "$CTRL" --tail=20 2>/dev/null || echo "no controller"
