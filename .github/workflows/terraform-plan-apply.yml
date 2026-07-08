@@ -81,6 +81,8 @@ env:
   # crit-alert bridge token — MUST be wired, else the plan sees crit_bridge_token=""
   # and DESTROYS the crit-bridge CF worker/route/secret (count gates on it != "").
   TF_VAR_crit_bridge_token: ${{ secrets.CRIT_BRIDGE_TOKEN }}
+  TF_VAR_k3s_node_token: ${{ secrets.K3S_NODE_TOKEN }}
+  TF_VAR_ci_worker_count: "1"
 
 jobs:
   # =========================================================================
