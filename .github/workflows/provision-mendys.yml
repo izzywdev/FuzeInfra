@@ -104,24 +104,21 @@ jobs:
           git commit -F /tmp/commit_msg.txt
 
           git push origin "$BRANCH"
+          {
+            printf 'Seals the Postgres and MongoDB credentials for MendysRobotics (#166).\n\n'
+            printf '## What this PR does\n'
+            printf -- '- `deploy/sealed-secrets/mendys-db-credentials.yaml` — Postgres password SealedSecret (scope: fuzeinfra/mendys-db-credentials)\n'
+            printf -- '- `deploy/sealed-secrets/mendys-mongo-credentials.yaml` — MongoDB password SealedSecret (scope: fuzeinfra/mendys-mongo-credentials)\n\n'
+            printf 'Note: `values-contabo.yaml` already has `mendys.enabled: true` for both serviceDatabases and serviceMongoDatabases.\n'
+            printf 'Once this merges, Argo CD runs the PostSync provisioning Jobs.\n\n'
+            printf '## GH secrets already set\n'
+            printf 'The four MendysRobotics secrets were set in the same workflow run (never in logs):\n'
+            printf -- '- `MENDYS_PG_USERNAME` = mendys_svc\n'
+            printf -- '- `MENDYS_PG_PASSWORD` = (sealed)\n'
+            printf -- '- `MENDYS_MONGO_USERNAME` = mendys_app\n'
+            printf -- '- `MENDYS_MONGO_PASSWORD` = (sealed)\n\n'
+            printf 'Closes #166\n'
+          } > /tmp/pr_body.md
           gh pr create --base main --head "$BRANCH" \
             --title "feat(secrets): seal mendys credentials + enable Postgres/MongoDB provisioning (#166)" \
-            --body "$(cat <<'EOF'
-Seals the Postgres and MongoDB credentials for MendysRobotics (#166).
-
-## What this PR does
-- \`deploy/sealed-secrets/mendys-db-credentials.yaml\` — Postgres password SealedSecret (scope: fuzeinfra/mendys-db-credentials)
-- \`deploy/sealed-secrets/mendys-mongo-credentials.yaml\` — MongoDB password SealedSecret (scope: fuzeinfra/mendys-mongo-credentials)
-
-Note: \`values-contabo.yaml\` already has \`mendys.enabled: true\` for both serviceDatabases and serviceMongoDatabases (set in the Helm chart PR). Once this merges, Argo CD runs the PostSync provisioning Jobs.
-
-## GH secrets already set
-The four MendysRobotics secrets were set in the same workflow run (never in logs):
-- \`MENDYS_PG_USERNAME\` = mendys_svc
-- \`MENDYS_PG_PASSWORD\` = (sealed)
-- \`MENDYS_MONGO_USERNAME\` = mendys_app
-- \`MENDYS_MONGO_PASSWORD\` = (sealed)
-
-Closes #166
-EOF
-)"
+            --body-file /tmp/pr_body.md
