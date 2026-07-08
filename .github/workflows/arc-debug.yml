@@ -37,6 +37,13 @@ jobs:
             echo "--- $POD ---"
             kubectl -n arc-runners get pod "$POD" -o jsonpath='exitCode: {.status.containerStatuses[0].state.terminated.exitCode} reason: {.status.containerStatuses[0].state.terminated.reason} message: {.status.containerStatuses[0].state.terminated.message}{"\n"}' 2>/dev/null || echo "(still running or not terminated)"
           done
+          echo "=== Listener pod logs (last 60) ==="
+          LPOD=$(kubectl -n arc-systems get pods -o name 2>/dev/null | grep listener | head -1)
+          if [ -n "$LPOD" ]; then
+            kubectl -n arc-systems logs "$LPOD" --tail=60 2>/dev/null || echo "(no logs)"
+          else
+            echo "no listener pod found"
+          fi
           echo "=== ARC controller logs (ALL, last 50) ==="
           CTRL=$(kubectl -n arc-systems get pods -l app.kubernetes.io/name=gha-rs-controller -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
           [ -n "$CTRL" ] && kubectl -n arc-systems logs "$CTRL" --tail=50 2>/dev/null || echo "no controller"
