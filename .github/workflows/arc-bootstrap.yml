@@ -84,24 +84,39 @@ jobs:
       - name: Apply arc-runners Argo Application
         run: |
           kubectl apply -f argocd/applications/arc-runners.yaml
-          echo "arc-runners-staging Argo Application applied — ArgoCD will sync the scale set."
+          echo "arc-runners-staging Argo Application applied."
+
+      - name: Install / upgrade runner scale set (direct Helm, not waiting for Argo sync)
+        run: |
+          # Install directly so the scale set is live immediately; Argo manages it going forward.
+          helm upgrade --install staging \
+            oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set \
+            --namespace arc-runners \
+            --values runners/arc/runner-scale-set-values.yaml \
+            --wait --timeout 5m
+          echo "Runner scale set 'staging' installed."
+          kubectl -n arc-runners get autoscalingrunnersets 2>/dev/null || echo "(AutoscalingRunnerSet CRD may need a moment)"
 
       - name: Wait for runner to register (up to 10 min)
         env:
           GH_TOKEN: ${{ secrets.GH_TF_TOKEN }}
         run: |
-          echo "Waiting for a [self-hosted, staging] runner to appear..."
+          echo "Waiting for a [self-hosted, staging] runner to appear at org level..."
           for i in $(seq 1 20); do
-            COUNT=$(gh api repos/izzywdev/FuzeInfra/actions/runners \
+            COUNT=$(gh api orgs/izzywdev/actions/runners \
               --jq '[.runners[] | select(.labels[].name == "staging")] | length' 2>/dev/null || echo "0")
             echo "  attempt $i/20: $COUNT staging runner(s) registered"
             if [ "$COUNT" -gt "0" ]; then
               echo "Runner is online!"
-              gh api repos/izzywdev/FuzeInfra/actions/runners \
+              gh api orgs/izzywdev/actions/runners \
                 --jq '.runners[] | select(.labels[].name == "staging") | "  \(.name) status=\(.status)"'
               exit 0
             fi
+            # Show runner pods to aid debugging
+            kubectl -n arc-runners get pods --no-headers 2>/dev/null | head -5 || true
             sleep 30
           done
-          echo "::warning::No staging runner appeared after 10 min. Check ARC pod logs: kubectl -n arc-runners get pods"
+          echo "::warning::No staging runner appeared after 10 min."
+          kubectl -n arc-runners get pods -o wide 2>/dev/null || true
+          kubectl -n arc-systems logs -l app.kubernetes.io/name=gha-rs-controller --tail=30 2>/dev/null || true
           exit 1
