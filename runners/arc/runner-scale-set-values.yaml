@@ -69,4 +69,6 @@ template:
 # ---- ARC controller reference -----------------------------------------------
 controllerServiceAccount:
   namespace: arc-systems
-  name: arc-gha-runner-scale-set-controller
+  # Must match the SA created by the controller chart release.
+  # Controller installed as: helm install arc-controller ... → SA = arc-controller-gha-rs-controller
+  name: arc-controller-gha-rs-controller
