@@ -3,23 +3,19 @@
 # Chart: oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set
 # Namespace: arc-runners  |  Release name: staging
 #
-# Registers an org-level ephemeral runner with labels [self-hosted, staging].
+# Registers a repo-level ephemeral runner with labels [self-hosted, staging].
+# izzywdev is a personal GitHub account (not an org) — repo-scoped runners only.
 # Consumers target it with:
 #   runs-on: [self-hosted, staging]
 # =============================================================================
 
 # ---- GitHub target ----------------------------------------------------------
-# Org-level URL → runner is available to every allowlisted repo in the group.
-githubConfigUrl: "https://github.com/izzywdev"
+# Repo-level URL — required for personal accounts (org-level API not available).
+githubConfigUrl: "https://github.com/izzywdev/FuzeInfra"
 
 # Name of the Kubernetes Secret containing GitHub App credentials.
 # Create it from runners/arc/github-secret.yaml before installing.
 githubConfigSecret: arc-runner-github-app
-
-# ---- Runner group -----------------------------------------------------------
-# Org runner group created at: Settings → Actions → Runner groups.
-# Set "Repository access" to the explicit repo allowlist (NOT "All repositories").
-runnerGroup: "Default"
 
 # ---- Scale set label --------------------------------------------------------
 # This value becomes the runner's primary label.  Combined with the automatic
