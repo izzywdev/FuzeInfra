@@ -26,8 +26,17 @@ jobs:
             echo "  --- logs ---"
             kubectl -n arc-runners logs "$POD" --all-containers 2>/dev/null || kubectl -n arc-runners logs "$POD" --all-containers --previous 2>/dev/null || echo "  (no logs)"
           done
-          echo "=== JIT secret keys in arc-runners ==="
-          kubectl -n arc-runners get secrets -o jsonpath='{range .items[*]}{.metadata.name}: {range $k,$v:=.data}{$k} {end}{"\n"}{end}' 2>/dev/null || true
-          echo "=== ARC controller logs (last 20) ==="
+          echo "=== JIT secret content check ==="
+          for S in $(kubectl -n arc-runners get secrets -o name 2>/dev/null | grep runner); do
+            NAME="${S#*/}"
+            JIT_LEN=$(kubectl -n arc-runners get secret "$NAME" -o jsonpath='{.data.jitToken}' 2>/dev/null | wc -c)
+            echo "  $NAME: jitToken length=$JIT_LEN"
+          done
+          echo "=== Runner pod exit status (kubectl describe) ==="
+          for POD in $(kubectl -n arc-runners get pods -o jsonpath='{.items[*].metadata.name}' 2>/dev/null); do
+            echo "--- $POD ---"
+            kubectl -n arc-runners get pod "$POD" -o jsonpath='exitCode: {.status.containerStatuses[0].state.terminated.exitCode} reason: {.status.containerStatuses[0].state.terminated.reason} message: {.status.containerStatuses[0].state.terminated.message}{"\n"}' 2>/dev/null || echo "(still running or not terminated)"
+          done
+          echo "=== ARC controller logs (ALL, last 50) ==="
           CTRL=$(kubectl -n arc-systems get pods -l app.kubernetes.io/name=gha-rs-controller -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
-          [ -n "$CTRL" ] && kubectl -n arc-systems logs "$CTRL" --tail=20 2>/dev/null || echo "no controller"
+          [ -n "$CTRL" ] && kubectl -n arc-systems logs "$CTRL" --tail=50 2>/dev/null || echo "no controller"
