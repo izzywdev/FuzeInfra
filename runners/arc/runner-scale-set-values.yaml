@@ -38,8 +38,18 @@ template:
     containers:
       - name: runner
         image: ghcr.io/actions/actions-runner:latest
-        # securityContext omitted — seccompProfile.type:RuntimeDefault is not
-        # guaranteed available on k3s nodes; add back once runner is stable.
+        # DEBUG: print env/fs for 30s so logs capture JIT config presence, then run normally
+        command: ["/bin/bash", "-c"]
+        args:
+          - |
+            echo "=== DEBUG: startup ==="
+            echo "JITCONFIG present: $([ -n \"$ACTIONS_RUNNER_INPUT_JITCONFIG\" ] && echo YES || echo NO)"
+            echo "RUNNER_JIT_CONFIG_FILE: ${RUNNER_JIT_CONFIG_FILE:-not-set}"
+            ls -la /home/runner/ 2>/dev/null || echo "no /home/runner"
+            ls -la /runner/ 2>/dev/null || echo "no /runner"
+            env | grep -i "runner\|actions\|github" | sort || true
+            echo "=== END DEBUG, running ./run.sh ==="
+            exec ./run.sh
         resources:
           requests:
             cpu: 200m
