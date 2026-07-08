@@ -1,0 +1,106 @@
+# =============================================================================
+# arc-register.yml — TEMPLATE: copy to .github/workflows/ in your repo
+#
+# Registers this repository as an ARC self-hosted runner on the shared
+# FuzeInfra cluster.  Run once to set up; re-run to upgrade the scale set.
+#
+# Required secrets in your repo:
+#   KUBE_CONFIG           — base64-encoded kubeconfig for the FuzeInfra cluster
+#                           (copy from FuzeInfra repo or ask infra team)
+#   GH_APP_ID             — GitHub App ID (from izzywdev/FuzeInfra runner app)
+#   GH_APP_INSTALLATION_ID — Installation ID for THIS repo
+#   GH_APP_PRIVATE_KEY    — PEM-encoded private key (set as multiline secret)
+#
+# OR: if you share the FuzeInfra GitHub App and the existing
+# arc-runner-github-app k8s secret already covers your repo, set:
+#   USE_EXISTING_SECRET: "arc-runner-github-app"
+# and leave the GH_APP_* secrets empty.
+#
+# After this workflow succeeds, use in your jobs:
+#   runs-on: <your-scale-set-name>   # matches SCALE_SET_NAME below
+# =============================================================================
+name: arc-register
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "install or uninstall"
+        required: true
+        default: install
+        type: choice
+        options: [install, uninstall]
+
+# ---- CONFIGURE THESE --------------------------------------------------------
+env:
+  SCALE_SET_NAME: ""        # FILL IN: e.g. "fuzefront" — used in runs-on:
+  ARC_VERSION: "0.14.2"
+  RUNNER_NS: "arc-runners"  # must match FuzeInfra controller watchSingleNamespace
+  # Set to the name of an existing k8s secret if sharing the FuzeInfra GitHub App:
+  USE_EXISTING_SECRET: ""   # e.g. "arc-runner-github-app", or leave empty
+# -----------------------------------------------------------------------------
+
+permissions:
+  contents: read
+
+jobs:
+  register:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: izzywdev/FuzeInfra
+          ref: main
+          sparse-checkout: |
+            runners/arc/register-repo.sh
+
+      - name: Setup kubectl
+        run: |
+          mkdir -p ~/.kube
+          echo "${{ secrets.KUBE_CONFIG }}" | base64 -d > ~/.kube/config
+          chmod 600 ~/.kube/config
+
+      - name: Setup Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: "3.14.0"
+
+      - name: Write GitHub App private key
+        if: ${{ env.USE_EXISTING_SECRET == '' && inputs.action == 'install' }}
+        run: |
+          echo "${{ secrets.GH_APP_PRIVATE_KEY }}" > /tmp/arc-app-key.pem
+
+      - name: Install / upgrade scale set
+        if: ${{ inputs.action == 'install' }}
+        run: |
+          chmod +x runners/arc/register-repo.sh
+          REPO_URL="https://github.com/${{ github.repository }}"
+
+          if [ -n "$USE_EXISTING_SECRET" ]; then
+            ./runners/arc/register-repo.sh \
+              --repo-url "$REPO_URL" \
+              --name     "$SCALE_SET_NAME" \
+              --secret   "$USE_EXISTING_SECRET"
+          else
+            ./runners/arc/register-repo.sh \
+              --repo-url        "$REPO_URL" \
+              --name            "$SCALE_SET_NAME" \
+              --app-id          "${{ secrets.GH_APP_ID }}" \
+              --app-install-id  "${{ secrets.GH_APP_INSTALLATION_ID }}" \
+              --app-private-key /tmp/arc-app-key.pem
+          fi
+
+      - name: Uninstall scale set
+        if: ${{ inputs.action == 'uninstall' }}
+        run: |
+          chmod +x runners/arc/register-repo.sh
+          ./runners/arc/register-repo.sh --name "$SCALE_SET_NAME" --uninstall
+
+      - name: Verify registration
+        if: ${{ inputs.action == 'install' }}
+        run: |
+          echo "=== AutoscalingRunnerSets in $RUNNER_NS ==="
+          kubectl -n "$RUNNER_NS" get autoscalingrunnersets
+          echo ""
+          echo "=== Listener pod (may take 30s to appear) ==="
+          kubectl -n arc-systems get pods | grep "$SCALE_SET_NAME" || echo "(listener not up yet — wait ~30s)"
