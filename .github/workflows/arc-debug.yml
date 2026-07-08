@@ -12,6 +12,15 @@ jobs:
           echo "${{ secrets.KUBE_CONFIG }}" | base64 -d > ~/.kube/config
           chmod 600 ~/.kube/config
 
+      - name: CI node capacity
+        run: |
+          echo "=== Nodes ==="
+          kubectl get nodes -o wide
+          echo "=== CI node allocatable ==="
+          kubectl describe node fuzeinfra-ci-runner-1 2>/dev/null | grep -A 20 "Allocatable:\|Allocated resources:" || echo "node not found"
+          echo "=== Pods on CI node ==="
+          kubectl get pods -A --field-selector spec.nodeName=fuzeinfra-ci-runner-1 2>/dev/null
+
       - name: Runner pod env + logs
         run: |
           echo "=== EphemeralRunners ==="
