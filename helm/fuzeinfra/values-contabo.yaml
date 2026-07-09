@@ -178,37 +178,45 @@ overprovisioning:
 # Secret the consumer repo seals FOR the `fuzeinfra` namespace. Helm replaces
 # (does NOT deep-merge) lists, so the full list is restated here.
 #
-# GITOPS GATE: each service stays `enabled: false` until its SealedSecret is
-# present in the `fuzeinfra` namespace. Flipping `enabled: true` before the
-# secret exists makes the hook Job fail to start (unresolvable secretKeyRef),
-# degrading the Argo sync. Flip each to `true` in the SAME change that lands its
-# secret. As of this PR none of the three secrets exist yet (verified via
-# read-only kubectl) — cross-repo hand-off issues track sealing them into
-# `fuzeinfra`:
-#   - fuzesales   -> Secret `fuzesales-db-credentials`   key `password`
-#   - fuzecontact -> Secret `fuzecontact-db-credentials` key `password`
-#   - fuzeservice -> Secret `fuzeservice-db-credentials` key `password`
-#   - mendys      -> Secret `mendys-db-credentials`      key `password`
+# GITOPS GATE: each service stays `enabled: false` until its per-service
+# credentials Secret is present in the `fuzeinfra` namespace. This is a HARD
+# gate: the provisioning hook is a SINGLE Job pod that mounts every enabled
+# service's password via `secretKeyRef` (Optional: false), so ONE missing
+# secret fails the whole pod with CreateContainerConfigError, blocks ALL
+# entries (including ones whose secret DOES exist), and degrades the Argo
+# PostSync hook. (Observed: the Job sat in CreateContainerConfigError for
+# ~3.7 days because fuzesales/fuzecontact/fuzeservice were flipped on before
+# their secrets landed.) Flip each to `true` in the SAME change that lands its
+# secret — never before.
+#   - mendys      -> Secret `mendys-db-credentials` key `password`
 #                    (DONE, issue #183: applied as a hand-off Secret in the
 #                     `fuzeinfra` namespace via the FuzeKeys #136 precedent, so
 #                     `mendys` below is enabled)
+#   - fuzesales   -> Secret `fuzesales-db-credentials`   key `password`  (pending seal)
+#   - fuzecontact -> Secret `fuzecontact-db-credentials` key `password`  (pending seal)
+#   - fuzeservice -> Secret `fuzeservice-db-credentials` key `password`  (pending seal)
 serviceDatabases:
+  # Disabled: `fuzesales-db-credentials` is NOT yet present in `fuzeinfra`
+  # (verified via kubectl); leaving it enabled wedges the shared provisioning
+  # Job for every service. Re-enable in the change that seals its secret.
   - name: fuzesales
-    enabled: true
+    enabled: false
     role: fuzesales_svc
     database: fuzesales
     passwordSecret:
       name: fuzesales-db-credentials
       key: password
+  # Disabled: `fuzecontact-db-credentials` not yet present in `fuzeinfra`.
   - name: fuzecontact
-    enabled: true
+    enabled: false
     role: fuzecontact_svc
     database: fuzecontact
     passwordSecret:
       name: fuzecontact-db-credentials
       key: password
+  # Disabled: `fuzeservice-db-credentials` not yet present in `fuzeinfra`.
   - name: fuzeservice
-    enabled: true
+    enabled: false
     role: fuzeservice_svc
     database: fuzeservice
     passwordSecret:
