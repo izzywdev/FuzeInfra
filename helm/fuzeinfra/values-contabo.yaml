@@ -192,31 +192,26 @@ overprovisioning:
 #                    (DONE, issue #183: applied as a hand-off Secret in the
 #                     `fuzeinfra` namespace via the FuzeKeys #136 precedent, so
 #                     `mendys` below is enabled)
-#   - fuzesales   -> Secret `fuzesales-db-credentials`   key `password`  (pending seal)
-#   - fuzecontact -> Secret `fuzecontact-db-credentials` key `password`  (pending seal)
-#   - fuzeservice -> Secret `fuzeservice-db-credentials` key `password`  (pending seal)
+#   - fuzesales   -> Secret `fuzesales-db-credentials`   key `password`  (present)
+#   - fuzecontact -> Secret `fuzecontact-db-credentials` key `password`  (present)
+#   - fuzeservice -> Secret `fuzeservice-db-credentials` key `password`  (present)
 serviceDatabases:
-  # Disabled: `fuzesales-db-credentials` is NOT yet present in `fuzeinfra`
-  # (verified via kubectl); leaving it enabled wedges the shared provisioning
-  # Job for every service. Re-enable in the change that seals its secret.
   - name: fuzesales
-    enabled: false
+    enabled: true
     role: fuzesales_svc
     database: fuzesales
     passwordSecret:
       name: fuzesales-db-credentials
       key: password
-  # Disabled: `fuzecontact-db-credentials` not yet present in `fuzeinfra`.
   - name: fuzecontact
-    enabled: false
+    enabled: true
     role: fuzecontact_svc
     database: fuzecontact
     passwordSecret:
       name: fuzecontact-db-credentials
       key: password
-  # Disabled: `fuzeservice-db-credentials` not yet present in `fuzeinfra`.
   - name: fuzeservice
-    enabled: false
+    enabled: true
     role: fuzeservice_svc
     database: fuzeservice
     passwordSecret:
