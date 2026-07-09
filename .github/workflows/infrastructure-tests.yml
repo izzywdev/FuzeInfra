@@ -20,7 +20,6 @@ permissions:
 jobs:
   test-infrastructure:
     runs-on: staging
-    
     steps:
     - name: Checkout code
       uses: actions/checkout@v7

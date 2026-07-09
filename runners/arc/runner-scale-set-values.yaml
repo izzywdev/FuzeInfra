@@ -81,6 +81,14 @@ template:
         operator: Exists
         effect: NoSchedule
 
+# ---- Docker-in-Docker -------------------------------------------------------
+# Enables the ARC-native DinD sidecar so runner pods have a real Docker daemon.
+# The chart injects a `dind` sidecar container and sets DOCKER_HOST automatically;
+# workflows that call docker/docker-compose work without any extra setup.
+# The runner container needs to be privileged to run DinD.
+containerMode:
+  type: dind
+
 # ---- ARC controller reference -----------------------------------------------
 controllerServiceAccount:
   namespace: arc-systems
