@@ -140,6 +140,14 @@ template:
     containers:
       - name: runner
         image: ghcr.io/actions/actions-runner:latest
+        # Explicit entrypoint. Overriding the container spec drops the chart's
+        # default command (/home/runner/run.sh); without this the pod runs the
+        # image default, exits 0 immediately, and never picks up its job — jobs
+        # sit "assigned" and churn forever without executing (see issue #220).
+        command: ["/bin/bash", "-c"]
+        args:
+          - |
+            echo "=== ARC RUNNER STARTUP ===" && if [ -f /entrypoint.sh ]; then exec /entrypoint.sh; elif [ -f /home/runner/run.sh ]; then exec /home/runner/run.sh; else echo "ERROR: no runner entrypoint" && exit 1; fi
         resources:
           requests:
             cpu: 200m
