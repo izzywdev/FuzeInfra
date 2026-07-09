@@ -103,7 +103,7 @@ jobs:
     if: needs.preflight.outputs.skip != 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # ── kubectl access ──────────────────────────────────────────────────────
       - name: Configure kubectl

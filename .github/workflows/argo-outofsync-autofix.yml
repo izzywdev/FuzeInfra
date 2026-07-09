@@ -36,7 +36,7 @@ concurrency:
 
 jobs:
   preflight:
-    runs-on: ubuntu-latest
+    runs-on: staging
     outputs:
       skip: ${{ steps.gate.outputs.skip }}
       owner_repo: ${{ steps.route.outputs.owner_repo }}
@@ -82,7 +82,7 @@ jobs:
   notify:
     needs: preflight
     if: needs.preflight.outputs.skip != 'true'
-    runs-on: ubuntu-latest
+    runs-on: staging
     steps:
       - name: Telegram 🔴 alert
         env:
@@ -104,7 +104,7 @@ jobs:
   delegate-consumer:
     needs: preflight
     if: needs.preflight.outputs.skip != 'true' && needs.preflight.outputs.is_self != 'true'
-    runs-on: ubuntu-latest
+    runs-on: staging
     env:
       APP: ${{ github.event.client_payload.app }}
       OWNER_REPO: ${{ needs.preflight.outputs.owner_repo }}
@@ -141,16 +141,16 @@ jobs:
   autofix:
     needs: preflight
     if: needs.preflight.outputs.skip != 'true' && needs.preflight.outputs.is_self == 'true'
-    runs-on: ubuntu-latest
+    runs-on: staging
     env:
       APP: ${{ github.event.client_payload.app }}
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           fetch-depth: 0
       - name: Re-validate app name
         run: printf '%s' "$APP" | grep -qE '^[a-z0-9][a-z0-9-]{0,62}$' || { echo "::error::bad app"; exit 1; }
-      - uses: azure/setup-kubectl@776406bce94f63e41d621b960d78ee25c8b76ede # v4
+      - uses: azure/setup-kubectl@829323503d1be3d00ca8346e5391ca0b07a9ab0d # v5.1.0
       - uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4
         with: { version: v3.14.4 }
       - name: Configure kubectl

@@ -1,0 +1,25 @@
+name: arc-restart-listener
+on: [workflow_dispatch]
+permissions:
+  contents: read
+jobs:
+  restart:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Setup kubectl
+        run: |
+          mkdir -p ~/.kube
+          echo "${{ secrets.KUBE_CONFIG }}" | base64 -d > ~/.kube/config
+          chmod 600 ~/.kube/config
+
+      - name: Restart listener pod
+        run: |
+          echo "=== Current listener pods ==="
+          kubectl -n arc-systems get pods | grep listener || echo "none"
+          echo "=== Deleting listener pod(s) — ARC will recreate ==="
+          kubectl -n arc-systems delete pods -l app.kubernetes.io/component=runner-scale-set-listener --ignore-not-found
+          echo "=== Waiting for new listener pod ==="
+          kubectl -n arc-systems wait pods -l app.kubernetes.io/component=runner-scale-set-listener \
+            --for=condition=Ready --timeout=120s
+          echo "=== New listener pod ==="
+          kubectl -n arc-systems get pods | grep listener

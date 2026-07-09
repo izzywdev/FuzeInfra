@@ -125,6 +125,26 @@ serviceDatabases:
       name: mendys-db-credentials
       key: password
 
+# MongoDB admin connection config for serviceMongoProvisioning Jobs.
+serviceMongoProvisioning:
+  host: fuzeinfra-mongodb    # in-namespace DNS of the shared MongoDB Service
+
+# List of MongoDB users to provision per-service. Same gate pattern as
+# serviceDatabases: disabled by default; prod overlay flips enabled: true once
+# the per-service SealedSecret is present in the fuzeinfra namespace.
+#   name:     logical service name (used to derive the password env var)
+#   database: MongoDB database the user will own
+#   user:     MongoDB username to create / sync
+#   passwordSecret.{name,key}: SealedSecret in fuzeinfra namespace holding the password
+serviceMongoDatabases:
+  - name: mendys
+    enabled: false
+    database: mendys
+    user: mendys_app
+    passwordSecret:
+      name: mendys-mongo-credentials
+      key: password
+
 # -----------------------------------------------------------------------------
 # Ingress (replaces the docker-compose nginx reverse proxy). Web UIs are exposed
 # at <service>.<global.domain>. Requires an ingress controller (ingress-nginx),

@@ -22,34 +22,31 @@ metadata:
       Application in a new environment without first creating that Secret.
 spec:
   project: fuzeinfra
-  source:
-    repoURL: https://github.com/izzywdev/FuzeInfra.git
-    targetRevision: main
-    chart: gha-runner-scale-set
-    # Helm chart pulled directly from OCI registry via ArgoCD's Helm OCI support.
-    # Requires ArgoCD >= 2.8 with HELM_ENABLE_OCI=1 (set in argocd-cm or env).
-    helm:
-      releaseName: staging
-      valueFiles:
-        # ArgoCD resolves this relative path against the source repo root.
-        - runners/arc/runner-scale-set-values.yaml
-  # Alternate source using the OCI chart directly (ArgoCD Helm OCI mode):
-  # source:
-  #   repoURL: ghcr.io/actions/actions-runner-controller-charts
-  #   chart: gha-runner-scale-set
-  #   targetRevision: "0.9.*"
-  #   helm:
-  #     releaseName: staging
-  #     values: |
-  #       githubConfigUrl: "https://github.com/izzywdev"
-  #       githubConfigSecret: arc-runner-github-app
-  #       runnerGroup: staging-runners
-  #       runnerScaleSetName: staging
-  #       minRunners: 0
-  #       maxRunners: 5
+  # Multi-source: OCI chart + git values file (ArgoCD >= 2.6).
+  # The $values ref variable lets valueFiles reference the git source by alias.
+  sources:
+    - repoURL: ghcr.io/actions/actions-runner-controller-charts
+      chart: gha-runner-scale-set
+      targetRevision: "0.14.2"
+      helm:
+        releaseName: staging
+        valueFiles:
+          - $values/runners/arc/runner-scale-set-values.yaml
+    - repoURL: https://github.com/izzywdev/FuzeInfra.git
+      targetRevision: main
+      ref: values
   destination:
     server: https://kubernetes.default.svc
     namespace: arc-runners
+  # Argo CD must not revert EphemeralRunnerSet replicas/patchID — the ARC listener
+  # owns those fields and patches them at runtime.  selfHeal reverting them causes
+  # the listener to loop indefinitely without runners ever completing a job.
+  ignoreDifferences:
+    - group: actions.github.com
+      kind: EphemeralRunnerSet
+      jsonPointers:
+        - /spec/replicas
+        - /spec/patchID
   syncPolicy:
     automated:
       prune: true

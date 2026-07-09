@@ -3,23 +3,19 @@
 # Chart: oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set
 # Namespace: arc-runners  |  Release name: staging
 #
-# Registers an org-level ephemeral runner with labels [self-hosted, staging].
+# Registers a repo-level ephemeral runner with labels [self-hosted, staging].
+# izzywdev is a personal GitHub account (not an org) — repo-scoped runners only.
 # Consumers target it with:
 #   runs-on: [self-hosted, staging]
 # =============================================================================
 
 # ---- GitHub target ----------------------------------------------------------
-# Org-level URL → runner is available to every allowlisted repo in the group.
-githubConfigUrl: "https://github.com/izzywdev"
+# Repo-level URL — required for personal accounts (org-level API not available).
+githubConfigUrl: "https://github.com/izzywdev/FuzeInfra"
 
 # Name of the Kubernetes Secret containing GitHub App credentials.
 # Create it from runners/arc/github-secret.yaml before installing.
 githubConfigSecret: arc-runner-github-app
-
-# ---- Runner group -----------------------------------------------------------
-# Org runner group created at: Settings → Actions → Runner groups.
-# Set "Repository access" to the explicit repo allowlist (NOT "All repositories").
-runnerGroup: "staging-runners"
 
 # ---- Scale set label --------------------------------------------------------
 # This value becomes the runner's primary label.  Combined with the automatic
@@ -42,14 +38,29 @@ template:
     containers:
       - name: runner
         image: ghcr.io/actions/actions-runner:latest
-        # Runners are ephemeral — no privileged flag, no host mounts.
-        securityContext:
-          allowPrivilegeEscalation: false
-          capabilities:
-            drop: ["ALL"]
-          runAsNonRoot: true
-          seccompProfile:
-            type: RuntimeDefault
+        # Debug wrapper: print JIT config presence + GitHub connectivity before
+        # handing off to the real runner entrypoint.  Remove once runner is stable.
+        command: ["/bin/bash", "-c"]
+        args:
+          - |
+            echo "=== ARC RUNNER STARTUP DEBUG ==="
+            echo "JITCONFIG length: ${#ACTIONS_RUNNER_INPUT_JITCONFIG}"
+            echo "JITCONFIG prefix: ${ACTIONS_RUNNER_INPUT_JITCONFIG:0:60}"
+            echo "Hostname: $(hostname)"
+            echo "GitHub API connectivity:"
+            curl -s --connect-timeout 10 https://api.github.com/status 2>&1 | head -5 || echo "GITHUB API UNREACHABLE"
+            echo "=== Launching runner entrypoint ==="
+            if [ -f /entrypoint.sh ]; then
+              exec /entrypoint.sh
+            elif [ -f /home/runner/run.sh ]; then
+              exec /home/runner/run.sh
+            else
+              echo "ERROR: no runner entrypoint found"
+              ls -la / /home/runner/ 2>&1
+              exit 1
+            fi
+        # securityContext omitted — seccompProfile.type:RuntimeDefault is not
+        # guaranteed available on k3s nodes; add back once runner is stable.
         resources:
           requests:
             cpu: 200m
@@ -62,15 +73,17 @@ template:
           - name: DISABLE_RUNNER_UPDATE
             value: "1"
 
-    # No tolerations/nodeSelector by default; add here to pin to staging nodes.
-    # nodeSelector:
-    #   node-role: staging
-    # tolerations:
-    #   - key: staging
-    #     operator: Exists
-    #     effect: NoSchedule
+    # Pin runner pods to the dedicated CI node (tainted fuzeinfra.io/ci=true:NoSchedule).
+    nodeSelector:
+      fuzeinfra.io/pool: ci
+    tolerations:
+      - key: fuzeinfra.io/ci
+        operator: Exists
+        effect: NoSchedule
 
 # ---- ARC controller reference -----------------------------------------------
 controllerServiceAccount:
   namespace: arc-systems
-  name: arc-gha-runner-scale-set-controller
+  # Must match the SA created by the controller chart release.
+  # Controller installed as: helm install arc-controller ... → SA = arc-controller-gha-rs-controller
+  name: arc-controller-gha-rs-controller

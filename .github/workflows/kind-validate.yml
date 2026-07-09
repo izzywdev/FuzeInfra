@@ -54,7 +54,7 @@ jobs:
     runs-on: [self-hosted, kind-host]
     timeout-minutes: 40
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Tool check (docker / kind / kubectl / helm / python)
         shell: bash

@@ -17,11 +17,11 @@ on:
 jobs:
   validate-and-sync:
     name: Validate → ArgoCD sync
-    runs-on: ubuntu-latest
+    runs-on: staging
     environment: production
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Set up Helm
         uses: azure/setup-helm@v4

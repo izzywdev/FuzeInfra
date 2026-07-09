@@ -36,12 +36,6 @@
 # ---------------------------------------------------------------------------
 
 module "baseline_workers" {
-  # NOTE: this module declares its own `provider "contabo" {}` block (a
-  # "legacy" module in Terraform's terms), so it cannot be used with `count`,
-  # `for_each`, or `depends_on` at the call site. Scaling to zero nodes is
-  # expressed instead by passing an empty `requests` list — the module already
-  # supports that (its `for_each` is keyed on `local.requests`, which is `{}`
-  # for an empty list), so `baseline_worker_count = 0` is still valid.
   source = "../../modules/contabo-k3s-node"
 
   requests = [
@@ -72,4 +66,39 @@ module "baseline_workers" {
   # as the control-plane (VXLAN today, WireGuard after the provisioning.tf
   # cutover — see that file's comment). Nothing here to change when that
   # cutover happens; the module's cloud-init only opens the agent-side ports.
+}
+
+# ---------------------------------------------------------------------------
+# CI runner pool — dedicated node(s) tainted fuzeinfra.io/ci=true:NoSchedule
+#
+# Only ARC runner pods (with a matching toleration) schedule here.
+# Prod/infra workloads never land on this node, keeping CI jobs isolated.
+#
+# To provision:  set ci_worker_count = 1 in terraform.tfvars and apply.
+# To tear down:  set ci_worker_count = 0 and apply.
+# ---------------------------------------------------------------------------
+module "ci_workers" {
+  source = "../../modules/contabo-k3s-node"
+
+  requests = [
+    for i in range(var.ci_worker_count) : {
+      name       = "fuzeinfra-ci-runner-${i + 1}"
+      product_id = var.ci_worker_product_id != "" ? var.ci_worker_product_id : var.product_id
+      region     = var.baseline_worker_region
+      role       = "ci"
+      labels     = {}
+    }
+  ]
+
+  contabo_client_id     = var.contabo_client_id
+  contabo_client_secret = var.contabo_client_secret
+  contabo_api_user      = var.contabo_api_user
+  contabo_api_password  = var.contabo_api_password
+
+  k3s_server_url = "https://${local.server_ip}:6443"
+  k3s_node_token = var.k3s_node_token
+  k3s_channel    = var.k3s_channel
+
+  image_id       = var.image_id
+  ssh_public_key = var.ssh_public_key
 }

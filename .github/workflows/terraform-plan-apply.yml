@@ -81,6 +81,8 @@ env:
   # crit-alert bridge token — MUST be wired, else the plan sees crit_bridge_token=""
   # and DESTROYS the crit-bridge CF worker/route/secret (count gates on it != "").
   TF_VAR_crit_bridge_token: ${{ secrets.CRIT_BRIDGE_TOKEN }}
+  TF_VAR_k3s_node_token: ${{ secrets.K3S_NODE_TOKEN }}
+  TF_VAR_ci_worker_count: "1"
 
 jobs:
   # =========================================================================
@@ -91,7 +93,7 @@ jobs:
     name: plan (${{ vars.TF_ROOT || 'terraform/contabo' }})
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # Deadlock-safe self-filter: this job ALWAYS runs (no trigger paths filter)
       # so it can be a required check, but only does real work when terraform/**
@@ -173,7 +175,7 @@ jobs:
 
       - name: Save the reviewed plan
         if: success() && steps.detect.outputs.tf == 'true' && github.event.pull_request.head.repo.fork != true
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           # Keyed by PR head SHA so the merge job applies the EXACT reviewed plan.
           name: tfplan-${{ github.event.pull_request.head.sha }}
@@ -233,7 +235,7 @@ jobs:
       group: terraform-apply-${{ vars.TF_ROOT || 'terraform/contabo' }}
       cancel-in-progress: false
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Resolve the merged PR + its head SHA
         id: pr
@@ -254,7 +256,7 @@ jobs:
           echo "Merged PR #$PR, reviewed plan keyed by head SHA $HEAD_SHA"
 
       - name: Download the reviewed plan
-        uses: dawidd6/action-download-artifact@bf251b5aa9c2f7eeb574a96ee720e24f801b7c11 # v6
+        uses: dawidd6/action-download-artifact@b6e2e70617bc3265edd6dab6c906732b2f1ae151 # v21
         with:
           name: tfplan-${{ steps.pr.outputs.head_sha }}
           # The plan was produced by a different workflow run (the PR check).

@@ -58,7 +58,7 @@ concurrency:
 
 jobs:
   register:
-    runs-on: ubuntu-latest
+    runs-on: staging
     steps:
       # --- Inline bundle mode (private repo dispatch) --------------------------
       - name: Extract inline argocd bundle (repository_dispatch with argocd_bundle)
@@ -73,7 +73,7 @@ jobs:
       # --- Git checkout mode (workflow_dispatch or public repo) ----------------
       - name: Check out consumer argo manifests (git checkout mode)
         if: github.event_name == 'workflow_dispatch' || github.event.client_payload.argocd_bundle == ''
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: ${{ github.event.client_payload.repo || inputs.repo }}
           ref: ${{ github.event.client_payload.ref || inputs.ref || 'main' }}

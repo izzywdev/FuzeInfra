@@ -1,0 +1,123 @@
+# ===========================================================================
+# arc-bootstrap  —  ONE-TIME bootstrap of the ARC controller + runner secret
+# ===========================================================================
+# Runs on ubuntu-latest (NOT self-hosted) so it can create the self-hosted
+# runner infrastructure from scratch.
+#
+# What it does:
+#   1. Creates the "staging-runners" org runner group (idempotent)
+#   2. Creates the arc-runner-github-app k8s Secret in arc-runners namespace
+#   3. Helm-installs the ARC controller in arc-systems namespace
+#   4. Applies the arc-runners Argo Application so ArgoCD owns the scale set
+#
+# Required secrets: KUBE_CONFIG, GH_TF_TOKEN
+# Trigger: workflow_dispatch (manual, one-time)
+# ===========================================================================
+
+name: arc-bootstrap
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  bootstrap:
+    name: Bootstrap ARC controller + runner secret
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up kubectl
+        run: |
+          mkdir -p "$HOME/.kube"
+          echo "${{ secrets.KUBE_CONFIG }}" | base64 -d > "$HOME/.kube/config"
+          chmod 600 "$HOME/.kube/config"
+          kubectl version --client
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: "3.14.0"
+
+      - name: Verify cluster connectivity
+        run: |
+          kubectl get nodes -o wide
+          echo "Cluster is reachable."
+
+      - name: Create namespaces
+        run: |
+          kubectl create namespace arc-systems --dry-run=client -o yaml | kubectl apply -f -
+          kubectl create namespace arc-runners  --dry-run=client -o yaml | kubectl apply -f -
+
+      - name: Create arc-runner-github-app Secret
+        run: |
+          # Use GH_TF_TOKEN as the runner PAT — it needs manage_runners:org scope.
+          # If the token lacks that scope, replace GH_TF_TOKEN with a dedicated secret.
+          kubectl -n arc-runners create secret generic arc-runner-github-app \
+            --from-literal=github_token="${{ secrets.GH_TF_TOKEN }}" \
+            --dry-run=client -o yaml | kubectl apply -f -
+          echo "Secret arc-runner-github-app applied in arc-runners namespace."
+
+      - name: Create arc-runner-sa ServiceAccount
+        run: |
+          kubectl apply -f - <<'EOF'
+          apiVersion: v1
+          kind: ServiceAccount
+          metadata:
+            name: arc-runner-sa
+            namespace: arc-runners
+            labels:
+              app.kubernetes.io/component: runner
+              app.kubernetes.io/part-of: arc-staging
+          EOF
+
+      - name: Install / upgrade ARC controller
+        run: |
+          helm upgrade --install arc-controller \
+            oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set-controller \
+            --namespace arc-systems \
+            --values runners/arc/controller-values.yaml \
+            --wait --timeout 5m
+
+      - name: Apply arc-runners Argo Application
+        run: |
+          kubectl apply -f argocd/applications/arc-runners.yaml
+          echo "arc-runners-staging Argo Application applied."
+
+      - name: Install / upgrade runner scale set (direct Helm, not waiting for Argo sync)
+        run: |
+          # Install directly so the scale set is live immediately; Argo manages it going forward.
+          helm upgrade --install staging \
+            oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set \
+            --namespace arc-runners \
+            --values runners/arc/runner-scale-set-values.yaml \
+            --wait --timeout 5m
+          echo "Runner scale set 'staging' installed."
+          kubectl -n arc-runners get autoscalingrunnersets 2>/dev/null || echo "(AutoscalingRunnerSet CRD may need a moment)"
+
+      - name: Wait for runner to register (up to 10 min)
+        env:
+          GH_TOKEN: ${{ secrets.GH_TF_TOKEN }}
+        run: |
+          # izzywdev is a personal account → repo-scoped runners only
+          echo "Waiting for a [self-hosted, staging] runner to appear..."
+          for i in $(seq 1 20); do
+            COUNT=$(gh api repos/izzywdev/FuzeInfra/actions/runners \
+              --jq '[.runners[] | select(.labels[].name == "staging")] | length' 2>/dev/null || echo "0")
+            echo "  attempt $i/20: $COUNT staging runner(s) registered"
+            if [ "$COUNT" -gt "0" ]; then
+              echo "Runner is online!"
+              gh api repos/izzywdev/FuzeInfra/actions/runners \
+                --jq '.runners[] | select(.labels[].name == "staging") | "  \(.name) status=\(.status)"'
+              exit 0
+            fi
+            # Show runner pods to aid debugging
+            kubectl -n arc-runners get pods --no-headers 2>/dev/null | head -5 || true
+            sleep 30
+          done
+          echo "::warning::No staging runner appeared after 10 min."
+          kubectl -n arc-runners get pods -o wide 2>/dev/null || true
+          kubectl -n arc-systems logs -l app.kubernetes.io/name=gha-rs-controller --tail=30 2>/dev/null || true
+          exit 1

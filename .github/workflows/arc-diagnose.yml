@@ -1,0 +1,92 @@
+name: arc-diagnose
+on: [workflow_dispatch]
+permissions:
+  contents: read
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Setup kubectl
+        run: |
+          mkdir -p ~/.kube
+          echo "${{ secrets.KUBE_CONFIG }}" | base64 -d > ~/.kube/config
+          chmod 600 ~/.kube/config
+
+      - name: Cluster nodes
+        run: kubectl get nodes -o wide --show-labels
+
+      - name: ARC namespaces
+        run: |
+          echo "=== arc-systems pods ==="
+          kubectl -n arc-systems get pods -o wide 2>/dev/null || echo "namespace missing or empty"
+          echo "=== arc-runners pods ==="
+          kubectl -n arc-runners get pods -o wide 2>/dev/null || echo "namespace missing or empty"
+          echo "=== arc-runners secrets ==="
+          kubectl -n arc-runners get secrets 2>/dev/null
+
+      - name: ARC controller logs (last 50 lines)
+        run: |
+          POD=$(kubectl -n arc-systems get pods -l app.kubernetes.io/name=gha-rs-controller -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")
+          if [ -n "$POD" ]; then
+            kubectl -n arc-systems logs "$POD" --tail=50
+          else
+            echo "No ARC controller pod found"
+          fi
+
+      - name: AutoscalingRunnerSet status
+        run: |
+          kubectl -n arc-runners get autoscalingrunnersets 2>/dev/null || echo "CRD not found"
+          kubectl -n arc-runners describe autoscalingrunnersets staging 2>/dev/null || true
+
+      - name: Listener pod status
+        run: |
+          echo "=== arc-systems all pods ==="
+          kubectl -n arc-systems get pods -o wide
+          echo "=== listener pod describe ==="
+          LPOD=$(kubectl -n arc-systems get pods -o name 2>/dev/null | grep listener || echo "")
+          if [ -n "$LPOD" ]; then
+            kubectl -n arc-systems describe $LPOD
+            echo "=== listener pod logs ==="
+            kubectl -n arc-systems logs $LPOD --tail=50 2>/dev/null || echo "(no logs yet)"
+          else
+            echo "No listener pod found"
+          fi
+
+      - name: Runner pod env + spec + logs
+        run: |
+          echo "=== EphemeralRunners ==="
+          kubectl -n arc-runners get ephemeralrunners 2>/dev/null || echo "(none)"
+          echo "=== Runner pod specs (env vars — JITCONFIG presence) ==="
+          for POD in $(kubectl -n arc-runners get pods -o jsonpath='{.items[*].metadata.name}' 2>/dev/null); do
+            echo "--- pod: $POD ---"
+            kubectl -n arc-runners get pod "$POD" -o json 2>/dev/null \
+              | python3 -c "
+import json,sys
+d=json.load(sys.stdin)
+for c in d['spec']['containers']:
+    print('container:', c['name'])
+    for e in c.get('env', []):
+        val = e.get('value','') or ''
+        if 'JITCONFIG' in e['name'] or 'RUNNER' in e['name'] or 'ACTIONS' in e['name']:
+            print('  ENV:', e['name'], '=', val[:60] if val else '(from secret ref: ' + str(e.get('valueFrom','')) + ')')
+    for ef in c.get('envFrom', []):
+        print('  envFrom:', ef)
+print('status phase:', d['status'].get('phase','?'))
+print('container statuses:', [(cs['name'], cs.get('state')) for cs in d['status'].get('containerStatuses', [])])
+" || true
+            echo "  --- logs ---"
+            kubectl -n arc-runners logs "$POD" --all-containers 2>/dev/null \
+              || kubectl -n arc-runners logs "$POD" --all-containers --previous 2>/dev/null \
+              || echo "  (no logs)"
+          done
+          echo "=== JIT config secrets (keys only, no values) ==="
+          for S in $(kubectl -n arc-runners get secrets -o jsonpath='{.items[*].metadata.name}' 2>/dev/null | tr ' ' '\n' | grep runner); do
+            echo "secret $S: keys=$(kubectl -n arc-runners get secret $S -o jsonpath='{.data}' 2>/dev/null | python3 -c 'import json,sys; d=json.load(sys.stdin); print(list(d.keys()))' 2>/dev/null)"
+          done
+
+      - name: arc-runners RBAC
+        run: |
+          echo "=== RoleBindings in arc-runners ==="
+          kubectl -n arc-runners get rolebindings -o wide 2>/dev/null
+          echo "=== Roles in arc-runners ==="
+          kubectl -n arc-runners get roles 2>/dev/null

@@ -66,9 +66,9 @@ env:
 jobs:
   elastic-drift-check:
     name: Guard elastic-node exclusion
-    runs-on: ubuntu-latest
+    runs-on: staging
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # Fork PRs have no access to secrets — skip the plan, but pass so the
       # check does not deadlock the PR. Human review will catch issues.
