@@ -1,3 +1,157 @@
+name: Claude
+
+# Lets maintainers delegate work to Claude by mentioning @claude in an issue,
+# issue comment, PR, or review comment. Claude reads the thread + repo and
+# responds / opens a PR.
+#
+# This handler is CLUSTER-CAPABLE: it mounts the prod k3s KUBE_CONFIG and installs
+# kubectl/helm/terraform so a delegated infra task (create app secrets, nudge an
+# Argo sync, label nodes, render+diff the chart) can be done autonomously on the
+# runner — instead of bouncing back to a human who happens to hold the kubeconfig.
+# That is the whole point of cross-repo @claude delegation: it must run without a
+# local session open.
+#
+# SECURITY: because it now holds prod cluster creds + a PAT, the job is gated to
+# TRUSTED authors only (author_association in OWNER/MEMBER/COLLABORATOR). An
+# untrusted user commenting "@claude" must NOT be able to drive cluster ops.
+on:
+  issue_comment:
+    types: [created]
+  pull_request_review_comment:
+    types: [created]
+  issues:
+    types: [opened, assigned, labeled]
+  pull_request_review:
+    types: [submitted]
+
+jobs:
+  claude:
+    # Gate 1: @claude is actually mentioned (or the issue is assigned to claude).
+    # Gate 2 (SECURITY): the author is a trusted collaborator. author_association
+    # is evaluated per event source. Anything else is ignored silently.
+    if: |
+      (
+        (github.event_name == 'issue_comment' && contains(github.event.comment.body, '@claude') &&
+          contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association)) ||
+        (github.event_name == 'pull_request_review_comment' && contains(github.event.comment.body, '@claude') &&
+          contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association)) ||
+        (github.event_name == 'pull_request_review' && contains(github.event.review.body, '@claude') &&
+          contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.review.author_association)) ||
+        (github.event_name == 'issues' &&
+          (contains(github.event.issue.body, '@claude') || contains(github.event.issue.title, '@claude')) &&
+          contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.issue.author_association))
+      )
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+      id-token: write
+      actions: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 1
+
+      # --- Infra tooling so @claude can actually DO infra work ------------------
+      # Third-party actions pinned to commit SHAs (supply-chain hardening); the
+      # trailing comment tracks the human-readable tag. Keep current via Dependabot
+      # (package-ecosystem: github-actions).
+      - name: Set up kubectl
+        uses: azure/setup-kubectl@829323503d1be3d00ca8346e5391ca0b07a9ab0d # v5.1.0
+      - name: Set up helm
+        uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4
+        with:
+          version: v3.14.4
+      - name: Set up terraform
+        uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3
+        with:
+          terraform_version: "1.6.6"
+          terraform_wrapper: false
+
+      - name: Configure kubectl (prod k3s)
+        env:
+          KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
+        run: |
+          if [ -z "$KUBE_CONFIG" ]; then
+            echo "::warning::KUBE_CONFIG secret is empty — cluster ops will be unavailable this run."
+            exit 0
+          fi
+          mkdir -p "$HOME/.kube"
+          printf '%s' "$KUBE_CONFIG" | base64 -d > "$HOME/.kube/config"
+          chmod 600 "$HOME/.kube/config"
+          echo "KUBECONFIG=$HOME/.kube/config" >> "$GITHUB_ENV"
+          kubectl config current-context >/dev/null 2>&1 && echo "kubectl context ready"
+
+      # HARD guardrail (defense-in-depth beyond the system-prompt): shadow the
+      # cluster CLIs with PATH wrappers that REJECT destructive verbs against prod,
+      # enforced by the OS regardless of what the agent is instructed/injected to do.
+      # `kubectl apply/create/get/label/rollout`, `helm template/upgrade --dry-run`,
+      # `terraform plan` etc. all pass through; the irreversible verbs do not.
+      # The real fix (scoped-RBAC ServiceAccount kubeconfig instead of admin + a
+      # fine-scoped GitHub App token) is tracked separately.
+      - name: Install destructive-op guard shims
+        run: |
+          set -euo pipefail
+          GUARD="$HOME/guardbin"; mkdir -p "$GUARD"
+          RK="$(command -v kubectl)"; RH="$(command -v helm)"; RT="$(command -v terraform)"
+          cat > "$GUARD/kubectl" <<EOF
+          #!/usr/bin/env bash
+          for a in "\$@"; do case "\$a" in
+            delete|drain|cordon|uncordon|taint|patch|edit|replace) echo "guard: 'kubectl \$a' is blocked on this runner (prod GitOps; reconcile via chart+PR)" >&2; exit 97;; esac; done
+          exec "$RK" "\$@"
+          EOF
+          cat > "$GUARD/helm" <<EOF
+          #!/usr/bin/env bash
+          for a in "\$@"; do case "\$a" in uninstall|delete|rollback) echo "guard: 'helm \$a' is blocked on this runner" >&2; exit 97;; esac; done
+          exec "$RH" "\$@"
+          EOF
+          cat > "$GUARD/terraform" <<EOF
+          #!/usr/bin/env bash
+          for a in "\$@"; do case "\$a" in apply|destroy|import|"state") echo "guard: 'terraform \$a' is blocked on this runner (plan-only; apply via terraform-plan-apply CD)" >&2; exit 97;; esac; done
+          exec "$RT" "\$@"
+          EOF
+          chmod +x "$GUARD"/kubectl "$GUARD"/helm "$GUARD"/terraform
+          # self-test: a blocked verb must fail, an allowed one must pass
+          "$GUARD/kubectl" delete ns x >/dev/null 2>&1 && { echo "guard self-test FAILED (delete not blocked)"; exit 1; } || echo "guard: kubectl delete correctly blocked"
+          echo "$GUARD" >> "$GITHUB_PATH"
+
+      - name: Snapshot claude branches before run
+        run: |
+          git ls-remote origin 'refs/heads/claude/*' | awk '{print $2}' | sort > /tmp/branches-before.txt
+
+      - name: Run Claude
+        uses: anthropics/claude-code-action@ba0aafd4308cbba7165f9f2cdb0cfbed5a3c99ce # v1.0.168
+        env:
+          # KUBECONFIG (set above) + a real-user PAT for things GITHUB_TOKEN can't
+          # do (GHCR package visibility, cross-repo gh api). The agent reads any
+          # privileged values (e.g. the live Postgres superuser pwd) straight from
+          # the cluster via kubectl — nothing extra to inject here.
+          KUBECONFIG: ${{ env.KUBECONFIG }}
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          # Allow Bash (kubectl/helm/terraform/gh) + file tools + Task (so it can
+          # spawn the fuzeinfra-expert / devops-engineer agents from .claude/agents).
+          # --permission-mode bypassPermissions is REQUIRED for headless infra ops:
+          # the prior cluster-blind run reported that every non-git command (kubectl,
+          # curl, even `command -v`) was denied behind an approval gate an automated
+          # run can't clear. Bypassing is safe here ONLY because the job is already
+          # gated to trusted authors (OWNER/MEMBER/COLLABORATOR) above. GitOps
+          # guardrails live in the agent defs + repo CLAUDE.md in the checkout, and
+          # are reinforced via --append-system-prompt.
+          additional_permissions: |
+            Bash
+            Write
+            Edit
+            MultiEdit
+            Task
+            TodoWrite
+          claude_args: >-
+            --permission-mode bypassPermissions
+            --max-turns 60
+            --append-system-prompt "EXPERT-FIRST: begin every task by invoking the fuzeinfra-expert subagent (via Task) to load this repo's architecture/deploy/gotcha context before planning or coding. If .claude/agents/fuzeinfra-expert.md is ever missing, create it from .claude/templates/repo-expert.template.md (explore the repo to fill it in), open a PR adding it, then use it. Runner has PROD cluster access: KUBECONFIG targets the FuzeInfra Contabo k3s cluster; kubectl/helm/terraform installed; GH_TOKEN is a PAT. GitOps guardrails: prod is GitOps under ArgoCD selfHeal — never kubectl-patch/edit chart-managed resources (reverted); reconcile via chart+PR. Imperatively creating NON-chart-managed cluster Secrets to unblock go-live IS allowed. Never run destructive kubectl (delete/drain/cordon) against prod without explicit instruction. Prefer the fuzeinfra-expert and devops-engineer agents for infra delegations. End issue replies with DONE: or BLOCKED: so cross-repo monitors can key off it. CROSS-REPO HAND-OFF: if a delegated issue's REMAINING work belongs to another repo (e.g. the fix is in FuzeFront's app-of-apps, not FuzeInfra), do NOT leave it open here — open (or comment on) an issue in that repo mentioning its @claude with full context + a STATE block, post a closing note here ('Closing on FuzeInfra's end — handed to <repo>#N, please take it on your side'), and CLOSE this issue. Only keep it open if FuzeInfra itself still has work to do."
 
       - name: Open draft PR for new claude branch
         if: always()
@@ -8,21 +162,29 @@
           # Using GH_TOKEN (PAT): GITHUB_TOKEN-pushed branches do NOT trigger push events
           # on other workflows (GitHub design), so claude-auto-pr.yml never fired.
           # This step is the authoritative PR-opener; claude-auto-pr.yml is now a fallback.
-          git ls-remote origin 'refs/heads/claude/*'             | awk '{print $2}' | sort > /tmp/branches-after.txt
-          NEW=$(comm -13 /tmp/branches-before.txt /tmp/branches-after.txt             | head -1 | sed 's#refs/heads/##')
+          git ls-remote origin 'refs/heads/claude/*' | awk '{print $2}' | sort > /tmp/branches-after.txt
+          NEW=$(comm -13 /tmp/branches-before.txt /tmp/branches-after.txt | head -1 | sed 's#refs/heads/##')
           if [ -z "$NEW" ]; then
             echo "No new claude branch detected — nothing to do."
             exit 0
           fi
           echo "New branch: $NEW"
-          EXISTING=$(gh pr list --repo "$GITHUB_REPOSITORY" --head "$NEW"             --state open --json number --jq '.[0].number' 2>/dev/null || true)
+          EXISTING=$(gh pr list --repo "$GITHUB_REPOSITORY" --head "$NEW" \
+            --state open --json number --jq '.[0].number' 2>/dev/null || true)
           if [ -n "$EXISTING" ]; then
             echo "PR #$EXISTING already open for $NEW — skipping."
             exit 0
           fi
-          ISSUE=$(printf '%s' "$NEW" | sed -nE 's#^claude/issue-0*([0-9]+).*##p')
+          ISSUE=$(printf '%s' "$NEW" | sed -nE 's#^claude/issue-0*([0-9]+).*#\1#p')
           BODY="Auto-opened from branch \`${NEW}\`."
           [ -n "$ISSUE" ] && BODY="${BODY}
 
 Closes #${ISSUE}"
-          gh pr create             --repo "$GITHUB_REPOSITORY"             --base "${{ github.event.repository.default_branch }}"             --head "$NEW"             --draft             --fill             --body "$BODY"             && echo "Draft PR opened for $NEW" 
+          gh pr create \
+            --repo "$GITHUB_REPOSITORY" \
+            --base "${{ github.event.repository.default_branch }}" \
+            --head "$NEW" \
+            --draft \
+            --fill \
+            --body "$BODY" \
+            && echo "Draft PR opened for $NEW"

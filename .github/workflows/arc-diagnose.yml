@@ -60,20 +60,8 @@ jobs:
           for POD in $(kubectl -n arc-runners get pods -o jsonpath='{.items[*].metadata.name}' 2>/dev/null); do
             echo "--- pod: $POD ---"
             kubectl -n arc-runners get pod "$POD" -o json 2>/dev/null \
-              | python3 -c "
-import json,sys
-d=json.load(sys.stdin)
-for c in d['spec']['containers']:
-    print('container:', c['name'])
-    for e in c.get('env', []):
-        val = e.get('value','') or ''
-        if 'JITCONFIG' in e['name'] or 'RUNNER' in e['name'] or 'ACTIONS' in e['name']:
-            print('  ENV:', e['name'], '=', val[:60] if val else '(from secret ref: ' + str(e.get('valueFrom','')) + ')')
-    for ef in c.get('envFrom', []):
-        print('  envFrom:', ef)
-print('status phase:', d['status'].get('phase','?'))
-print('container statuses:', [(cs['name'], cs.get('state')) for cs in d['status'].get('containerStatuses', [])])
-" || true
+              | python3 -c "import json,sys; d=json.load(sys.stdin); [print('container:', c['name']) or [print('  ENV:', e['name'], '=', (e.get('value','') or '')[:60] or '(from secret ref: '+str(e.get('valueFrom',''))+')') for e in c.get('env',[]) if any(k in e['name'] for k in ('JITCONFIG','RUNNER','ACTIONS'))] or [print('  envFrom:', ef) for ef in c.get('envFrom',[])] for c in d['spec']['containers']]; print('status phase:', d['status'].get('phase','?')); print('container statuses:', [(cs['name'], cs.get('state')) for cs in d['status'].get('containerStatuses',[])])" \
+              || true
             echo "  --- logs ---"
             kubectl -n arc-runners logs "$POD" --all-containers 2>/dev/null \
               || kubectl -n arc-runners logs "$POD" --all-containers --previous 2>/dev/null \

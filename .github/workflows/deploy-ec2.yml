@@ -713,13 +713,12 @@ jobs:
         status: ${{ job.status }}
         text: |
           FuzeInfra Deployment ${{ job.status == 'success' && '✅ Completed' || '❌ Failed' }}
-          
+
           Instance: ${{ env.INSTANCE_NAME }}
           Environment: ${{ env.ENVIRONMENT }}
           Type: ${{ env.DEPLOYMENT_TYPE }}
-          
+
           URL: https://infra.fuzefront.com
           Grafana: https://infra.fuzefront.com:3001
           Prometheus: https://infra.fuzefront.com:9090
         webhook_url: ${{ secrets.SLACK_WEBHOOK_URL }}
-      if: ${{ secrets.SLACK_WEBHOOK_URL != '' }}
