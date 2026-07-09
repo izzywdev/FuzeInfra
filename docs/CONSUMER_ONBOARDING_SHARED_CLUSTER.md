@@ -64,6 +64,59 @@ database per datastore; creds delivered as GH Actions secrets on the consumer re
 never in the issue). The consumer composes its connection URLs from those creds +
 the published host/port contract (`fuzeinfra-<svc>.fuzeinfra`).
 
+### Database provisioning — the canonical FuzeInfra-side flow (Postgres)
+
+FuzeInfra provisions per-service Postgres roles/databases with a **two-secret
+pattern**. Get this order wrong and the provisioning Job wedges the whole cluster
+(one `CreateContainerConfigError` pod blocks **every** enabled service — this cost
+~4 days of downtime once, see #228). The two secrets:
+
+| Secret (both named `<service>-db-credentials`) | Namespace | Contents | Sealed by |
+|---|---|---|---|
+| Password secret | `fuzeinfra` | just `password` | **FuzeInfra** (`deploy/sealed-secrets/`) |
+| App credentials | app namespace | `DATABASE_URL`, `DB_HOST`, … | the **app repo** (`deploy/**`) |
+
+The `fuzeinfra`-namespace password secret is what the provisioning Job
+(`helm/fuzeinfra/templates/service-db-provisioning.yaml`) reads via
+`secretKeyRef` (`Optional: false`) to create the role/database. It is committed as a
+SealedSecret and reconciled onto the cluster by the **`fuzeinfra-sealed-secrets`**
+Argo app (`argocd/applications/fuzeinfra-sealed-secrets.yaml`, path
+`deploy/sealed-secrets/`). That reconciler is what makes the fix durable: if the
+`fuzeinfra` namespace is deleted or the cluster is re-provisioned, Argo re-applies
+the SealedSecrets and the controller re-creates the plain Secrets before the Job
+needs them.
+
+Steps for a new service (`<service>`):
+
+1. **In FuzeInfra**, seal the password secret:
+   ```bash
+   ./scripts/seed-service-db.sh <service>        # generates + seals a 32-char password
+   # or ./scripts/seed-service-db.sh <service> <password>   to use a given one
+   ```
+   This writes `deploy/sealed-secrets/<service>-db-credentials.yaml` (scope
+   `fuzeinfra/<service>-db-credentials`, key `password`) and prints the password.
+   It is idempotent — it refuses to overwrite an existing manifest (use `--force`
+   only for an intentional rotation).
+2. **In the app repo**, seal the app-namespace credentials with the **same
+   password** (its own `seal-db-credentials.sh`/`seal-secrets.yml`), producing the
+   `DATABASE_URL` secret the app consumes.
+3. **Open a single PR on FuzeInfra** that adds BOTH the sealed
+   `deploy/sealed-secrets/<service>-db-credentials.yaml` **and** flips the service
+   to `enabled: true` under `serviceDatabases:` in
+   `helm/fuzeinfra/values-contabo.yaml` (role `<service>_svc`, database
+   `<service>`, `passwordSecret.name: <service>-db-credentials`, `key: password`).
+4. **Merge.** Argo applies the SealedSecret → the controller decrypts it → the
+   post-sync provisioning Job creates the role + database (idempotently).
+
+> **The load-bearing invariant:** never flip `enabled: true` in
+> `values-contabo.yaml` without the matching `fuzeinfra`-namespace SealedSecret in
+> the **same** PR. The Job is a single pod mounting every enabled service's
+> password; one missing Secret fails the pod and blocks provisioning for all
+> services. `seed-service-db.sh` prints these steps on every run.
+
+MongoDB follows the same shape — see `docs/consuming-repos/MONGODB_PROVISIONING.md`
+(`<service>-mongo-credentials`, `serviceMongoDatabases:`).
+
 ## 5. Self-heal covers it going forward
 
 Once live, `docs/argo-selfheal-autofix.md` keeps it healthy: any `OutOfSync`,

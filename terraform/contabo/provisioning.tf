@@ -20,8 +20,12 @@ locals {
   argocd_project_path        = "${path.root}/../../argocd/projects/fuzeinfra.yaml"
   argocd_app_path            = "${path.root}/../../argocd/applications/fuzeinfra-prod.yaml"
   argocd_sealed_secrets_path = "${path.root}/../../argocd/applications/sealed-secrets.yaml"
-  argocd_ingress_prod_path   = "${path.root}/../../argocd/argocd-ingress-prod.yaml"
-  values_path                = "${path.root}/../../helm/fuzeinfra/values-contabo.yaml"
+  # Reconciler for the committed SealedSecrets in deploy/sealed-secrets/ (issue
+  # #228): keeps the per-service DB password secrets applied to `fuzeinfra` so a
+  # namespace re-create never wedges the provisioning Job.
+  argocd_infra_sealed_path = "${path.root}/../../argocd/applications/fuzeinfra-sealed-secrets.yaml"
+  argocd_ingress_prod_path = "${path.root}/../../argocd/argocd-ingress-prod.yaml"
+  values_path              = "${path.root}/../../helm/fuzeinfra/values-contabo.yaml"
 }
 
 resource "null_resource" "provision" {
@@ -53,6 +57,11 @@ resource "null_resource" "provision" {
   provisioner "file" {
     source      = local.argocd_sealed_secrets_path
     destination = "/tmp/argocd-sealed-secrets.yaml"
+  }
+
+  provisioner "file" {
+    source      = local.argocd_infra_sealed_path
+    destination = "/tmp/argocd-infra-sealed-secrets.yaml"
   }
 
   provisioner "file" {
@@ -157,6 +166,10 @@ resource "null_resource" "provision" {
       "kubectl apply -f /tmp/argocd-app.yaml",
       # Sealed Secrets controller + published public-cert Ingress.
       "kubectl apply -f /tmp/argocd-sealed-secrets.yaml",
+      # Reconciler for deploy/sealed-secrets/ (service-DB password secrets) so a
+      # fresh `fuzeinfra` namespace always has them before the provisioning Job
+      # runs — otherwise the Job wedges with CreateContainerConfigError (#228).
+      "kubectl apply -f /tmp/argocd-infra-sealed-secrets.yaml",
 
       # --- ArgoCD Ingress via Traefik (insecure mode: Cloudflare handles TLS) ---
       "kubectl -n argocd patch configmap argocd-cmd-params-cm --type merge -p '{\"data\":{\"server.insecure\":\"true\"}}'",
@@ -197,6 +210,7 @@ resource "null_resource" "argocd_sync" {
     app_sha            = filesha256(local.argocd_app_path)
     project_sha        = filesha256(local.argocd_project_path)
     sealed_secrets_sha = filesha256(local.argocd_sealed_secrets_path)
+    infra_sealed_sha   = filesha256(local.argocd_infra_sealed_path)
   }
 
   connection {
@@ -223,6 +237,11 @@ resource "null_resource" "argocd_sync" {
   }
 
   provisioner "file" {
+    source      = local.argocd_infra_sealed_path
+    destination = "/tmp/argocd-infra-sealed-secrets.yaml"
+  }
+
+  provisioner "file" {
     source      = local.argocd_ingress_prod_path
     destination = "/tmp/argocd-ingress-prod.yaml"
   }
@@ -232,6 +251,7 @@ resource "null_resource" "argocd_sync" {
       "kubectl apply -f /tmp/argocd-project.yaml",
       "kubectl apply -f /tmp/argocd-app.yaml",
       "kubectl apply -f /tmp/argocd-sealed-secrets.yaml",
+      "kubectl apply -f /tmp/argocd-infra-sealed-secrets.yaml",
       "kubectl apply -f /tmp/argocd-ingress-prod.yaml",
       "echo 'ArgoCD manifests synced'",
     ]
