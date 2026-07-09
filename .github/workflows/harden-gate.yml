@@ -136,7 +136,7 @@ jobs:
       - name: Semgrep authz/appsec scan (report-only, SARIF)
         shell: bash
         run: |
-          pip install -q semgrep
+          python3 -m pip install -q semgrep
           CFG=""
           [ -f .semgrep/fuze-authz.yml ] && CFG="$CFG --config .semgrep/fuze-authz.yml"
           semgrep scan $CFG --config p/owasp-top-ten --config p/secrets --sarif --output authz.sarif || true
