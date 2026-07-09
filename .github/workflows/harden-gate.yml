@@ -86,7 +86,7 @@ jobs:
       - name: Semgrep (report-only, SARIF)
         shell: bash
         run: |
-          pip install -q semgrep
+          python3 -m pip install -q semgrep || true
           semgrep scan --config auto --sarif --output semgrep.sarif || true
           test -f semgrep.sarif || echo '{"version":"2.1.0","runs":[]}' > semgrep.sarif
       - uses: github/codeql-action/upload-sarif@v3
