@@ -20,7 +20,6 @@ permissions:
 jobs:
   test-infrastructure:
     runs-on: staging
-    continue-on-error: true  # staging ARC runner has no Docker daemon; don't block merges
     steps:
     - name: Checkout code
       uses: actions/checkout@v7
