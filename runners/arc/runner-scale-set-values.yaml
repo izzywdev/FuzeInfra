@@ -37,7 +37,10 @@ template:
 
     containers:
       - name: runner
-        image: ghcr.io/actions/actions-runner:latest
+        # Custom image = official actions-runner + Docker Compose V2 plugin, so
+        # `docker compose ...` works in jobs (base image lacks it — see #223).
+        # Rebuild/push with runners/arc/build-runner-image.sh.
+        image: ghcr.io/izzywdev/fuzeinfra-runner:latest
         # Debug wrapper: print JIT config presence + GitHub connectivity before
         # handing off to the real runner entrypoint.  Remove once runner is stable.
         command: ["/bin/bash", "-c"]

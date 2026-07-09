@@ -13,6 +13,8 @@ runners/
 │   ├── controller-values.yaml       # Helm values for ARC controller (arc-systems ns)
 │   ├── runner-scale-set-values.yaml # Helm values for the runner scale set (arc-runners ns)
 │   ├── github-secret.yaml           # Secret TEMPLATE — fill before applying
+│   ├── Dockerfile                   # Custom runner image (runner + Docker Compose V2)
+│   ├── build-runner-image.sh        # Build & push the custom runner image
 │   └── install.sh                   # Bootstrap: install controller + scale set
 └── rbac/
     ├── deployer-role.yaml           # Namespaced Role for deploy operations
@@ -197,6 +199,41 @@ To remove everything:
 ```bash
 ./runners/arc/install.sh --uninstall
 ```
+
+---
+
+## Runner image (`docker compose` support)
+
+All scale sets run a **custom runner image**, not the stock
+`ghcr.io/actions/actions-runner`:
+
+```
+ghcr.io/izzywdev/fuzeinfra-runner:latest
+```
+
+It is the official actions-runner **plus the Docker Compose V2 plugin**, so jobs
+can run `docker compose -f … up` (with the ARC dind sidecar). The stock image
+ships the `docker` CLI but not the compose plugin, so `docker compose -f …`
+fails with `unknown shorthand flag: 'f' in -f` (izzywdev/FuzeInfra#223).
+
+Build & push it (requires `docker login ghcr.io` with `write:packages`):
+
+```bash
+./runners/arc/build-runner-image.sh                # build + push :latest
+TAG=v1 ./runners/arc/build-runner-image.sh         # tagged build
+PUSH=false ./runners/arc/build-runner-image.sh     # local build only
+```
+
+The image is referenced by `runners/arc/runner-scale-set-values.yaml` (the
+FuzeInfra `staging` scale set) and is the default in `register-repo.sh` (so
+every consumer scale set — `fuzesocial`, `fuzefront`, … — picks it up on its
+next `arc-register` run). Override per-repo with `register-repo.sh --image …`.
+
+> There is intentionally **no build workflow committed here** (the bot cannot
+> add files under `.github/workflows/`). Add a `build-runner-image.yml` that
+> runs `build-runner-image.sh` on `workflow_dispatch` / on changes to
+> `runners/arc/Dockerfile`, or run the script from a machine with Docker + GHCR
+> login.
 
 ---
 

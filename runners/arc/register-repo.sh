@@ -25,6 +25,11 @@
 #       --name      fuzefront \
 #       --secret    arc-runner-github-app   # existing secret in arc-runners
 #
+#   # override the runner image (default: ghcr.io/izzywdev/fuzeinfra-runner:latest
+#   # = actions-runner + Docker Compose V2 plugin, built by build-runner-image.sh)
+#   ./runners/arc/register-repo.sh --repo-url … --name fuzefront \
+#       --secret arc-runner-github-app --image ghcr.io/izzywdev/fuzeinfra-runner:v1
+#
 #   # uninstall a repo's scale set
 #   ./runners/arc/register-repo.sh --name fuzefront --uninstall
 #
@@ -45,6 +50,10 @@ ARC_RUNNER_CHART="oci://ghcr.io/actions/actions-runner-controller-charts/gha-run
 ARC_VERSION="0.14.2"
 MAX_RUNNERS=5
 MIN_RUNNERS=0
+# Custom runner image = official actions-runner + Docker Compose V2 plugin, so
+# `docker compose ...` works in jobs (base image lacks it — see #223).
+# Build/push with runners/arc/build-runner-image.sh; override with --image.
+RUNNER_IMAGE="ghcr.io/izzywdev/fuzeinfra-runner:latest"
 
 REPO_URL=""
 SCALE_SET_NAME=""
@@ -69,6 +78,7 @@ while [[ $# -gt 0 ]]; do
     --app-install-id)    APP_INSTALL_ID="$2"; shift 2 ;;
     --app-private-key)   APP_PRIVATE_KEY_FILE="$2"; shift 2 ;;
     --max-runners)       MAX_RUNNERS="$2"; shift 2 ;;
+    --image)             RUNNER_IMAGE="$2"; shift 2 ;;
     --uninstall)         UNINSTALL=true; shift ;;
     --help|-h)           usage ;;
     *) echo "Unknown option: $1"; usage ;;
@@ -139,7 +149,7 @@ template:
     serviceAccountName: arc-runner-sa
     containers:
       - name: runner
-        image: ghcr.io/actions/actions-runner:latest
+        image: ${RUNNER_IMAGE}
         resources:
           requests:
             cpu: 200m

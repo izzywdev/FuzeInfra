@@ -65,6 +65,8 @@ The tooling for this lives in FuzeInfra:
 - Scale set name must be unique across all repos sharing the arc-runners namespace.
   Existing names in use: "staging" (FuzeInfra).  Pick something repo-specific.
 - All runners land on fuzeinfra-ci-runner-1 (4 CPU / 7.75 GB RAM, Contabo).
+- Runners use the custom image ghcr.io/izzywdev/fuzeinfra-runner:latest
+  (actions-runner + Docker Compose V2 plugin), so `docker compose ...` works.
 - The controller watchSingleNamespace is "arc-runners" — do NOT deploy to any
   other namespace or the controller will ignore it.
 - Do NOT hand-deploy prod resources.  The arc-runners Argo CD app manages the
