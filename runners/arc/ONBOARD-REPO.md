@@ -100,13 +100,15 @@ so runner pods get a **real Docker daemon** (a privileged `docker:dind` sidecar 
 means these work out of the box on `runs-on: <SCALE_SET_NAME>` — no separate
 `kind-host` runner is needed for image builds:
 
-- `docker build` / `docker buildx build --push` (GHCR image builds)
-- `docker compose -f … up -d` / `--env-file …` (compose v2 plugin is present)
-- `docker run` / `docker ps` (daemon reachable at `/run/docker/docker.sock`)
+- `docker build` / `docker buildx build --push` (GHCR image builds) ✅
+- `docker run` / `docker ps` (daemon reachable via `DOCKER_HOST`) ✅
 
-The `ghcr.io/actions/actions-runner:latest` image already ships the docker CLI +
-compose-v2 + buildx plugins. If you see `unknown shorthand flag: 'f' in -f` from a
-`docker compose` call, the pod predates the DinD rollout — **re-register** (below).
+**`docker compose` needs one extra step.** The stock `ghcr.io/actions/actions-runner`
+image ships the docker CLI + buildx but **not** the compose-v2 plugin, so
+`docker compose -f …` fails with `unknown shorthand flag: 'f' in -f`. To enable it,
+publish `runners/arc/Dockerfile` (bakes the compose plugin) and point the scale set
+at it via `RUNNER_IMAGE` / the `image:` field, then re-register (below). DinD alone
+does **not** add compose.
 
 **Re-register existing scale sets to pick up DinD.** The dind sidecar only appears
 on pods created *after* the Helm values change. Any scale set registered before DinD

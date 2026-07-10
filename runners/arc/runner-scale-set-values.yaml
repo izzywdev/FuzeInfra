@@ -24,9 +24,11 @@ runnerScaleSetName: staging
 
 # ---- Scaling ----------------------------------------------------------------
 # minRunners=0  → idle costs nothing; runners spin up on demand.
-# maxRunners    → hard cap; tune based on cluster capacity.
+# maxRunners    → hard cap; tune based on cluster capacity. DinD sidecars are
+#                 unbounded and share the CI node (~7.75 GB) — keep this low so
+#                 parallel build/compose stacks don't OOM the node.
 minRunners: 0
-maxRunners: 5
+maxRunners: 3
 
 # ---- Runner pod spec --------------------------------------------------------
 template:
@@ -37,23 +39,24 @@ template:
 
     containers:
       - name: runner
+        # Stock actions-runner has the docker CLI + buildx but NOT compose-v2.
+        # For `docker compose`, publish runners/arc/Dockerfile and set the image
+        # here (e.g. ghcr.io/izzywdev/fuzeinfra-arc-runner:<tag>).
         image: ghcr.io/actions/actions-runner:latest
-        # NOTE: do NOT override command/args here. With containerMode: dind the
-        # chart-provided entrypoint wires up the docker externals + DOCKER_HOST
-        # and waits for the dind sidecar; a custom wrapper that exec's run.sh
-        # directly bypasses that setup. (A debug JITCONFIG/connectivity wrapper
-        # used to live here — removed now that the runner is stable.)
+        # NOTE: do NOT override command/args here. (A debug JITCONFIG wrapper
+        # used to live here — removed now that the runner is stable. It exec'd
+        # run.sh directly and added connectivity-curl noise.)
         # securityContext omitted — seccompProfile.type:RuntimeDefault is not
         # guaranteed available on k3s nodes; add back once runner is stable.
-        # DinD needs headroom: image builds + compose stacks are heavy, and the
-        # dind sidecar shares the pod cgroup budget with the runner container.
+        # Headroom for buildkit client work + Node actions (1Gi OOMs). Compose/
+        # build workloads run in the dind sidecar's cgroup, not here.
         resources:
           requests:
             cpu: 500m
             memory: 1Gi
           limits:
-            cpu: "4"
-            memory: 4Gi
+            cpu: "2"
+            memory: 2Gi
         env:
           # Prevent the runner from self-updating (image version is the pin).
           - name: DISABLE_RUNNER_UPDATE
@@ -70,8 +73,9 @@ template:
 # ---- Docker-in-Docker -------------------------------------------------------
 # Enables the ARC-native DinD sidecar so runner pods have a real Docker daemon.
 # The chart injects a `dind` sidecar container and sets DOCKER_HOST automatically;
-# workflows that call docker/docker-compose work without any extra setup.
-# The runner container needs to be privileged to run DinD.
+# `docker build` / `docker buildx build --push` / `docker run` work without any
+# extra setup. `docker compose` needs the compose-v2 plugin, which the stock
+# runner image lacks — set a compose-enabled `image:` above to get it.
 containerMode:
   type: dind
 
