@@ -4,6 +4,12 @@
 # The `fuzepicker` AppProject (argocd/projects/fuzepicker.yaml) must exist first.
 #
 # NOTE: FuzePicker's default branch is `master` (not `main`).
+#
+# REGISTRATION (one-time): nothing in FuzeInfra recurses argocd/applications/ from
+# git, so committing this file does NOT deploy it. After merge — and after the
+# fuzepicker AppProject is applied — register once against the prod cluster:
+#   kubectl apply -f argocd/applications/fuzepicker.yaml
+# Thereafter ArgoCD self-syncs FuzePicker's deploy/argocd/applications automatically.
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:

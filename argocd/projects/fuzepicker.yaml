@@ -11,6 +11,12 @@
 # Consumers consume FuzeInfra services via in-cluster service DNS (cross-namespace
 # networking) — that needs NO Argo destination into `fuzeinfra`. FuzePicker's
 # backend consumes the shared MongoDB via service DNS (fuzeinfra-mongodb.fuzeinfra).
+#
+# REGISTRATION (one-time): nothing in FuzeInfra recurses argocd/projects/ from git,
+# so committing this file does NOT deploy it. After merge, apply once against the
+# prod cluster (same pattern as argocd/applications/arc-runners.yaml):
+#   kubectl apply -f argocd/projects/fuzepicker.yaml
+# Thereafter ArgoCD owns it. Apply the project BEFORE the root app-of-apps.
 apiVersion: argoproj.io/v1alpha1
 kind: AppProject
 metadata:
