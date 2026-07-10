@@ -1,0 +1,44 @@
+# Argo CD AppProject for the FuzePicker consumer — OWNED BY FuzeInfra.
+#
+# ISOLATION BOUNDARY (FuzeInfra#99): consumer apps must NOT be able to deploy into
+# FuzeInfra's own `fuzeinfra` namespace. A consumer that grants itself the
+# `fuzeinfra` namespace can redeploy a *duplicate* FuzeInfra (split-brain
+# Postgres/Kafka, control-plane saturation, cluster-wide 502 — see FuzeInfra#93 /
+# FuzeFront#95). This project deliberately does NOT include `fuzeinfra`.
+#
+# GOVERNANCE RULE: FuzeInfra owns AppProjects (the destination/security boundary);
+# consumers only create Applications WITHIN their assigned, restricted project.
+# Consumers consume FuzeInfra services via in-cluster service DNS (cross-namespace
+# networking) — that needs NO Argo destination into `fuzeinfra`. FuzePicker's
+# backend consumes the shared MongoDB via service DNS (fuzeinfra-mongodb.fuzeinfra).
+#
+# REGISTRATION (one-time): nothing in FuzeInfra recurses argocd/projects/ from git,
+# so committing this file does NOT deploy it. After merge, apply once against the
+# prod cluster (same pattern as argocd/applications/arc-runners.yaml):
+#   kubectl apply -f argocd/projects/fuzepicker.yaml
+# Thereafter ArgoCD owns it. Apply the project BEFORE the root app-of-apps.
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: fuzepicker
+  namespace: argocd
+spec:
+  description: FuzePicker product (consumer of FuzeInfra) — may deploy ONLY into its own namespace.
+  sourceRepos:
+    - https://github.com/izzywdev/FuzePicker.git
+  destinations:
+    # The product's workloads.
+    - namespace: fuzepicker
+      server: https://kubernetes.default.svc
+    # The app-of-apps creates child Application objects here.
+    - namespace: argocd
+      server: https://kubernetes.default.svc
+    # NOTE: `fuzeinfra` is deliberately NOT a destination — that is FuzeInfra's
+    # namespace. A consumer that needs an infra service consumes it via DNS, it
+    # does not deploy into it.
+  clusterResourceWhitelist:
+    - group: "*"
+      kind: "*"
+  namespaceResourceWhitelist:
+    - group: "*"
+      kind: "*"
