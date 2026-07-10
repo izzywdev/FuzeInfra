@@ -117,6 +117,10 @@ jobs:
           "$GUARD/kubectl" delete ns x >/dev/null 2>&1 && { echo "guard self-test FAILED (delete not blocked)"; exit 1; } || echo "guard: kubectl delete correctly blocked"
           echo "$GUARD" >> "$GITHUB_PATH"
 
+      - name: Snapshot claude branches before run
+        run: |
+          git ls-remote origin 'refs/heads/claude/*' | awk '{print $2}' | sort > /tmp/branches-before.txt
+
       - name: Run Claude
         uses: anthropics/claude-code-action@ba0aafd4308cbba7165f9f2cdb0cfbed5a3c99ce # v1.0.168
         env:
@@ -148,3 +152,37 @@ jobs:
             --permission-mode bypassPermissions
             --max-turns 60
             --append-system-prompt "EXPERT-FIRST: begin every task by invoking the fuzeinfra-expert subagent (via Task) to load this repo's architecture/deploy/gotcha context before planning or coding. If .claude/agents/fuzeinfra-expert.md is ever missing, create it from .claude/templates/repo-expert.template.md (explore the repo to fill it in), open a PR adding it, then use it. Runner has PROD cluster access: KUBECONFIG targets the FuzeInfra Contabo k3s cluster; kubectl/helm/terraform installed; GH_TOKEN is a PAT. GitOps guardrails: prod is GitOps under ArgoCD selfHeal — never kubectl-patch/edit chart-managed resources (reverted); reconcile via chart+PR. Imperatively creating NON-chart-managed cluster Secrets to unblock go-live IS allowed. Never run destructive kubectl (delete/drain/cordon) against prod without explicit instruction. Prefer the fuzeinfra-expert and devops-engineer agents for infra delegations. End issue replies with DONE: or BLOCKED: so cross-repo monitors can key off it. CROSS-REPO HAND-OFF: if a delegated issue's REMAINING work belongs to another repo (e.g. the fix is in FuzeFront's app-of-apps, not FuzeInfra), do NOT leave it open here — open (or comment on) an issue in that repo mentioning its @claude with full context + a STATE block, post a closing note here ('Closing on FuzeInfra's end — handed to <repo>#N, please take it on your side'), and CLOSE this issue. Only keep it open if FuzeInfra itself still has work to do."
+
+      - name: Open draft PR for new claude branch
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+        run: |
+          # Compare branches before/after — open a draft PR for any new claude/** branch.
+          # Using GH_TOKEN (PAT): GITHUB_TOKEN-pushed branches do NOT trigger push events
+          # on other workflows (GitHub design), so claude-auto-pr.yml never fired.
+          # This step is the authoritative PR-opener; claude-auto-pr.yml is now a fallback.
+          git ls-remote origin 'refs/heads/claude/*' | awk '{print $2}' | sort > /tmp/branches-after.txt
+          NEW=$(comm -13 /tmp/branches-before.txt /tmp/branches-after.txt | head -1 | sed 's#refs/heads/##')
+          if [ -z "$NEW" ]; then
+            echo "No new claude branch detected — nothing to do."
+            exit 0
+          fi
+          echo "New branch: $NEW"
+          EXISTING=$(gh pr list --repo "$GITHUB_REPOSITORY" --head "$NEW" \
+            --state open --json number --jq '.[0].number' 2>/dev/null || true)
+          if [ -n "$EXISTING" ]; then
+            echo "PR #$EXISTING already open for $NEW — skipping."
+            exit 0
+          fi
+          ISSUE=$(printf '%s' "$NEW" | sed -nE 's#^claude/issue-0*([0-9]+).*#\1#p')
+          BODY="Auto-opened from branch \`${NEW}\`."
+          [ -n "$ISSUE" ] && BODY=$(printf '%s\n\nCloses #%s' "$BODY" "$ISSUE")
+          gh pr create \
+            --repo "$GITHUB_REPOSITORY" \
+            --base "${{ github.event.repository.default_branch }}" \
+            --head "$NEW" \
+            --draft \
+            --fill \
+            --body "$BODY" \
+            && echo "Draft PR opened for $NEW"

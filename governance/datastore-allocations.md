@@ -12,6 +12,7 @@ PR (or provisioning run) that creates an allocation. See
 | fuzesales | `fuzesales_svc` | `fuzesales` | izzywdev/FuzeSales | declared (FuzeInfra#153) |
 | fuzecontact | `fuzecontact_svc` | `fuzecontact` | izzywdev/FuzeContact | declared (FuzeInfra#153) |
 | fuzeservice | `fuzeservice_svc` | `fuzeservice` | izzywdev/FuzeService | declared (FuzeInfra#153) |
+| fuzesocial | `fuzesocial_app` | `fuzesocial` | izzywdev/FuzeSocial | active (FuzeInfra#150) — owner+grants verified; consumer-authoritative credential in `fuzesocial/fuzesocial-secrets:DB_PASSWORD` |
 
 > `fuzesales` / `fuzecontact` / `fuzeservice` are provisioned **declaratively**
 > by the `fuzeinfra-service-db-provision` hook Job (chart values

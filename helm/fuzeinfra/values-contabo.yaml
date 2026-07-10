@@ -178,19 +178,23 @@ overprovisioning:
 # Secret the consumer repo seals FOR the `fuzeinfra` namespace. Helm replaces
 # (does NOT deep-merge) lists, so the full list is restated here.
 #
-# GITOPS GATE: each service stays `enabled: false` until its SealedSecret is
-# present in the `fuzeinfra` namespace. Flipping `enabled: true` before the
-# secret exists makes the hook Job fail to start (unresolvable secretKeyRef),
-# degrading the Argo sync. Flip each to `true` in the SAME change that lands its
-# secret. As of this PR none of the three secrets exist yet (verified via
-# read-only kubectl) — cross-repo hand-off issues track sealing them into
-# `fuzeinfra`:
-#   - fuzesales   -> Secret `fuzesales-db-credentials`   key `password`
-#   - fuzecontact -> Secret `fuzecontact-db-credentials` key `password`
-#   - fuzeservice -> Secret `fuzeservice-db-credentials` key `password`
-#   - mendys      -> Secret `mendys-db-credentials`      key `password`
-#                    (SealedSecret must be committed to izzywdev/MendysRobotics
-#                     sealed for namespace=fuzeinfra before enabling here)
+# GITOPS GATE: each service stays `enabled: false` until its per-service
+# credentials Secret is present in the `fuzeinfra` namespace. This is a HARD
+# gate: the provisioning hook is a SINGLE Job pod that mounts every enabled
+# service's password via `secretKeyRef` (Optional: false), so ONE missing
+# secret fails the whole pod with CreateContainerConfigError, blocks ALL
+# entries (including ones whose secret DOES exist), and degrades the Argo
+# PostSync hook. (Observed: the Job sat in CreateContainerConfigError for
+# ~3.7 days because fuzesales/fuzecontact/fuzeservice were flipped on before
+# their secrets landed.) Flip each to `true` in the SAME change that lands its
+# secret — never before.
+#   - mendys      -> Secret `mendys-db-credentials` key `password`
+#                    (DONE, issue #183: applied as a hand-off Secret in the
+#                     `fuzeinfra` namespace via the FuzeKeys #136 precedent, so
+#                     `mendys` below is enabled)
+#   - fuzesales   -> Secret `fuzesales-db-credentials`   key `password`  (present)
+#   - fuzecontact -> Secret `fuzecontact-db-credentials` key `password`  (present)
+#   - fuzeservice -> Secret `fuzeservice-db-credentials` key `password`  (present)
 serviceDatabases:
   - name: fuzesales
     enabled: true
@@ -213,9 +217,13 @@ serviceDatabases:
     passwordSecret:
       name: fuzeservice-db-credentials
       key: password
-  # Enable once izzywdev/MendysRobotics seals mendys-db-credentials for fuzeinfra.
+  # Enabled: `mendys-db-credentials` (key `password`) is present in the
+  # `fuzeinfra` namespace as a hand-off Secret (issue #183, FuzeKeys #136
+  # precedent — annotated `fuzeinfra.dev/consumer: izzywdev/MendysRobotics`).
+  # The role/db were also provisioned imperatively with the same password, so
+  # this hook Job idempotently adopts and re-syncs them on the next Argo sync.
   - name: mendys
-    enabled: false
+    enabled: true
     role: mendys_svc
     database: mendys
     passwordSecret:

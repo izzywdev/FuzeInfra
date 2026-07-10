@@ -1,0 +1,58 @@
+name: arc-debug
+on: [workflow_dispatch]
+permissions:
+  contents: read
+jobs:
+  debug:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Setup kubectl
+        run: |
+          mkdir -p ~/.kube
+          echo "${{ secrets.KUBE_CONFIG }}" | base64 -d > ~/.kube/config
+          chmod 600 ~/.kube/config
+
+      - name: CI node capacity
+        run: |
+          echo "=== Nodes ==="
+          kubectl get nodes -o wide
+          echo "=== CI node allocatable ==="
+          kubectl describe node fuzeinfra-ci-runner-1 2>/dev/null | grep -A 20 "Allocatable:\|Allocated resources:" || echo "node not found"
+          echo "=== Pods on CI node ==="
+          kubectl get pods -A --field-selector spec.nodeName=fuzeinfra-ci-runner-1 2>/dev/null
+
+      - name: Runner pod env + logs
+        run: |
+          echo "=== EphemeralRunners ==="
+          kubectl -n arc-runners get ephemeralrunners 2>/dev/null || echo "(none)"
+          echo "=== All runner pods ==="
+          kubectl -n arc-runners get pods -o wide 2>/dev/null
+          echo "=== Runner pod JITCONFIG env check ==="
+          for POD in $(kubectl -n arc-runners get pods -o jsonpath='{.items[*].metadata.name}' 2>/dev/null); do
+            echo "--- pod: $POD ---"
+            kubectl -n arc-runners get pod "$POD" -o jsonpath='{range .spec.containers[*]}{.name}{"\n"}{range .env[*]}  env: {.name}={.value}{.valueFrom}{"\n"}{end}{range .envFrom[*]}  envFrom: {.secretRef}{"\n"}{end}{end}' 2>/dev/null || echo "(pod gone)"
+            echo "  phase: $(kubectl -n arc-runners get pod $POD -o jsonpath='{.status.phase}' 2>/dev/null)"
+            echo "  --- logs ---"
+            kubectl -n arc-runners logs "$POD" --all-containers 2>/dev/null || kubectl -n arc-runners logs "$POD" --all-containers --previous 2>/dev/null || echo "  (no logs)"
+          done
+          echo "=== JIT secret content check ==="
+          for S in $(kubectl -n arc-runners get secrets -o name 2>/dev/null | grep runner); do
+            NAME="${S#*/}"
+            JIT_LEN=$(kubectl -n arc-runners get secret "$NAME" -o jsonpath='{.data.jitToken}' 2>/dev/null | wc -c)
+            echo "  $NAME: jitToken length=$JIT_LEN"
+          done
+          echo "=== Runner pod exit status (kubectl describe) ==="
+          for POD in $(kubectl -n arc-runners get pods -o jsonpath='{.items[*].metadata.name}' 2>/dev/null); do
+            echo "--- $POD ---"
+            kubectl -n arc-runners get pod "$POD" -o jsonpath='exitCode: {.status.containerStatuses[0].state.terminated.exitCode} reason: {.status.containerStatuses[0].state.terminated.reason} message: {.status.containerStatuses[0].state.terminated.message}{"\n"}' 2>/dev/null || echo "(still running or not terminated)"
+          done
+          echo "=== Listener pod logs (last 60) ==="
+          LPOD=$(kubectl -n arc-systems get pods -o name 2>/dev/null | grep listener | head -1)
+          if [ -n "$LPOD" ]; then
+            kubectl -n arc-systems logs "$LPOD" --tail=60 2>/dev/null || echo "(no logs)"
+          else
+            echo "no listener pod found"
+          fi
+          echo "=== ARC controller logs (ALL, last 50) ==="
+          CTRL=$(kubectl -n arc-systems get pods -l app.kubernetes.io/name=gha-rs-controller -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+          [ -n "$CTRL" ] && kubectl -n arc-systems logs "$CTRL" --tail=50 2>/dev/null || echo "no controller"
