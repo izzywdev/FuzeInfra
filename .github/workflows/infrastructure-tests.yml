@@ -19,8 +19,7 @@ permissions:
 
 jobs:
   test-infrastructure:
-    runs-on: staging
-    
+    runs-on: ubuntu-latest
     steps:
     - name: Checkout code
       uses: actions/checkout@v7
@@ -337,7 +336,7 @@ jobs:
         docker system prune -f
 
     - name: Publish Test Results
-      uses: EnricoMi/publish-unit-test-result-action@v2
+      uses: EnricoMi/publish-unit-test-result-action/composite@v2
       if: always()
       with:
         files: |

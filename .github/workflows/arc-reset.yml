@@ -1,0 +1,52 @@
+name: arc-reset
+# Full ARC reset: restarts controller + listener to clear stuck broker messages.
+# Use when: listener is looping on the same broker message ID and no jobs progress.
+on: [workflow_dispatch]
+permissions:
+  contents: read
+jobs:
+  reset:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Setup kubectl
+        run: |
+          mkdir -p ~/.kube
+          echo "${{ secrets.KUBE_CONFIG }}" | base64 -d > ~/.kube/config
+          chmod 600 ~/.kube/config
+
+      - name: Restart ARC controller
+        run: |
+          echo "=== Restarting ARC controller (arc-systems) ==="
+          kubectl -n arc-systems rollout restart deployment/arc-controller-gha-rs-controller
+          kubectl -n arc-systems rollout status deployment/arc-controller-gha-rs-controller --timeout=120s
+          echo "Controller restarted."
+
+      - name: Delete listener pod (controller will recreate)
+        run: |
+          echo "=== Current listener ==="
+          kubectl -n arc-systems get pods | grep listener || echo "(none)"
+          echo "=== Deleting listener pod ==="
+          kubectl -n arc-systems delete pods -l app.kubernetes.io/component=runner-scale-set-listener --ignore-not-found
+          echo "=== Waiting for new listener ==="
+          kubectl -n arc-systems wait pods -l app.kubernetes.io/component=runner-scale-set-listener \
+            --for=condition=Ready --timeout=120s
+          kubectl -n arc-systems get pods | grep listener
+
+      - name: Clear stuck EphemeralRunnerSet state
+        run: |
+          echo "=== Patching EphemeralRunnerSet spec to reset patchID ==="
+          for ERS in $(kubectl -n arc-runners get ephemeralrunnersets -o name 2>/dev/null); do
+            echo "Patching $ERS..."
+            kubectl -n arc-runners patch "$ERS" --type=merge \
+              -p '{"spec":{"replicas":0,"patchID":0}}' 2>/dev/null || echo "  (patch not needed or failed)"
+          done
+          echo "Done."
+
+      - name: Status summary
+        run: |
+          echo "=== arc-systems pods ==="
+          kubectl -n arc-systems get pods -o wide
+          echo "=== arc-runners ephemeralrunnersets ==="
+          kubectl -n arc-runners get ephemeralrunnersets 2>/dev/null || echo "(none)"
+          echo "=== arc-runners pods ==="
+          kubectl -n arc-runners get pods -o wide 2>/dev/null || echo "(none)"

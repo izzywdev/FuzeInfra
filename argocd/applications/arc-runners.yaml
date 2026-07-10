@@ -38,6 +38,15 @@ spec:
   destination:
     server: https://kubernetes.default.svc
     namespace: arc-runners
+  # Argo CD must not revert EphemeralRunnerSet replicas/patchID — the ARC listener
+  # owns those fields and patches them at runtime.  selfHeal reverting them causes
+  # the listener to loop indefinitely without runners ever completing a job.
+  ignoreDifferences:
+    - group: actions.github.com
+      kind: EphemeralRunnerSet
+      jsonPointers:
+        - /spec/replicas
+        - /spec/patchID
   syncPolicy:
     automated:
       prune: true
