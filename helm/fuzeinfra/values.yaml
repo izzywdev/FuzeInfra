@@ -133,9 +133,19 @@ serviceMongoProvisioning:
 # serviceDatabases: disabled by default; prod overlay flips enabled: true once
 # the per-service SealedSecret is present in the fuzeinfra namespace.
 #   name:     logical service name (used to derive the password env var)
-#   database: MongoDB database the user will own
+#   database: MongoDB database the user will own (default target for the role)
 #   user:     MongoDB username to create / sync
 #   passwordSecret.{name,key}: SealedSecret in fuzeinfra namespace holding the password
+#   authDatabase:   OPTIONAL — database the user record lives in / authenticates
+#                   against (default: `database`). Set to `admin` when the app
+#                   connects with authSource=admin.
+#   roles:          OPTIONAL — list of {role, db} to ensure on the user (default:
+#                   [{role: readWrite, db: <database>}]). Lets one user hold
+#                   readWrite on a database whose name differs from its auth db.
+#   managePassword: OPTIONAL bool (default: true). When false, the Job never
+#                   touches the password (no createUser/updateUser) and only
+#                   grants roles to a pre-existing user — use for users created
+#                   out-of-band whose password FuzeInfra does not own.
 serviceMongoDatabases:
   - name: mendys
     enabled: false
