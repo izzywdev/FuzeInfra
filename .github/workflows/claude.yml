@@ -177,9 +177,7 @@ jobs:
           fi
           ISSUE=$(printf '%s' "$NEW" | sed -nE 's#^claude/issue-0*([0-9]+).*#\1#p')
           BODY="Auto-opened from branch \`${NEW}\`."
-          [ -n "$ISSUE" ] && BODY="${BODY}
-
-Closes #${ISSUE}"
+          [ -n "$ISSUE" ] && BODY=$(printf '%s\n\nCloses #%s' "$BODY" "$ISSUE")
           gh pr create \
             --repo "$GITHUB_REPOSITORY" \
             --base "${{ github.event.repository.default_branch }}" \

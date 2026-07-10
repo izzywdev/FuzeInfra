@@ -136,7 +136,7 @@ jobs:
       - name: Semgrep authz/appsec scan (report-only, SARIF)
         shell: bash
         run: |
-          python3 -m pip install -q semgrep
+          python3 -m pip install -q semgrep || true
           CFG=""
           [ -f .semgrep/fuze-authz.yml ] && CFG="$CFG --config .semgrep/fuze-authz.yml"
           semgrep scan $CFG --config p/owasp-top-ten --config p/secrets --sarif --output authz.sarif || true
@@ -163,9 +163,12 @@ jobs:
           if [ -z "$CT" ]; then
             echo "::warning title=local-up::No bounded local-up (FuzeInfra consumer-test) wired yet — tracked by local-env-verifier"; exit 0
           fi
-          dir=$(dirname "$CT"); env=""; [ -f "$dir/versions.env" ] && env="--env-file $dir/versions.env"
+          dir=$(dirname "$CT")
+          # Load versions.env into shell env so image tags resolve without --env-file
+          # (older docker compose versions on self-hosted runners don't support that flag).
+          [ -f "$dir/versions.env" ] && set -a && . "$dir/versions.env" && set +a || true
           echo "::group::consumer-test up"
-          docker compose $env -f "$CT" up -d --wait || { echo "consumer-test infra failed to come up"; docker compose -f "$CT" logs | tail -50; exit 1; }
+          docker compose -f "$CT" up -d --wait || { echo "consumer-test infra failed to come up"; docker compose -f "$CT" logs | tail -50; exit 1; }
           echo "::endgroup::"
           docker compose -f "$CT" down -v || true
           echo "bounded local-up smoke OK"
