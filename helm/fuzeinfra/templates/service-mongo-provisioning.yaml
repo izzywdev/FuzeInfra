@@ -6,19 +6,22 @@ users on the shared `fuzeinfra-mongodb` server.
 For each entry in `.Values.serviceMongoDatabases` (that is `enabled`) this Job:
   1. Waits until the MongoDB pod is ready (mongosh ping loop).
   2. Ensures the user exists in its auth database and holds the requested roles.
-     - The user record lives in `authDatabase` (default: `database`). Set this to
-       `admin` when the app connects with `authSource=admin`.
+     - The user record lives in `authDatabase` (default: `database`) — this is
+       the client's `authSource`.
      - Roles come from `roles` (a list of `{role, db}`); default is
        `[{ role: readWrite, db: <database> }]`. This lets a single user hold
        `readWrite` on a database whose name differs from its auth database
-       (e.g. user `mendys` in `admin` granted `readWrite` on `robot_catalog`).
+       (e.g. user `mendys_app` whose home/auth db is `mendys`, granted
+       `readWrite` on `robot_catalog` — issue #238).
   3. Password handling is controlled by `managePassword` (default: `true`):
      - `true`  — create the user with the sealed password if missing, and sync
        the password via `updateUser` on every run (rotation propagates).
      - `false` — never touch the password; only grant roles to a pre-existing
-       user via `grantRolesToUser`. Use this when the user was created
-       out-of-band and FuzeInfra's sealed secret may not match its password, so
-       a working authentication is never broken by a rotation.
+       user via `grantRolesToUser`, and NO per-service `passwordSecret` is
+       mounted (so the Job doesn't fail if that Secret is absent). Use this when
+       the user was created out-of-band and FuzeInfra's sealed secret may not
+       match its password, so a working authentication is never broken by a
+       rotation.
      Roles are always ensured additively with `grantRolesToUser`, so re-runs are
      idempotent and never revoke a role the app depends on.
 
@@ -79,11 +82,13 @@ spec:
                   name: {{ include "fuzeinfra.secretName" . }}
                   key: MONGODB_PASSWORD
             {{- range $enabled }}
+            {{- if or (not (hasKey . "managePassword")) .managePassword }}
             - name: SVC_PW_{{ .name | upper | replace "-" "_" }}
               valueFrom:
                 secretKeyRef:
                   name: {{ required (printf "serviceMongoDatabases[%s].passwordSecret.name is required" .name) .passwordSecret.name }}
                   key: {{ required (printf "serviceMongoDatabases[%s].passwordSecret.key is required" .name) .passwordSecret.key }}
+            {{- end }}
             {{- end }}
           command:
             - bash
@@ -133,7 +138,7 @@ spec:
               }
 
               {{- range $enabled }}
-              provision '{{ .authDatabase | default .database }}' '{{ .user }}' "$SVC_PW_{{ .name | upper | replace "-" "_" }}" '{{ .roles | default (list (dict "role" "readWrite" "db" .database)) | toJson }}' '{{ if hasKey . "managePassword" }}{{ if .managePassword }}true{{ else }}false{{ end }}{{ else }}true{{ end }}'
+              provision '{{ .authDatabase | default .database }}' '{{ .user }}' "${SVC_PW_{{ .name | upper | replace "-" "_" }}:-}" '{{ .roles | default (list (dict "role" "readWrite" "db" .database)) | toJson }}' '{{ if hasKey . "managePassword" }}{{ if .managePassword }}true{{ else }}false{{ end }}{{ else }}true{{ end }}'
               {{- end }}
 
               echo "All MongoDB users provisioned."

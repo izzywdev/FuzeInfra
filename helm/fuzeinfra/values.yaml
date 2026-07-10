@@ -147,13 +147,19 @@ serviceMongoProvisioning:
 #                   grants roles to a pre-existing user — use for users created
 #                   out-of-band whose password FuzeInfra does not own.
 serviceMongoDatabases:
+  # mendys_app's user record lives in the `mendys` db (authSource=mendys) and is
+  # provisioned out-of-band; FuzeInfra only reconciles its readWrite grants
+  # (incl. `robot_catalog`, the DB the backend uses). Enabled in the contabo
+  # overlay. See #238. managePassword:false ⇒ no passwordSecret required.
   - name: mendys
     enabled: false
-    database: mendys
     user: mendys_app
-    passwordSecret:
-      name: mendys-mongo-credentials
-      key: password
+    authDatabase: mendys
+    managePassword: false
+    database: robot_catalog
+    roles:
+      - { role: readWrite, db: robot_catalog }
+      - { role: readWrite, db: mendys }
 
 # -----------------------------------------------------------------------------
 # Ingress (replaces the docker-compose nginx reverse proxy). Web UIs are exposed
