@@ -32,6 +32,11 @@
 #   jobs:
 #     build:
 #       runs-on: fuzefront   # matches --name
+#
+# Docker-in-Docker is enabled by default (docker / docker compose work in jobs).
+# Pass --no-dind to register a hardened, Docker-less runner instead.
+# A node-shared hostedtoolcache (/opt/hostedtoolcache on the CI node) is always
+# mounted so setup-python / setup-node hit a warm cache across ephemeral pods.
 # =============================================================================
 
 set -euo pipefail
@@ -45,6 +50,9 @@ ARC_RUNNER_CHART="oci://ghcr.io/actions/actions-runner-controller-charts/gha-run
 ARC_VERSION="0.14.2"
 MAX_RUNNERS=5
 MIN_RUNNERS=0
+# DinD (docker-in-docker) is ON by default so `docker` / `docker compose` gates
+# work out of the box.  Pass --no-dind for a hardened, Docker-less runner.
+DIND=true
 
 REPO_URL=""
 SCALE_SET_NAME=""
@@ -69,6 +77,7 @@ while [[ $# -gt 0 ]]; do
     --app-install-id)    APP_INSTALL_ID="$2"; shift 2 ;;
     --app-private-key)   APP_PRIVATE_KEY_FILE="$2"; shift 2 ;;
     --max-runners)       MAX_RUNNERS="$2"; shift 2 ;;
+    --no-dind)           DIND=false; shift ;;
     --uninstall)         UNINSTALL=true; shift ;;
     --help|-h)           usage ;;
     *) echo "Unknown option: $1"; usage ;;
@@ -125,7 +134,27 @@ else
     --dry-run=client -o yaml | kubectl apply -f -
 fi
 
+# ---- DinD (docker-in-docker) block ------------------------------------------
+# containerMode.type=dind makes the chart inject a privileged `dind` sidecar and
+# wire DOCKER_HOST, so `docker` / `docker compose` gates run with no extra setup.
+# NOTE: the compose/build workload runs inside the (unbounded) dind sidecar, not
+# the runner container — the runner limits below only size the non-docker steps.
+CONTAINER_MODE=""
+if $DIND; then
+  CONTAINER_MODE=$(cat <<'YAML'
+
+containerMode:
+  type: dind
+YAML
+)
+fi
+
 # ---- Build per-repo values (in-memory, no temp file) ------------------------
+# Shared hostedtoolcache: a hostPath on the dedicated CI node, warmed once and
+# reused by every ephemeral pod.  Fixes "Version X was not found in the local
+# cache" + api.github.com timeouts from setup-python/setup-node re-downloading
+# on each fresh pod.  A root initContainer makes the dir writable by the runner
+# user (uid 1001); the chart preserves user initContainers/volumes under dind.
 VALUES=$(cat <<YAML
 githubConfigUrl: "${REPO_URL}"
 githubConfigSecret: ${K8S_SECRET_NAME}
@@ -137,26 +166,43 @@ maxRunners: ${MAX_RUNNERS}
 template:
   spec:
     serviceAccountName: arc-runner-sa
+    initContainers:
+      - name: tool-cache-perms
+        image: busybox:1.36
+        command: ["sh", "-c", "mkdir -p /opt/hostedtoolcache && chmod 0777 /opt/hostedtoolcache"]
+        securityContext:
+          runAsUser: 0
+        volumeMounts:
+          - name: hostedtoolcache
+            mountPath: /opt/hostedtoolcache
     containers:
       - name: runner
         image: ghcr.io/actions/actions-runner:latest
         resources:
           requests:
-            cpu: 200m
-            memory: 256Mi
+            cpu: 500m
+            memory: 512Mi
           limits:
             cpu: "2"
-            memory: 1Gi
+            memory: 4Gi
         env:
           - name: DISABLE_RUNNER_UPDATE
             value: "1"
+        volumeMounts:
+          - name: hostedtoolcache
+            mountPath: /opt/hostedtoolcache
+    volumes:
+      - name: hostedtoolcache
+        hostPath:
+          path: /opt/hostedtoolcache
+          type: DirectoryOrCreate
     nodeSelector:
       fuzeinfra.io/pool: ci
     tolerations:
       - key: fuzeinfra.io/ci
         operator: Exists
         effect: NoSchedule
-
+${CONTAINER_MODE}
 controllerServiceAccount:
   namespace: ${CONTROLLER_NS}
   name: ${CONTROLLER_SA}
@@ -185,6 +231,12 @@ echo "$VALUES" | helm upgrade --install "$SCALE_SET_NAME" \
 
 echo ""
 echo "✓ Scale set '${SCALE_SET_NAME}' registered for ${REPO_URL}"
+if $DIND; then
+  echo "  • Docker-in-Docker: ENABLED (docker / docker compose available in jobs)"
+else
+  echo "  • Docker-in-Docker: disabled (--no-dind)"
+fi
+echo "  • Tool cache: /opt/hostedtoolcache shared on the CI node (warm setup-python/node)"
 echo ""
 echo "Add to your repo's workflows:"
 echo "  jobs:"

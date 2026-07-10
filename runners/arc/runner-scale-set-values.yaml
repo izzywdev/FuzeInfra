@@ -35,6 +35,20 @@ template:
     # staging namespace via a RoleBinding the platform grants at onboarding.
     serviceAccountName: arc-runner-sa
 
+    # Make the node-shared hostedtoolcache writable by the runner user (uid 1001).
+    # hostPath dirs are created root:root 0755; the runner can't write until this
+    # root initContainer opens it up.  The chart preserves user initContainers and
+    # appends its own dind-externals/dind init containers under containerMode:dind.
+    initContainers:
+      - name: tool-cache-perms
+        image: busybox:1.36
+        command: ["sh", "-c", "mkdir -p /opt/hostedtoolcache && chmod 0777 /opt/hostedtoolcache"]
+        securityContext:
+          runAsUser: 0
+        volumeMounts:
+          - name: hostedtoolcache
+            mountPath: /opt/hostedtoolcache
+
     containers:
       - name: runner
         image: ghcr.io/actions/actions-runner:latest
@@ -63,15 +77,30 @@ template:
         # guaranteed available on k3s nodes; add back once runner is stable.
         resources:
           requests:
-            cpu: 200m
-            memory: 256Mi
+            cpu: 500m
+            memory: 512Mi
+          # Higher ceiling than the old 1Gi: setup-python/node, playwright, and
+          # test steps run in THIS container.  (docker compose/build run in the
+          # unbounded dind sidecar, capped only by the node.)
           limits:
             cpu: "2"
-            memory: 1Gi
+            memory: 4Gi
         env:
           # Prevent the runner from self-updating (image version is the pin).
           - name: DISABLE_RUNNER_UPDATE
             value: "1"
+        # Node-shared hostedtoolcache — warmed once, reused by every ephemeral
+        # pod.  Kills "Version X not found in local cache" + api.github.com
+        # timeouts from setup-python/setup-node re-downloading on each fresh pod.
+        volumeMounts:
+          - name: hostedtoolcache
+            mountPath: /opt/hostedtoolcache
+
+    volumes:
+      - name: hostedtoolcache
+        hostPath:
+          path: /opt/hostedtoolcache
+          type: DirectoryOrCreate
 
     # Pin runner pods to the dedicated CI node (tainted fuzeinfra.io/ci=true:NoSchedule).
     nodeSelector:

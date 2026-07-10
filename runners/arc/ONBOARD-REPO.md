@@ -81,6 +81,38 @@ The tooling for this lives in FuzeInfra:
 
 ---
 
+## Docker (DinD) & tool cache — enabled by default
+
+Every scale set registered through `register-repo.sh` now comes with:
+
+- **Docker-in-Docker.** `register-repo.sh` sets `containerMode: dind`, so the chart
+  injects a privileged `dind` sidecar and wires `DOCKER_HOST`. `docker` and
+  `docker compose` work in jobs with no extra setup. (Pass `--no-dind` to the
+  script for a hardened, Docker-less runner.)
+  > The compose/build workload runs inside the **dind sidecar**, which is
+  > unbounded and capped only by the CI node (~4 CPU / 7.75 GB). Keep
+  > `maxRunners` low for compose-heavy repos so concurrent stacks don't OOM the
+  > node.
+- **Warm hostedtoolcache.** A node-shared `hostPath` at `/opt/hostedtoolcache`
+  is mounted into every pod (a root initContainer makes it writable by the
+  runner uid 1001). The first job populates Python/Node; every later ephemeral
+  pod on the CI node reuses it, so `actions/setup-python` / `setup-node` stop
+  re-downloading (and stop timing out against `api.github.com`).
+
+### Already-onboarded repos must re-run to pick this up
+
+These scale sets are registered **out-of-band** by each consumer repo's own
+`arc-register.yml` (they are *not* managed by FuzeInfra's Argo CD — only the
+`staging` scale set is). After this change merges to `main`, re-trigger the
+consumer's workflow to `helm upgrade` in place (idempotent):
+
+**Actions → arc-register → Run workflow → action: `install`.**
+
+The workflow sparse-checkouts `register-repo.sh` at `ref: main`, so it will pull
+the updated (DinD + tool-cache) values automatically.
+
+---
+
 ## Notes for the human
 
 | Placeholder | What to fill in |
