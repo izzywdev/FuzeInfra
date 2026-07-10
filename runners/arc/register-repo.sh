@@ -140,13 +140,15 @@ template:
     containers:
       - name: runner
         image: ghcr.io/actions/actions-runner:latest
+        # DinD needs headroom: image builds + compose stacks are heavy, and the
+        # dind sidecar shares the pod cgroup budget with the runner container.
         resources:
           requests:
-            cpu: 200m
-            memory: 256Mi
-          limits:
-            cpu: "2"
+            cpu: 500m
             memory: 1Gi
+          limits:
+            cpu: "4"
+            memory: 4Gi
         env:
           - name: DISABLE_RUNNER_UPDATE
             value: "1"
@@ -156,6 +158,19 @@ template:
       - key: fuzeinfra.io/ci
         operator: Exists
         effect: NoSchedule
+
+# ---- Docker-in-Docker -------------------------------------------------------
+# Every consumer scale set gets a real Docker daemon so docker build, docker
+# buildx, and docker compose work out of the box. The chart injects a privileged
+# dind sidecar (docker:dind) plus an init-dind-externals initContainer and wires
+# DOCKER_HOST for the runner. The actions-runner image already ships the docker
+# CLI + compose-v2 + buildx plugins, so "docker compose -f ..." resolves instead
+# of failing with: unknown shorthand flag: 'f' in -f.
+# NOTE: existing scale sets must be RE-REGISTERED (re-run arc-register.yml, or
+# FuzeInfra arc-reinstall-scaleset.yml for the staging set) to pick this up --
+# the dind sidecar only appears on pods created after this Helm values change.
+containerMode:
+  type: dind
 
 controllerServiceAccount:
   namespace: ${CONTROLLER_NS}

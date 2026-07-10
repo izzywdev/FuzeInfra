@@ -38,36 +38,22 @@ template:
     containers:
       - name: runner
         image: ghcr.io/actions/actions-runner:latest
-        # Debug wrapper: print JIT config presence + GitHub connectivity before
-        # handing off to the real runner entrypoint.  Remove once runner is stable.
-        command: ["/bin/bash", "-c"]
-        args:
-          - |
-            echo "=== ARC RUNNER STARTUP DEBUG ==="
-            echo "JITCONFIG length: ${#ACTIONS_RUNNER_INPUT_JITCONFIG}"
-            echo "JITCONFIG prefix: ${ACTIONS_RUNNER_INPUT_JITCONFIG:0:60}"
-            echo "Hostname: $(hostname)"
-            echo "GitHub API connectivity:"
-            curl -s --connect-timeout 10 https://api.github.com/status 2>&1 | head -5 || echo "GITHUB API UNREACHABLE"
-            echo "=== Launching runner entrypoint ==="
-            if [ -f /entrypoint.sh ]; then
-              exec /entrypoint.sh
-            elif [ -f /home/runner/run.sh ]; then
-              exec /home/runner/run.sh
-            else
-              echo "ERROR: no runner entrypoint found"
-              ls -la / /home/runner/ 2>&1
-              exit 1
-            fi
+        # NOTE: do NOT override command/args here. With containerMode: dind the
+        # chart-provided entrypoint wires up the docker externals + DOCKER_HOST
+        # and waits for the dind sidecar; a custom wrapper that exec's run.sh
+        # directly bypasses that setup. (A debug JITCONFIG/connectivity wrapper
+        # used to live here — removed now that the runner is stable.)
         # securityContext omitted — seccompProfile.type:RuntimeDefault is not
         # guaranteed available on k3s nodes; add back once runner is stable.
+        # DinD needs headroom: image builds + compose stacks are heavy, and the
+        # dind sidecar shares the pod cgroup budget with the runner container.
         resources:
           requests:
-            cpu: 200m
-            memory: 256Mi
-          limits:
-            cpu: "2"
+            cpu: 500m
             memory: 1Gi
+          limits:
+            cpu: "4"
+            memory: 4Gi
         env:
           # Prevent the runner from self-updating (image version is the pin).
           - name: DISABLE_RUNNER_UPDATE
