@@ -140,6 +140,14 @@ template:
     containers:
       - name: runner
         image: ghcr.io/actions/actions-runner:latest
+        # MANDATORY: the gha-runner-scale-set chart's default runner container
+        # sets command: ["/home/runner/run.sh"]. Helm REPLACES (does not merge)
+        # list values, so overriding template.spec.containers here wipes that
+        # default. Without it the pod runs the image's default entrypoint, which
+        # does NOT start the runner — each ephemeral runner exits 0 in ~0s, the
+        # controller logs "finished successfully", the job is never acquired, and
+        # the listener re-spawns forever with jobs stuck "queued". (FuzeInfra #234)
+        command: ["/home/runner/run.sh"]
         resources:
           requests:
             cpu: 200m
