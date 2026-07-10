@@ -163,9 +163,11 @@ jobs:
           if [ -z "$CT" ]; then
             echo "::warning title=local-up::No bounded local-up (FuzeInfra consumer-test) wired yet — tracked by local-env-verifier"; exit 0
           fi
+          if ! docker compose version >/dev/null 2>&1; then
+            echo "::warning title=local-up::docker compose not available on this runner — skipping bounded smoke test"; exit 0
+          fi
           dir=$(dirname "$CT")
-          # Load versions.env into shell env so image tags resolve without --env-file
-          # (older docker compose versions on self-hosted runners don't support that flag).
+          # Source versions.env so image tags resolve (avoids --env-file flag incompatibility).
           [ -f "$dir/versions.env" ] && set -a && . "$dir/versions.env" && set +a || true
           echo "::group::consumer-test up"
           docker compose -f "$CT" up -d --wait || { echo "consumer-test infra failed to come up"; docker compose -f "$CT" logs | tail -50; exit 1; }
