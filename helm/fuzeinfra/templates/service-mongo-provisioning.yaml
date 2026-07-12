@@ -143,7 +143,10 @@ spec:
 
               echo "All MongoDB users provisioned."
           resources:
-            requests: { cpu: 50m, memory: 64Mi }
-            limits:   { cpu: 250m, memory: 128Mi }
+            # mongosh is Node/V8-based; its heap + process footprint needs well
+            # over 128Mi (that limit OOMKilled the Job before it could apply the
+            # grant — FuzeInfra #245). 512Mi gives comfortable headroom.
+            requests: { cpu: 50m, memory: 128Mi }
+            limits:   { cpu: 250m, memory: 512Mi }
 {{- end }}
 {{- end }}
