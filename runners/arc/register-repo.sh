@@ -43,8 +43,15 @@ CONTROLLER_NS="arc-systems"
 CONTROLLER_SA="arc-controller-gha-rs-controller"
 ARC_RUNNER_CHART="oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set"
 ARC_VERSION="0.14.2"
-MAX_RUNNERS=5
+# DinD sidecars are unbounded and share the CI node (fuzeinfra-ci-runner-1,
+# 4 CPU / ~7.75 GB). Cap concurrency so parallel compose/build stacks don't OOM
+# the node; raise per-repo with --max-runners once the CI pool is scaled out.
+MAX_RUNNERS=3
 MIN_RUNNERS=0
+# Runner image. Stock actions-runner ships the docker CLI + buildx but NOT the
+# compose-v2 plugin. To get `docker compose`, publish runners/arc/Dockerfile and
+# point RUNNER_IMAGE at it (e.g. ghcr.io/izzywdev/fuzeinfra-arc-runner:<tag>).
+RUNNER_IMAGE="${RUNNER_IMAGE:-ghcr.io/actions/actions-runner:latest}"
 
 REPO_URL=""
 SCALE_SET_NAME=""
@@ -139,14 +146,17 @@ template:
     serviceAccountName: arc-runner-sa
     containers:
       - name: runner
-        image: ghcr.io/actions/actions-runner:latest
+        image: ${RUNNER_IMAGE}
+        # Headroom for buildkit client work + Node-based actions (1Gi OOMs).
+        # NOTE: compose/build workloads run in the dind sidecar's cgroup, not
+        # here; the sidecar is unbounded, so node capacity is the real limit.
         resources:
           requests:
-            cpu: 200m
-            memory: 256Mi
+            cpu: 500m
+            memory: 1Gi
           limits:
             cpu: "2"
-            memory: 1Gi
+            memory: 2Gi
         env:
           - name: DISABLE_RUNNER_UPDATE
             value: "1"
@@ -156,6 +166,21 @@ template:
       - key: fuzeinfra.io/ci
         operator: Exists
         effect: NoSchedule
+
+# ---- Docker-in-Docker -------------------------------------------------------
+# Gives every consumer scale set a real Docker daemon: the chart injects a
+# privileged dind sidecar (docker:dind) + an init-dind-externals initContainer
+# and wires DOCKER_HOST for the runner. This makes docker build / docker buildx
+# build --push / docker run work self-hosted (no separate kind-host runner).
+# COMPOSE CAVEAT: the stock actions-runner image ships the docker CLI + buildx
+# but NOT the compose-v2 plugin, so "docker compose -f ..." still fails with
+# "unknown shorthand flag: 'f' in -f" until RUNNER_IMAGE points at a compose-
+# enabled image (see runners/arc/Dockerfile). dind alone does not add compose.
+# NOTE: existing scale sets must be RE-REGISTERED (re-run arc-register.yml, or
+# FuzeInfra arc-reinstall-scaleset.yml for the staging set) to pick this up --
+# the dind sidecar only appears on pods created after this Helm values change.
+containerMode:
+  type: dind
 
 controllerServiceAccount:
   namespace: ${CONTROLLER_NS}
