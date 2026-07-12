@@ -26,7 +26,19 @@ on:
 
 jobs:
   claude:
-    # Gate 1: @claude is actually mentioned (or the issue is assigned to claude).
+    # DEDUP: at most one run per issue/PR at a time (latest wins). An issue CREATED
+    # WITH labels emits BOTH an `issues.opened` and an `issues.labeled` event; without
+    # this guard the (expensive, cluster-capable) job would fire twice. cancel-in-progress
+    # collapses the near-simultaneous duplicate into a single run — and, as a bonus,
+    # a rapid follow-up @claude on the same thread supersedes the prior in-flight run
+    # instead of stacking a second cluster session on top of it.
+    concurrency:
+      group: claude-${{ github.event.issue.number || github.event.pull_request.number }}
+      cancel-in-progress: true
+    # Gate 1: @claude is actually mentioned (or the issue is labeled/assigned to claude).
+    #   Each branch is scoped to a specific github.event.action so a single intent maps
+    #   to a single matching branch — the trigger-level half of the dedup (concurrency
+    #   above is the safety net for the opened+labeled-at-creation overlap).
     # Gate 2 (SECURITY): the author is a trusted collaborator. author_association
     # is evaluated per event source. Anything else is ignored silently.
     if: |
@@ -37,8 +49,14 @@ jobs:
           contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association)) ||
         (github.event_name == 'pull_request_review' && contains(github.event.review.body, '@claude') &&
           contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.review.author_association)) ||
-        (github.event_name == 'issues' &&
+        (github.event_name == 'issues' && github.event.action == 'opened' &&
           (contains(github.event.issue.body, '@claude') || contains(github.event.issue.title, '@claude')) &&
+          contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.issue.author_association)) ||
+        (github.event_name == 'issues' && github.event.action == 'labeled' &&
+          github.event.label.name == 'claude' &&
+          contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.issue.author_association)) ||
+        (github.event_name == 'issues' && github.event.action == 'assigned' &&
+          github.event.assignee.login == 'claude' &&
           contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.issue.author_association))
       )
     runs-on: ubuntu-latest
