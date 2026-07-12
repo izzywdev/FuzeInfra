@@ -229,3 +229,46 @@ serviceDatabases:
     passwordSecret:
       name: mendys-db-credentials
       key: password
+
+# Per-service MongoDB provisioning (Helm REPLACES lists, so the full set must be
+# declared here — the base values default every entry to enabled: false).
+#
+# MendysRobotics prod (FuzeInfra #238): the backend reads/writes database
+# `robot_catalog` (MONGODB_DATABASE=robot_catalog). Verified against the live
+# cluster, the backend's actual MONGODB_URL authenticates as user `mendys_app`
+# whose user record lives in — and whose authSource is — the `mendys` database
+# (NOT `admin`; that is the only mendys user in the whole deployment). It was
+# created out-of-band (#124) with readWrite on `mendys` only, so every
+# find/aggregate/createIndexes on `robot_catalog` failed with code 13
+# (Unauthorized).
+#
+# This entry grants that existing `mendys.mendys_app` user readWrite on the
+# databases it uses, via the idempotent PostSync provisioning Job
+# (grantRolesToUser). managePassword: false — FuzeInfra does not own this user's
+# password, so the Job must NOT rotate it (which would break the working auth)
+# and mounts no per-service Secret; it only reconciles the role grants. (The
+# same grant was applied imperatively to unblock prod immediately; this Job
+# re-applies it idempotently and makes it durable across syncs/rebuilds.)
+serviceMongoDatabases:
+  - name: mendys
+    enabled: true
+    user: mendys_app
+    authDatabase: mendys
+    managePassword: false
+    database: robot_catalog
+    roles:
+      - { role: readWrite, db: robot_catalog }
+      - { role: readWrite, db: mendys }
+  # FuzePicker backend (issue #242). FuzeInfra creates the least-privilege user
+  # `fuzepicker_svc` on the shared mongo server with readWrite on its own
+  # `fuzepicker` database. managePassword defaults true, so the provisioning Job
+  # creates the user (if missing) and syncs its password from the sealed
+  # `fuzepicker-db-credentials` secret
+  # (deploy/sealed-secrets/fuzepicker-db-credentials.yaml, key `password`).
+  - name: fuzepicker
+    enabled: true
+    database: fuzepicker
+    user: fuzepicker_svc
+    passwordSecret:
+      name: fuzepicker-db-credentials
+      key: password

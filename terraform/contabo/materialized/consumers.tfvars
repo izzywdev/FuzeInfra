@@ -22,4 +22,8 @@ public_app_hosts = {
   "fuzesales"   = "izzywdev/FuzeSales"   # fuzesales.prod.fuzefront.com
   "fuzecontact" = "izzywdev/FuzeContact" # fuzecontact.prod.fuzefront.com
   "fuzeservice" = "izzywdev/FuzeService" # fuzeservice.prod.fuzefront.com
+
+  # izzywdev/FuzePicker (FuzeInfra#242)
+  "api.fuzepicker" = "izzywdev/FuzePicker" # backend API (own JWT auth) — api.fuzepicker.prod.fuzefront.com
+  "picker"         = "izzywdev/FuzePicker" # static module-federation bundle — picker.prod.fuzefront.com
 }
