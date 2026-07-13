@@ -139,7 +139,63 @@ jobs:
         run: |
           git ls-remote origin 'refs/heads/claude/*' | awk '{print $2}' | sort > /tmp/branches-before.txt
 
+      # PREVENTION (item a): the responder has silently died when the very FIRST
+      # Anthropic API call failed — the run reported is_error after ~200ms having
+      # done nothing (num_turns=1, $0), then the action's own post-processing threw
+      # an unhandled 404 (compare main...<branch> for a branch that was never made),
+      # and nobody was told. Preflight with a 1-token live call so a KNOWN-BAD
+      # key/credit/model fails fast HERE (skipping the expensive, cluster-capable
+      # run) and surfaces the REAL error. Transient conditions (429/5xx/timeout) do
+      # NOT block — the action has its own retries; only definitive auth/credit/
+      # model errors hard-stop. NOTE: preflight uses the base model id; the 1M
+      # context beta the action may append ([1m]) is a header, not a model string —
+      # if entitlement for that is the culprit the detect+alert path below still
+      # catches it.
+      - name: Preflight — Anthropic API reachable & key valid
+        id: preflight
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          set -uo pipefail
+          if [ -z "${ANTHROPIC_API_KEY:-}" ]; then
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+            echo "reason=ANTHROPIC_API_KEY secret is empty or unset" >> "$GITHUB_OUTPUT"
+            echo "::error::ANTHROPIC_API_KEY secret is empty or unset"
+            exit 0
+          fi
+          code=$(curl -sS -o /tmp/preflight.json -w '%{http_code}' --max-time 20 \
+            -X POST https://api.anthropic.com/v1/messages \
+            -H "x-api-key: ${ANTHROPIC_API_KEY}" \
+            -H "anthropic-version: 2023-06-01" \
+            -H "content-type: application/json" \
+            -d '{"model":"claude-opus-4-8","max_tokens":1,"messages":[{"role":"user","content":"ping"}]}' \
+            || echo "000")
+          err=$(jq -r '.error.message // empty' /tmp/preflight.json 2>/dev/null || true)
+          case "$code" in
+            200)
+              echo "ok=true" >> "$GITHUB_OUTPUT"
+              echo "Anthropic API preflight OK" ;;
+            400|401|402|403)
+              # Deterministic, will-fail-every-time: invalid key, no credits, or the
+              # model/beta isn't entitled. Don't enter the run — go straight to alert.
+              [ -z "$err" ] && err="HTTP $code"
+              echo "ok=false" >> "$GITHUB_OUTPUT"
+              echo "reason=Anthropic API rejected preflight (HTTP $code): $err" >> "$GITHUB_OUTPUT"
+              echo "::error::Anthropic API rejected preflight (HTTP $code): $err" ;;
+            *)
+              # Transient (429/5xx/timeout/000): don't block — let the action attempt
+              # and lean on its own retries. If it still fails, detect+alert covers it.
+              echo "ok=true" >> "$GITHUB_OUTPUT"
+              echo "::warning::Anthropic API preflight inconclusive (HTTP $code) — proceeding; the action has its own retries." ;;
+          esac
+
       - name: Run Claude
+        id: claude
+        # Preflight gates entry: don't spend a cluster-capable run on a known-bad key.
+        # continue-on-error lets the detect + alert steps below run and OWN the job's
+        # final status, instead of the action failing silently with no notification.
+        if: steps.preflight.outputs.ok == 'true'
+        continue-on-error: true
         uses: anthropics/claude-code-action@ba0aafd4308cbba7165f9f2cdb0cfbed5a3c99ce # v1.0.168
         env:
           # KUBECONFIG (set above) + a real-user PAT for things GITHUB_TOKEN can't
@@ -170,6 +226,83 @@ jobs:
             --permission-mode bypassPermissions
             --max-turns 60
             --append-system-prompt "EXPERT-FIRST: begin every task by invoking the fuzeinfra-expert subagent (via Task) to load this repo's architecture/deploy/gotcha context before planning or coding. If .claude/agents/fuzeinfra-expert.md is ever missing, create it from .claude/templates/repo-expert.template.md (explore the repo to fill it in), open a PR adding it, then use it. Runner has PROD cluster access: KUBECONFIG targets the FuzeInfra Contabo k3s cluster; kubectl/helm/terraform installed; GH_TOKEN is a PAT. GitOps guardrails: prod is GitOps under ArgoCD selfHeal — never kubectl-patch/edit chart-managed resources (reverted); reconcile via chart+PR. Imperatively creating NON-chart-managed cluster Secrets to unblock go-live IS allowed. Never run destructive kubectl (delete/drain/cordon) against prod without explicit instruction. Prefer the fuzeinfra-expert and devops-engineer agents for infra delegations. End issue replies with DONE: or BLOCKED: so cross-repo monitors can key off it. CROSS-REPO HAND-OFF: if a delegated issue's REMAINING work belongs to another repo (e.g. the fix is in FuzeFront's app-of-apps, not FuzeInfra), do NOT leave it open here — open (or comment on) an issue in that repo mentioning its @claude with full context + a STATE block, post a closing note here ('Closing on FuzeInfra's end — handed to <repo>#N, please take it on your side'), and CLOSE this issue. Only keep it open if FuzeInfra itself still has work to do."
+
+      # DETECT (item b): did the responder actually fail? Three signals — a preflight
+      # hard-stop, the action step's own failure, or an is_error result in the
+      # execution log (the ~200ms "did nothing" failure). continue-on-error on the
+      # step above means we own the verdict here rather than the action deciding it.
+      - name: Detect Claude failure
+        id: detect
+        if: always()
+        env:
+          EXEC_FILE: ${{ steps.claude.outputs.execution_file }}
+          PREFLIGHT_OK: ${{ steps.preflight.outputs.ok }}
+          PREFLIGHT_REASON: ${{ steps.preflight.outputs.reason }}
+          STEP_OUTCOME: ${{ steps.claude.outcome }}
+        run: |
+          set -uo pipefail
+          failed=false; reason=""
+          if [ "${PREFLIGHT_OK:-}" != "true" ]; then
+            failed=true; reason="${PREFLIGHT_REASON:-preflight did not pass}"
+          elif [ "${STEP_OUTCOME:-}" = "failure" ]; then
+            failed=true; reason="claude-code-action step failed"
+          elif [ -n "${EXEC_FILE:-}" ] && [ -f "$EXEC_FILE" ] && \
+               grep -Eq '"is_error"[[:space:]]*:[[:space:]]*true' "$EXEC_FILE"; then
+            turns=$(jq -rs '[.[]|.. |objects|select(.type?=="result")]|last|.num_turns // ""' "$EXEC_FILE" 2>/dev/null || true)
+            failed=true; reason="Claude run returned is_error (num_turns=${turns:-?}) — it errored before completing the task"
+          fi
+          echo "failed=$failed" >> "$GITHUB_OUTPUT"
+          echo "reason=$reason" >> "$GITHUB_OUTPUT"
+          if [ "$failed" = "true" ]; then
+            echo "::error::@claude responder failed: $reason"
+          else
+            echo "@claude responder completed without an error signal"
+          fi
+
+      # ALERT (item b): a failed responder used to die silently. Now it (1) pings
+      # Telegram — the same channel as argo-deploy-notify / argo-outofsync-autofix —
+      # and (2) tells the human who typed @claude, on their own issue/PR, that it
+      # failed and how to retry. Best-effort: a notify hiccup must not mask the
+      # failure. We deliberately do NOT open a @claude triage issue here (as
+      # ci-failure-triage does for deploy workflows): summoning a broken responder to
+      # fix itself would just fail again.
+      - name: Alert on Claude failure
+        if: always() && steps.detect.outputs.failed == 'true'
+        env:
+          TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          CHAT: ${{ secrets.TELEGRAM_CHAT_ID }}
+          GH_TOKEN: ${{ secrets.GH_TOKEN || secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          ISSUE: ${{ github.event.issue.number || github.event.pull_request.number }}
+          ACTOR: ${{ github.actor }}
+          REASON: ${{ steps.detect.outputs.reason }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -uo pipefail
+          # 1) Telegram 🔴
+          if [ -n "${TOKEN:-}" ]; then
+            TEXT=$(printf '🔴 @claude responder FAILED\nRepo: %s\nIssue/PR: #%s\nBy: %s\nReason: %s\nRun: %s' \
+              "$REPO" "${ISSUE:-?}" "$ACTOR" "$REASON" "$RUN_URL")
+            curl -s -X POST "https://api.telegram.org/bot${TOKEN}/sendMessage" \
+              --data-urlencode "chat_id=${CHAT:-}" \
+              --data-urlencode "text=${TEXT}" \
+              --data "disable_web_page_preview=true" >/dev/null \
+              && echo "telegram alert sent" || echo "::warning::telegram send failed"
+          else
+            echo "::warning::TELEGRAM_BOT_TOKEN unset — skipping Telegram alert"
+          fi
+          # 2) Tell the requester on their own thread (gh issue comment works for PRs).
+          if [ -n "${ISSUE:-}" ]; then
+            {
+              printf '### ⚠️ @claude did not run to completion\n\n'
+              printf 'The responder errored before finishing your request, so **no changes were made and no branch was created**.\n\n'
+              printf -- '- **Reason:** %s\n' "$REASON"
+              printf -- '- **Run log:** %s\n\n' "$RUN_URL"
+              printf 'Re-trigger by commenting `@claude` again. If it keeps failing this fast, it is almost certainly an API-side problem (key revoked / out of credits / model or 1M-context beta not entitled / Anthropic outage) — an operator should check the `ANTHROPIC_API_KEY` secret and the Anthropic account before retrying.\n'
+            } > /tmp/claude-fail.md
+            gh issue comment "$ISSUE" --repo "$REPO" --body-file /tmp/claude-fail.md \
+              && echo "posted failure notice to #$ISSUE" || echo "::warning::could not comment on #$ISSUE"
+          fi
 
       - name: Open draft PR for new claude branch
         if: always()
@@ -204,3 +337,14 @@ jobs:
             --fill \
             --body "$BODY" \
             && echo "Draft PR opened for $NEW"
+
+      # Reflect the failure in the job status (Run Claude ran with continue-on-error
+      # so alert + PR-open could execute first). Kept LAST so the job goes red only
+      # after the requester and Telegram have been notified.
+      - name: Fail job if Claude failed
+        if: always() && steps.detect.outputs.failed == 'true'
+        env:
+          REASON: ${{ steps.detect.outputs.reason }}
+        run: |
+          echo "::error::Marking job failed — @claude responder did not complete: ${REASON}"
+          exit 1
