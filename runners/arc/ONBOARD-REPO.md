@@ -103,12 +103,21 @@ means these work out of the box on `runs-on: <SCALE_SET_NAME>` — no separate
 - `docker build` / `docker buildx build --push` (GHCR image builds) ✅
 - `docker run` / `docker ps` (daemon reachable via `DOCKER_HOST`) ✅
 
-**`docker compose` needs one extra step.** The stock `ghcr.io/actions/actions-runner`
-image ships the docker CLI + buildx but **not** the compose-v2 plugin, so
-`docker compose -f …` fails with `unknown shorthand flag: 'f' in -f`. To enable it,
-publish `runners/arc/Dockerfile` (bakes the compose plugin) and point the scale set
-at it via `RUNNER_IMAGE` / the `image:` field, then re-register (below). DinD alone
-does **not** add compose.
+**`docker compose` works by default now.** `register-repo.sh` defaults the runner
+image to the **FuzeInfra CI-capable image** (`ghcr.io/izzywdev/fuzeinfra-arc-runner`,
+built from `runners/arc/Dockerfile`), which bakes in the **compose-v2 & buildx CLI
+plugins**, `jq`/`curl`, a warm Python/Node toolcache, and **Playwright browser OS
+deps**. So `docker compose -f …`, `docker buildx …`, and `npx playwright install
+<browser>` all work on `runs-on: <SCALE_SET_NAME>` out of the box.
+
+> **Prerequisite:** that image must be **published + PUBLIC** on GHCR (or an
+> `imagePullSecret` wired into `arc-runners`) or runner pods `ImagePullBackOff`.
+> Publish it once via the `build-runner-image` workflow
+> (`runners/arc/workflows-to-install/build-runner-image.yml` → move into
+> `.github/workflows/`) or `runners/arc/build-and-push-runner-image.sh`.
+
+To fall back to the stock image (no compose), pass `--runner-image
+ghcr.io/actions/actions-runner:latest`. DinD alone does **not** add compose.
 
 **Re-register existing scale sets to pick up DinD.** The dind sidecar only appears
 on pods created *after* the Helm values change. Any scale set registered before DinD

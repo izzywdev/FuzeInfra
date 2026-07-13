@@ -25,6 +25,15 @@
 #       --name      fuzefront \
 #       --secret    arc-runner-github-app   # existing secret in arc-runners
 #
+#   # override the CI runner image or container mode (both have CI-capable
+#   # defaults — the FuzeInfra runner image + dind — so onboarding stays a
+#   # single invocation):
+#   ./runners/arc/register-repo.sh \
+#       --repo-url  https://github.com/izzywdev/FuzeFront \
+#       --name      fuzefront --secret arc-runner-github-app \
+#       --runner-image ghcr.io/izzywdev/fuzeinfra-arc-runner:2026-07-13 \
+#       --container-mode dind
+#
 #   # uninstall a repo's scale set
 #   ./runners/arc/register-repo.sh --name fuzefront --uninstall
 #
@@ -48,10 +57,24 @@ ARC_VERSION="0.14.2"
 # the node; raise per-repo with --max-runners once the CI pool is scaled out.
 MAX_RUNNERS=3
 MIN_RUNNERS=0
-# Runner image. Stock actions-runner ships the docker CLI + buildx but NOT the
-# compose-v2 plugin. To get `docker compose`, publish runners/arc/Dockerfile and
-# point RUNNER_IMAGE at it (e.g. ghcr.io/izzywdev/fuzeinfra-arc-runner:<tag>).
-RUNNER_IMAGE="${RUNNER_IMAGE:-ghcr.io/actions/actions-runner:latest}"
+# Runner image. Defaults to the FuzeInfra CI-capable image (runners/arc/Dockerfile:
+# stock actions-runner + docker compose-v2 & buildx plugins + jq/curl + warm
+# Python/Node toolcache + Playwright browser deps) so every scale set comes up
+# CI-capable from this one provisioning change. Override with --runner-image or
+# RUNNER_IMAGE (e.g. the stock ghcr.io/actions/actions-runner:latest — but that
+# lacks `docker compose`, so gate-* / build-test jobs will fail on it).
+#
+# PREREQUISITE: the default image must be published + PUBLIC (or an imagePullSecret
+# wired into arc-runners) or runner pods ImagePullBackOff. Publish it via the
+# build-runner-image workflow (runners/arc/workflows-to-install/build-runner-image.yml)
+# or runners/arc/build-and-push-runner-image.sh before onboarding new repos.
+RUNNER_IMAGE="${RUNNER_IMAGE:-ghcr.io/izzywdev/fuzeinfra-arc-runner:latest}"
+
+# Container mode for the runner pods. "dind" (default) injects a privileged
+# docker:dind sidecar + init-dind-externals initContainer and wires DOCKER_HOST,
+# giving docker / docker compose / docker buildx / docker run self-hosted. Kept
+# parameterizable (--container-mode) but dind is the CI-capable default.
+CONTAINER_MODE="dind"
 
 REPO_URL=""
 SCALE_SET_NAME=""
@@ -76,6 +99,8 @@ while [[ $# -gt 0 ]]; do
     --app-install-id)    APP_INSTALL_ID="$2"; shift 2 ;;
     --app-private-key)   APP_PRIVATE_KEY_FILE="$2"; shift 2 ;;
     --max-runners)       MAX_RUNNERS="$2"; shift 2 ;;
+    --runner-image)      RUNNER_IMAGE="$2"; shift 2 ;;
+    --container-mode)    CONTAINER_MODE="$2"; shift 2 ;;
     --uninstall)         UNINSTALL=true; shift ;;
     --help|-h)           usage ;;
     *) echo "Unknown option: $1"; usage ;;
@@ -180,7 +205,7 @@ template:
 # FuzeInfra arc-reinstall-scaleset.yml for the staging set) to pick this up --
 # the dind sidecar only appears on pods created after this Helm values change.
 containerMode:
-  type: dind
+  type: ${CONTAINER_MODE}
 
 controllerServiceAccount:
   namespace: ${CONTROLLER_NS}
@@ -200,6 +225,8 @@ EOF
 
 # ---- Helm install/upgrade ---------------------------------------------------
 echo "==> Registering scale set '$SCALE_SET_NAME' for $REPO_URL …"
+echo "    runner image : $RUNNER_IMAGE"
+echo "    containerMode: $CONTAINER_MODE"
 echo "$VALUES" | helm upgrade --install "$SCALE_SET_NAME" \
   "$ARC_RUNNER_CHART" \
   --version "$ARC_VERSION" \
