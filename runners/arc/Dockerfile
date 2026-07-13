@@ -17,6 +17,10 @@
 # local cache instead of hitting api.github.com / objects.githubusercontent.com
 # from a cold pod (setup-python was timing out fetching the version manifest).
 #
+# It further bakes in `jq`/`curl` and Playwright's browser OS dependencies so
+# e2e/visual jobs only run `npx playwright install <browser>` (no apt/root at
+# job time). This is the CI-capable runner image register-repo.sh defaults to.
+#
 # Build + push:  runners/arc/build-and-push-runner-image.sh
 # Consumed by:   runners/arc/runner-scale-set-values.yaml (template.spec image)
 #                runners/arc/register-repo.sh (--runner-image / RUNNER_IMAGE)
@@ -69,5 +73,19 @@ RUN set -eux; \
 COPY warm-python-toolcache.sh /usr/local/bin/warm-python-toolcache.sh
 RUN chmod +x /usr/local/bin/warm-python-toolcache.sh; \
     /usr/local/bin/warm-python-toolcache.sh 3.10 3.11
+
+# --- Playwright browser system dependencies ----------------------------------
+# e2e / visual-regression jobs run Playwright. The heavy, root-requiring part is
+# the OS-level libraries the browsers need (libnss3, libatk, fonts, …); baking
+# those in via Playwright's own `install-deps` resolver means consumer jobs only
+# need `npx playwright install <browser>` — which downloads the browser binary
+# into the (unprivileged) runner cache and needs neither apt nor root at job
+# time. Uses the warmed Node from the toolcache. Pin PLAYWRIGHT_VERSION to the
+# consumers' Playwright major so the dep list matches.
+ARG PLAYWRIGHT_VERSION=1.49.1
+RUN set -eux; \
+    export PATH="/opt/hostedtoolcache/node/${NODE_VERSION}/x64/bin:$PATH"; \
+    npx --yes "playwright@${PLAYWRIGHT_VERSION}" install-deps; \
+    rm -rf /var/lib/apt/lists/* /root/.npm
 
 USER runner
