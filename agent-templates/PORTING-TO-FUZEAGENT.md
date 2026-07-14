@@ -28,8 +28,12 @@ The whole `agent-templates/` framework and its runtime:
 - **Orchestration** — `orchestration/` (the `handoff_mcp/` server: spawn / resume /
   ask / approve + `memory_read`/`memory_write`; the deterministic `relay.py`;
   session-resume + memory + repo-file handoff, no transcript copying).
-- **Sync + launch tooling** — `sync/` (project manifests → `/v1/agents`,
-  `/v1/environments`, vaults, memory stores; `launch_session.py`).
+- **Provider layer** — `providers/` (the `AgentProvider` seam + registry, the `anthropic`
+  reference adapter, `openai`/`hermes` stubs, and `provision.py`). This is what makes the port
+  clean: nothing above the seam is Anthropic-specific, so FuzeAgent can add/swap providers
+  (OpenAI, Hermes) without touching the manifests or orchestration.
+- **Sync + launch tooling** — `sync/` (REST client, session driver, manifest loader; the
+  `anthropic` adapter wraps these) and `launch_session.py` (provider-routed).
 - **Deploy** — the `handoff_mcp/` container image + `deploy/` manifests, and the
   self-hosted `worker/` image — deployed under FuzeAgent's Argo Application, not
   FuzeInfra's.
