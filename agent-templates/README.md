@@ -70,6 +70,11 @@ Beyond the engineer roles:
 
 The handoff MCP server exposes **`reach_human(human, message, reply_to_session_id, channels)`** — spawns that human's digital persona (their vault) to get a real decision and relay it back. This is how an `always_ask`/human-needed pause is fulfilled asynchronously across a person's real channels instead of stalling. Per-human vault template: `vaults/examples/persona.json` → copy to `vaults/persona-<human>.json` and provision.
 
+### Two-tier coordinators
+
+- **SDLC coordinator** (`coordinator/coordinator.json`) routes engineering work via the **handoff MCP** (`ask_agent`/`spawn_agent`) so each role runs in its **own** environment (cloud-* or the devops self-hosted worker) — not as in-session sub-agents, which would share one environment and lose each role's access.
+- **Executive coordinator** (`coordinator/exec-coordinator.json`) sits above it: it delegates strategy/architecture/finance/security questions to the CEO/CTO/CFO/CISO (they share `cloud-exec`, so as in-session sub-agents) and hands anything to be **built/deployed/tested down to the SDLC coordinator** via the handoff MCP. Binding human decisions go through `reach_human`.
+
 ## Prerequisites
 
 - `ANTHROPIC_API_KEY` (org has Managed Agents; beta `managed-agents-2026-04-01`).
