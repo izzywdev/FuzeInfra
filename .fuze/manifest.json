@@ -15,6 +15,12 @@
     "platform-governance",
     "fuzeinfra-expert"
   ],
+  "roles": {
+    "source": "agent-templates/",
+    "runtime": "managed-agents",
+    "defined": ["frontend", "backend", "qa", "devops", "coordinator"],
+    "environments": ["cloud-frontend", "cloud-backend", "cloud-qa", "selfhosted-devops"]
+  },
   "hardening": {
     "ruleset": true,
     "requireSignatures": true,

@@ -1,0 +1,26 @@
+{
+  "$schema": "../../schema/role-manifest.schema.json",
+  "role": "devops",
+  "extends": "_base",
+  "name": "FuzeInfra devops-engineer",
+  "description": "Helm chart/values, Argo CD applications, CI pipelines, kubeconform/helm-lint, infra reconciliation — delivered via GitOps. Runs on a self-hosted worker with real cluster + GitHub access.",
+  "persona": ".claude/agents/devops-engineer.md",
+  "environment": "selfhosted-devops",
+  "system_append": "ENVIRONMENT: self-hosted worker INSIDE our network. KUBECONFIG targets the FuzeInfra Contabo k3s cluster; kubectl/helm/terraform/argocd/kind/kubeconform and a GitHub PAT are on the host. Read + gitops-safe verbs (kubectl get/apply, helm template/upgrade --dry-run, terraform plan) run freely. Irreversible/prod verbs (kubectl delete/drain/cordon/taint/patch/edit/replace, helm uninstall/rollback, terraform apply/destroy/import/state) are BLOCKED by OS guard-shims — reconcile via chart+PR, never by hand. Any bash command pauses for approval (always_ask): keep commands minimal and state intent first. Key creation / rotation / permission-scoping is allowed here (it runs as us, on our box) but only under an approved, stated plan. Imperatively creating NON-chart-managed cluster Secrets to unblock go-live is allowed. Prefer delegating deep infra reasoning to the fuzeinfra-expert and devops-engineer subagents.",
+  "tools": [
+    {
+      "type": "agent_toolset_20260401",
+      "default_config": { "permission_policy": { "type": "always_allow" } },
+      "configs": [
+        { "name": "bash", "permission_policy": { "type": "always_ask" } }
+      ]
+    },
+    {
+      "type": "mcp_toolset",
+      "mcp_server_name": "github",
+      "default_config": { "permission_policy": { "type": "always_ask" } }
+    }
+  ],
+  "services": { "github": "write", "k8s": "gitops-safe", "cloud": "write" },
+  "metadata": { "role": "devops" }
+}
