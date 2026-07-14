@@ -17,16 +17,13 @@ FROM ubuntu:24.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-# --- base utilities + python + node 24 LTS (Node 20 is EOL April 2026) --------
-ARG NODE_MAJOR=24
+# --- base utilities + python -------------------------------------------------
 RUN set -eux; \
     apt-get update; \
     apt-get install -y --no-install-recommends \
       ca-certificates curl gnupg git jq unzip tar bash python3 python3-pip; \
-    curl -fsSL "https://deb.nodesource.com/setup_${NODE_MAJOR}.x" | bash -; \
-    apt-get install -y --no-install-recommends nodejs; \
     rm -rf /var/lib/apt/lists/*; \
-    node --version; python3 --version
+    python3 --version
 
 # --- GitHub CLI --------------------------------------------------------------
 RUN set -eux; \
@@ -58,11 +55,15 @@ RUN set -eux; arch="$(dpkg --print-architecture)"; \
     kubectl version --client; helm version; terraform version; kubeconform -v
 
 # --- Anthropic `ant` CLI (drives the self_hosted worker: `ant beta:worker`) ---
-# NOTE: confirm the exact install command against the Managed Agents quickstart
-# (https://platform.claude.com/docs/en/managed-agents/quickstart). Override the
-# package with --build-arg ANT_CLI_PKG=... if the name differs.
-ARG ANT_CLI_PKG=@anthropic-ai/cli
-RUN npm install -g "${ANT_CLI_PKG}" && (ant --version || true)
+# Released as a Go binary (NOT npm): github.com/anthropics/anthropic-cli/releases.
+# Bump with --build-arg ANT_VERSION=...
+ARG ANT_VERSION=1.15.0
+RUN set -eux; \
+    case "$(dpkg --print-architecture)" in amd64) A=amd64 ;; arm64) A=arm64 ;; *) A=amd64 ;; esac; \
+    curl -fsSL "https://github.com/anthropics/anthropic-cli/releases/download/v${ANT_VERSION}/ant_${ANT_VERSION}_linux_${A}.tar.gz" \
+      | tar -xz -C /usr/local/bin ant; \
+    chmod +x /usr/local/bin/ant; \
+    ant --version
 
 # --- destructive-op guard shims FIRST on PATH --------------------------------
 COPY bin/guards/ /opt/guards/
