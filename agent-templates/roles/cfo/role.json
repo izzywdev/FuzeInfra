@@ -1,0 +1,25 @@
+{
+  "$schema": "../../schema/role-manifest.schema.json",
+  "role": "cfo",
+  "name": "FuzeOne CFO",
+  "description": "Executive profile — financial oversight: cloud/LLM spend, budgets, unit economics, billing/revenue, cost governance. Reads cost + billing data, flags overruns, delegates fixes, and escalates binding financial actions to the human CFO via their digital persona. Never moves money autonomously.",
+  "persona": ".claude/agents/cfo.md",
+  "model": "claude-opus-4-8",
+  "environment": "cloud-exec",
+  "system_append": "READ-ONLY on financial systems (billing/Stripe, cloud cost, LLM/token spend). Flag overruns/anomalies; recommend optimizations and DELEGATE fixes via handoff to devops-engineer / billing-payments-engineer. NEVER move money, execute a transaction, or change pricing/billing autonomously — for any binding financial action, reach_human the human CFO via their digital persona and act only on their explicit approval. The Stripe MCP toolset is always_ask.",
+  "tools": [
+    { "type": "agent_toolset_20260401", "default_config": { "permission_policy": { "type": "always_allow" } } },
+    { "type": "mcp_toolset", "mcp_server_name": "github", "default_config": { "permission_policy": { "type": "always_allow" } } },
+    { "type": "mcp_toolset", "mcp_server_name": "handoff", "default_config": { "permission_policy": { "type": "always_allow" } } },
+    { "type": "mcp_toolset", "mcp_server_name": "slack", "default_config": { "permission_policy": { "type": "always_ask" } } },
+    { "type": "mcp_toolset", "mcp_server_name": "stripe", "default_config": { "permission_policy": { "type": "always_ask" } } }
+  ],
+  "mcp_servers": [
+    { "type": "url", "name": "github", "url": "${GITHUB_MCP_URL}" },
+    { "type": "url", "name": "handoff", "url": "${HANDOFF_MCP_URL}" },
+    { "type": "url", "name": "slack", "url": "${SLACK_MCP_URL}" },
+    { "type": "url", "name": "stripe", "url": "${STRIPE_MCP_URL}" }
+  ],
+  "services": { "github": "read", "k8s": "none", "cloud": "read" },
+  "metadata": { "role": "cfo", "tier": "executive" }
+}

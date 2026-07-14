@@ -1,0 +1,28 @@
+{
+  "$schema": "../../schema/vault.schema.json",
+  "_note": "TEMPLATE — copy to vaults/persona-<human>.json (top level) per person to provision it. One vault per human = their channel credentials. The digital-persona session binds this vault at launch (reach_human selects vault by display_name 'persona-<human>'). Secret values are ${ENV} refs, filled from that person's tokens; unresolved ones are skipped at sync.",
+  "display_name": "persona-jane",
+  "metadata": { "human": "jane", "email": "jane@fuzeone.example", "preferred_channels": "slack,email", "quiet_hours": "22:00-08:00" },
+  "credentials": [
+    {
+      "display_name": "Jane — Gmail",
+      "auth": { "type": "static_bearer", "mcp_server_url": "${GMAIL_MCP_URL}", "token": "${PERSONA_JANE_GMAIL_TOKEN}" }
+    },
+    {
+      "display_name": "Jane — Slack",
+      "auth": { "type": "static_bearer", "mcp_server_url": "${SLACK_MCP_URL}", "token": "${PERSONA_JANE_SLACK_TOKEN}" }
+    },
+    {
+      "display_name": "Jane — Telegram",
+      "auth": { "type": "static_bearer", "mcp_server_url": "${TELEGRAM_MCP_URL}", "token": "${PERSONA_JANE_TELEGRAM_TOKEN}" }
+    },
+    {
+      "display_name": "Jane — Twilio (WhatsApp/SMS/voice)",
+      "auth": { "type": "static_bearer", "mcp_server_url": "${TWILIO_MCP_URL}", "token": "${PERSONA_JANE_TWILIO_TOKEN}" }
+    },
+    {
+      "display_name": "Jane — GitHub",
+      "auth": { "type": "static_bearer", "mcp_server_url": "${GITHUB_MCP_URL}", "token": "${PERSONA_JANE_GITHUB_TOKEN}" }
+    }
+  ]
+}

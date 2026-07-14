@@ -194,6 +194,51 @@ def memory_read(path: str) -> str:
     return json.dumps({"store_id": sid, "path": path, "found": True, "content": full.get("content", "")})
 
 
+def _vault_id_by_name(name):
+    path = os.path.join(STATE, "vault-ids.json")
+    ids = json.load(open(path, encoding="utf-8")) if os.path.exists(path) else {}
+    return ids.get(name)
+
+
+@mcp.tool()
+def reach_human(human: str, message: str, reply_to_session_id: str = "", channels: str = "", wait: bool = False) -> str:
+    """Reach a real human through their digital persona and relay their answer back.
+
+    Spawns the `digital-persona` agent bound to this human's vault (their channel
+    credentials: email/Slack/GitHub/WhatsApp/Telegram/phone) and tells it to contact
+    the human with `message`, collect their ACTUAL reply, and — if reply_to_session_id
+    is set — resume_session() that session with the human's answer. Use this instead of
+    stalling when a session needs a human's decision or approval.
+
+    human: person key (matches vault 'persona-<human>' + the persona's metadata).
+    channels: comma list to prefer (e.g. "slack,email"); empty = their preferred.
+    wait: if true, block until the persona reports (reply|blocked|pending); else fire-and-forget
+          (the persona resumes the origin session itself when the human replies).
+    """
+    roles = _roles()
+    if "digital-persona" not in roles:
+        raise RuntimeError("digital-persona agent not provisioned — run providers/provision.py")
+    e = roles["digital-persona"]
+    vid = _vault_id_by_name(f"persona-{human}")
+    if not vid:
+        raise RuntimeError(f"no vault 'persona-{human}' — create vaults/persona-{human}.json and provision it")
+    sid = driver.create_session(e["id"], e["version"], e["environment_id"],
+                                vault_ids=[vid], resources=_memory_resources(),
+                                title=f"persona:{human}")["id"]
+    ch = f" via {channels}" if channels else " via their preferred channel"
+    prompt = (f"You represent {human}. Reach the real {human}{ch} with the following, collect their "
+              f"ACTUAL reply (never fabricate a binding answer), and report it.\n\nMESSAGE:\n{message}")
+    if reply_to_session_id:
+        prompt += (f"\n\nWhen you have their real answer, call resume_session(session_id='{reply_to_session_id}', "
+                   f"summary=<their verbatim answer + your read>). If you cannot reach them, resume with 'BLOCKED: ...'.")
+    if not wait:
+        driver.send_message(sid, prompt)
+        return json.dumps({"session_id": sid, "human": human, "status": "reaching"})
+    res = driver.run_until_block(sid, prompt)
+    return json.dumps({"session_id": sid, "human": human, "status": res["status"],
+                       "reply": res["text"], "pending": res["pending"]})
+
+
 if __name__ == "__main__":
     # Managed Agents connects to remote MCP servers over streamable HTTP.
     mcp.run(transport="streamable-http")

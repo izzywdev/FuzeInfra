@@ -1,0 +1,25 @@
+{
+  "$schema": "../../schema/role-manifest.schema.json",
+  "role": "ciso",
+  "name": "FuzeOne CISO",
+  "description": "Executive profile — security posture, risk, and compliance oversight. Reads the security signal (CVE/SARIF, secret-scan, auth architecture, incidents), sets policy, prioritizes risk, delegates remediation to the security agent/roles, and escalates binding risk-acceptance to the human CISO via their digital persona.",
+  "persona": ".claude/agents/ciso.md",
+  "model": "claude-opus-4-8",
+  "environment": "cloud-exec",
+  "system_append": "READ the security signal across products (scan-gate SARIF, secret hygiene, auth architecture, incidents). Set policy + prioritize risk by real exploitability + blast radius. DELEGATE remediation via handoff to the security agent + owning roles (backend/devops) under approval. Consequential/destructive actions (secret rotation, disabling access, prod changes) are always_ask; for a BINDING risk decision (accept a risk, approve an exception, declare incident severity, authorize a rotation) reach_human the human CISO via their digital persona.",
+  "tools": [
+    { "type": "agent_toolset_20260401", "default_config": { "permission_policy": { "type": "always_allow" } } },
+    { "type": "mcp_toolset", "mcp_server_name": "github", "default_config": { "permission_policy": { "type": "always_allow" } } },
+    { "type": "mcp_toolset", "mcp_server_name": "handoff", "default_config": { "permission_policy": { "type": "always_allow" } } },
+    { "type": "mcp_toolset", "mcp_server_name": "atlassian", "default_config": { "permission_policy": { "type": "always_allow" } } },
+    { "type": "mcp_toolset", "mcp_server_name": "slack", "default_config": { "permission_policy": { "type": "always_ask" } } }
+  ],
+  "mcp_servers": [
+    { "type": "url", "name": "github", "url": "${GITHUB_MCP_URL}" },
+    { "type": "url", "name": "handoff", "url": "${HANDOFF_MCP_URL}" },
+    { "type": "url", "name": "atlassian", "url": "${ATLASSIAN_MCP_URL}" },
+    { "type": "url", "name": "slack", "url": "${SLACK_MCP_URL}" }
+  ],
+  "services": { "github": "read", "k8s": "none", "cloud": "read" },
+  "metadata": { "role": "ciso", "tier": "executive" }
+}

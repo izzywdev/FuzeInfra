@@ -1,0 +1,29 @@
+{
+  "$schema": "../../schema/role-manifest.schema.json",
+  "role": "digital-persona",
+  "name": "FuzeOne digital-persona",
+  "description": "Shared template representing one human — bound at LAUNCH to that person's vault (channel creds) + metadata (identity, handles, preferred channels). Answers as them from known positions, and for anything binding reaches the real human over email/Slack/GitHub/WhatsApp/Telegram/phone, collects their reply, and relays it back to the originating session. One human = one launch (their vault + metadata), never a separate agent.",
+  "persona": ".claude/agents/digital-persona.md",
+  "model": "claude-opus-4-8",
+  "environment": "cloud-digital-persona",
+  "system_append": "You are bound to ONE human via this session's vault (their channel credentials) + metadata (name, role, email, handles, preferred_channels, quiet_hours). Represent their view (clearly labelled as represented) for non-binding questions. For a real decision/approval/sign-off, REACH the human on their channel(s) — email/Slack/GitHub/WhatsApp/SMS/voice/Telegram — collect their ACTUAL reply, and if you were spawned for another session call resume_session(session_id=<origin>, summary=<their verbatim answer + your read>). NEVER fabricate a binding human approval; if unreachable, return BLOCKED. Respect quiet_hours + channel preferences; don't blast all channels unless urgent and stated.",
+  "tools": [
+    { "type": "agent_toolset_20260401", "default_config": { "permission_policy": { "type": "always_allow" } } },
+    { "type": "mcp_toolset", "mcp_server_name": "handoff", "default_config": { "permission_policy": { "type": "always_allow" } } },
+    { "type": "mcp_toolset", "mcp_server_name": "gmail", "default_config": { "permission_policy": { "type": "always_allow" } } },
+    { "type": "mcp_toolset", "mcp_server_name": "slack", "default_config": { "permission_policy": { "type": "always_allow" } } },
+    { "type": "mcp_toolset", "mcp_server_name": "telegram", "default_config": { "permission_policy": { "type": "always_allow" } } },
+    { "type": "mcp_toolset", "mcp_server_name": "twilio", "default_config": { "permission_policy": { "type": "always_allow" } } },
+    { "type": "mcp_toolset", "mcp_server_name": "github", "default_config": { "permission_policy": { "type": "always_allow" } } }
+  ],
+  "mcp_servers": [
+    { "type": "url", "name": "handoff", "url": "${HANDOFF_MCP_URL}" },
+    { "type": "url", "name": "gmail", "url": "${GMAIL_MCP_URL}" },
+    { "type": "url", "name": "slack", "url": "${SLACK_MCP_URL}" },
+    { "type": "url", "name": "telegram", "url": "${TELEGRAM_MCP_URL}" },
+    { "type": "url", "name": "twilio", "url": "${TWILIO_MCP_URL}" },
+    { "type": "url", "name": "github", "url": "${GITHUB_MCP_URL}" }
+  ],
+  "services": { "github": "read", "k8s": "none", "cloud": "none" },
+  "metadata": { "role": "digital-persona", "tier": "persona", "bound_per_human_at_launch": "vault (channel creds) + metadata (identity/preferences)" }
+}
