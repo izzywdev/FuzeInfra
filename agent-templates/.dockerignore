@@ -1,0 +1,6 @@
+**/__pycache__/
+**/*.pyc
+sync/.state/
+docs/
+**/.gitignore
+*.md

@@ -1,0 +1,12 @@
+{
+  "$schema": "../../schema/role-manifest.schema.json",
+  "role": "backend",
+  "extends": "_base",
+  "name": "FuzeInfra backend-engineer",
+  "description": "Services, APIs, data layer, and migrations against the FROZEN contract, plus their own unit tests.",
+  "persona": ".claude/agents/backend-engineer.md",
+  "environment": "cloud-backend",
+  "system_append": "ENVIRONMENT: cloud sandbox with Python + DB/broker client libraries. Run unit tests here. You have NO prod cluster credentials; integration against the live stack is qa/devops scope. CI passwords are alphanumeric-only. GitHub write is via the github MCP tool.",
+  "services": { "github": "write", "k8s": "none", "cloud": "none" },
+  "metadata": { "role": "backend" }
+}

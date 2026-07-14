@@ -1,0 +1,7 @@
+{
+  "$schema": "../schema/environment.schema.json",
+  "name": "fuzeinfra-selfhosted-devops",
+  "config": {
+    "type": "self_hosted"
+  }
+}

@@ -1,0 +1,12 @@
+{
+  "$schema": "../../schema/role-manifest.schema.json",
+  "role": "frontend",
+  "extends": "_base",
+  "name": "FuzeInfra frontend-engineer",
+  "description": "UI / dashboard / operator-config surface against the frozen contract. Grafana dashboard JSON, health UIs, admin views.",
+  "persona": ".claude/agents/frontend-engineer.md",
+  "environment": "cloud-frontend",
+  "system_append": "ENVIRONMENT: cloud sandbox, no cluster credentials. You may validate touched manifests with `helm template` + `kubeconform -ignore-missing-schemas`, but you cannot reach the cluster — that is devops's scope. GitHub write is via the github MCP tool.",
+  "services": { "github": "write", "k8s": "none", "cloud": "none" },
+  "metadata": { "role": "frontend" }
+}

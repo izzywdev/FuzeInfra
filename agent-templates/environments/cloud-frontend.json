@@ -1,0 +1,19 @@
+{
+  "$schema": "../schema/environment.schema.json",
+  "name": "fuzeinfra-cloud-frontend",
+  "config": {
+    "type": "cloud",
+    "packages": {
+      "apt": ["jq"],
+      "npm": ["prettier"],
+      "pip": ["yamllint", "check-jsonschema"],
+      "go": ["github.com/yannh/kubeconform/cmd/kubeconform@latest"]
+    },
+    "networking": {
+      "type": "limited",
+      "allowed_hosts": ["*.grafana.com"],
+      "allow_mcp_servers": true,
+      "allow_package_managers": true
+    }
+  }
+}
