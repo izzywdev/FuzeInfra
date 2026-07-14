@@ -130,7 +130,7 @@ jobs:
         with:
           fetch-depth: 0
       - name: Auto-fix → DRAFT PR (never auto-merge)
-        uses: anthropics/claude-code-action@ba0aafd4308cbba7165f9f2cdb0cfbed5a3c99ce  # v1.0.168
+        uses: anthropics/claude-code-action@f1bd27ca5b54584506e40e17884d90bdaaa1a9b3  # v1.0.173
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           prompt: |
