@@ -418,7 +418,7 @@ jobs:
 
       - name: Send email
         if: steps.suppress.outputs.skip != 'true' && (steps.act.outputs.action == 'fix' || steps.act.outputs.action == 'issue' || steps.act.outputs.action == 'handoff')
-        uses: dawidd6/action-send-mail@v3
+        uses: dawidd6/action-send-mail@v18
         with:
           server_address: smtp.gmail.com
           server_port: 587

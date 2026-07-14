@@ -41,13 +41,24 @@ jobs:
     #   above is the safety net for the opened+labeled-at-creation overlap).
     # Gate 2 (SECURITY): the author is a trusted collaborator. author_association
     # is evaluated per event source. Anything else is ignored silently.
+    # Gate 3 (LOOP-BREAKER): this workflow's OWN failure notice (posted below via a
+    #   trusted PAT) contains the literal "@claude" and would otherwise re-trigger the
+    #   gate above — a definitive failure (e.g. Anthropic out of credits) then loops
+    #   forever, one failing run + one notice comment every ~20s (issue #255: 691
+    #   comments). The notice carries the hidden `claude-loop-guard` sentinel (an
+    #   HTML comment stamped by the "Alert on Claude failure" step below); any
+    #   comment/review containing that string is ignored here, so the responder
+    #   fails ONCE, posts ONE notice, and waits for a human/funded retrigger.
     if: |
       (
         (github.event_name == 'issue_comment' && contains(github.event.comment.body, '@claude') &&
+          !contains(github.event.comment.body, 'claude-loop-guard') &&
           contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association)) ||
         (github.event_name == 'pull_request_review_comment' && contains(github.event.comment.body, '@claude') &&
+          !contains(github.event.comment.body, 'claude-loop-guard') &&
           contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association)) ||
         (github.event_name == 'pull_request_review' && contains(github.event.review.body, '@claude') &&
+          !contains(github.event.review.body, 'claude-loop-guard') &&
           contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.review.author_association)) ||
         (github.event_name == 'issues' && github.event.action == 'opened' &&
           (contains(github.event.issue.body, '@claude') || contains(github.event.issue.title, '@claude')) &&
@@ -79,7 +90,7 @@ jobs:
       - name: Set up kubectl
         uses: azure/setup-kubectl@829323503d1be3d00ca8346e5391ca0b07a9ab0d # v5.1.0
       - name: Set up helm
-        uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4
+        uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
         with:
           version: v3.14.4
       - name: Set up terraform
@@ -196,7 +207,7 @@ jobs:
         # final status, instead of the action failing silently with no notification.
         if: steps.preflight.outputs.ok == 'true'
         continue-on-error: true
-        uses: anthropics/claude-code-action@ba0aafd4308cbba7165f9f2cdb0cfbed5a3c99ce # v1.0.168
+        uses: anthropics/claude-code-action@f1bd27ca5b54584506e40e17884d90bdaaa1a9b3 # v1.0.173
         env:
           # KUBECONFIG (set above) + a real-user PAT for things GITHUB_TOKEN can't
           # do (GHCR package visibility, cross-repo gh api). The agent reads any
@@ -292,13 +303,21 @@ jobs:
             echo "::warning::TELEGRAM_BOT_TOKEN unset — skipping Telegram alert"
           fi
           # 2) Tell the requester on their own thread (gh issue comment works for PRs).
+          #    LOOP-BREAKER: this comment is posted with a trusted PAT and mentions
+          #    "@claude", so without a guard it re-triggers this very workflow (Gate 3
+          #    in the job `if:`). The hidden `claude-loop-guard` sentinel below is what
+          #    Gate 3 keys off to ignore it — DO NOT remove it or the runaway in
+          #    issue #255 (691 self-triggered comments) returns. Also: the retry
+          #    instruction deliberately does NOT put a bare "@claude" on its own line,
+          #    and tells the operator to FUND/FIX first — one failure, then wait.
           if [ -n "${ISSUE:-}" ]; then
             {
-              printf '### ⚠️ @claude did not run to completion\n\n'
+              printf '<!-- claude-loop-guard: automated failure notice — this comment must NOT re-trigger the Claude workflow -->\n'
+              printf '### ⚠️ Claude responder did not run to completion\n\n'
               printf 'The responder errored before finishing your request, so **no changes were made and no branch was created**.\n\n'
               printf -- '- **Reason:** %s\n' "$REASON"
               printf -- '- **Run log:** %s\n\n' "$RUN_URL"
-              printf 'Re-trigger by commenting `@claude` again. If it keeps failing this fast, it is almost certainly an API-side problem (key revoked / out of credits / model or 1M-context beta not entitled / Anthropic outage) — an operator should check the `ANTHROPIC_API_KEY` secret and the Anthropic account before retrying.\n'
+              printf 'This notice is automated and will **not** retry on its own — the responder stops after one failure and waits. If this looks like an API-side problem (key revoked / **out of credits** / model or 1M-context beta not entitled / Anthropic outage), an operator should **check the `ANTHROPIC_API_KEY` secret and fund/repair the Anthropic account first**, then re-trigger by posting a new comment mentioning the responder.\n'
             } > /tmp/claude-fail.md
             gh issue comment "$ISSUE" --repo "$REPO" --body-file /tmp/claude-fail.md \
               && echo "posted failure notice to #$ISSUE" || echo "::warning::could not comment on #$ISSUE"

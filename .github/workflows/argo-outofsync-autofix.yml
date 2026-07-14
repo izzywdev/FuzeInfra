@@ -151,7 +151,7 @@ jobs:
       - name: Re-validate app name
         run: printf '%s' "$APP" | grep -qE '^[a-z0-9][a-z0-9-]{0,62}$' || { echo "::error::bad app"; exit 1; }
       - uses: azure/setup-kubectl@829323503d1be3d00ca8346e5391ca0b07a9ab0d # v5.1.0
-      - uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
         with: { version: v3.14.4 }
       - name: Configure kubectl
         env:

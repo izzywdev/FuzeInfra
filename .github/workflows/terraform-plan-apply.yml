@@ -100,7 +100,7 @@ jobs:
       # actually changed.
       - name: Detect terraform/** changes
         id: detect
-        uses: dorny/paths-filter@d1c1ffe0248fe513906c8e24db8ea791d46f8590 # v3
+        uses: dorny/paths-filter@7b450fff21473bca461d4b92ce414b9d0420d706 # v4.0.2
         with:
           filters: |
             tf:
@@ -186,7 +186,7 @@ jobs:
 
       - name: Post plan as PR comment
         if: always() && steps.detect.outputs.tf == 'true' && github.event.pull_request.head.repo.fork != true
-        uses: actions/github-script@v7
+        uses: actions/github-script@v9
         with:
           script: |
             const fs = require('fs');
