@@ -20,17 +20,33 @@ the needed access, so work is dispatched rather than bounced back to a human.
 > Vendor-semi-agnostic: the `.md` personas keep driving Claude Code and the `@claude`
 > GitHub Action. This layer *projects* them into `/v1/agents`; nothing is forked.
 
+> **Provider-abstracted.** The definitions + orchestration are provider-neutral; a
+> `providers/<name>/adapter.py` targets a backend. `anthropic` is the reference impl;
+> `openai`/`hermes` are stubs. Pick with `AGENT_PROVIDER`. See [providers/README.md](providers/README.md).
+
+## Roles are one-per-role, not per-repo
+
+There is **one `backend` agent template**, not `fuzeinfra-backend` + `fuzefront-backend` + …. A
+repo is not a different agent — it's a different **environment** bound at launch (toolchain,
+checkout, networking, creds) plus its repo-expert. A **session** is one `role × environment`
+instantiation; you run many in parallel per feature. So *"fuzefront-backend"* = the Backend
+template × the FuzeFront env (+ its vault/skills), assembled at `create_session` (optionally via
+`agent_with_overrides`) — not a stored 16th agent. See [docs/fuzeone-agent-map.html](docs/fuzeone-agent-map.html).
+
 ## Layout
 
 | Path | What |
 |---|---|
-| `schema/` | JSON Schemas for `role.json` and environment configs |
-| `roles/_base/role.json` | shared guardrail system-prompt, default tools + policies, github MCP |
+| `providers/` | provider seam: `base.py` interface, registry, `anthropic/` (ref) + `openai`/`hermes` stubs, `provision.py` |
+| `schema/` | JSON Schemas for `role.json`, environment, vault, memory configs |
+| `roles/_base/role.json` | shared guardrail system-prompt, default tools + policies, github + handoff MCP |
 | `roles/{frontend,backend,qa,devops}/role.json` | per-role overrides (`qa` reuses `test-engineer`) |
 | `coordinator/coordinator.json` | routing agent (`multiagent` roster over the 4 roles) |
 | `environments/*.json` | `cloud-*` (Anthropic sandbox) + `selfhosted-devops` (our worker) |
+| `vaults/`, `memory/` | MCP-auth vault + shared cross-session handoff memory store |
+| `orchestration/` | handoff MCP server + `relay.py` (session-resume/memory hand-forward) |
 | `worker/` | self-hosted worker image + guard shims + k8s deploy |
-| `sync/` | project manifests → API, and launch sessions |
+| `sync/` | REST client, session driver, manifest loader, validate, launch |
 
 ## Role → environment → guardrail matrix
 
@@ -57,18 +73,15 @@ cd agent-templates
 # 1. validate every manifest (schema + persona render) before touching the API
 python sync/validate.py
 
-# 2. create the cloud + self-hosted environments (idempotent; writes .state/environment-ids.json)
-python sync/sync_environments.py
+# 2. preview the full create-plan offline — no API calls (works even without a valid key)
+python providers/provision.py --provider anthropic --dry-run
 
-# 3a. create vault credentials (GitHub MCP auth) — reads ${GITHUB_MCP_TOKEN} from env
-GITHUB_MCP_URL=https://api.githubcopilot.com/mcp/ GITHUB_MCP_TOKEN=... python sync/sync_vaults.py
-
-# 3b. create the shared cross-session handoff memory store (idempotent)
-python sync/sync_memory.py
-
-# 3c. project the personas into versioned /v1/agents + the coordinator (idempotent)
-#     (reads ${GITHUB_MCP_URL} and ${HANDOFF_MCP_URL} for the role mcp_servers)
-python sync/sync_agents.py
+# 3. create/update EVERYTHING for the provider (environments + vaults + memory + agents +
+#    coordinator), idempotently; prints every id and writes .state/*.json. This is the
+#    "all agents created with their envs" step. (reads ${GITHUB_MCP_URL/TOKEN}, ${HANDOFF_MCP_URL})
+GITHUB_MCP_URL=https://api.githubcopilot.com/mcp/ GITHUB_MCP_TOKEN=... HANDOFF_MCP_URL=... \
+  python providers/provision.py --provider anthropic
+# (the individual sync/sync_*.py scripts still exist for piecemeal runs)
 
 # 3d. run the handoff MCP server (agent-to-agent spawn/resume/ask + memory) — container in prod
 python orchestration/handoff_mcp/server.py          # local; or deploy the image (see orchestration/)
