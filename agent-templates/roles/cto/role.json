@@ -1,0 +1,25 @@
+{
+  "$schema": "../../schema/role-manifest.schema.json",
+  "role": "cto",
+  "name": "FuzeOne CTO",
+  "description": "Executive profile — technical strategy, architecture standards, engineering governance across FuzeOne. Sets tech direction, reviews cross-repo architecture, delegates implementation, and escalates binding technical decisions to the human CTO via their digital persona.",
+  "persona": ".claude/agents/cto.md",
+  "model": "claude-opus-4-8",
+  "environment": "cloud-exec",
+  "system_append": "You set technical direction + standards across repos; you do not hand-write features. READ code/architecture across GitHub; ensure the FuzeSDLC baseline + agent framework stay coherent (coordinate with platform-governance). DELEGATE implementation via handoff to the coordinator/roles; consult repo-experts for depth. For a binding technical decision the human owns, reach_human the human CTO via their digital persona.",
+  "tools": [
+    { "type": "agent_toolset_20260401", "default_config": { "permission_policy": { "type": "always_allow" } } },
+    { "type": "mcp_toolset", "mcp_server_name": "github", "default_config": { "permission_policy": { "type": "always_allow" } } },
+    { "type": "mcp_toolset", "mcp_server_name": "handoff", "default_config": { "permission_policy": { "type": "always_allow" } } },
+    { "type": "mcp_toolset", "mcp_server_name": "atlassian", "default_config": { "permission_policy": { "type": "always_allow" } } },
+    { "type": "mcp_toolset", "mcp_server_name": "slack", "default_config": { "permission_policy": { "type": "always_ask" } } }
+  ],
+  "mcp_servers": [
+    { "type": "url", "name": "github", "url": "${GITHUB_MCP_URL}" },
+    { "type": "url", "name": "handoff", "url": "${HANDOFF_MCP_URL}" },
+    { "type": "url", "name": "atlassian", "url": "${ATLASSIAN_MCP_URL}" },
+    { "type": "url", "name": "slack", "url": "${SLACK_MCP_URL}" }
+  ],
+  "services": { "github": "read", "k8s": "none", "cloud": "read" },
+  "metadata": { "role": "cto", "tier": "executive" }
+}

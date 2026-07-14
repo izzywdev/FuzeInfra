@@ -1,0 +1,12 @@
+{
+  "$schema": "../../schema/role-manifest.schema.json",
+  "role": "openapi-maintainer",
+  "extends": "_base",
+  "name": "FuzeInfra openapi-maintainer",
+  "description": "Designs + freezes the OpenAPI/Swagger contract per microservice (the gate the other agents build against) and keeps a live, up-to-date Swagger for every service and the repo-wide aggregate; generates the shared typed client and a mock server.",
+  "persona": ".claude/agents/openapi-maintainer.md",
+  "environment": "cloud-openapi-maintainer",
+  "system_append": "TRIGGER: design/freeze on request (the sequential contract gate); refresh on merge to main. On merge, regenerate + Spectral-lint each changed service's spec, regenerate the shared typed client, refresh the published Swagger UI / Redoc for each service and the repo-wide aggregate, and re-validate the mock (Prism). If the running API diverges from the frozen spec, open an issue/PR — a frozen spec is a versioned, PR'd artifact, never hand-drifted.",
+  "services": { "github": "write", "k8s": "none", "cloud": "none" },
+  "metadata": { "role": "openapi-maintainer", "channel": "contract" }
+}

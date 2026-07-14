@@ -1,0 +1,18 @@
+{
+  "$schema": "../schema/environment.schema.json",
+  "name": "fuzeinfra-cloud-mcp-engineer",
+  "config": {
+    "type": "cloud",
+    "packages": {
+      "apt": ["jq"],
+      "npm": ["@modelcontextprotocol/sdk", "@modelcontextprotocol/inspector"],
+      "pip": ["mcp", "httpx", "uvicorn", "starlette", "sse-starlette"]
+    },
+    "networking": {
+      "type": "limited",
+      "allowed_hosts": [],
+      "allow_mcp_servers": true,
+      "allow_package_managers": true
+    }
+  }
+}

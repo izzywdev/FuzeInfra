@@ -56,6 +56,19 @@ template × the FuzeFront env (+ its vault/skills), assembled at `create_session
 | backend | `cloud-backend` | github MCP; DB client libs; no cluster | `always_allow` |
 | qa (test-engineer) | `cloud-qa` | github MCP; app URLs read-only | `always_allow`; never patch to force green |
 | devops | **`selfhosted-devops`** | real kubeconfig + PAT on our worker; reaches private k3s | `bash` **`always_ask`**; guard shims block `kubectl delete\|patch\|edit`, `helm uninstall\|rollback`, `terraform apply\|destroy`; prod-sanity system prompt |
+| openapi-maintainer | `cloud-openapi-maintainer` | github MCP; spectral/redocly/openapi-typescript/prism | designs+freezes the contract; refreshes live Swagger on merge |
+| mcp-engineer | `cloud-mcp-engineer` | github MCP; MCP SDK + inspector | keeps stdio + remote SSE MCP server current; **triggered on merge to main** |
+
+### Executive + persona tiers
+
+Beyond the engineer roles:
+
+| Role | Env | What it does |
+|---|---|---|
+| **CEO / CTO / CFO / CISO** | `cloud-exec` | Strategy / architecture / finance / security **oversight**. Read across GitHub/Jira/Slack (+ Stripe for CFO); **delegate** execution via the handoff tools; escalate binding decisions to the human via `reach_human`. Never implement; money/pricing/prod actions are `always_ask` + human-approved. |
+| **digital-persona** | `cloud-digital-persona` | A **shared template representing one human** — bound at launch to that person's **vault** (email/Slack/GitHub/WhatsApp/Telegram/phone creds) + **metadata** (identity, preferred channels, quiet hours). Answers as them for non-binding questions; for real decisions it **reaches the human on their channels**, collects their actual reply, and **`resume_session`s** the waiting session. One human = one launch (their vault), never a separate agent. |
+
+The handoff MCP server exposes **`reach_human(human, message, reply_to_session_id, channels)`** — spawns that human's digital persona (their vault) to get a real decision and relay it back. This is how an `always_ask`/human-needed pause is fulfilled asynchronously across a person's real channels instead of stalling. Per-human vault template: `vaults/examples/persona.json` → copy to `vaults/persona-<human>.json` and provision.
 
 ## Prerequisites
 
@@ -63,6 +76,10 @@ template × the FuzeFront env (+ its vault/skills), assembled at `create_session
 - `GITHUB_MCP_URL` — URL of a GitHub MCP server (auth handled at the server); referenced by `roles/_base/role.json`.
 - For **devops**: a self-hosted environment key (Console: Environments → the env → *Generate environment key*),
   a host inside our network to run `worker/` (holds a **scoped-RBAC** kubeconfig + fine-scoped PAT), and the image built/pushed.
+- For the **executive + persona** roles: the extra MCP server URLs their manifests reference —
+  `ATLASSIAN_MCP_URL`, `SLACK_MCP_URL`, `STRIPE_MCP_URL` (CFO), and `GMAIL_MCP_URL` / `TELEGRAM_MCP_URL` /
+  `TWILIO_MCP_URL` (digital-persona) — plus per-human vault tokens (`vaults/examples/persona.json`). Roles
+  whose MCP URLs aren't set can't be launched live until they are (dry-run/validate still pass).
 - `pip install -r sync/requirements.txt` (only `jsonschema`, for `validate.py`).
 
 ## Usage
