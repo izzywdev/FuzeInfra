@@ -1,0 +1,80 @@
+name: Provision Managed Agents
+
+# One-click "get all agents ready on Anthropic". Creates/updates every environment +
+# agent (+ vaults, memory) idempotently for the selected provider and uploads the id
+# state (agent-ids/environment-ids/vault-ids/memory-ids.json) as an artifact — that
+# state becomes the `handoff-state` ConfigMap the handoff MCP server mounts.
+#
+# Requires a **Managed-Agents-entitled** key as the MANAGED_AGENTS_API_KEY secret
+# (a Console API key with the managed-agents beta — NOT a Claude Code token) plus the
+# MCP server URLs / tokens the role manifests reference. Slated to move to FuzeAgent.
+
+on:
+  workflow_dispatch:
+    inputs:
+      provider:
+        description: "Provider to provision"
+        default: "anthropic"
+        type: choice
+        options: ["anthropic"]
+      dry_run:
+        description: "Dry run (resolve + print only, no API calls)"
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+jobs:
+  provision:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Guard — Managed Agents key present (unless dry-run)
+        id: guard
+        env:
+          MA_KEY: ${{ secrets.MANAGED_AGENTS_API_KEY }}
+        run: |
+          if [ "${{ inputs.dry_run }}" != "true" ] && [ -z "${MA_KEY}" ]; then
+            echo "::error::MANAGED_AGENTS_API_KEY secret is not set — cannot create agents. Add a Console API key with the managed-agents beta."
+            exit 1
+          fi
+
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - run: pip install --quiet jsonschema requests
+
+      - name: Validate manifests
+        working-directory: agent-templates
+        run: python sync/validate.py
+
+      - name: Provision
+        working-directory: agent-templates
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.MANAGED_AGENTS_API_KEY }}
+          GITHUB_MCP_URL: ${{ secrets.GITHUB_MCP_URL }}
+          GITHUB_MCP_TOKEN: ${{ secrets.GITHUB_MCP_TOKEN }}
+          HANDOFF_MCP_URL: ${{ secrets.HANDOFF_MCP_URL }}
+          ATLASSIAN_MCP_URL: ${{ secrets.ATLASSIAN_MCP_URL }}
+          SLACK_MCP_URL: ${{ secrets.SLACK_MCP_URL }}
+          STRIPE_MCP_URL: ${{ secrets.STRIPE_MCP_URL }}
+          GMAIL_MCP_URL: ${{ secrets.GMAIL_MCP_URL }}
+          TELEGRAM_MCP_URL: ${{ secrets.TELEGRAM_MCP_URL }}
+          TWILIO_MCP_URL: ${{ secrets.TWILIO_MCP_URL }}
+        run: |
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            python providers/provision.py --provider "${{ inputs.provider }}" --dry-run
+          else
+            python providers/provision.py --provider "${{ inputs.provider }}"
+          fi
+
+      - name: Upload id state (for the handoff-state ConfigMap)
+        if: ${{ inputs.dry_run != true }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: managed-agents-state
+          path: agent-templates/sync/.state/*.json
+          if-no-files-found: warn

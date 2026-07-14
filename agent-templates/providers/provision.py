@@ -30,7 +30,7 @@ import role_loader as rl            # noqa: E402
 ENV_DIR = os.path.join(TEMPLATES_ROOT, "environments")
 VAULT_DIR = os.path.join(TEMPLATES_ROOT, "vaults")
 MEM_DIR = os.path.join(TEMPLATES_ROOT, "memory")
-COORD = os.path.join(TEMPLATES_ROOT, "coordinator", "coordinator.json")
+COORD_DIR = os.path.join(TEMPLATES_ROOT, "coordinator")
 
 
 def _load(path):
@@ -69,8 +69,8 @@ def dry_run(provider):
         mcp = [s.get("name") for s in m.get("mcp_servers", [])]
         print(f"  - {m['name']}  model={m.get('model')}  tools={len(m.get('tools', []))}  "
               f"mcp={mcp}  skills={len(m.get('skills', []))}  env={m.get('environment')}")
-    if os.path.exists(COORD):
-        c = rl.load_manifest(COORD)
+    for p in _glob(COORD_DIR):
+        c = rl.load_manifest(p)
         print(f"  - {c['name']}  (coordinator; roster={c.get('multiagent_roles', [])})")
     print("\n(no changes made)")
 
@@ -114,14 +114,17 @@ def apply(provider, no_vault, no_memory):
                        "environment": m.get("environment"),
                        "environment_id": env_ids.get(_env_basename_to_name(m.get("environment")))}
         print(f"[agent]  {a['name']}: {'created' if a.get('created') else 'exists'}  v{a['version']}  {a['id']}")
-    if os.path.exists(COORD):
-        c = rl.load_manifest(COORD)
+    # Coordinators are created after the roles they reference (sorted: coordinator.json
+    # before exec-coordinator.json). A roster entry may reference a role OR an already-
+    # created coordinator, resolved against the accumulated state.
+    for p in _glob(COORD_DIR):
+        c = rl.load_manifest(p)
         roster = [{"type": "agent", "id": state[r]["id"], "version": state[r]["version"]}
                   for r in c.get("multiagent_roles", []) if r in state]
         a = provider.ensure_agent(c, multiagent=roster or None)
-        state["coordinator"] = {"id": a["id"], "version": a["version"],
-                                "environment": c.get("environment"),
-                                "environment_id": env_ids.get(_env_basename_to_name(c.get("environment")))}
+        state[c["role"]] = {"id": a["id"], "version": a["version"],
+                            "environment": c.get("environment"),
+                            "environment_id": env_ids.get(_env_basename_to_name(c.get("environment")))}
         print(f"[agent]  {a['name']}: {'created' if a.get('created') else 'exists'}  v{a['version']}  {a['id']}")
     _write("agent-ids.json", state)
 
