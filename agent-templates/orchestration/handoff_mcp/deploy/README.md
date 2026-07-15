@@ -26,7 +26,7 @@ the gate). **Prod is GitOps — never `kubectl apply` by hand; land everything v
    (Synced by the existing `fuzeinfra-sealed-secrets` Argo app.)
 
 3. **Populate the id-state** and **flip the gate** — in the SAME PR as the sealed secret:
-   - download the `managed-agents-state` artifact from the latest **Provision Managed Agents** run (or run `providers/provision.py` locally) → commit its `*.json` into `helm/fuzeinfra/files/handoff-state/`.
+   - download the `managed-agents-state-anthropic` artifact from the latest **Provision Managed Agents** / **Sync Managed Agents on merge** run (or run `providers/provision.py` locally) → commit its `*.json` into `helm/fuzeinfra/files/handoff-state/`.
    - set `handoffMcp.enabled: true` in `helm/fuzeinfra/values-contabo.yaml`.
    - **verify GHCR visibility**: make `ghcr.io/izzywdev/fuzeinfra/agent-handoff` public, or set `handoffMcp.imagePullSecrets` + add a ghcr pull secret to `fuzeinfra` (see `argocd/cluster-config/ghcr-pull-secret-*.yaml`).
    Merge → Argo syncs the Deployment/Service/Ingress/ConfigMap.
