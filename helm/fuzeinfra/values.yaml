@@ -527,3 +527,21 @@ clusterAutoscaler:
     maxSize: 2
     grpcListen: ":8086"
     userDataTemplateB64: ""
+
+# -----------------------------------------------------------------------------
+# Handoff MCP server — agent-to-agent orchestration carrier for the FuzeOne
+# Managed-Agents fleet (agent-templates/orchestration/handoff_mcp).
+# OFF by default. Enable per-overlay in the SAME change that lands the sealed
+# secret deploy/sealed-secrets/handoff-mcp-secret.yaml (ANTHROPIC_API_KEY +
+# HANDOFF_MCP_TOKEN) and populates helm/fuzeinfra/files/handoff-state/*.json.
+# Exposed at mcp-handoff.<domain> (Ingress here + CF Access bypass in Terraform).
+# -----------------------------------------------------------------------------
+handoffMcp:
+  enabled: false
+  image: ghcr.io/izzywdev/fuzeinfra/agent-handoff
+  tag: latest
+  replicas: 1
+  imagePullSecrets: []
+  resources:
+    requests: { cpu: "100m", memory: "256Mi" }
+    limits:   { cpu: "500m", memory: "512Mi" }
