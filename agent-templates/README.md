@@ -58,6 +58,7 @@ template × the FuzeFront env (+ its vault/skills), assembled at `create_session
 | devops | **`selfhosted-devops`** | real kubeconfig + PAT on our worker; reaches private k3s | `bash` **`always_ask`**; guard shims block `kubectl delete\|patch\|edit`, `helm uninstall\|rollback`, `terraform apply\|destroy`; prod-sanity system prompt |
 | openapi-maintainer | `cloud-openapi-maintainer` | github MCP; spectral/redocly/openapi-typescript/prism | designs+freezes the contract; refreshes live Swagger on merge |
 | mcp-engineer | `cloud-mcp-engineer` | github MCP; MCP SDK + inspector | keeps stdio + remote SSE MCP server current; **triggered on merge to main** |
+| mobile-engineer | `cloud-mobile-engineer` | github MCP; playwright + lighthouse + workbox + capacitor | verifies responsive/mobile UI + mobile delivery (PWA/RN/Flutter) vs `mobile.requirements.yaml`; **triggered on merge to main** |
 
 ### Executive + persona tiers
 
