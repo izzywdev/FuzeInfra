@@ -48,6 +48,18 @@ python providers/provision.py --provider anthropic             # create/update l
 `provision` creates environments + agents (+ vaults + memory) idempotently and writes the id
 state (`environment-ids/agent-ids/vault-ids/memory-ids.json`) under the state dir.
 
+## Auto-sync on merge
+
+Agent-definition changes reconcile into their **deployed** counterparts automatically.
+`.github/workflows/provision-sync.yml` triggers on every merge to `main` that touches a
+definition (`roles/`, `environments/`, `vaults/`, `memory/`, `coordinator/`, `providers/`,
+`sync/`, or the personas in `.claude/agents/`) and calls the reusable `provision.yml` **per
+provider** (matrix — currently `[anthropic]`; add `openai`/`hermes` when implemented). Because
+`provision.py` only updates an agent/environment when its config actually changed, unchanged
+definitions are no-ops and changed ones get a new version. Editing a persona `.md` re-syncs the
+agent's `system`; editing a `role.json` re-syncs its tools/policies/mcp/env; a new role is
+created. (Removed roles are **not** pruned — archiving an orphaned agent is a separate step.)
+
 ## Not yet routed
 
 The handoff MCP server (`orchestration/handoff_mcp/server.py`) still calls the Anthropic
