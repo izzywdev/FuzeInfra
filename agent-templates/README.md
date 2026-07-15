@@ -71,6 +71,20 @@ Beyond the engineer roles:
 
 The handoff MCP server exposes **`reach_human(human, message, reply_to_session_id, channels)`** — spawns that human's digital persona (their vault) to get a real decision and relay it back. This is how an `always_ask`/human-needed pause is fulfilled asynchronously across a person's real channels instead of stalling. Per-human vault template: `vaults/examples/persona.json` → copy to `vaults/persona-<human>.json` and provision.
 
+### Product + go-to-market tiers
+
+Beyond engineering + executives, the org roles (reached by the executive coordinator via the handoff MCP — each in its own environment):
+
+| Role | Env | What it does |
+|---|---|---|
+| **product-manager** | `cloud-product` | Defines **what** to build + why: prioritized requirements, specs, acceptance criteria, roadmap; owns backlog *content* (feeds ux-designer / openapi-maintainer / the SDLC coordinator). Distinct from `agile-manager` (sprint cadence). |
+| **ux-designer** | `cloud-product` | UX + interface **design** — research, IA, flows, wireframes, interaction + visual design in **Figma**, a11y — and hands design-system-aligned specs to `frontend-engineer`. **Design, not implementation** (very different from frontend-engineer). |
+| **sales-rep** | `cloud-gtm` | Pipeline/CRM, account research, call prep, outreach + proposal **drafts**. Drafts/proposes; the human sends/signs. Never commits pricing/contracts or moves money (outbound `always_ask`). |
+| **marketing** | `cloud-gtm` | Content, campaigns, SEO, brand, performance reporting. Drafts/plans; publishing public content or list sends is `always_ask` (human-approved). |
+| **support-rep** | `cloud-gtm` | Ticket triage, KB-grounded response **drafts**, KB upkeep, correct escalation (bugs→engineering, security→CISO, billing→CFO). Sending a customer reply is `always_ask`; never commits refunds/SLAs/roadmap. |
+
+All outbound/customer-facing tools are `always_ask` and route to a human via `reach_human`. Extra MCP URLs these reference: `FIGMA_MCP_URL` (ux), `CRM_MCP_URL` + `CALENDAR_MCP_URL` (sales), `SUPPORT_MCP_URL` (support), plus the shared `SLACK_MCP_URL` / `GMAIL_MCP_URL` / `ATLASSIAN_MCP_URL`.
+
 ### Two-tier coordinators
 
 - **SDLC coordinator** (`coordinator/coordinator.json`) routes engineering work via the **handoff MCP** (`ask_agent`/`spawn_agent`) so each role runs in its **own** environment (cloud-* or the devops self-hosted worker) — not as in-session sub-agents, which would share one environment and lose each role's access.

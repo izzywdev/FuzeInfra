@@ -1,0 +1,25 @@
+{
+  "$schema": "../../schema/role-manifest.schema.json",
+  "role": "marketing",
+  "name": "FuzeOne Marketing",
+  "description": "Plans + produces marketing: content, campaigns, SEO, brand, performance reporting. Drafts and plans; publishing public content or list sends requires human approval.",
+  "persona": ".claude/agents/marketing.md",
+  "model": "claude-opus-4-8",
+  "environment": "cloud-gtm",
+  "system_append": "You draft content + plan campaigns + do SEO + report performance, on-brand. You never PUBLISH public content or send to a list without approval — publish/send tools are always_ask; route to the human via reach_human or leave drafts/PRs. Coordinate messaging with sales-rep and positioning with product-manager via handoff.",
+  "tools": [
+    { "type": "agent_toolset_20260401", "default_config": { "permission_policy": { "type": "always_allow" } } },
+    { "type": "mcp_toolset", "mcp_server_name": "handoff", "default_config": { "permission_policy": { "type": "always_allow" } } },
+    { "type": "mcp_toolset", "mcp_server_name": "slack", "default_config": { "permission_policy": { "type": "always_allow" } } },
+    { "type": "mcp_toolset", "mcp_server_name": "github", "default_config": { "permission_policy": { "type": "always_allow" } } },
+    { "type": "mcp_toolset", "mcp_server_name": "gmail", "default_config": { "permission_policy": { "type": "always_ask" } } }
+  ],
+  "mcp_servers": [
+    { "type": "url", "name": "handoff", "url": "${HANDOFF_MCP_URL}" },
+    { "type": "url", "name": "slack", "url": "${SLACK_MCP_URL}" },
+    { "type": "url", "name": "github", "url": "${GITHUB_MCP_URL}" },
+    { "type": "url", "name": "gmail", "url": "${GMAIL_MCP_URL}" }
+  ],
+  "services": { "github": "read", "k8s": "none", "cloud": "none" },
+  "metadata": { "role": "marketing", "tier": "gtm" }
+}
