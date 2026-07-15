@@ -54,11 +54,18 @@ Agent-definition changes reconcile into their **deployed** counterparts automati
 `.github/workflows/provision-sync.yml` triggers on every merge to `main` that touches a
 definition (`roles/`, `environments/`, `vaults/`, `memory/`, `coordinator/`, `providers/`,
 `sync/`, or the personas in `.claude/agents/`) and calls the reusable `provision.yml` **per
-provider** (matrix — currently `[anthropic]`; add `openai`/`hermes` when implemented). Because
-`provision.py` only updates an agent/environment when its config actually changed, unchanged
-definitions are no-ops and changed ones get a new version. Editing a persona `.md` re-syncs the
-agent's `system`; editing a `role.json` re-syncs its tools/policies/mcp/env; a new role is
-created. (Removed roles are **not** pruned — archiving an orphaned agent is a separate step.)
+provider** (matrix — currently `[anthropic]`; add `openai`/`hermes` when implemented). It
+reconciles **all four resource kinds** — not just create-if-missing:
+
+| Resource | On a definition change |
+|---|---|
+| **`/v1/agents`** | new **version** (`POST /v1/agents/{id}`) when model/system/tools/mcp/skills/multiagent differ — editing a persona `.md` re-syncs the `system`; editing a `role.json` re-syncs tools/policies/mcp; a new role is created |
+| **environments** | not versioned + no update endpoint → **archive + recreate** on real config drift (packages/networking), detected by a subset compare that ignores API-added defaults + list order (no churn on no-op syncs); the new id is written back to state |
+| **vault credentials** | **rotate** the secret (`POST …/credentials/{id}`) — values are write-only so the current secret is always re-pushed; a new key is created; immutable keys (mcp_server_url) need archive+recreate |
+| **memory** | seed **content updated** when it changed (content is readable); new paths seeded |
+
+Idempotent: a no-op sync makes no changes. **Removed** roles are **not** pruned — archiving an
+orphaned agent/env/credential is a separate, deliberate step.
 
 ## Not yet routed
 
