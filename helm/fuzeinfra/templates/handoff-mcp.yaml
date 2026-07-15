@@ -1,0 +1,124 @@
+{{- if .Values.handoffMcp.enabled }}
+{{- $root := . -}}
+{{- $stateFiles := .Files.Glob "files/handoff-state/*.json" -}}
+{{- $stateBlob := "" -}}
+{{- range $path, $_ := $stateFiles }}{{ $stateBlob = printf "%s%s" $stateBlob ($root.Files.Get $path) }}{{- end -}}
+{{- /*
+  Handoff MCP server — the agent-to-agent orchestration carrier for the FuzeOne
+  Managed-Agents fleet (agent-templates/orchestration/handoff_mcp). It creates
+  Managed-Agents sessions with our ANTHROPIC_API_KEY, so it is bearer-gated
+  (HANDOFF_MCP_TOKEN) and exposed to Anthropic's cloud at mcp-handoff.<domain>
+  through the Cloudflare tunnel, with a more-specific CF Access "bypass" app in
+  front so the app bearer (not email-OTP) is the gate. GitOps-only: enable via
+  values in the SAME change that lands deploy/sealed-secrets/handoff-mcp-secret.yaml.
+*/ -}}
+---
+# Non-secret id state (agent/env/vault/memory ids) the server reads at /state.
+# Populated under files/handoff-state/*.json by the provisioning job; NOT secrets.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: handoff-state
+  labels:
+    {{- include "fuzeinfra.labels" . | nindent 4 }}
+{{- if $stateFiles }}
+data:
+{{- range $path, $_ := $stateFiles }}
+  {{ base $path }}: |-
+{{ $root.Files.Get $path | indent 4 }}
+{{- end }}
+{{- else }}
+data: {}
+{{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: handoff-mcp
+  labels:
+    {{- include "fuzeinfra.labels" . | nindent 4 }}
+spec:
+  selector:
+    {{- include "fuzeinfra.selectorLabels" (dict "component" "handoff-mcp" "root" $) | nindent 4 }}
+  ports:
+    - name: http
+      port: 8000
+      targetPort: 8000
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: handoff-mcp
+  labels:
+    {{- include "fuzeinfra.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.handoffMcp.replicas | default 1 }}
+  selector:
+    matchLabels:
+      {{- include "fuzeinfra.selectorLabels" (dict "component" "handoff-mcp" "root" $) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "fuzeinfra.selectorLabels" (dict "component" "handoff-mcp" "root" $) | nindent 8 }}
+      annotations:
+        # roll the pod when the mounted id-state changes (selfHeal syncs the ConfigMap
+        # but will not restart the Deployment on its own).
+        checksum/handoff-state: {{ $stateBlob | sha256sum }}
+    spec:
+      {{- with .Values.handoffMcp.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: handoff-mcp
+          image: "{{ .Values.handoffMcp.image }}:{{ .Values.handoffMcp.tag }}"
+          imagePullPolicy: {{ .Values.global.imagePullPolicy | default "IfNotPresent" }}
+          ports:
+            - containerPort: 8000
+          env:
+            - name: ANTHROPIC_API_KEY
+              valueFrom: { secretKeyRef: { name: handoff-mcp-secret, key: ANTHROPIC_API_KEY } }
+            - name: HANDOFF_MCP_TOKEN
+              valueFrom: { secretKeyRef: { name: handoff-mcp-secret, key: HANDOFF_MCP_TOKEN } }
+            - name: FUZE_STATE_DIR
+              value: /state
+          volumeMounts:
+            - name: state
+              mountPath: /state
+              readOnly: true
+          readinessProbe:
+            # TCP, not HTTP: a bare GET /mcp without the bearer returns 401.
+            tcpSocket: { port: 8000 }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            {{- toYaml (.Values.handoffMcp.resources | default dict) | nindent 12 }}
+      volumes:
+        - name: state
+          configMap:
+            name: handoff-state
+{{- if .Values.ingress.enabled }}
+---
+# Traefik-only ingress (tunnel routes *.prod → Traefik → here). No TLS block: CF
+# terminates edge TLS; Traefik serves HTTP. Path / covers /mcp.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: fuzeinfra-handoff-mcp
+  labels:
+    {{- include "fuzeinfra.labels" . | nindent 4 }}
+spec:
+  ingressClassName: {{ .Values.ingress.className }}
+  rules:
+    - host: {{ include "fuzeinfra.host" (dict "root" $root "sub" "mcp-handoff") }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: handoff-mcp
+                port:
+                  number: 8000
+{{- end }}
+{{- end }}

@@ -534,6 +534,34 @@ resource "cloudflare_zero_trust_access_policy" "crit_alert_bridge_bypass" {
   }
 }
 
+# CF Access bypass — handoff MCP is a MACHINE endpoint: Anthropic Managed Agents
+# connect server-to-server (no browser), so the wildcard *.prod.fuzefront.com
+# email-OTP app would block them. This more-specific host app takes precedence and
+# bypasses OTP; the handoff MCP server enforces its own bearer (HANDOFF_MCP_TOKEN),
+# which agents present via a vault credential keyed to the URL. Gated off by default.
+resource "cloudflare_zero_trust_access_application" "handoff_mcp" {
+  count                = local.cloudflare_enabled && var.handoff_mcp_access_enabled ? 1 : 0
+  account_id           = var.cloudflare_account_id
+  name                 = "Handoff MCP (agent-to-agent, bearer-gated)"
+  domain               = "mcp-handoff.${local.prod_domain}"
+  type                 = "self_hosted"
+  session_duration     = "0s"
+  app_launcher_visible = false
+}
+
+resource "cloudflare_zero_trust_access_policy" "handoff_mcp_bypass" {
+  count          = local.cloudflare_enabled && var.handoff_mcp_access_enabled ? 1 : 0
+  account_id     = var.cloudflare_account_id
+  application_id = cloudflare_zero_trust_access_application.handoff_mcp[0].id
+  name           = "Bypass — handoff MCP (app enforces HANDOFF_MCP_TOKEN bearer)"
+  precedence     = 1
+  decision       = "bypass"
+
+  include {
+    everyone = true
+  }
+}
+
 # ---------------------------------------------------------------------------
 # fuzeinfra-tunnel-secrets — Terraform-owned Secret (ArgoCD never touches it)
 #

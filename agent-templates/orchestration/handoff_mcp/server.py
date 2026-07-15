@@ -239,6 +239,34 @@ def reach_human(human: str, message: str, reply_to_session_id: str = "", channel
                        "reply": res["text"], "pending": res["pending"]})
 
 
+def build_app():
+    """Streamable-HTTP MCP app, gated by a bearer token when HANDOFF_MCP_TOKEN is set.
+
+    This server creates sessions with our ANTHROPIC_API_KEY, so it must not be open.
+    Managed Agents connect server-to-server and present the token as a vault-injected
+    `Authorization: Bearer` credential (keyed to the handoff MCP url). In prod the
+    Cloudflare Access email-OTP wildcard is bypassed for this hostname (a more-specific
+    Access app), so this app-level bearer is the gate.
+    """
+    from starlette.responses import JSONResponse
+    app = mcp.streamable_http_app()
+    token = os.environ.get("HANDOFF_MCP_TOKEN")
+    if token:
+        expected = f"Bearer {token}"
+
+        @app.middleware("http")
+        async def _require_bearer(request, call_next):  # noqa: ANN001
+            if request.headers.get("authorization") != expected:
+                return JSONResponse({"error": "unauthorized"}, status_code=401)
+            return await call_next(request)
+    else:
+        import sys as _sys
+        print("WARNING: HANDOFF_MCP_TOKEN not set — the handoff MCP is UNAUTHENTICATED.", file=_sys.stderr)
+    return app
+
+
 if __name__ == "__main__":
-    # Managed Agents connects to remote MCP servers over streamable HTTP.
-    mcp.run(transport="streamable-http")
+    # Managed Agents connect to remote MCP servers over streamable HTTP.
+    import uvicorn
+    uvicorn.run(build_app(), host=os.environ.get("HOST", "0.0.0.0"),
+                port=int(os.environ.get("PORT", "8000")))

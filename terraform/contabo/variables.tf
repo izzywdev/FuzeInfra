@@ -173,6 +173,12 @@ variable "crit_bridge_token" {
   sensitive   = true
 }
 
+variable "handoff_mcp_access_enabled" {
+  description = "Create the more-specific CF Access 'bypass' app for mcp-handoff.<domain> so Anthropic Managed Agents (machine, non-interactive) skip the *.prod email-OTP wildcard; the handoff MCP server enforces its own HANDOFF_MCP_TOKEN bearer. Flip to true when the handoff MCP is deployed."
+  type        = bool
+  default     = false
+}
+
 # ---------------------------------------------------------------------------
 # Baseline worker pool (terraform/contabo/baseline.tf)
 #

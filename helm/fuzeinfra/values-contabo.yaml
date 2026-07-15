@@ -129,6 +129,20 @@ cloudflareTunnel:
   # (tunnelId would switch to local-config mode requiring CLOUDFLARE_TUNNEL_CREDENTIALS JSON
   # which we don't provision — omitting it keeps the simpler token-based connection.)
 
+# Handoff MCP server — exposed at mcp-handoff.prod.fuzefront.com through the CF tunnel
+# (Ingress in helm/fuzeinfra/templates/handoff-mcp.yaml) with a more-specific CF Access
+# "bypass" app (terraform/contabo/cloudflare.tf, var handoff_mcp_access_enabled) so
+# Anthropic's machine calls skip the *.prod email-OTP wildcard and the app bearer
+# (HANDOFF_MCP_TOKEN) is the gate.
+#
+# GITOPS GATE: keep enabled:false until BOTH land in the SAME change —
+#   1. deploy/sealed-secrets/handoff-mcp-secret.yaml (ANTHROPIC_API_KEY + HANDOFF_MCP_TOKEN),
+#      sealed via scripts/seal-secret.sh, and
+#   2. helm/fuzeinfra/files/handoff-state/*.json (the provisioned ids).
+# Enabling before the secret exists CrashLoops the pod (CreateContainerConfigError).
+handoffMcp:
+  enabled: false
+
 # dnsmasq not needed on a remote server (use real DNS / nip.io)
 dnsmasq:
   enabled: false

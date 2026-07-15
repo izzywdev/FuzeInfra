@@ -58,6 +58,7 @@ jobs:
           GITHUB_MCP_URL: ${{ secrets.GH_MCP_URL }}
           GITHUB_MCP_TOKEN: ${{ secrets.GH_MCP_TOKEN }}
           HANDOFF_MCP_URL: ${{ secrets.HANDOFF_MCP_URL }}
+          HANDOFF_MCP_TOKEN: ${{ secrets.HANDOFF_MCP_TOKEN }}
           ATLASSIAN_MCP_URL: ${{ secrets.ATLASSIAN_MCP_URL }}
           SLACK_MCP_URL: ${{ secrets.SLACK_MCP_URL }}
           STRIPE_MCP_URL: ${{ secrets.STRIPE_MCP_URL }}
