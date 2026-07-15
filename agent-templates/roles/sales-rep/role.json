@@ -1,0 +1,27 @@
+{
+  "$schema": "../../schema/role-manifest.schema.json",
+  "role": "sales-rep",
+  "name": "FuzeOne Sales Rep",
+  "description": "Runs the sales motion: pipeline/CRM hygiene, account research, call prep, outreach + proposal drafting, scheduling. Drafts and proposes; the human sends/signs. Never commits pricing/contracts or moves money.",
+  "persona": ".claude/agents/sales-rep.md",
+  "model": "claude-opus-4-8",
+  "environment": "cloud-gtm",
+  "system_append": "You research accounts, prep calls, keep the CRM honest, and DRAFT outreach/proposals — you never SEND external outreach or commit pricing/contracts/money. Outbound (email/CRM sends) is always_ask; route sends to the human via reach_human or leave drafts. Escalate pricing/billing to cfo and product commitments to product-manager via handoff.",
+  "tools": [
+    { "type": "agent_toolset_20260401", "default_config": { "permission_policy": { "type": "always_allow" } } },
+    { "type": "mcp_toolset", "mcp_server_name": "handoff", "default_config": { "permission_policy": { "type": "always_allow" } } },
+    { "type": "mcp_toolset", "mcp_server_name": "slack", "default_config": { "permission_policy": { "type": "always_allow" } } },
+    { "type": "mcp_toolset", "mcp_server_name": "calendar", "default_config": { "permission_policy": { "type": "always_allow" } } },
+    { "type": "mcp_toolset", "mcp_server_name": "gmail", "default_config": { "permission_policy": { "type": "always_ask" } } },
+    { "type": "mcp_toolset", "mcp_server_name": "crm", "default_config": { "permission_policy": { "type": "always_ask" } } }
+  ],
+  "mcp_servers": [
+    { "type": "url", "name": "handoff", "url": "${HANDOFF_MCP_URL}" },
+    { "type": "url", "name": "slack", "url": "${SLACK_MCP_URL}" },
+    { "type": "url", "name": "calendar", "url": "${CALENDAR_MCP_URL}" },
+    { "type": "url", "name": "gmail", "url": "${GMAIL_MCP_URL}" },
+    { "type": "url", "name": "crm", "url": "${CRM_MCP_URL}" }
+  ],
+  "services": { "github": "none", "k8s": "none", "cloud": "none" },
+  "metadata": { "role": "sales-rep", "tier": "gtm" }
+}

@@ -1,0 +1,25 @@
+{
+  "$schema": "../../schema/role-manifest.schema.json",
+  "role": "support-rep",
+  "name": "FuzeOne Support Rep",
+  "description": "Handles the support queue: triage tickets, draft KB-grounded responses, maintain the knowledge base, and escalate correctly (bugs to engineering, security to CISO, billing to CFO). Drafts and proposes; sending a customer reply needs approval; never commits refunds/SLAs/roadmap.",
+  "persona": ".claude/agents/support-rep.md",
+  "model": "claude-opus-4-8",
+  "environment": "cloud-gtm",
+  "system_append": "You triage tickets, DRAFT KB-grounded replies (cite sources; never invent answers), maintain the KB, and ESCALATE via handoff: bugs -> SDLC coordinator; security -> ciso/security; billing/refunds -> cfo; feature requests -> product-manager. Sending an external customer reply is always_ask — route to the human via reach_human unless a reply class is explicitly auto-approved. Never commit refunds, credits, SLAs, or roadmap.",
+  "tools": [
+    { "type": "agent_toolset_20260401", "default_config": { "permission_policy": { "type": "always_allow" } } },
+    { "type": "mcp_toolset", "mcp_server_name": "handoff", "default_config": { "permission_policy": { "type": "always_allow" } } },
+    { "type": "mcp_toolset", "mcp_server_name": "slack", "default_config": { "permission_policy": { "type": "always_allow" } } },
+    { "type": "mcp_toolset", "mcp_server_name": "support", "default_config": { "permission_policy": { "type": "always_ask" } } },
+    { "type": "mcp_toolset", "mcp_server_name": "gmail", "default_config": { "permission_policy": { "type": "always_ask" } } }
+  ],
+  "mcp_servers": [
+    { "type": "url", "name": "handoff", "url": "${HANDOFF_MCP_URL}" },
+    { "type": "url", "name": "slack", "url": "${SLACK_MCP_URL}" },
+    { "type": "url", "name": "support", "url": "${SUPPORT_MCP_URL}" },
+    { "type": "url", "name": "gmail", "url": "${GMAIL_MCP_URL}" }
+  ],
+  "services": { "github": "none", "k8s": "none", "cloud": "none" },
+  "metadata": { "role": "support-rep", "tier": "gtm" }
+}

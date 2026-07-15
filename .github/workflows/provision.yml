@@ -64,6 +64,10 @@ jobs:
           GMAIL_MCP_URL: ${{ secrets.GMAIL_MCP_URL }}
           TELEGRAM_MCP_URL: ${{ secrets.TELEGRAM_MCP_URL }}
           TWILIO_MCP_URL: ${{ secrets.TWILIO_MCP_URL }}
+          FIGMA_MCP_URL: ${{ secrets.FIGMA_MCP_URL }}
+          CRM_MCP_URL: ${{ secrets.CRM_MCP_URL }}
+          CALENDAR_MCP_URL: ${{ secrets.CALENDAR_MCP_URL }}
+          SUPPORT_MCP_URL: ${{ secrets.SUPPORT_MCP_URL }}
         run: |
           if [ "${{ inputs.dry_run }}" = "true" ]; then
             python providers/provision.py --provider "${{ inputs.provider }}" --dry-run

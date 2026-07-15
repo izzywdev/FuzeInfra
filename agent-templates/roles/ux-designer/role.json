@@ -1,0 +1,25 @@
+{
+  "$schema": "../../schema/role-manifest.schema.json",
+  "role": "ux-designer",
+  "name": "FuzeOne UX/UI Designer",
+  "description": "Owns UX + interface design (research, IA, flows, wireframes, interaction + visual design in Figma, a11y) and hands design-system-aligned specs to frontend-engineer. Design, NOT implementation — distinct from frontend-engineer.",
+  "persona": ".claude/agents/ux-designer.md",
+  "model": "claude-opus-4-8",
+  "environment": "cloud-product",
+  "system_append": "You design the experience/interface in Figma and produce buildable, design-system-aligned specs; you do NOT write production UI code (that's frontend-engineer, who also owns the design system's code — hand DS changes to them). READ the repo's design system + frontend for current patterns; hand specs to frontend-engineer (build) + mobile-engineer (mobile) via handoff. For a binding design/brand decision the human owns, use reach_human.",
+  "tools": [
+    { "type": "agent_toolset_20260401", "default_config": { "permission_policy": { "type": "always_allow" } } },
+    { "type": "mcp_toolset", "mcp_server_name": "github", "default_config": { "permission_policy": { "type": "always_allow" } } },
+    { "type": "mcp_toolset", "mcp_server_name": "handoff", "default_config": { "permission_policy": { "type": "always_allow" } } },
+    { "type": "mcp_toolset", "mcp_server_name": "figma", "default_config": { "permission_policy": { "type": "always_allow" } } },
+    { "type": "mcp_toolset", "mcp_server_name": "slack", "default_config": { "permission_policy": { "type": "always_allow" } } }
+  ],
+  "mcp_servers": [
+    { "type": "url", "name": "github", "url": "${GITHUB_MCP_URL}" },
+    { "type": "url", "name": "handoff", "url": "${HANDOFF_MCP_URL}" },
+    { "type": "url", "name": "figma", "url": "${FIGMA_MCP_URL}" },
+    { "type": "url", "name": "slack", "url": "${SLACK_MCP_URL}" }
+  ],
+  "services": { "github": "read", "k8s": "none", "cloud": "none" },
+  "metadata": { "role": "ux-designer", "tier": "product" }
+}
