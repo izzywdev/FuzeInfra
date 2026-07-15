@@ -1,4 +1,4 @@
-name: Agent — refresh MCP + Swagger on merge
+name: Agent — refresh MCP + Swagger + mobile on merge
 
 # When a PR merges to main, have the mcp-engineer check/update the stdio + remote
 # SSE MCP server, and the openapi-maintainer refresh the live Swagger — if the merged
@@ -69,7 +69,7 @@ jobs:
         run: |
           set -euo pipefail
           python providers/provision.py --provider anthropic
-          for role in openapi-maintainer mcp-engineer; do
+          for role in openapi-maintainer mcp-engineer mobile-engineer; do
             python sync/launch_session.py --role "$role" --auto allow \
               --prompt "PR #${PR} just merged to main. If it changes your surface, update it and open a PR; otherwise report no change. Do NOT touch prod directly — open PRs only."
           done

@@ -1,0 +1,31 @@
+# Mobile requirements contract — TEMPLATE.
+# Copy to a UI package's root as `mobile.requirements.yaml`, or inline the same
+# fields as a `mobile:` block in package.json / service.json / .fuze/manifest.json.
+# Schema: agent-templates/schema/mobile-requirements.schema.json
+# The mobile-engineer reads this on merge to verify mobile readiness + delivery.
+
+# yaml-language-server: $schema=../schema/mobile-requirements.schema.json
+product: fuzefront-shell
+
+# Is a mobile experience in scope for this package?
+required: true
+
+# How mobile is delivered: responsive-web | pwa | react-native | flutter
+strategy: pwa
+
+# Platforms that must be covered.
+targets: [mobile-web, ios, android]
+
+responsive:
+  min_width: 375           # must render with no horizontal scroll down to this width
+  breakpoints: [375, 768, 1024]
+  min_tap_target_px: 44
+
+acceptance:
+  - "No horizontal scroll at 375px on every route"
+  - "Primary nav collapses to a mobile menu below 768px"
+  - { check: "Lighthouse mobile performance", min_score: 80, at_width: 375 }
+  - { check: "Lighthouse mobile accessibility", min_score: 90 }
+  - "PWA installable: valid manifest + service worker + offline shell"
+
+owner: frontend
