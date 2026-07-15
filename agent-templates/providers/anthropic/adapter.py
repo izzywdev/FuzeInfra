@@ -89,8 +89,12 @@ class AnthropicProvider(AgentProvider):
         for cred in tmpl.get("credentials", []):
             auth = cred["auth"]
             key = auth.get("mcp_server_url") or auth.get("secret_name")
+            # Skip a credential whose secret isn't actually provided: an unresolved ${VAR}
+            # (env unset -> literal "${...}") OR an empty/whitespace value (env set to "").
             if not key or "${" in json.dumps(auth):
-                continue  # unresolved ${VAR} — the env var isn't set; skip rather than store a bad cred
+                continue
+            if "token" in auth and not str(auth.get("token") or "").strip():
+                continue
             if key in have:
                 continue
             common.request("POST", f"/v1/vaults/{vid}/credentials",
