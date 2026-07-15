@@ -43,18 +43,47 @@ def _agent_changed(current, desired):
     return False
 
 
+def _cred_key(auth):
+    return (auth or {}).get("mcp_server_url") or (auth or {}).get("secret_name")
+
+
+def _subset(desired, live):
+    """True if `desired` config is contained in `live` — extra live fields (API-added
+    defaults) are ignored; lists compared order-independently. Used for environment
+    drift detection so only a REAL config change triggers a recreate (envs aren't
+    versioned and have no update endpoint)."""
+    if isinstance(desired, dict):
+        return isinstance(live, dict) and all(k in live and _subset(v, live[k]) for k, v in desired.items())
+    if isinstance(desired, list):
+        if not isinstance(live, list):
+            return False
+        canon = lambda xs: sorted(json.dumps(x, sort_keys=True) for x in xs)
+        return canon(desired) == canon(live)
+    return desired == live
+
+
 class AnthropicProvider(AgentProvider):
     name = "anthropic"
     capabilities = {"self_hosted": True, "vaults": True, "memory": True, "multiagent": True}
 
     # ---- provisioning -------------------------------------------------------
     def ensure_environment(self, manifest):
-        existing = {e["name"]: e["id"] for e in common.list_all("/v1/environments")}
         name = manifest["name"]
-        if name in existing:
-            return {"name": name, "id": existing[name], "created": False}
-        created = common.request("POST", "/v1/environments",
-                                 body={"name": name, "config": manifest["config"]})
+        desired = manifest["config"]
+        live = next((e for e in common.list_all("/v1/environments") if e.get("name") == name), None)
+        if live:
+            cfg = live.get("config") or common.request("GET", f"/v1/environments/{live['id']}").get("config", {})
+            if _subset(desired, cfg):
+                return {"name": name, "id": live["id"], "created": False}
+            # Config drifted. Environments are NOT versioned and have no update endpoint,
+            # so archive the old (session-safe: running sessions continue) and recreate.
+            try:
+                common.request("POST", f"/v1/environments/{live['id']}/archive")
+            except SystemExit:
+                pass
+            created = common.request("POST", "/v1/environments", body={"name": name, "config": desired})
+            return {"name": name, "id": created["id"], "created": True, "recreated": True}
+        created = common.request("POST", "/v1/environments", body={"name": name, "config": desired})
         return {"name": name, "id": created["id"], "created": True}
 
     def ensure_agent(self, manifest, multiagent=None):
@@ -84,11 +113,11 @@ class AnthropicProvider(AgentProvider):
             if tmpl.get("metadata"):
                 body["metadata"] = tmpl["metadata"]
             vid = common.request("POST", "/v1/vaults", body=body)["id"]
-        have = {(c.get("auth") or {}).get("mcp_server_url") or (c.get("auth") or {}).get("secret_name")
-                for c in common.list_all(f"/v1/vaults/{vid}/credentials")}
+        have = {_cred_key(c.get("auth")): c for c in common.list_all(f"/v1/vaults/{vid}/credentials")
+                if _cred_key(c.get("auth"))}
         for cred in tmpl.get("credentials", []):
             auth = cred["auth"]
-            key = auth.get("mcp_server_url") or auth.get("secret_name")
+            key = _cred_key(auth)
             # Skip a credential whose secret isn't actually provided: an unresolved ${VAR}
             # (env unset -> literal "${...}") OR an empty/whitespace value (env set to "").
             if not key or "${" in json.dumps(auth):
@@ -96,9 +125,14 @@ class AnthropicProvider(AgentProvider):
             if "token" in auth and not str(auth.get("token") or "").strip():
                 continue
             if key in have:
-                continue
-            common.request("POST", f"/v1/vaults/{vid}/credentials",
-                           body={"display_name": cred["display_name"], "auth": auth})
+                # Rotate: push the current secret (values are write-only, so we can't
+                # compare — always re-set). Structural fields (mcp_server_url/secret_name)
+                # are immutable, so send only the mutable auth fields.
+                upd = {k: v for k, v in auth.items() if k not in ("mcp_server_url", "secret_name")}
+                common.request("POST", f"/v1/vaults/{vid}/credentials/{have[key]['id']}", body={"auth": upd})
+            else:
+                common.request("POST", f"/v1/vaults/{vid}/credentials",
+                               body={"display_name": cred["display_name"], "auth": auth})
         return {"name": name, "id": vid}
 
     def ensure_memory(self, manifest):
@@ -110,13 +144,19 @@ class AnthropicProvider(AgentProvider):
             sid = common.request("POST", "/v1/memory_stores",
                                  body={"name": name, "description": manifest.get("description", "")},
                                  beta=common.MEMORY_BETA)["id"]
-        have = {m["path"] for m in common.list_all(f"/v1/memory_stores/{sid}/memories", beta=common.MEMORY_BETA)
+        have = {m["path"]: m for m in common.list_all(f"/v1/memory_stores/{sid}/memories", beta=common.MEMORY_BETA)
                 if m.get("path")}
         for mem in manifest.get("seed", []):
-            if mem["path"] in have:
-                continue
-            common.request("POST", f"/v1/memory_stores/{sid}/memories",
-                           body={"path": mem["path"], "content": mem["content"]}, beta=common.MEMORY_BETA)
+            cur = have.get(mem["path"])
+            if cur:
+                # Update the seed content if it changed (memory content IS readable).
+                full = common.request("GET", f"/v1/memory_stores/{sid}/memories/{cur['id']}", beta=common.MEMORY_BETA)
+                if full.get("content") != mem["content"]:
+                    common.request("POST", f"/v1/memory_stores/{sid}/memories/{cur['id']}",
+                                   body={"content": mem["content"]}, beta=common.MEMORY_BETA)
+            else:
+                common.request("POST", f"/v1/memory_stores/{sid}/memories",
+                               body={"path": mem["path"], "content": mem["content"]}, beta=common.MEMORY_BETA)
         return {"name": name, "id": sid}
 
     # ---- runtime (thin delegations to the driver) ---------------------------
