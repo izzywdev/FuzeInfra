@@ -71,10 +71,27 @@ def agent_payload(manifest):
     }
     if manifest.get("description"):
         payload["description"] = manifest["description"]
-    if manifest.get("tools"):
-        payload["tools"] = expand_env(manifest["tools"])
-    if manifest.get("mcp_servers"):
-        payload["mcp_servers"] = expand_env(manifest["mcp_servers"])
+
+    # Drop MCP servers whose URL isn't configured (env var unset -> literal "${VAR}",
+    # or set-but-empty -> "") — the API rejects an empty/invalid url. Also drop the
+    # matching mcp_toolset so the agent creates cleanly with only its configured servers;
+    # re-provision after setting the URL to add the server + tool back.
+    servers = expand_env(manifest.get("mcp_servers", []))
+    valid, dropped = [], set()
+    for s in servers:
+        url = s.get("url", "")
+        if url and "${" not in url:
+            valid.append(s)
+        else:
+            dropped.add(s.get("name"))
+    tools = expand_env(manifest.get("tools", []))
+    if dropped:
+        tools = [t for t in tools
+                 if not (t.get("type") == "mcp_toolset" and t.get("mcp_server_name") in dropped)]
+    if tools:
+        payload["tools"] = tools
+    if valid:
+        payload["mcp_servers"] = valid
     if manifest.get("skills"):
         payload["skills"] = manifest["skills"]
     if manifest.get("metadata"):
