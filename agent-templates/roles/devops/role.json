@@ -19,6 +19,11 @@
       "type": "mcp_toolset",
       "mcp_server_name": "github",
       "default_config": { "permission_policy": { "type": "always_ask" } }
+    },
+    {
+      "type": "mcp_toolset",
+      "mcp_server_name": "handoff",
+      "default_config": { "permission_policy": { "type": "always_allow" } }
     }
   ],
   "services": { "github": "write", "k8s": "gitops-safe", "cloud": "write" },
