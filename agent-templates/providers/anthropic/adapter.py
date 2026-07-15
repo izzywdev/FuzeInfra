@@ -60,7 +60,7 @@ class AnthropicProvider(AgentProvider):
     def ensure_agent(self, manifest, multiagent=None):
         payload = rl.agent_payload(manifest)
         if multiagent:
-            payload["multiagent"] = {"agents": multiagent}
+            payload["multiagent"] = {"type": "coordinator", "agents": multiagent}
         existing = {a["name"]: a for a in common.list_all("/v1/agents")}
         name = payload["name"]
         if name in existing:
