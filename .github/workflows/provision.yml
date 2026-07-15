@@ -55,8 +55,8 @@ jobs:
         working-directory: agent-templates
         env:
           ANTHROPIC_API_KEY: ${{ secrets.MANAGED_AGENTS_API_KEY }}
-          GITHUB_MCP_URL: ${{ secrets.GITHUB_MCP_URL }}
-          GITHUB_MCP_TOKEN: ${{ secrets.GITHUB_MCP_TOKEN }}
+          GITHUB_MCP_URL: ${{ secrets.GH_MCP_URL }}
+          GITHUB_MCP_TOKEN: ${{ secrets.GH_MCP_TOKEN }}
           HANDOFF_MCP_URL: ${{ secrets.HANDOFF_MCP_URL }}
           ATLASSIAN_MCP_URL: ${{ secrets.ATLASSIAN_MCP_URL }}
           SLACK_MCP_URL: ${{ secrets.SLACK_MCP_URL }}
