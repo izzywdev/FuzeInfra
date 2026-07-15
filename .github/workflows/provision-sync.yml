@@ -1,0 +1,44 @@
+name: Sync Managed Agents on merge
+
+# Reconcile agent-definition changes into their DEPLOYED counterparts (agents +
+# environments + vaults + memory) on every merge to main that touches a definition,
+# for each provider the fleet is deployed to. Idempotent: providers/provision.py only
+# updates an agent/environment when its config actually changed (a no-op otherwise), so
+# unchanged definitions are left alone and changed ones get a new version.
+#
+# Editing a persona (.claude/agents/*.md) changes the agent `system` -> re-synced.
+# Editing a role.json (tools/policies/mcp/env) -> re-synced. Adding a role -> created.
+# (Removals are NOT pruned here — archiving an orphaned agent is a separate, deliberate
+# step; provisioning only creates/updates.)
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "agent-templates/roles/**"
+      - "agent-templates/environments/**"
+      - "agent-templates/vaults/**"
+      - "agent-templates/memory/**"
+      - "agent-templates/coordinator/**"
+      - "agent-templates/providers/**"
+      - "agent-templates/sync/**"
+      - ".claude/agents/**"
+      - ".github/workflows/provision.yml"
+      - ".github/workflows/provision-sync.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  sync:
+    strategy:
+      fail-fast: false
+      matrix:
+        # Providers the agents are deployed to. Add "openai" / "hermes" once their
+        # providers/<name>/adapter.py is implemented (they are stubs today).
+        provider: [anthropic]
+    uses: ./.github/workflows/provision.yml
+    secrets: inherit
+    with:
+      provider: ${{ matrix.provider }}
+      dry_run: false

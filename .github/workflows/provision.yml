@@ -1,13 +1,19 @@
 name: Provision Managed Agents
 
-# One-click "get all agents ready on Anthropic". Creates/updates every environment +
-# agent (+ vaults, memory) idempotently for the selected provider and uploads the id
-# state (agent-ids/environment-ids/vault-ids/memory-ids.json) as an artifact — that
-# state becomes the `handoff-state` ConfigMap the handoff MCP server mounts.
+# Creates/updates every environment + agent (+ vaults, memory) idempotently for the
+# selected provider and uploads the id state (agent-ids/environment-ids/vault-ids/
+# memory-ids.json) as an artifact — that state becomes the `handoff-state` ConfigMap
+# the handoff MCP server mounts.
 #
-# Requires a **Managed-Agents-entitled** key as the MANAGED_AGENTS_API_KEY secret
-# (a Console API key with the managed-agents beta — NOT a Claude Code token) plus the
-# MCP server URLs / tokens the role manifests reference. Slated to move to FuzeAgent.
+# Two ways in:
+#   - workflow_dispatch: manual "provision everything now" (choose provider / dry-run).
+#   - workflow_call: reusable — provision-sync.yml calls this per provider on merge so
+#     agent-definition changes reconcile into their deployed counterparts automatically.
+#
+# Requires a Managed-Agents-entitled key as MANAGED_AGENTS_API_KEY (a Console API key
+# with the managed-agents beta — NOT a Claude Code token) + the MCP URLs/tokens the role
+# manifests reference. If the key is absent the job SKIPS (does not fail). Slated to
+# move to FuzeAgent.
 
 on:
   workflow_dispatch:
@@ -21,6 +27,14 @@ on:
         description: "Dry run (resolve + print only, no API calls)"
         default: false
         type: boolean
+  workflow_call:
+    inputs:
+      provider:
+        type: string
+        default: "anthropic"
+      dry_run:
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -29,29 +43,36 @@ jobs:
   provision:
     runs-on: ubuntu-latest
     steps:
-      - name: Guard — Managed Agents key present (unless dry-run)
+      - name: Guard — Managed Agents key present
         id: guard
         env:
           MA_KEY: ${{ secrets.MANAGED_AGENTS_API_KEY }}
         run: |
           if [ "${{ inputs.dry_run }}" != "true" ] && [ -z "${MA_KEY}" ]; then
-            echo "::error::MANAGED_AGENTS_API_KEY secret is not set — cannot create agents. Add a Console API key with the managed-agents beta."
-            exit 1
+            echo "::notice::MANAGED_AGENTS_API_KEY not set — skipping provisioning for ${{ inputs.provider }}."
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "ok=true" >> "$GITHUB_OUTPUT"
           fi
 
-      - uses: actions/checkout@v7
+      - if: steps.guard.outputs.ok == 'true'
+        uses: actions/checkout@v7
 
-      - uses: actions/setup-python@v5
+      - if: steps.guard.outputs.ok == 'true'
+        uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
-      - run: pip install --quiet jsonschema requests
+      - if: steps.guard.outputs.ok == 'true'
+        run: pip install --quiet jsonschema requests
 
       - name: Validate manifests
+        if: steps.guard.outputs.ok == 'true'
         working-directory: agent-templates
         run: python sync/validate.py
 
-      - name: Provision
+      - name: Provision (${{ inputs.provider }})
+        if: steps.guard.outputs.ok == 'true'
         working-directory: agent-templates
         env:
           ANTHROPIC_API_KEY: ${{ secrets.MANAGED_AGENTS_API_KEY }}
@@ -77,9 +98,9 @@ jobs:
           fi
 
       - name: Upload id state (for the handoff-state ConfigMap)
-        if: ${{ inputs.dry_run != true }}
+        if: steps.guard.outputs.ok == 'true' && inputs.dry_run != true
         uses: actions/upload-artifact@v4
         with:
-          name: managed-agents-state
+          name: managed-agents-state-${{ inputs.provider }}
           path: agent-templates/sync/.state/*.json
           if-no-files-found: warn
