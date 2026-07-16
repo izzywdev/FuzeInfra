@@ -1,0 +1,23 @@
+name: Governance Sync
+
+# Per-repo caller for the canonical, CI-time governance reconciliation (FuzeSDLC).
+# On every PR it fetches the FuzeSDLC canonical at this repo's baselineRef (via the
+# read-only FUZESDLC_DEPLOY_KEY secret) and reconciles this repo's managed files to it —
+# committing agent/framework drift back to the PR branch, failing on drift the token
+# cannot auto-fix. Keeps NO PR merging against stale policy.
+#
+# Prereqs: FuzeSDLC PR #41 merged (the reusable workflow) + the FUZESDLC_DEPLOY_KEY repo
+# secret set (scripts/setup-fuzesdlc-deploy-key.sh). Absent key -> the reusable workflow
+# SKIPS (never fails the PR), so this can land ahead of the key.
+
+on:
+  pull_request:
+
+permissions:
+  contents: write
+
+jobs:
+  governance-sync:
+    uses: izzywdev/FuzeSDLC/.github/workflows/governance-sync.yml@main
+    secrets:
+      FUZESDLC_DEPLOY_KEY: ${{ secrets.FUZESDLC_DEPLOY_KEY }}

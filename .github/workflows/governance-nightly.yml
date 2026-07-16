@@ -46,9 +46,12 @@ jobs:
             3. OPEN ISSUES — drive each to a concrete next step: close ones demonstrably resolved (with
                evidence), open a PR or delegate small actionable ones via an @claude comment with a STATE
                block, and summarize decision-needing ones for the human.
-            4. DRIFT — compare .claude/agents + CLAUDE.md + the workflow stack against the expectation in
-               .fuze/manifest.json and the FuzeSDLC canonical; open a fix PR for mechanical drift, flag
-               judgment calls.
+            4. DRIFT — compare .claude/agents + CLAUDE.md + the workflow stack AND the managed-agents
+               ROLES framework (agent-templates/{schema,roles/_base,sync,providers} + the `roles` block
+               in .fuze/manifest.json vs the actual agent-templates/roles|environments|coordinator) against
+               the expectation in .fuze/manifest.json and the FuzeSDLC canonical; open a fix PR for
+               mechanical drift, flag judgment calls. (The deterministic governance-sync check is the
+               per-PR gate for the framework files; this nightly is the floor + catches manifest/roster drift.)
 
             Then open or UPDATE a single issue titled "Governance reconciliation — <today's date>"
             (label: governance) with: branch actions, per-PR blocker+next-action, per-issue disposition,
