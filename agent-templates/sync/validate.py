@@ -31,8 +31,10 @@ def main():
     env_schema = _schema("environment.schema.json")
     errors = 0
 
-    for path in sorted(glob.glob(os.path.join(TEMPLATES_ROOT, "roles", "*", "role.json"))) + \
-            [os.path.join(TEMPLATES_ROOT, "coordinator", "coordinator.json")]:
+    # Coordinators are optional (a framework-only repo may ship none) — glob rather
+    # than hardcode a path, so validate.py runs cleanly wherever this template lands.
+    coordinators = sorted(glob.glob(os.path.join(TEMPLATES_ROOT, "coordinator", "*.json")))
+    for path in sorted(glob.glob(os.path.join(TEMPLATES_ROOT, "roles", "*", "role.json"))) + coordinators:
         # _base is a defaults fragment merged into other roles, not a full manifest.
         if os.path.basename(os.path.dirname(path)) == "_base":
             continue
