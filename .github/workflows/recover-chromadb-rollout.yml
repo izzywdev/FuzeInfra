@@ -46,7 +46,7 @@ jobs:
 
           if [ "$phase" = "Running" ] && [ "$operation_revision" != "$desired_revision" ]; then
             echo "Terminating stale Argo operation: $operation_revision (desired $desired_revision)"
-            /tmp/argocd app terminate-op "$app" --core --app-namespace argocd
+            /tmp/argocd app terminate-op "$app" --core
           fi
 
           for _ in $(seq 1 60); do
