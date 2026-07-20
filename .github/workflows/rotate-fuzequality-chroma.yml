@@ -1,0 +1,74 @@
+name: Rotate FuzeQuality Chroma credentials
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: rotate-fuzequality-chroma
+  cancel-in-progress: false
+
+jobs:
+  rotate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install kubeseal
+        run: |
+          set -euo pipefail
+          version=0.27.1
+          curl -fsSL -o /tmp/kubeseal.tgz \
+            "https://github.com/bitnami-labs/sealed-secrets/releases/download/v${version}/kubeseal-${version}-linux-amd64.tar.gz"
+          tar -xzf /tmp/kubeseal.tgz -C /tmp kubeseal
+          sudo install -m0755 /tmp/kubeseal /usr/local/bin/kubeseal
+
+      - name: Generate once and seal for both namespaces
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          test -n "$GH_TOKEN" || { echo "::error::GH_TOKEN is required for the coordinated FuzeFront PR"; exit 1; }
+          umask 077
+          token_file=$(mktemp)
+          app_dir=$(mktemp -d)
+          trap 'rm -f "$token_file"; rm -rf "$app_dir"' EXIT
+
+          token=$(openssl rand -hex 32 | tr -d '[:space:]')
+          echo "::add-mask::$token"
+          printf '%s' "$token" > "$token_file"
+
+          bash scripts/seal-secret.sh fuzeinfra/fuzequality-chroma-credentials \
+            "token=@${token_file}" \
+            --out deploy/sealed-secrets/fuzequality-chroma-credentials.yaml
+
+          gh repo clone izzywdev/FuzeFront "$app_dir" -- --depth 1 --branch master
+          bash scripts/seal-secret.sh fuzequality/fuzequality-chroma-credentials \
+            "token=@${token_file}" \
+            --out "$app_dir/FuzeQuality/deploy/helm/fuzequality/templates/chroma-sealed-secret.yaml"
+
+          app_branch="rotate/fuzequality-chroma-${RUN_ID}"
+          git -C "$app_dir" config user.name "FuzeInfra Secret Rotation"
+          git -C "$app_dir" config user.email "rotation@fuzeinfra"
+          git -C "$app_dir" checkout -b "$app_branch"
+          git -C "$app_dir" add FuzeQuality/deploy/helm/fuzequality/templates/chroma-sealed-secret.yaml
+          git -C "$app_dir" commit -m "chore(fuzequality): seal Chroma credentials [skip ci]"
+          git -C "$app_dir" push origin "$app_branch"
+          gh pr create --repo izzywdev/FuzeFront --base master --head "$app_branch" \
+            --title "chore(fuzequality): seal Chroma credentials" \
+            --body "Coordinated ciphertext-only rotation from FuzeInfra run ${RUN_ID}. The token is strictly sealed for namespace \`fuzequality\` and Secret \`fuzequality-chroma-credentials\`. Merge together with the companion FuzeInfra rotation PR."
+
+          infra_branch="rotate/fuzequality-chroma-${RUN_ID}"
+          git config user.name "FuzeInfra Secret Rotation"
+          git config user.email "rotation@fuzeinfra"
+          git checkout -b "$infra_branch"
+          git add deploy/sealed-secrets/fuzequality-chroma-credentials.yaml
+          git commit -m "chore(chroma): rotate FuzeQuality credentials [skip ci]"
+          git push origin "$infra_branch"
+          gh pr create --repo izzywdev/FuzeInfra --base main --head "$infra_branch" \
+            --title "chore(chroma): rotate FuzeQuality credentials" \
+            --body "Coordinated ciphertext-only rotation from run ${RUN_ID}. The same token is separately sealed for FuzeInfra and FuzeQuality namespaces. Merge together with the companion FuzeFront rotation PR."
