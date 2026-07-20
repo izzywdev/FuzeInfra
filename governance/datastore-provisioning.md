@@ -1,4 +1,4 @@
-# Shared datastore provisioning (Postgres / Redis / Mongo / Neo4j)
+# Shared datastore provisioning (Postgres / Redis / Mongo / Neo4j / ChromaDB)
 
 How a consumer repo gets a least-privilege silo on FuzeInfra's shared datastores
 — **without any credential ever appearing in plaintext in git, issues, or logs**.
@@ -90,6 +90,31 @@ gh secret set <APP>_REDIS_URL -R izzywdev/<consumer> \
   the issue is closed.
 - If ACLs are unavailable on the deployed Redis, fall back to shared password
   + dedicated DB index, and record the accepted risk in the issue.
+
+## ChromaDB recipe — declarative bootstrap collections
+
+ChromaDB runs without authentication and is reachable only inside the cluster.
+Consumers therefore need no ChromaDB credential or per-service user. Add an
+enabled entry to `serviceChromaCollections` in the applicable Helm values
+overlay; the Argo CD PostSync Job idempotently calls
+`get_or_create_collection()` for every declared collection.
+
+Use `<service>_<purpose>` collection names so consumers have distinct logical
+prefixes. This namespacing prevents accidental collisions but is not an
+authorization boundary: an in-cluster ChromaDB client can access every
+collection while authentication is disabled.
+
+Declare only shared/bootstrap collections. Dynamic per-resource collections,
+such as `repo_<projectId>`, are created by the service on demand and are not
+registered in Helm. No secret generation or credential hand-off is involved.
+
+```yaml
+serviceChromaCollections:
+  - name: example-indexer
+    enabled: true
+    collections:
+      - example_indexer_ready
+```
 
 ## Security invariants
 
