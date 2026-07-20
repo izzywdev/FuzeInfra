@@ -30,6 +30,10 @@ In-cluster service contract (stable DNS — use these from consumer workloads):
   fuzeinfra-neo4j.{{ .Release.Namespace }}.svc.cluster.local:7474   (HTTP)
   fuzeinfra-chromadb.{{ .Release.Namespace }}.svc.cluster.local:8000
 
+ChromaDB requires the allocation's sealed bearer token and assigned
+tenant/database. See docs/consuming-repos/CHROMADB_PROVISIONING.md; collection
+prefixes alone are not an authorization boundary.
+
 See CONTRACT.md in the repository root for the full consumer API reference.
 
 Check status:

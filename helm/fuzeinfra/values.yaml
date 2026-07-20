@@ -161,11 +161,11 @@ serviceMongoDatabases:
       - { role: readWrite, db: robot_catalog }
       - { role: readWrite, db: mendys }
 
-# Bootstrap collections to reconcile on the shared ChromaDB instance. ChromaDB
-# is internal and unauthenticated, so no per-service Secret is required.
-# `name` is the logical consumer name; `collections` contains only shared or
-# bootstrap collections. Consumers create dynamic per-resource collections on
-# demand. Collection prefixes provide logical namespacing, not access control.
+# Authenticated, isolated ChromaDB allocations. Each enabled consumer is bound
+# server-side to exactly one tenant/database by its sealed bearer token.
+# `credentialSecret` must exist in the fuzeinfra namespace before enabling an
+# allocation. Network selectors are an additional boundary, not a replacement
+# for Chroma authorization. Only bootstrap collections belong in this list.
 serviceChromaCollections: []
 
 # -----------------------------------------------------------------------------
@@ -248,9 +248,17 @@ elasticsearch:
 
 chromadb:
   enabled: true
-  image: chromadb/chroma:latest
+  # 0.5.23 is the last OSS release with the built-in token auth provider used
+  # below. Never use `latest`: auth behavior and client/server APIs must match.
+  image: chromadb/chroma:0.5.23@sha256:18e67eecc172abbcd9413d751bde64983b3d167fe497c98f979083eb24c0c942
   port: 8000
   storage: 5Gi
+  auth:
+    adminSecret:
+      name: chromadb-admin-credentials
+      key: token
+  networkPolicy:
+    enabled: true
 
 # Kafka in KRaft mode (no ZooKeeper) - fixes the ZooKeeper startup races and
 # deprecation warnings from the docker-compose ZooKeeper-based setup.

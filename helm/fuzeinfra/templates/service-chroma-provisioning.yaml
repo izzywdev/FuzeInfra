@@ -1,22 +1,7 @@
-{{- /*
-============================ Per-service ChromaDB provisioning ============================
-Declarative, GitOps-reconciled, idempotent provisioning of bootstrap collections
-on the shared `fuzeinfra-chromadb` server.
-
-For every enabled entry in `.Values.serviceChromaCollections`, this Job waits
-for ChromaDB and calls `get_or_create_collection()` for each declared
-collection. Dynamic per-resource collections remain the consumer's
-responsibility and must not be listed here.
-
-ChromaDB is unauthenticated and internal to the cluster, so this Job needs no
-credentials. Collection prefixes provide logical namespacing, not an
-authorization boundary.
-*/ -}}
+{{- /* Authenticated per-consumer Chroma tenant/database provisioning and verification. */ -}}
 {{- if and .Values.chromadb.enabled .Values.serviceChromaCollections }}
 {{- $enabled := list -}}
-{{- range .Values.serviceChromaCollections }}
-  {{- if .enabled }}{{- $enabled = append $enabled . }}{{- end }}
-{{- end }}
+{{- range .Values.serviceChromaCollections }}{{- if .enabled }}{{- $enabled = append $enabled . }}{{- end }}{{- end }}
 {{- if $enabled }}
 apiVersion: batch/v1
 kind: Job
@@ -40,49 +25,131 @@ spec:
     spec:
       restartPolicy: Never
       containers:
-        - name: provision
+        - name: provision-and-test
           image: {{ .Values.chromadb.image }}
           imagePullPolicy: {{ include "fuzeinfra.pullPolicy" . }}
           env:
             - name: CHROMA_HOST
-              value: "fuzeinfra-chromadb"
+              value: fuzeinfra-chromadb
             - name: CHROMA_PORT
               value: {{ .Values.chromadb.port | quote }}
-            - name: CHROMA_COLLECTION_GROUPS
-              value: {{ $enabled | toJson | quote }}
-          command:
-            - python
-            - -c
+            - name: CHROMA_ADMIN_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ required "chromadb.auth.adminSecret.name is required" .Values.chromadb.auth.adminSecret.name }}
+                  key: {{ required "chromadb.auth.adminSecret.key is required" .Values.chromadb.auth.adminSecret.key }}
+            {{- range $enabled }}
+            - name: TOKEN_{{ .name | upper | replace "-" "_" }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ required (printf "serviceChromaCollections[%s].credentialSecret.name is required" .name) .credentialSecret.name }}
+                  key: {{ required (printf "serviceChromaCollections[%s].credentialSecret.key is required" .name) .credentialSecret.key }}
+            {{- end }}
+          command: [python, -c]
+          args:
             - |
-              import json
               import os
               import time
-
+              import uuid
               import chromadb
+              from chromadb.config import Settings
 
-              host = os.environ["CHROMA_HOST"]
-              port = int(os.environ["CHROMA_PORT"])
-              groups = json.loads(os.environ["CHROMA_COLLECTION_GROUPS"])
-              client = chromadb.HttpClient(host=host, port=port)
+              host, port = os.environ["CHROMA_HOST"], int(os.environ["CHROMA_PORT"])
+              allocations = [
+              {{- range $enabled }}
+                  {"name": {{ .name | quote }}, "tenant": {{ required (printf "serviceChromaCollections[%s].tenant is required" .name) .tenant | quote }}, "database": {{ required (printf "serviceChromaCollections[%s].database is required" .name) .database | quote }}, "collections": {{ .collections | default list | toJson }}, "token": os.environ[{{ printf "TOKEN_%s" (.name | upper | replace "-" "_") | quote }}]},
+              {{- end }}
+              ]
 
-              print(f"Waiting for ChromaDB at {host}:{port} ...", flush=True)
+              def settings(token):
+                  return Settings(chroma_client_auth_provider="chromadb.auth.token_authn.TokenAuthClientProvider", chroma_client_auth_credentials=token)
+
+              admin_settings = settings(os.environ["CHROMA_ADMIN_TOKEN"])
+              admin_settings.chroma_api_impl = "chromadb.api.fastapi.FastAPI"
+              admin_settings.chroma_server_host = host
+              admin_settings.chroma_server_http_port = port
+              admin = chromadb.AdminClient(admin_settings)
               while True:
                   try:
-                      client.heartbeat()
+                      admin.get_tenant("default_tenant")
                       break
                   except Exception as exc:
-                      print(f"ChromaDB not ready: {exc}", flush=True)
+                      print(f"ChromaDB not ready: {type(exc).__name__}", flush=True)
                       time.sleep(3)
 
-              for group in groups:
-                  service = group["name"]
-                  for collection in group.get("collections", []):
-                      print(f"Provisioning service={service!r} collection={collection!r}", flush=True)
-                      client.get_or_create_collection(name=collection)
+              for allocation in allocations:
+                  try:
+                      admin.create_tenant(allocation["tenant"])
+                  except Exception:
+                      admin.get_tenant(allocation["tenant"])
+                  try:
+                      admin.create_database(allocation["database"], tenant=allocation["tenant"])
+                  except Exception:
+                      admin.get_database(allocation["database"], tenant=allocation["tenant"])
 
-              print("All ChromaDB collections provisioned.", flush=True)
+                  client = chromadb.HttpClient(host=host, port=port, tenant=allocation["tenant"], database=allocation["database"], settings=settings(allocation["token"]))
+                  for collection in allocation["collections"]:
+                      client.get_or_create_collection(collection)
+
+                  # Positive own-tenant CRUD/list test. The temporary object is
+                  # removed, so retries and later syncs remain idempotent.
+                  probe_name = "auth_probe_" + uuid.uuid4().hex[:16]
+                  probe = client.create_collection(probe_name, embedding_function=None)
+                  probe.upsert(ids=["probe"], embeddings=[[0.1, 0.2]])
+                  assert probe.get(ids=["probe"])["ids"] == ["probe"]
+                  assert probe_name in {item.name for item in client.list_collections()}
+                  client.delete_collection(probe_name)
+
+                  # A token must be rejected when it asks for every other
+                  # tenant/database. Client construction performs tenant/db
+                  # reads; list and CRUD cannot proceed across the boundary.
+                  for target in allocations:
+                      if target["tenant"] == allocation["tenant"] and target["database"] == allocation["database"]:
+                          continue
+                      try:
+                          foreign = chromadb.HttpClient(host=host, port=port, tenant=target["tenant"], database=target["database"], settings=settings(allocation["token"]))
+                          foreign.list_collections()
+                          foreign.get_or_create_collection("cross_tenant_must_be_denied")
+                      except Exception:
+                          pass
+                      else:
+                          raise RuntimeError(f"SECURITY FAILURE: {allocation['name']} accessed {target['name']}")
+                  print(f"verified isolated allocation: {allocation['name']}", flush=True)
+              print("All Chroma allocations provisioned and isolation-tested.", flush=True)
           resources:
-            requests: { cpu: 50m, memory: 64Mi }
-            limits:   { cpu: 250m, memory: 256Mi }
+            requests: { cpu: 50m, memory: 96Mi }
+            limits: { cpu: 250m, memory: 256Mi }
+---
+{{- if .Values.chromadb.networkPolicy.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: fuzeinfra-chromadb-ingress
+  labels:
+    {{- include "fuzeinfra.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "fuzeinfra.selectorLabels" (dict "component" "chromadb" "root" $) | nindent 6 }}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "fuzeinfra.selectorLabels" (dict "component" "service-chroma-provision" "root" $) | nindent 14 }}
+      ports:
+        - { protocol: TCP, port: 8000 }
+    {{- range $enabled }}
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ required (printf "serviceChromaCollections[%s].networkPolicy.namespace is required" .name) .networkPolicy.namespace | quote }}
+          podSelector:
+            matchLabels:
+              {{- required (printf "serviceChromaCollections[%s].networkPolicy.podLabels is required" .name) .networkPolicy.podLabels | toYaml | nindent 14 }}
+      ports:
+        - { protocol: TCP, port: 8000 }
+    {{- end }}
+{{- end }}
 {{- end }}
 {{- end }}

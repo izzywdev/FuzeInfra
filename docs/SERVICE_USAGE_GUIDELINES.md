@@ -426,9 +426,20 @@ REST API:        http://chromadb:8003
 Prefix every collection with your project name:
 
 ```python
+import os
 import chromadb
+from chromadb.config import Settings
 
-client = chromadb.HttpClient(host="chromadb", port=8003)
+client = chromadb.HttpClient(
+    host="fuzeinfra-chromadb.fuzeinfra.svc.cluster.local",
+    port=8000,
+    tenant="myproject",
+    database="myproject",
+    settings=Settings(
+        chroma_client_auth_provider="chromadb.auth.token_authn.TokenAuthClientProvider",
+        chroma_client_auth_credentials=os.environ["CHROMA_TOKEN"],
+    ),
+)
 
 # Always use your project prefix
 collection = client.get_or_create_collection(name="myproject_documents")
@@ -437,9 +448,10 @@ collection = client.get_or_create_collection(name="myproject_embeddings_v2")
 
 ### Safety checklist
 
-- [ ] Prefix every collection name with `<myproject>_`
-- [ ] Never call `client.reset()` — this wipes **all** collections from all projects
-- [ ] Do not delete collections you did not create
+- [ ] Use only the tenant/database assigned in the allocation registry
+- [ ] Load `CHROMA_TOKEN` from the consumer's SealedSecret, never values or code
+- [ ] Prefix shared collection names with `<myproject>_` for readability
+- [ ] Confirm a cross-tenant request is denied during onboarding
 - [ ] Do not change the ChromaDB server settings
 
 ---

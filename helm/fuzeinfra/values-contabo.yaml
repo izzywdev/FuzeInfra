@@ -287,11 +287,33 @@ serviceMongoDatabases:
       name: fuzepicker-db-credentials
       key: password
 
-# ChromaDB has no authentication and is reachable only inside the cluster.
-# Reconcile shared/bootstrap collections; per-project collections are created
-# by the owning service on demand.
+# Chroma allocations are enabled only with a matching strict-scoped
+# SealedSecret in deploy/sealed-secrets. Chroma binds each bearer token to the
+# declared tenant/database; the NetworkPolicy also admits only the named pods.
 serviceChromaCollections:
   - name: fuzeplan-repo-digester
     enabled: true
+    tenant: fuzeplan
+    database: repo-digester
+    credentialSecret:
+      name: fuzeplan-repo-digester-chroma-credentials
+      key: token
+    networkPolicy:
+      namespace: fuzeplan
+      podLabels:
+        app.kubernetes.io/name: repo-digester
     collections:
       - _repo_digester_ready
+  - name: fuzequality
+    enabled: true
+    tenant: fuzequality
+    database: fuzequality
+    credentialSecret:
+      name: fuzequality-chroma-credentials
+      key: token
+    networkPolicy:
+      namespace: fuzequality
+      podLabels:
+        app.kubernetes.io/name: fuzequality
+    collections:
+      - _fuzequality_ready
