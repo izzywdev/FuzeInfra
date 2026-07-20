@@ -38,7 +38,25 @@ jobs:
           [ "${failed:-0}" -gt 0 ] || { echo "::error::$job has no failed attempts; refusing recovery"; exit 1; }
           [ "${succeeded:-0}" -eq 0 ] || { echo "::error::$job already succeeded; refusing recovery"; exit 1; }
 
-          kubectl -n "$namespace" delete job "$job" --wait=true --timeout=2m
+          kubectl -n "$namespace" delete job "$job" --wait=false
+
+          # A failed Argo hook can remain in Terminating when the operation that
+          # owned its hook finalizer has already ended. Remove only that exact
+          # finalizer, and only after the guarded failed/unsucceeded checks above.
+          for _ in $(seq 1 10); do
+            kubectl -n "$namespace" get job "$job" >/dev/null 2>&1 || break
+            sleep 1
+          done
+          if kubectl -n "$namespace" get job "$job" >/dev/null 2>&1; then
+            deleting=$(kubectl -n "$namespace" get job "$job" -o jsonpath='{.metadata.deletionTimestamp}')
+            finalizers=$(kubectl -n "$namespace" get job "$job" -o jsonpath='{.metadata.finalizers}')
+            [ -n "$deleting" ] || { echo "::error::$job is not deleting; refusing finalizer recovery"; exit 1; }
+            [ "$finalizers" = '[argocd.argoproj.io/hook-finalizer]' ] || {
+              echo "::error::unexpected finalizers on $job: $finalizers"; exit 1;
+            }
+            kubectl -n "$namespace" patch job "$job" --type merge -p '{"metadata":{"finalizers":null}}'
+          fi
+          kubectl -n "$namespace" wait --for=delete job/"$job" --timeout=2m
           kubectl -n argocd annotate application "$app" argocd.argoproj.io/refresh=hard --overwrite
           kubectl -n argocd patch application "$app" --type merge \
             -p '{"operation":{"initiatedBy":{"username":"chroma-bootstrap-recovery"},"sync":{}}}'
