@@ -23,6 +23,9 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      - name: Set up kubectl
+        uses: azure/setup-kubectl@829323503d1be3d00ca8346e5391ca0b07a9ab0d # v5.1.0
+
       - name: Set up Helm
         uses: azure/setup-helm@v5
         with:
@@ -46,10 +49,11 @@ jobs:
         env:
           KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
         run: |
+          set -euo pipefail
           if [ -z "$KUBE_CONFIG" ]; then
-            echo "::warning::KUBE_CONFIG secret not set — ArgoCD sync not triggered."
+            echo "::error::KUBE_CONFIG secret not set — production sync cannot run."
             echo "Run 'terraform apply' in terraform/contabo/ to provision the server and set the secret."
-            exit 0
+            exit 1
           fi
           echo "$KUBE_CONFIG" | base64 -d > /tmp/kubeconfig
           chmod 600 /tmp/kubeconfig
@@ -60,15 +64,13 @@ jobs:
           # rebuild (or if one was never registered — e.g. sealed-secrets, #88) they
           # would silently go missing. apply -f makes the repo the source of truth.
           for app in fuzeinfra-prod sealed-secrets; do
-            kubectl apply -f "argocd/applications/$app.yaml" \
-              && echo "registered $app" \
-              || echo "::warning::failed to register $app"
+            kubectl apply -f "argocd/applications/$app.yaml"
+            echo "registered $app"
           done
 
           # Kick an immediate sync so the rollout starts seconds after merge.
           for app in fuzeinfra-prod sealed-secrets; do
             kubectl -n argocd patch application "$app" --type merge \
-              -p '{"operation":{"initiatedBy":{"username":"ci"},"sync":{}}}' \
-              && echo "sync triggered for $app" \
-              || echo "::warning::sync patch failed for $app"
+              -p '{"operation":{"initiatedBy":{"username":"ci"},"sync":{}}}'
+            echo "sync triggered for $app"
           done
