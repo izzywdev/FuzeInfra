@@ -58,6 +58,17 @@ jobs:
           fi
           kubectl -n "$namespace" wait --for=delete job/"$job" --timeout=2m
           kubectl -n argocd annotate application "$app" argocd.argoproj.io/refresh=hard --overwrite
+
+          # The refresh request is asynchronous. Starting a sync before Argo
+          # consumes it can recreate the hook from a stale Helm manifest.
+          for _ in $(seq 1 60); do
+            refresh=$(kubectl -n argocd get application "$app" \
+              -o go-template='{{index .metadata.annotations "argocd.argoproj.io/refresh"}}')
+            [ "$refresh" != "hard" ] && break
+            sleep 2
+          done
+          [ "$refresh" != "hard" ] || { echo "::error::Argo did not consume the hard refresh request"; exit 1; }
+
           kubectl -n argocd patch application "$app" --type merge \
             -p '{"operation":{"initiatedBy":{"username":"chroma-bootstrap-recovery"},"sync":{}}}'
 
