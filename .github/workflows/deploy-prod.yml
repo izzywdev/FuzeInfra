@@ -65,13 +65,13 @@ jobs:
           # deploy. Terraform only applies them on first-provision, so on a VPS
           # rebuild (or if one was never registered — e.g. sealed-secrets, #88) they
           # would silently go missing. apply -f makes the repo the source of truth.
-          for app in fuzeinfra-prod sealed-secrets fuzeinfra-sealed-secrets; do
+          for app in fuzeinfra-prod sealed-secrets fuzeinfra-sealed-secrets fuzequality; do
             kubectl apply -f "argocd/applications/$app.yaml"
             echo "registered $app"
           done
 
           # Kick an immediate sync so the rollout starts seconds after merge.
-          for app in fuzeinfra-prod sealed-secrets fuzeinfra-sealed-secrets; do
+          for app in fuzeinfra-prod sealed-secrets fuzeinfra-sealed-secrets fuzequality; do
             # Ensure the sync renders this Git revision instead of reusing a
             # cached Helm result whose reported revision has already advanced.
             kubectl -n argocd annotate application "$app" \
