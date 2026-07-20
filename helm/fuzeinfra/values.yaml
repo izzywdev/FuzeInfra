@@ -161,6 +161,13 @@ serviceMongoDatabases:
       - { role: readWrite, db: robot_catalog }
       - { role: readWrite, db: mendys }
 
+# Bootstrap collections to reconcile on the shared ChromaDB instance. ChromaDB
+# is internal and unauthenticated, so no per-service Secret is required.
+# `name` is the logical consumer name; `collections` contains only shared or
+# bootstrap collections. Consumers create dynamic per-resource collections on
+# demand. Collection prefixes provide logical namespacing, not access control.
+serviceChromaCollections: []
+
 # -----------------------------------------------------------------------------
 # Ingress (replaces the docker-compose nginx reverse proxy). Web UIs are exposed
 # at <service>.<global.domain>. Requires an ingress controller (ingress-nginx),

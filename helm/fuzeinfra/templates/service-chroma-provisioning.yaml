@@ -1,0 +1,88 @@
+{{- /*
+============================ Per-service ChromaDB provisioning ============================
+Declarative, GitOps-reconciled, idempotent provisioning of bootstrap collections
+on the shared `fuzeinfra-chromadb` server.
+
+For every enabled entry in `.Values.serviceChromaCollections`, this Job waits
+for ChromaDB and calls `get_or_create_collection()` for each declared
+collection. Dynamic per-resource collections remain the consumer's
+responsibility and must not be listed here.
+
+ChromaDB is unauthenticated and internal to the cluster, so this Job needs no
+credentials. Collection prefixes provide logical namespacing, not an
+authorization boundary.
+*/ -}}
+{{- if and .Values.chromadb.enabled .Values.serviceChromaCollections }}
+{{- $enabled := list -}}
+{{- range .Values.serviceChromaCollections }}
+  {{- if .enabled }}{{- $enabled = append $enabled . }}{{- end }}
+{{- end }}
+{{- if $enabled }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: fuzeinfra-service-chroma-provision
+  labels:
+    {{- include "fuzeinfra.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "1"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+    "argocd.argoproj.io/hook": PostSync
+    "argocd.argoproj.io/hook-delete-policy": BeforeHookCreation
+spec:
+  backoffLimit: 6
+  template:
+    metadata:
+      labels:
+        {{- include "fuzeinfra.labels" . | nindent 8 }}
+        {{- include "fuzeinfra.selectorLabels" (dict "component" "service-chroma-provision" "root" $) | nindent 8 }}
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: provision
+          image: {{ .Values.chromadb.image }}
+          imagePullPolicy: {{ include "fuzeinfra.pullPolicy" . }}
+          env:
+            - name: CHROMA_HOST
+              value: "fuzeinfra-chromadb"
+            - name: CHROMA_PORT
+              value: {{ .Values.chromadb.port | quote }}
+            - name: CHROMA_COLLECTION_GROUPS
+              value: {{ $enabled | toJson | quote }}
+          command:
+            - python
+            - -c
+            - |
+              import json
+              import os
+              import time
+
+              import chromadb
+
+              host = os.environ["CHROMA_HOST"]
+              port = int(os.environ["CHROMA_PORT"])
+              groups = json.loads(os.environ["CHROMA_COLLECTION_GROUPS"])
+              client = chromadb.HttpClient(host=host, port=port)
+
+              print(f"Waiting for ChromaDB at {host}:{port} ...", flush=True)
+              while True:
+                  try:
+                      client.heartbeat()
+                      break
+                  except Exception as exc:
+                      print(f"ChromaDB not ready: {exc}", flush=True)
+                      time.sleep(3)
+
+              for group in groups:
+                  service = group["name"]
+                  for collection in group.get("collections", []):
+                      print(f"Provisioning service={service!r} collection={collection!r}", flush=True)
+                      client.get_or_create_collection(name=collection)
+
+              print("All ChromaDB collections provisioned.", flush=True)
+          resources:
+            requests: { cpu: 50m, memory: 64Mi }
+            limits:   { cpu: 250m, memory: 256Mi }
+{{- end }}
+{{- end }}
