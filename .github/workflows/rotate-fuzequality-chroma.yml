@@ -41,6 +41,7 @@ jobs:
           token=$(openssl rand -hex 32 | tr -d '[:space:]')
           echo "::add-mask::$token"
           printf '%s' "$token" > "$token_file"
+          gh auth setup-git
 
           bash scripts/seal-secret.sh fuzeinfra/fuzequality-chroma-credentials \
             "token=@${token_file}" \
