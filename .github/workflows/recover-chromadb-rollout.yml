@@ -26,6 +26,47 @@ jobs:
           printf '%s' "$KUBE_CONFIG" | base64 -d > "$HOME/.kube/config"
           chmod 600 "$HOME/.kube/config"
 
+      - name: Install matching Argo CD CLI
+        run: |
+          set -euo pipefail
+          curl --fail --location --silent --show-error \
+            https://github.com/argoproj/argo-cd/releases/download/v3.4.4/argocd-linux-amd64 \
+            --output /tmp/argocd
+          echo 'b93c312956880c9597a246a7d1e705fbb7ee7f19c5229affdec99b26d5663e09  /tmp/argocd' | sha256sum --check
+          chmod 0755 /tmp/argocd
+
+      - name: Supersede a stale Argo CD operation
+        run: |
+          set -euo pipefail
+          app=fuzeinfra-prod
+          phase=$(kubectl -n argocd get application "$app" -o jsonpath='{.status.operationState.phase}')
+          operation_revision=$(kubectl -n argocd get application "$app" -o jsonpath='{.status.operationState.operation.sync.revision}')
+          desired_revision=$(kubectl -n argocd get application "$app" -o jsonpath='{.status.sync.revision}')
+          initial_update=$(kubectl -n fuzeinfra get statefulset fuzeinfra-chromadb -o jsonpath='{.status.updateRevision}')
+
+          if [ "$phase" = "Running" ] && [ "$operation_revision" != "$desired_revision" ]; then
+            echo "Terminating stale Argo operation: $operation_revision (desired $desired_revision)"
+            /tmp/argocd app terminate-op "$app" --core --app-namespace argocd
+          fi
+
+          for _ in $(seq 1 60); do
+            phase=$(kubectl -n argocd get application "$app" -o jsonpath='{.status.operationState.phase}')
+            [ "$phase" != "Running" ] && break
+            sleep 2
+          done
+          [ "$phase" != "Running" ] || { echo "::error::stale Argo operation did not terminate"; exit 1; }
+
+          kubectl -n argocd patch application "$app" --type merge \
+            -p '{"operation":{"initiatedBy":{"username":"chroma-rollout-recovery"},"sync":{}}}'
+
+          for _ in $(seq 1 60); do
+            update=$(kubectl -n fuzeinfra get statefulset fuzeinfra-chromadb -o jsonpath='{.status.updateRevision}')
+            [ "$update" != "$initial_update" ] && exit 0
+            sleep 2
+          done
+          echo "::error::latest ChromaDB revision was not applied by Argo CD"
+          exit 1
+
       - name: Recycle only a stale unhealthy ChromaDB pod
         run: |
           set -euo pipefail
