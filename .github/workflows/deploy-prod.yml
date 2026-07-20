@@ -13,6 +13,8 @@ on:
       - 'argocd/applications/fuzeinfra-prod.yaml'
       - 'argocd/applications/fuzeinfra-sealed-secrets.yaml'
       - 'argocd/applications/sealed-secrets.yaml'
+      - 'argocd/applications/fuzequality.yaml'
+      - 'argocd/projects/fuzefront.yaml'
       - '.github/workflows/deploy-prod.yml'
   workflow_dispatch:
 
@@ -60,6 +62,11 @@ jobs:
           echo "$KUBE_CONFIG" | base64 -d > /tmp/kubeconfig
           chmod 600 /tmp/kubeconfig
           export KUBECONFIG=/tmp/kubeconfig
+
+          # AppProjects are the destination/security boundary and must exist
+          # before their Applications are registered or synchronized.
+          kubectl apply -f argocd/projects/fuzefront.yaml
+          echo "registered fuzefront AppProject"
 
           # Register the standalone Application manifests idempotently on every prod
           # deploy. Terraform only applies them on first-provision, so on a VPS
