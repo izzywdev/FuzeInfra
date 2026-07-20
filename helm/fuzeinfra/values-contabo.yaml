@@ -303,7 +303,7 @@ serviceChromaCollections:
       podLabels:
         app.kubernetes.io/name: repo-digester
     collections:
-      - _repo_digester_ready
+      - repo_digester_ready
   - name: fuzequality
     enabled: true
     tenant: fuzequality
@@ -316,4 +316,4 @@ serviceChromaCollections:
       podLabels:
         app.kubernetes.io/name: fuzequality
     collections:
-      - _fuzequality_ready
+      - fuzequality_ready

@@ -24,8 +24,15 @@ def test_chroma_provisioning_keeps_security_checks():
         "foreign.list_collections",
         "cross_tenant_must_be_denied",
         "SECURITY FAILURE",
+        "must be 3-63 characters",
     ):
         assert required in template
+
+    values = (ROOT / "helm/fuzeinfra/values-contabo.yaml").read_text()
+    assert "_repo_digester_ready" not in values
+    assert "_fuzequality_ready" not in values
+    assert "repo_digester_ready" in values
+    assert "fuzequality_ready" in values
 
 
 def test_chroma_server_requires_auth_and_disables_reset():
