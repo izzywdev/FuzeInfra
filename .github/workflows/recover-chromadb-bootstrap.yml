@@ -1,0 +1,60 @@
+name: Recover ChromaDB bootstrap hook
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  recover:
+    runs-on: staging
+    environment: production
+    steps:
+      - uses: azure/setup-kubectl@829323503d1be3d00ca8346e5391ca0b07a9ab0d # v5.1.0
+
+      - name: Configure kubectl
+        env:
+          KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
+        run: |
+          set -euo pipefail
+          test -n "$KUBE_CONFIG" || { echo "::error::KUBE_CONFIG unset"; exit 1; }
+          mkdir -p "$HOME/.kube"
+          printf '%s' "$KUBE_CONFIG" | base64 -d > "$HOME/.kube/config"
+          chmod 600 "$HOME/.kube/config"
+
+      - name: Replace only a failed ChromaDB bootstrap hook
+        run: |
+          set -euo pipefail
+          namespace=fuzeinfra
+          job=fuzeinfra-service-chroma-provision
+          app=fuzeinfra-prod
+
+          ready=$(kubectl -n "$namespace" get pod fuzeinfra-chromadb-0 -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}')
+          [ "$ready" = "True" ] || { echo "::error::ChromaDB is not ready"; exit 1; }
+
+          failed=$(kubectl -n "$namespace" get job "$job" -o jsonpath='{.status.failed}')
+          succeeded=$(kubectl -n "$namespace" get job "$job" -o jsonpath='{.status.succeeded}')
+          [ "${failed:-0}" -gt 0 ] || { echo "::error::$job has no failed attempts; refusing recovery"; exit 1; }
+          [ "${succeeded:-0}" -eq 0 ] || { echo "::error::$job already succeeded; refusing recovery"; exit 1; }
+
+          kubectl -n "$namespace" delete job "$job" --wait=true --timeout=2m
+          kubectl -n argocd annotate application "$app" argocd.argoproj.io/refresh=hard --overwrite
+          kubectl -n argocd patch application "$app" --type merge \
+            -p '{"operation":{"initiatedBy":{"username":"chroma-bootstrap-recovery"},"sync":{}}}'
+
+          for _ in $(seq 1 180); do
+            phase=$(kubectl -n argocd get application "$app" -o jsonpath='{.status.operationState.phase}')
+            health=$(kubectl -n argocd get application "$app" -o jsonpath='{.status.health.status}')
+            initiator=$(kubectl -n argocd get application "$app" -o jsonpath='{.status.operationState.operation.initiatedBy.username}')
+            if [ "$initiator" = "chroma-bootstrap-recovery" ] && [ "$phase" = "Succeeded" ] && [ "$health" = "Healthy" ]; then
+              echo "ChromaDB bootstrap and security verification succeeded."
+              exit 0
+            fi
+            case "$phase" in
+              Failed|Error) echo "::error::Argo operation ended in $phase"; exit 1 ;;
+            esac
+            sleep 2
+          done
+          echo "::error::timed out waiting for ChromaDB bootstrap"
+          exit 1
