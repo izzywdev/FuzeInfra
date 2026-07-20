@@ -38,3 +38,13 @@ def test_chroma_server_requires_auth_and_disables_reset():
     assert "self._sysdb.get_collections" in provider
     assert "resource_tenant == user.tenant" in provider
     assert "resource_database == user.databases[0]" in provider
+
+
+def test_chroma_tokens_are_normalized_at_secret_boundaries():
+    server = (ROOT / "helm/fuzeinfra/templates/databases.yaml").read_text()
+    provisioner = (ROOT / "helm/fuzeinfra/templates/service-chroma-provisioning.yaml").read_text()
+
+    assert "value = os.environ[name].strip()" in server
+    assert "printable, non-whitespace ASCII characters only" in server
+    assert 'os.environ["CHROMA_ADMIN_TOKEN"].strip()' in provisioner
+    assert '].strip()' in provisioner

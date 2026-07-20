@@ -57,14 +57,14 @@ spec:
               host, port = os.environ["CHROMA_HOST"], int(os.environ["CHROMA_PORT"])
               allocations = [
               {{- range $enabled }}
-                  {"name": {{ .name | quote }}, "tenant": {{ required (printf "serviceChromaCollections[%s].tenant is required" .name) .tenant | quote }}, "database": {{ required (printf "serviceChromaCollections[%s].database is required" .name) .database | quote }}, "collections": {{ .collections | default list | toJson }}, "token": os.environ[{{ printf "TOKEN_%s" (.name | upper | replace "-" "_") | quote }}]},
+                  {"name": {{ .name | quote }}, "tenant": {{ required (printf "serviceChromaCollections[%s].tenant is required" .name) .tenant | quote }}, "database": {{ required (printf "serviceChromaCollections[%s].database is required" .name) .database | quote }}, "collections": {{ .collections | default list | toJson }}, "token": os.environ[{{ printf "TOKEN_%s" (.name | upper | replace "-" "_") | quote }}].strip()},
               {{- end }}
               ]
 
               def settings(token):
                   return Settings(chroma_client_auth_provider="chromadb.auth.token_authn.TokenAuthClientProvider", chroma_client_auth_credentials=token)
 
-              admin_settings = settings(os.environ["CHROMA_ADMIN_TOKEN"])
+              admin_settings = settings(os.environ["CHROMA_ADMIN_TOKEN"].strip())
               admin_settings.chroma_api_impl = "chromadb.api.fastapi.FastAPI"
               admin_settings.chroma_server_host = host
               admin_settings.chroma_server_http_port = port
