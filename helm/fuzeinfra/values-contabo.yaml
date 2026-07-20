@@ -286,3 +286,12 @@ serviceMongoDatabases:
     passwordSecret:
       name: fuzepicker-db-credentials
       key: password
+
+# ChromaDB has no authentication and is reachable only inside the cluster.
+# Reconcile shared/bootstrap collections; per-project collections are created
+# by the owning service on demand.
+serviceChromaCollections:
+  - name: fuzeplan-repo-digester
+    enabled: true
+    collections:
+      - _repo_digester_ready
