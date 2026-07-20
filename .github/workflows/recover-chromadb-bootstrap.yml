@@ -51,7 +51,7 @@ jobs:
             deleting=$(kubectl -n "$namespace" get job "$job" -o jsonpath='{.metadata.deletionTimestamp}')
             finalizers=$(kubectl -n "$namespace" get job "$job" -o jsonpath='{.metadata.finalizers}')
             [ -n "$deleting" ] || { echo "::error::$job is not deleting; refusing finalizer recovery"; exit 1; }
-            [ "$finalizers" = '[argocd.argoproj.io/hook-finalizer]' ] || {
+            [ "$finalizers" = '["argocd.argoproj.io/hook-finalizer"]' ] || {
               echo "::error::unexpected finalizers on $job: $finalizers"; exit 1;
             }
             kubectl -n "$namespace" patch job "$job" --type merge -p '{"metadata":{"finalizers":null}}'
