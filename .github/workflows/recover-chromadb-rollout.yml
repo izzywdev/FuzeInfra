@@ -46,6 +46,7 @@ jobs:
 
           if [ "$phase" = "Running" ] && [ "$operation_revision" != "$desired_revision" ]; then
             echo "Terminating stale Argo operation: $operation_revision (desired $desired_revision)"
+            kubectl config set-context --current --namespace=argocd
             /tmp/argocd app terminate-op "$app" --core
           fi
 
