@@ -513,13 +513,20 @@ spec:
           args:
             - |
               import os
+              import string
               from pathlib import Path
 
+              def token(name):
+                  value = os.environ[name].strip()
+                  if not value or any(char not in string.printable or char.isspace() for char in value):
+                      raise ValueError(f"{name} must contain printable, non-whitespace ASCII characters only")
+                  return value
+
               users = [
-                  {"id": "fuzeinfra-chroma-admin", "role": "admin", "tenant": "*", "databases": ["*"], "token": os.environ["CHROMA_ADMIN_TOKEN"]},
+                  {"id": "fuzeinfra-chroma-admin", "role": "admin", "tenant": "*", "databases": ["*"], "token": token("CHROMA_ADMIN_TOKEN")},
               {{- range .Values.serviceChromaCollections }}
               {{- if .enabled }}
-                  {"id": {{ .name | quote }}, "role": "write", "tenant": {{ required (printf "serviceChromaCollections[%s].tenant is required" .name) .tenant | quote }}, "databases": [{{ required (printf "serviceChromaCollections[%s].database is required" .name) .database | quote }}], "token": os.environ[{{ printf "TOKEN_%s" (.name | upper | replace "-" "_") | quote }}]},
+                  {"id": {{ .name | quote }}, "role": "write", "tenant": {{ required (printf "serviceChromaCollections[%s].tenant is required" .name) .tenant | quote }}, "databases": [{{ required (printf "serviceChromaCollections[%s].database is required" .name) .database | quote }}], "token": token({{ printf "TOKEN_%s" (.name | upper | replace "-" "_") | quote }})},
               {{- end }}
               {{- end }}
               ]
