@@ -20,8 +20,8 @@ to this registry; the consuming service creates those on demand.
 
 | Repo / service | Tenant / database | Bootstrap collections | Dynamic collections |
 |---|---|---|---|
-| FuzePlan repo-digester | `fuzeplan` / `repo-digester` | `_repo_digester_ready` | `repo_<projectId>` (service-managed) |
-| FuzeQuality | `fuzequality` / `fuzequality` | `_fuzequality_ready` | service-managed |
+| FuzePlan repo-digester | `fuzeplan` / `repo-digester` | `repo_digester_ready` | `repo_<projectId>` (service-managed) |
+| FuzeQuality | `fuzequality` / `fuzequality` | `fuzequality_ready` | service-managed |
 
 ## Adding a new consumer
 

@@ -3,6 +3,13 @@
 {{- $enabled := list -}}
 {{- range .Values.serviceChromaCollections }}{{- if .enabled }}{{- $enabled = append $enabled . }}{{- end }}{{- end }}
 {{- if $enabled }}
+{{- range $allocation := $enabled }}
+{{- range $collection := ($allocation.collections | default list) }}
+{{- if not (regexMatch "^[A-Za-z0-9][A-Za-z0-9_-]{1,61}[A-Za-z0-9]$" $collection) }}
+{{- fail (printf "serviceChromaCollections[%s] collection %q must be 3-63 characters, start/end alphanumeric, and contain only alphanumeric, underscore, or hyphen characters" $allocation.name $collection) }}
+{{- end }}
+{{- end }}
+{{- end }}
 apiVersion: batch/v1
 kind: Job
 metadata:

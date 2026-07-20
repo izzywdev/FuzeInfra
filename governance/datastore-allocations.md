@@ -34,8 +34,8 @@ DB index 0 is reserved for FuzeInfra platform services.
 
 | App | Tenant | Database | Bootstrap collection | Consumer repo | Status |
 |---|---|---|---|---|---|
-| FuzePlan repo-digester | `fuzeplan` | `repo-digester` | `_repo_digester_ready` | izzywdev/FuzePlan | declared (FuzeInfra#168 corrective follow-up) |
-| FuzeQuality | `fuzequality` | `fuzequality` | `_fuzequality_ready` | izzywdev/FuzeQuality | declared (FuzeInfra#168 corrective follow-up) |
+| FuzePlan repo-digester | `fuzeplan` | `repo-digester` | `repo_digester_ready` | izzywdev/FuzePlan | declared (FuzeInfra#168 corrective follow-up) |
+| FuzeQuality | `fuzequality` | `fuzequality` | `fuzequality_ready` | izzywdev/FuzeQuality | declared (FuzeInfra#168 corrective follow-up) |
 
 Each row has a unique sealed token and an explicit NetworkPolicy peer. Tenant
 and database binding is enforced by Chroma; collection prefixes are not an
