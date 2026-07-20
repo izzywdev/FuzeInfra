@@ -72,6 +72,10 @@ jobs:
 
           # Kick an immediate sync so the rollout starts seconds after merge.
           for app in fuzeinfra-prod sealed-secrets fuzeinfra-sealed-secrets; do
+            # Ensure the sync renders this Git revision instead of reusing a
+            # cached Helm result whose reported revision has already advanced.
+            kubectl -n argocd annotate application "$app" \
+              argocd.argoproj.io/refresh=hard --overwrite
             kubectl -n argocd patch application "$app" --type merge \
               -p '{"operation":{"initiatedBy":{"username":"ci"},"sync":{}}}'
             echo "sync triggered for $app"
