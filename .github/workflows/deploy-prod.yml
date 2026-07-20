@@ -9,7 +9,9 @@ on:
     branches: [main]
     paths:
       - 'helm/**'
+      - 'deploy/sealed-secrets/**'
       - 'argocd/applications/fuzeinfra-prod.yaml'
+      - 'argocd/applications/fuzeinfra-sealed-secrets.yaml'
       - 'argocd/applications/sealed-secrets.yaml'
       - '.github/workflows/deploy-prod.yml'
   workflow_dispatch:
@@ -63,13 +65,13 @@ jobs:
           # deploy. Terraform only applies them on first-provision, so on a VPS
           # rebuild (or if one was never registered — e.g. sealed-secrets, #88) they
           # would silently go missing. apply -f makes the repo the source of truth.
-          for app in fuzeinfra-prod sealed-secrets; do
+          for app in fuzeinfra-prod sealed-secrets fuzeinfra-sealed-secrets; do
             kubectl apply -f "argocd/applications/$app.yaml"
             echo "registered $app"
           done
 
           # Kick an immediate sync so the rollout starts seconds after merge.
-          for app in fuzeinfra-prod sealed-secrets; do
+          for app in fuzeinfra-prod sealed-secrets fuzeinfra-sealed-secrets; do
             kubectl -n argocd patch application "$app" --type merge \
               -p '{"operation":{"initiatedBy":{"username":"ci"},"sync":{}}}'
             echo "sync triggered for $app"
