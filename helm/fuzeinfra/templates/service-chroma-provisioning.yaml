@@ -95,7 +95,7 @@ spec:
                   # removed, so retries and later syncs remain idempotent.
                   probe_name = "auth_probe_" + uuid.uuid4().hex[:16]
                   probe = client.create_collection(probe_name, embedding_function=None)
-                  probe.add(ids=["probe"], embeddings=[[0.1, 0.2]])
+                  probe.upsert(ids=["probe"], embeddings=[[0.1, 0.2]])
                   assert probe.get(ids=["probe"])["ids"] == ["probe"]
                   assert probe_name in {item.name for item in client.list_collections()}
                   client.delete_collection(probe_name)

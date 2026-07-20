@@ -19,7 +19,7 @@ def test_chroma_provisioning_keeps_security_checks():
         "tenant",
         "database",
         "NetworkPolicy",
-        "probe.add",
+        "probe.upsert",
         "client.list_collections",
         "foreign.list_collections",
         "cross_tenant_must_be_denied",
@@ -35,5 +35,6 @@ def test_chroma_server_requires_auth_and_disables_reset():
     assert 'name: ALLOW_RESET\n              value: "false"' in template
 
     provider = (ROOT / "helm/fuzeinfra/templates/chroma-authz.yaml").read_text()
-    assert "resource.tenant == user.tenant" in provider
-    assert "resource.database == user.databases[0]" in provider
+    assert "self._sysdb.get_collections" in provider
+    assert "resource_tenant == user.tenant" in provider
+    assert "resource_database == user.databases[0]" in provider

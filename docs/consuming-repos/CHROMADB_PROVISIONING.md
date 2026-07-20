@@ -7,6 +7,12 @@ database. Chroma enforces that binding server-side. Collection prefixes remain
 useful for readability, but are never treated as access control. A NetworkPolicy
 also limits connections to the registered namespace and pod labels.
 
+Chroma 0.5.23 collection objects send item operations to a default-tenant v2
+URL even when the client is scoped correctly. FuzeInfra's authorization provider
+therefore resolves the collection UUID in Chroma's system database and checks
+its actual tenant/database ownership. Do not change the pinned image or remove
+that provider without running `tests/integration/test_chroma_auth_runtime.py`.
+
 Dynamic per-resource collections such as `repo_<projectId>` must not be added
 to this registry; the consuming service creates those on demand.
 

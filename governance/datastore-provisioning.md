@@ -106,6 +106,12 @@ credential, reconciles bootstrap collections, performs positive own-tenant
 CRUD, and proves that cross-tenant list/CRUD is denied. Any failed assertion
 fails the sync.
 
+The pinned Chroma 0.5.23 client emits default-tenant v2 URLs for collection item
+operations. The custom server authorization provider resolves collection UUIDs
+against the system database before authorizing those operations; a URL or known
+UUID is never trusted as the isolation boundary. The executable runtime test in
+`tests/integration/test_chroma_auth_runtime.py` guards this compatibility rule.
+
 Within a database, use `<service>_<purpose>` for shared collection names.
 Dynamic per-resource collections such as `repo_<projectId>` are created by the
 service on demand and are not declared in Helm.
