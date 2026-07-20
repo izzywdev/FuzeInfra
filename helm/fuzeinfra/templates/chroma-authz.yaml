@@ -1,0 +1,43 @@
+{{- if .Values.chromadb.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: fuzeinfra-chromadb-authz
+  labels:
+    {{- include "fuzeinfra.labels" . | nindent 4 }}
+data:
+  fuzeinfra_chroma_authz.py: |
+    """Resource-aware tenant/database authorization for OSS Chroma."""
+    from fastapi import HTTPException
+    from overrides import override
+    from chromadb.auth import ServerAuthorizationProvider
+
+    WRITE_ACTIONS = {
+        "tenant:get_tenant", "db:get_database", "db:list_collections",
+        "db:count_collections", "db:create_collection",
+        "db:get_or_create_collection", "collection:get_collection",
+        "collection:delete_collection", "collection:update_collection",
+        "collection:add", "collection:delete", "collection:get",
+        "collection:query", "collection:count", "collection:update",
+        "collection:upsert",
+    }
+
+    class TenantDatabaseAuthorizationProvider(ServerAuthorizationProvider):
+        @override
+        def authorize_or_raise(self, user, action, resource):
+            if user.user_id == "fuzeinfra-chroma-admin":
+                return
+            action_name = getattr(action, "value", str(action))
+            tenant_only = action_name == "tenant:get_tenant"
+            allowed = (
+                action_name in WRITE_ACTIONS
+                and user.tenant
+                and user.tenant != "*"
+                and resource.tenant == user.tenant
+                and user.databases
+                and len(user.databases) == 1
+                and (tenant_only or resource.database == user.databases[0])
+            )
+            if not allowed:
+                raise HTTPException(status_code=403, detail="Forbidden")
+{{- end }}
