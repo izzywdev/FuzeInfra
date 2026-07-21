@@ -162,6 +162,8 @@ jobs:
           remaining_disabled=$(grep -A1 -- '- name: fuzequality' "$config" | grep -c 'enabled: false' || true)
           test "$remaining_disabled" -eq 0 || { echo '::error::fuzequality PostgreSQL gate remains disabled'; exit 1; }
           infra_branch="provision/fuzequality-db-$run_id"
+          git config --local --unset-all http.https://github.com/.extraheader || true
+          gh auth setup-git
           git config user.name 'FuzeInfra Provisioning'
           git config user.email 'provisioning@fuzeinfra'
           git checkout -b "$infra_branch"

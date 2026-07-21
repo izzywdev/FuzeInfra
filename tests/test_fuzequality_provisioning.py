@@ -60,3 +60,9 @@ def test_bootstrap_has_no_ruby_runner_dependency():
     assert "fuzequality PostgreSQL gate remains disabled" in text
     assert "grep -c 'enabled: false'" in text
 
+
+
+def test_infra_publisher_removes_checkout_token_override():
+    text = WORKFLOW.read_text()
+    assert "git config --local --unset-all http.https://github.com/.extraheader || true" in text
+    assert text.count("gh auth setup-git") == 2
