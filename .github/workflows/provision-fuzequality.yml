@@ -160,7 +160,8 @@ jobs:
           test "$before" -eq 1 || { echo '::error::unique disabled fuzequality database gate missing'; exit 1; }
           sed -i '/- name: fuzequality/{n;s/enabled: false/enabled: true/;}' "$config"
           after=$(grep -A1 -- '- name: fuzequality' "$config" | grep -c 'enabled: true' || true)
-          test "$after" -eq 1 || { echo '::error::fuzequality database gate was not enabled'; exit 1; }          infra_branch="provision/fuzequality-db-$run_id"
+          test "$after" -eq 1 || { echo '::error::fuzequality database gate was not enabled'; exit 1; }
+          infra_branch="provision/fuzequality-db-$run_id"
           git config user.name 'FuzeInfra Provisioning'
           git config user.email 'provisioning@fuzeinfra'
           git checkout -b "$infra_branch"
