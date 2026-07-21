@@ -246,7 +246,7 @@ serviceDatabases:
   # The provisioning workflow flips this gate only in the same PR that adds
   # the strict-scoped fuzeinfra password SealedSecret.
   - name: fuzequality
-    enabled: false
+    enabled: true
     role: fuzequality_user
     database: fuzequality
     passwordSecret:
