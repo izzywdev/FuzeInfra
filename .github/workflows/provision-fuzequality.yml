@@ -28,7 +28,7 @@ env:
   REGISTRY_SECRET: ghcr-pull
   # Approved source: the working FuzeFront namespace registry credential.
   REGISTRY_SOURCE_NAMESPACE: fuzefront
-  REGISTRY_SOURCE_SECRET: ghcr-pull-secret
+  REGISTRY_SOURCE_SECRET: ghcr-pull
   POSTGRES_HOST: fuzeinfra-postgres.fuzeinfra.svc.cluster.local
   POSTGRES_ROLE: fuzequality_user
   POSTGRES_DATABASE: fuzequality
@@ -194,7 +194,10 @@ jobs:
             -o jsonpath='{range .spec.template.spec.containers[*]}{.image}{"\n"}{end}')
           test -n "$images"
           while IFS= read -r image; do
-            case "$image" in *@sha256:*) ;; *) echo '::error::fuzequality-backend image is not digest-pinned'; exit 1;; esac
+            if [[ "$image" == *:latest || ! "$image" =~ :[0-9a-f]{12}$ ]]; then
+              echo '::error::fuzequality-backend image must use a non-latest 12-hex commit tag'
+              exit 1
+            fi
           done <<< "$images"
           kubectl -n fuzequality rollout status deployment/fuzequality-backend --timeout=5m
           test "$(kubectl -n fuzequality get pods -l app.kubernetes.io/name=fuzequality \
@@ -205,4 +208,4 @@ jobs:
             "$app_json" >/dev/null || {
               echo '::error::Argo does not report a successful FuzeQuality migration hook'; exit 1;
             }
-          echo 'Verified: Argo healthy, backend digest-pinned and pulled, migration hook succeeded.'
+          echo 'Verified: Argo healthy, backend commit-tagged and pulled, migration hook succeeded.'

@@ -27,4 +27,19 @@ def test_bootstrap_workflow_is_ciphertext_only_and_strict_scoped():
     assert "argocd.argoproj.io/sync-wave=-2" in text
     assert "FUZEQUALITY_API_TOKEN" in text
     assert 'REGISTRY_SECRET: ghcr-pull' in text
-    assert 'role: fuzequality_user' in text
+    assert 'POSTGRES_ROLE: fuzequality_user' in text
+
+
+def test_bootstrap_uses_approved_registry_source_secret():
+    text = WORKFLOW.read_text()
+    assert 'REGISTRY_SOURCE_NAMESPACE: fuzefront' in text
+    assert 'REGISTRY_SOURCE_SECRET: ghcr-pull\n' in text
+    assert 'REGISTRY_SOURCE_SECRET: ghcr-pull-secret' not in text
+
+
+def test_verification_requires_immutable_commit_tag():
+    text = WORKFLOW.read_text()
+    assert '"$image" == *:latest' in text
+    assert '"$image" =~ :[0-9a-f]{12}$' in text
+    assert 'image must use a non-latest 12-hex commit tag' in text
+    assert 'case "$image" in *@sha256:*' not in text
