@@ -77,6 +77,26 @@ jobs:
             echo "registered $app"
           done
 
+          # Recover only a demonstrably stale FuzeQuality migration-hook operation.
+          # A newer chart cannot replace its BeforeHookCreation hook while the old
+          # operation remains Running indefinitely.
+          phase=$(kubectl -n argocd get application fuzequality -o jsonpath='{.status.operationState.phase}')
+          message=$(kubectl -n argocd get application fuzequality -o jsonpath='{.status.operationState.message}')
+          started=$(kubectl -n argocd get application fuzequality -o jsonpath='{.status.operationState.startedAt}')
+          if [ "$phase" = Running ] && [[ "$message" == *"fuzequality-migrations-"* ]] && [ -n "$started" ]; then
+            age_seconds=$(( $(date +%s) - $(date -d "$started" +%s) ))
+            if [ "$age_seconds" -gt 900 ]; then
+              echo "cancelling stale FuzeQuality migration-hook operation (${age_seconds}s old)"
+              kubectl -n argocd patch application fuzequality --type merge -p '{"operation":null}'
+              for _ in $(seq 1 30); do
+                current_phase=$(kubectl -n argocd get application fuzequality -o jsonpath='{.status.operationState.phase}')
+                [ "$current_phase" != Running ] && break
+                sleep 2
+              done
+              current_phase=$(kubectl -n argocd get application fuzequality -o jsonpath='{.status.operationState.phase}')
+              [ "$current_phase" != Running ] || { echo '::error::stale FuzeQuality operation did not terminate'; exit 1; }
+            fi
+          fi
           # Kick an immediate sync so the rollout starts seconds after merge.
           for app in fuzeinfra-prod sealed-secrets fuzeinfra-sealed-secrets fuzequality; do
             # Ensure the sync renders this Git revision instead of reusing a
