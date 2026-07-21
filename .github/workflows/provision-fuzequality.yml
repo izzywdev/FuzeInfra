@@ -45,6 +45,17 @@ jobs:
 
       - uses: azure/setup-kubectl@829323503d1be3d00ca8346e5391ca0b07a9ab0d # v5.1.0
 
+      - name: Install GitHub CLI
+        run: |
+          set -euo pipefail
+          version=2.74.2
+          archive="gh_${version}_linux_amd64.tar.gz"
+          curl -fsSLO "https://github.com/cli/cli/releases/download/v${version}/${archive}"
+          curl -fsSLO "https://github.com/cli/cli/releases/download/v${version}/gh_${version}_checksums.txt"
+          grep " ${archive}$" "gh_${version}_checksums.txt" | sha256sum -c -
+          tar -xzf "$archive"
+          sudo install -m0755 "gh_${version}_linux_amd64/bin/gh" /usr/local/bin/gh
+          gh --version
       - name: Install kubeseal
         run: |
           set -euo pipefail
