@@ -155,14 +155,12 @@ jobs:
 
           # Enablement is deliberately made in the same Infra PR as the
           # fuzeinfra-namespace password ciphertext.
-          # shellcheck disable=SC2016 # the single-quoted body is Ruby, not shell
-          ruby -e '
-            p = "helm/fuzeinfra/values-contabo.yaml"
-            s = File.read(p)
-            old = /(- name: fuzequality\n\s+)enabled: false(\n\s+role: fuzequality_user)/
-            abort "unique disabled fuzequality database gate missing" unless s.scan(old).length == 1
-            File.write(p, s.sub(old, "\\1enabled: true\\2"))
-          '
+          config=helm/fuzeinfra/values-contabo.yaml
+          before=$(grep -A1 -- '- name: fuzequality' "$config" | grep -c 'enabled: false' || true)
+          test "$before" -eq 1 || { echo '::error::unique disabled fuzequality database gate missing'; exit 1; }
+          sed -i '/- name: fuzequality/{n;s/enabled: false/enabled: true/;}' "$config"
+          after=$(grep -A1 -- '- name: fuzequality' "$config" | grep -c 'enabled: true' || true)
+          test "$after" -eq 1 || { echo '::error::fuzequality database gate was not enabled'; exit 1; }
           infra_branch="provision/fuzequality-db-$run_id"
           git config user.name 'FuzeInfra Provisioning'
           git config user.email 'provisioning@fuzeinfra'
