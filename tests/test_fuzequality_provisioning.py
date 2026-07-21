@@ -57,4 +57,4 @@ def test_bootstrap_has_no_ruby_runner_dependency():
     text = WORKFLOW.read_text()
     assert "ruby -e" not in text
     assert "sed -i '/- name: fuzequality/{n;s/enabled: false/enabled: true/;}'" in text
-    assert "fuzequality database gate was not enabled" in text
+    assert "fuzequality PostgreSQL gate remains disabled" in text`n    assert 'grep -c ''enabled: false''' in text
