@@ -74,6 +74,21 @@ COPY warm-python-toolcache.sh /usr/local/bin/warm-python-toolcache.sh
 RUN chmod +x /usr/local/bin/warm-python-toolcache.sh; \
     /usr/local/bin/warm-python-toolcache.sh 3.10 3.11
 
+# --- GitHub CLI (gh) ---------------------------------------------------------
+# Installed from GitHub's official apt repo. In workflows it authenticates via
+# the automatic GITHUB_TOKEN / GH_TOKEN env var — no static credential baked in.
+RUN set -eux; \
+    curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+      | dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg; \
+    chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg; \
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] \
+      https://cli.github.com/packages stable main" \
+      > /etc/apt/sources.list.d/github-cli.list; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends gh; \
+    rm -rf /var/lib/apt/lists/*; \
+    gh --version
+
 # --- Playwright browser system dependencies ----------------------------------
 # e2e / visual-regression jobs run Playwright. The heavy, root-requiring part is
 # the OS-level libraries the browsers need (libnss3, libatk, fonts, …); baking
