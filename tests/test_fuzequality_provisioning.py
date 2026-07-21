@@ -66,3 +66,7 @@ def test_infra_publisher_removes_checkout_token_override():
     text = WORKFLOW.read_text()
     assert "git config --local --unset-all http.https://github.com/.extraheader || true" in text
     assert text.count("gh auth setup-git") == 2
+
+def test_provision_checkout_does_not_persist_default_token():
+    text = WORKFLOW.read_text()
+    assert text.count("persist-credentials: false") == 1
