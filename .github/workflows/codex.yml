@@ -127,6 +127,10 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           fetch-depth: 0
+          # Codex patches may legitimately add or update workflow files. The
+          # default GitHub App token cannot push those paths, so publication
+          # must use the repository PAT with workflow-file write permission.
+          token: ${{ secrets.GH_TOKEN }}
 
       - name: Download Codex patch
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
@@ -166,7 +170,15 @@ jobs:
 
   report:
     needs: [codex, publish]
-    if: always()
+    # The workflow is invoked for every issue comment. Report only trusted
+    # @codex delegations; otherwise unrelated comments produce misleading red
+    # runs even though the implementation job was intentionally skipped.
+    if: |
+      always() &&
+      github.event.issue.pull_request == null &&
+      contains(github.event.comment.body, '@codex') &&
+      !contains(github.event.comment.body, 'codex-loop-guard') &&
+      contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association)
     runs-on: ubuntu-latest
     permissions:
       issues: write
@@ -175,6 +187,7 @@ jobs:
         if: always()
         env:
           GH_TOKEN: ${{ secrets.GH_TOKEN || github.token }}
+          GH_REPO: ${{ github.repository }}
           ISSUE_NUMBER: ${{ github.event.issue.number }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           CODEX_RESULT: ${{ needs.codex.result }}
@@ -182,6 +195,8 @@ jobs:
           PR_URL: ${{ needs.publish.outputs.pr_url }}
         run: |
           set -euo pipefail
+          # Markdown backticks below are intentional literals.
+          # shellcheck disable=SC2016
           {
             printf '<!-- codex-loop-guard: cloud-run result -->\n'
             if [ "$CODEX_RESULT" = success ] && [ "$PUBLISH_RESULT" = success ]; then
