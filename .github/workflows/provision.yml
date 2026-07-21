@@ -99,7 +99,7 @@ jobs:
 
       - name: Upload id state (for the handoff-state ConfigMap)
         if: steps.guard.outputs.ok == 'true' && inputs.dry_run != true
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: managed-agents-state-${{ inputs.provider }}
           path: agent-templates/sync/.state/*.json
