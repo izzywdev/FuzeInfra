@@ -1,0 +1,208 @@
+name: Provision FuzeQuality bootstrap
+
+# Cloud-only bootstrap for FuzeInfra #316. The provision phase reads the
+# approved registry credential without displaying it, generates new values in
+# runner memory, and commits only strict-scoped SealedSecret ciphertext. It
+# never applies resources to the cluster; Argo deploys the merged PRs.
+on:
+  workflow_dispatch:
+    inputs:
+      phase:
+        description: Create coordinated PRs, or verify after both PRs merge
+        required: true
+        default: provision
+        type: choice
+        options: [provision, verify]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: provision-fuzequality
+  cancel-in-progress: false
+
+env:
+  APP_NAMESPACE: fuzequality
+  APP_SECRET: fuzequality-secrets
+  DB_SECRET: fuzequality-db-credentials
+  REGISTRY_SECRET: ghcr-pull
+  # Approved source: the working FuzeFront namespace registry credential.
+  REGISTRY_SOURCE_NAMESPACE: fuzefront
+  REGISTRY_SOURCE_SECRET: ghcr-pull-secret
+  POSTGRES_HOST: fuzeinfra-postgres.fuzeinfra.svc.cluster.local
+  POSTGRES_ROLE: fuzequality_user
+  POSTGRES_DATABASE: fuzequality
+
+jobs:
+  provision:
+    if: inputs.phase == 'provision'
+    runs-on: staging
+    environment: production
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+
+      - uses: azure/setup-kubectl@829323503d1be3d00ca8346e5391ca0b07a9ab0d # v5.1.0
+
+      - name: Install kubeseal
+        run: |
+          set -euo pipefail
+          version=0.27.1
+          curl -fsSL -o /tmp/kubeseal.tgz \
+            "https://github.com/bitnami-labs/sealed-secrets/releases/download/v${version}/kubeseal-${version}-linux-amd64.tar.gz"
+          tar -xzf /tmp/kubeseal.tgz -C /tmp kubeseal
+          sudo install -m0755 /tmp/kubeseal /usr/local/bin/kubeseal
+
+      - name: Configure read-only cluster access
+        env:
+          KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
+        run: |
+          set -euo pipefail
+          test -n "$KUBE_CONFIG" || { echo '::error::KUBE_CONFIG is required'; exit 1; }
+          kubeconfig=$(mktemp)
+          printf '%s' "$KUBE_CONFIG" | base64 -d > "$kubeconfig"
+          chmod 600 "$kubeconfig"
+          echo "KUBECONFIG=$kubeconfig" >> "$GITHUB_ENV"
+
+      - name: Generate and seal bootstrap credentials
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+        run: |
+          set -euo pipefail
+          umask 077
+          test -n "$GH_TOKEN" || { echo '::error::GH_TOKEN requires contents and pull-request access to both repositories'; exit 1; }
+
+          work=$(mktemp -d)
+          app_checkout=$(mktemp -d)
+          # shellcheck disable=SC2016 # expand paths when the EXIT trap runs
+          trap 'rm -rf "$work" "$app_checkout" "${KUBECONFIG:-}"' EXIT
+
+          db_password=$(openssl rand -hex 24)
+          api_token=$(openssl rand -hex 32)
+          echo "::add-mask::$db_password"
+          echo "::add-mask::$api_token"
+          printf '%s' "$db_password" > "$work/db-password"
+          printf 'postgresql://%s:%s@%s:5432/%s' \
+            "$POSTGRES_ROLE" "$db_password" "$POSTGRES_HOST" "$POSTGRES_DATABASE" > "$work/database-url"
+          printf '%s' "$api_token" > "$work/api-token"
+
+          # Read and decode the existing approved Docker config without ever
+          # writing its encoded or decoded value to workflow output.
+          dockerconfig_b64=$(kubectl -n "$REGISTRY_SOURCE_NAMESPACE" get secret \
+            "$REGISTRY_SOURCE_SECRET" -o jsonpath='{.data.\.dockerconfigjson}')
+          test -n "$dockerconfig_b64" || { echo '::error::approved registry credential is empty'; exit 1; }
+          printf '%s' "$dockerconfig_b64" | base64 -d > "$work/dockerconfigjson"
+          unset dockerconfig_b64
+
+          # Provider-side password: consumed by the FuzeInfra provisioning Job.
+          bash scripts/seal-secret.sh "fuzeinfra/$DB_SECRET" \
+            "password=@$work/db-password" \
+            --out "deploy/sealed-secrets/$DB_SECRET.yaml"
+
+          gh auth setup-git
+          gh repo clone izzywdev/FuzeFront "$app_checkout" -- --depth 1 --branch master
+          destination="$app_checkout/FuzeQuality/deploy/helm/fuzequality/templates"
+          mkdir -p "$destination"
+
+          # Add the Argo wave to the plaintext metadata in a pipeline; only the
+          # resulting ciphertext manifest is stored in the checkout.
+          kubectl create secret generic "$APP_SECRET" -n "$APP_NAMESPACE" \
+            --from-file="DATABASE_URL=$work/database-url" \
+            --from-file="FUZEQUALITY_API_TOKEN=$work/api-token" \
+            --dry-run=client -o yaml \
+            | kubectl annotate --local -f - 'argocd.argoproj.io/sync-wave=-2' -o yaml \
+            | kubeseal --scope strict --format yaml \
+                --cert https://sealed-secrets.prod.fuzefront.com/v1/cert.pem \
+            > "$destination/bootstrap-sealed-secret.yaml"
+
+          kubectl create secret generic "$REGISTRY_SECRET" -n "$APP_NAMESPACE" \
+            --type=kubernetes.io/dockerconfigjson \
+            --from-file=".dockerconfigjson=$work/dockerconfigjson" \
+            --dry-run=client -o yaml \
+            | kubectl annotate --local -f - 'argocd.argoproj.io/sync-wave=-2' -o yaml \
+            | kubeseal --scope strict --format yaml \
+                --cert https://sealed-secrets.prod.fuzefront.com/v1/cert.pem \
+            > "$destination/ghcr-pull-sealed-secret.yaml"
+
+          # Consumer PR contains ciphertext only. Never include fingerprints or
+          # connection strings in commit/PR text.
+          run_id=${{ github.run_id }}
+          app_branch="provision/fuzequality-bootstrap-$run_id"
+          git -C "$app_checkout" config user.name 'FuzeInfra Provisioning'
+          git -C "$app_checkout" config user.email 'provisioning@fuzeinfra'
+          git -C "$app_checkout" checkout -b "$app_branch"
+          git -C "$app_checkout" add \
+            FuzeQuality/deploy/helm/fuzequality/templates/bootstrap-sealed-secret.yaml \
+            FuzeQuality/deploy/helm/fuzequality/templates/ghcr-pull-sealed-secret.yaml
+          git -C "$app_checkout" commit -m 'chore(fuzequality): add sealed bootstrap secrets (#316)'
+          git -C "$app_checkout" push origin "$app_branch"
+          # shellcheck disable=SC2016 # Markdown backticks are intentionally literal
+          gh pr create --repo izzywdev/FuzeFront --base master --head "$app_branch" \
+            --title 'chore(fuzequality): add sealed bootstrap secrets' \
+            --body 'Adds strict namespace/name-scoped ciphertext for the FuzeQuality database/API bootstrap and GHCR pull secret. Both resources use Argo sync wave `-2`. Merge after the companion FuzeInfra database PR is healthy. No plaintext secret material is present.'
+
+          # Enablement is deliberately made in the same Infra PR as the
+          # fuzeinfra-namespace password ciphertext.
+          # shellcheck disable=SC2016 # the single-quoted body is Ruby, not shell
+          ruby -e '
+            p = "helm/fuzeinfra/values-contabo.yaml"
+            s = File.read(p)
+            old = /(- name: fuzequality\n\s+)enabled: false(\n\s+role: fuzequality_user)/
+            abort "unique disabled fuzequality database gate missing" unless s.scan(old).length == 1
+            File.write(p, s.sub(old, "\\1enabled: true\\2"))
+          '
+          infra_branch="provision/fuzequality-db-$run_id"
+          git config user.name 'FuzeInfra Provisioning'
+          git config user.email 'provisioning@fuzeinfra'
+          git checkout -b "$infra_branch"
+          git add "deploy/sealed-secrets/$DB_SECRET.yaml" helm/fuzeinfra/values-contabo.yaml
+          git commit -m 'feat(postgres): provision FuzeQuality database (#316)'
+          git push origin "$infra_branch"
+          # shellcheck disable=SC2016 # Markdown backticks are intentionally literal
+          gh pr create --repo izzywdev/FuzeInfra --base main --head "$infra_branch" \
+            --title 'feat(postgres): provision FuzeQuality database' \
+            --body 'Adds the strict-scoped ciphertext input and enables the declarative PostgreSQL allocation in the same PR. Argo provisions role `fuzequality_user` and database `fuzequality`. Merge this PR before the companion FuzeFront bootstrap PR. No plaintext secret material is present. Closes #316.'
+
+  verify:
+    if: inputs.phase == 'verify'
+    runs-on: staging
+    environment: production
+    steps:
+      - uses: azure/setup-kubectl@829323503d1be3d00ca8346e5391ca0b07a9ab0d # v5.1.0
+
+      - name: Configure read-only cluster access
+        env:
+          KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
+        run: |
+          set -euo pipefail
+          test -n "$KUBE_CONFIG" || { echo '::error::KUBE_CONFIG is required'; exit 1; }
+          mkdir -p "$HOME/.kube"
+          printf '%s' "$KUBE_CONFIG" | base64 -d > "$HOME/.kube/config"
+          chmod 600 "$HOME/.kube/config"
+
+      - name: Verify Argo deployment, immutable image, and migration hook
+        run: |
+          set -euo pipefail
+          app_json=$(mktemp)
+          trap 'rm -f "$app_json"' EXIT
+          kubectl -n argocd get application fuzequality -o json > "$app_json"
+          test "$(jq -r '.status.sync.status' "$app_json")" = Synced
+          test "$(jq -r '.status.health.status' "$app_json")" = Healthy
+
+          images=$(kubectl -n fuzequality get deploy fuzequality-backend \
+            -o jsonpath='{range .spec.template.spec.containers[*]}{.image}{"\n"}{end}')
+          test -n "$images"
+          while IFS= read -r image; do
+            case "$image" in *@sha256:*) ;; *) echo '::error::fuzequality-backend image is not digest-pinned'; exit 1;; esac
+          done <<< "$images"
+          kubectl -n fuzequality rollout status deployment/fuzequality-backend --timeout=5m
+          test "$(kubectl -n fuzequality get pods -l app.kubernetes.io/name=fuzequality \
+            -o json | jq '[.items[].status.containerStatuses[]? | select(.state.waiting.reason == "ImagePullBackOff" or .state.waiting.reason == "ErrImagePull")] | length')" = 0
+
+          jq -e '[.status.operationState.syncResult.resources[]? |
+            select((.hookPhase == "Succeeded") and ((.name // "") | test("migrat"; "i")))] | length > 0' \
+            "$app_json" >/dev/null || {
+              echo '::error::Argo does not report a successful FuzeQuality migration hook'; exit 1;
+            }
+          echo 'Verified: Argo healthy, backend digest-pinned and pulled, migration hook succeeded.'
