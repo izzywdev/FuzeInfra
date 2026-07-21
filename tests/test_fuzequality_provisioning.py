@@ -43,3 +43,11 @@ def test_verification_requires_immutable_commit_tag():
     assert '"$image" =~ :[0-9a-f]{12}$' in text
     assert 'image must use a non-latest 12-hex commit tag' in text
     assert 'case "$image" in *@sha256:*' not in text
+
+
+def test_bootstrap_installs_verified_github_cli_on_runner():
+    text = WORKFLOW.read_text()
+    assert 'name: Install GitHub CLI' in text
+    assert 'gh_${version}_checksums.txt' in text
+    assert 'sha256sum -c -' in text
+    assert 'gh --version' in text
