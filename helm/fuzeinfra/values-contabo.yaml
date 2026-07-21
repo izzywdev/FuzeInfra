@@ -243,6 +243,15 @@ serviceDatabases:
     passwordSecret:
       name: mendys-db-credentials
       key: password
+  # The provisioning workflow flips this gate only in the same PR that adds
+  # the strict-scoped fuzeinfra password SealedSecret.
+  - name: fuzequality
+    enabled: false
+    role: fuzequality_user
+    database: fuzequality
+    passwordSecret:
+      name: fuzequality-db-credentials
+      key: password
 
 # Per-service MongoDB provisioning (Helm REPLACES lists, so the full set must be
 # declared here — the base values default every entry to enabled: false).

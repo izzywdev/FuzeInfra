@@ -124,6 +124,13 @@ serviceDatabases:
     passwordSecret:
       name: mendys-db-credentials
       key: password
+  - name: fuzequality
+    enabled: false
+    role: fuzequality_user
+    database: fuzequality
+    passwordSecret:
+      name: fuzequality-db-credentials
+      key: password
 
 # MongoDB admin connection config for serviceMongoProvisioning Jobs.
 serviceMongoProvisioning:
