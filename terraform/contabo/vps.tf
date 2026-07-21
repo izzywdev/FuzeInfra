@@ -24,11 +24,16 @@ resource "contabo_instance" "prod" {
       # the Cloudflare Named Tunnel (outbound-only from cloudflared).
       # 8472/udp = Flannel VXLAN overlay — required for cross-node pod networking
       # once worker nodes join (the server must accept inbound VXLAN from agents, or
-      # worker pods can't reach control-plane services). kubelet (10250) is NOT
-      # opened: k3s tunnels agent kubelets over the outbound 6443 connection, so no
-      # inbound 10250 is needed and exposing it would be an unnecessary risk.
-      # 8472 Anywhere here is a rebuild bootstrap default; the live runtime rule is
-      # scoped to node IPs (durable fix: wireguard-native overlay / private VLAN).
+      # worker pods can't reach control-plane services).
+      # 10250/tcp = kubelet read-only/authenticated API. It IS needed inbound:
+      # metrics-server runs OFF the control-plane (on a worker) and dials each
+      # kubelet directly at <node-ip>:10250 — it does NOT ride k3s's 6443 tunnel
+      # (that tunnel only backs apiserver→kubelet proxying for logs/exec, not the
+      # metrics scrape). Without this rule, `kubectl top node vmi3383846` returns
+      # <unknown> and HPA/scheduling signals for this node go dark (issue #318).
+      # 8472 and 10250 Anywhere here are rebuild bootstrap defaults; the live runtime
+      # rules are scoped to node IPs (durable fix: wireguard-native overlay / private
+      # VLAN). See ufw allows below.
       # 51820/udp = Flannel WireGuard-native overlay (see provisioning.tf for the
       # --flannel-backend=wireguard-native install flag). Opened ALONGSIDE 8472/udp
       # during the transition: the flag is inert on the already-running prod
@@ -39,6 +44,7 @@ resource "contabo_instance" "prod" {
       - ufw allow 22/tcp
       - ufw allow 6443/tcp
       - ufw allow 8472/udp
+      - ufw allow 10250/tcp
       - ufw allow 51820/udp
       - ufw --force enable
   EOT
