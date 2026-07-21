@@ -204,6 +204,8 @@ jobs:
           revision=$(jq -r '.status.sync.revision // "unknown"' "$app_json")
           echo "Argo application: sync=$sync_status health=$health_status revision=${revision:0:12}"
           if [ "$sync_status" != Synced ]; then
+            jq -r '"operation: phase=\(.status.operationState.phase // "Unknown") message=\(.status.operationState.message // "") started=\(.status.operationState.startedAt // "unknown") finished=\(.status.operationState.finishedAt // "pending")"' "$app_json"
+            jq -r '.status.operationState.syncResult.resources[]? | select((.hookPhase // "") == "Failed" or (.status // "") == "SyncFailed") | "failed sync resource: \(.kind)/\(.name) hook=\(.hookPhase // "none") status=\(.status // "Unknown") message=\(.message // "")"' "$app_json"
             jq -r '.status.conditions[]? | "condition: \(.type): \(.message)"' "$app_json"
             jq -r '.status.resources[]? | select((.status // "Unknown") != "Synced") | "out-of-sync resource: \(.kind)/\(.name) namespace=\(.namespace // "cluster") status=\(.status // "Unknown") health=\(.health.status // "Unknown")"' "$app_json"
             echo "::error::FuzeQuality Argo application is not Synced (actual: $sync_status)"
