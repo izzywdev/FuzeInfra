@@ -205,6 +205,7 @@ jobs:
           echo "Argo application: sync=$sync_status health=$health_status revision=${revision:0:12}"
           if [ "$sync_status" != Synced ]; then
             jq -r '.status.conditions[]? | "condition: \(.type): \(.message)"' "$app_json"
+            jq -r '.status.resources[]? | select((.status // "Unknown") != "Synced") | "out-of-sync resource: \(.kind)/\(.name) namespace=\(.namespace // "cluster") status=\(.status // "Unknown") health=\(.health.status // "Unknown")"' "$app_json"
             echo "::error::FuzeQuality Argo application is not Synced (actual: $sync_status)"
             exit 1
           fi
