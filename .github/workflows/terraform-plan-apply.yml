@@ -117,7 +117,7 @@ jobs:
         if: steps.detect.outputs.tf == 'true' && github.event.pull_request.head.repo.fork == true
         run: echo "::notice::Fork PR touches terraform/** — a maintainer must run the plan from a trusted branch. Check passes to avoid deadlock; merge is still gated by review."
 
-      - uses: hashicorp/setup-terraform@v3
+      - uses: hashicorp/setup-terraform@v4
         if: steps.detect.outputs.tf == 'true' && github.event.pull_request.head.repo.fork != true
         with:
           terraform_version: ${{ env.TERRAFORM_VERSION }}
@@ -272,7 +272,7 @@ jobs:
           path: ${{ env.TF_ROOT }}
           if_no_artifact_found: fail
 
-      - uses: hashicorp/setup-terraform@v3
+      - uses: hashicorp/setup-terraform@v4
         with:
           terraform_version: ${{ env.TERRAFORM_VERSION }}
 
