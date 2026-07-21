@@ -199,8 +199,20 @@ jobs:
           app_json=$(mktemp)
           trap 'rm -f "$app_json"' EXIT
           kubectl -n argocd get application fuzequality -o json > "$app_json"
-          test "$(jq -r '.status.sync.status' "$app_json")" = Synced
-          test "$(jq -r '.status.health.status' "$app_json")" = Healthy
+          sync_status=$(jq -r '.status.sync.status // "Unknown"' "$app_json")
+          health_status=$(jq -r '.status.health.status // "Unknown"' "$app_json")
+          revision=$(jq -r '.status.sync.revision // "unknown"' "$app_json")
+          echo "Argo application: sync=$sync_status health=$health_status revision=${revision:0:12}"
+          if [ "$sync_status" != Synced ]; then
+            jq -r '.status.conditions[]? | "condition: \(.type): \(.message)"' "$app_json"
+            echo "::error::FuzeQuality Argo application is not Synced (actual: $sync_status)"
+            exit 1
+          fi
+          if [ "$health_status" != Healthy ]; then
+            jq -r '.status.resources[]? | select(.health.status != "Healthy") | "resource: \(.kind)/\(.name) sync=\(.status // "Unknown") health=\(.health.status // "Unknown") message=\(.health.message // "")"' "$app_json"
+            echo "::error::FuzeQuality Argo application is not Healthy (actual: $health_status)"
+            exit 1
+          fi
 
           images=$(kubectl -n fuzequality get deploy fuzequality-backend \
             -o jsonpath='{range .spec.template.spec.containers[*]}{.image}{"\n"}{end}')
