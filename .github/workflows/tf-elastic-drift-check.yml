@@ -76,12 +76,12 @@ jobs:
         if: github.event.pull_request.head.repo.fork == true
         run: echo "::notice::Fork PR touches terraform/** — elastic-drift check skipped (no creds). Review must verify no elastic-tagged instances are added."
 
-      - uses: hashicorp/setup-terraform@v3
+      - uses: hashicorp/setup-terraform@v4
         if: github.event.pull_request.head.repo.fork != true && github.event_name != 'workflow_dispatch'
         with:
           terraform_version: ${{ env.TERRAFORM_VERSION }}
 
-      - uses: hashicorp/setup-terraform@v3
+      - uses: hashicorp/setup-terraform@v4
         if: github.event_name == 'workflow_dispatch'
         with:
           terraform_version: ${{ env.TERRAFORM_VERSION }}
