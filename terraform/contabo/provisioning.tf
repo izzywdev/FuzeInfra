@@ -87,23 +87,36 @@ resource "null_resource" "provision" {
       # and exposing the kubelet API is an unnecessary risk.
       # SECURITY: 8472 is opened Anywhere here only as a rebuild bootstrap default
       # (static cloud-init can't know future worker IPs). The RUNTIME posture is
-      # scoped — the live rule allows 8472 only from the specific node IPs, and the
-      # node-join path should add a scoped per-worker rule. The durable fix is moving
-      # the overlay onto flannel wireguard-native or a Contabo private VLAN (tracked).
-      "ufw allow 22/tcp && ufw allow 6443/tcp && ufw allow 8472/udp && ufw --force enable 2>/dev/null || true",
+      # scoped — the live rule allows 8472 only from the specific node IPs.
+      # 51820/udp = flannel WireGuard-native overlay (switched 2026-07-22, FuzeInfra#318);
+      # required in addition to 8472 so new nodes can join during/after the transition.
+      "ufw allow 22/tcp && ufw allow 6443/tcp && ufw allow 8472/udp && ufw allow 51820/udp && ufw --force enable 2>/dev/null || true",
+      # Scoped runtime 8472 rule for mendys-worker-1 (194.163.136.242) — added 2026-07-22.
+      # Was missing before, which caused that node's overlay (and DNS) to be completely blocked.
+      "ufw allow from 194.163.136.242 to any port 8472 proto udp comment 'flannel vxlan from mendys-worker-1' 2>/dev/null || true",
+      "ufw allow from 194.163.136.242 to any port 51820 proto udp comment 'flannel wireguard from mendys-worker-1' 2>/dev/null || true",
       "ufw delete allow 80/tcp 2>/dev/null || true",
       "ufw delete allow 443/tcp 2>/dev/null || true",
 
       # --- k3s ---
       # --node-taint control-plane=:PreferNoSchedule biases tenant workloads onto
       # worker nodes, keeping the single control-plane node (apiserver + Traefik +
-      # CoreDNS + Postgres) from saturating under tenant churn (FuzeInfra#92). The
-      # live node already carries this taint; this makes it survive a VPS rebuild.
-      #
-      # WireGuard overlay is a separate, cluster-wide hardening initiative —
-      # intentionally NOT coupled to autoscaling. Elastic nodes join via the
-      # same public-IP + VXLAN path the existing consumer-dispatched workers
-      # use, so the k3s server keeps its default flannel backend here.
+      # CoreDNS + Postgres) from saturating under tenant churn (FuzeInfra#92).
+      # /etc/rancher/k3s/config.yaml is written first; it persists across reinstalls
+      # and sets flannel-backend=wireguard-native (switched 2026-07-22, FuzeInfra#318).
+      # All worker nodes must have 51820/udp open for the WireGuard peers to handshake.
+      "mkdir -p /etc/rancher/k3s",
+      "cat > /etc/rancher/k3s/config.yaml <<'KCFG'",
+      "# Flannel WireGuard-native backend: encrypts pod overlay traffic, avoids",
+      "# VXLAN fragmentation/loss on Contabo public IPs (FuzeInfra#318, 2026-07-22).",
+      "# All nodes need UDP 51820 open. Switch from default VXLAN requires rolling",
+      "# restart of all k3s-agent nodes after the server adopts this config.",
+      "flannel-backend: wireguard-native",
+      "tls-san:",
+      "  - ${local.server_ip}",
+      "node-taint:",
+      "  - node-role.kubernetes.io/control-plane=:PreferNoSchedule",
+      "KCFG",
       "if ! command -v k3s &>/dev/null; then",
       "  curl -sfL https://get.k3s.io | INSTALL_K3S_EXEC='--tls-san ${local.server_ip} --node-taint node-role.kubernetes.io/control-plane=:PreferNoSchedule' sh -",
       "else",

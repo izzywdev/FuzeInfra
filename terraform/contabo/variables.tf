@@ -210,9 +210,9 @@ variable "k3s_node_token" {
 }
 
 variable "k3s_channel" {
-  description = "k3s release channel/version pin for baseline worker nodes (INSTALL_K3S_CHANNEL). Should match the control-plane's installed k3s version to avoid version skew."
+  description = "k3s release channel/version pin for baseline worker nodes (INSTALL_K3S_CHANNEL). Pinned to v1.36 to match the running control-plane and prevent skew (FuzeInfra#318)."
   type        = string
-  default     = "stable"
+  default     = "v1.36"
 }
 
 variable "enable_argocd_provisioner" {
