@@ -234,7 +234,7 @@ jobs:
           HTTP_CODE=$(curl -sS -o "$RESP" -w '%{http_code}' \
             -H "Authorization: Bearer ${CONTABO_TOKEN}" \
             -H "x-request-id: ${REQ_ID}" \
-            "https://api.contabo.com/v1/compute/instances?size=200")
+            "https://api.contabo.com/v1/compute/instances")
           if [ "$HTTP_CODE" != "200" ]; then
             echo "::error::GATE A: listing instances failed (HTTP $HTTP_CODE) via GET /v1/compute/instances. Fail-closed — cannot verify the live spec."
             exit 1
