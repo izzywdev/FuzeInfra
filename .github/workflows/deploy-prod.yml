@@ -93,7 +93,8 @@ jobs:
           started=$(kubectl -n argocd get application fuzequality -o jsonpath='{.status.operationState.startedAt}')
           if [ "$phase" = Running ] && [ -n "$started" ]; then
             age_seconds=$(( $(date +%s) - $(date -d "$started" +%s) ))
-            if [ "$age_seconds" -gt 900 ]; then
+            # The deployment verifier uses the same five-minute rollout budget.
+            if [ "$age_seconds" -gt 300 ]; then
               echo "cancelling stale FuzeQuality operation (${age_seconds}s old)"
               kubectl config set-context --current --namespace=argocd
               argocd login --core
