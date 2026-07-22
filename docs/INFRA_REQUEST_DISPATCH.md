@@ -164,9 +164,34 @@ Ongoing edits to those files are **not** infra-requests and trigger nothing.
 | `KUBE_CONFIG` | base64 kubeconfig — node labeling (handler) + one-time Argo registration (`argocd-register.yml`) |
 | `TF_STATE_BUCKET` / `TF_STATE_REGION` / `TF_STATE_ACCESS_KEY_ID` / `TF_STATE_SECRET_ACCESS_KEY` | FuzeInfra-owned remote TF state backend |
 
+## Coexistence with cluster autoscaling
+
+Nodes you dispatch through this workflow are **baseline** nodes as far as the cluster
+autoscaler is concerned — and the autoscaler will **never scale them down**. This is
+by construction, not configuration:
+
+- The autoscaler manages **only** the nodes it creates itself, which carry the Contabo
+  tag **`fuzeinfra-elastic`**. Anything **without** that tag — the control-plane and
+  every node dispatched here — is **foreign** to it: counted for scheduling capacity,
+  but never a scale-down (or scale-up) candidate.
+- Dispatched nodes are **never** tagged `fuzeinfra-elastic` (the `contabo-k3s-node`
+  module never sets that tag), so a dispatched node cannot be mistaken for an elastic one.
+- The autoscaler's "floor" is therefore **implicit and floating**: it is whatever nodes
+  exist right now (control-plane + everything dispatched), and it grows automatically
+  when you dispatch more. FuzeInfra does **not** track or predict that count — preserving
+  the platform's decoupling from consumer needs.
+
+When dispatching: you do **not** need to coordinate node counts with the autoscaler
+(dispatch what you need; the elastic pool floats above it), and you must **not** manually
+apply the `fuzeinfra-elastic` tag to a dispatched node — that would hand it to the
+autoscaler, which could then drain and delete it. See
+[ADR 0001 — identity-scoped floating baseline](adr/0001-cluster-autoscaling-identity-scoped-baseline.md)
+for the full rationale.
+
 ## Related docs
 
 - [`TERRAFORM_CD.md`](TERRAFORM_CD.md) — the full merge-to-apply model (FuzeInfra-owned plane A + this dispatch bridge plane B), backend bootstrap, and the FuzeOne consumer-side workflows.
+- [ADR 0001](adr/0001-cluster-autoscaling-identity-scoped-baseline.md) — why cluster autoscaling uses an identity-scoped floating baseline (decoupling from consumer-dispatched nodes).
 - [`K3S_SECOND_NODE_RUNBOOK.md`](K3S_SECOND_NODE_RUNBOOK.md) — manual node-join procedure this automates.
 - [`gitops.md`](gitops.md) — Argo CD delivery model.
 - [`CONTRACT.md`](../CONTRACT.md) — FuzeInfra's stable service interface.

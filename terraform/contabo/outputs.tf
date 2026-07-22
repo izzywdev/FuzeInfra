@@ -39,13 +39,3 @@ output "argocd_url_public" {
   description = "ArgoCD public URL (public once Cloudflare tunnel is wired)"
   value       = "https://argocd.${var.prod_subdomain}.${var.zone_name}"
 }
-
-output "baseline_worker_nodes" {
-  description = "Map of baseline worker node name -> {instance_id, ipv4}. Empty when baseline_worker_count = 0."
-  value       = module.baseline_workers.nodes
-}
-
-output "baseline_worker_ids" {
-  description = "Contabo instance IDs of the TF-managed baseline worker nodes (never includes elastic/autoscaler-managed instances)."
-  value       = module.baseline_workers.node_ids
-}
