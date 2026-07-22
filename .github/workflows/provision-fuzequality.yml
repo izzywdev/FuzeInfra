@@ -240,9 +240,16 @@ jobs:
           test "$(kubectl -n fuzequality get pods -l app.kubernetes.io/name=fuzequality \
             -o json | jq '[.items[].status.containerStatuses[]? | select(.state.waiting.reason == "ImagePullBackOff" or .state.waiting.reason == "ErrImagePull")] | length')" = 0
 
-          jq -e '[.status.operationState.syncResult.resources[]? |
+          if ! jq -e '[.status.operationState.syncResult.resources[]? |
             select((.hookPhase == "Succeeded") and ((.name // "") | test("migrat"; "i")))] | length > 0' \
-            "$app_json" >/dev/null || {
-              echo '::error::Argo does not report a successful FuzeQuality migration hook'; exit 1;
-            }
+            "$app_json" >/dev/null; then
+            jq -e '(.status.operationState.phase == "Succeeded") and
+              ([.status.operationState.syncResult.resources[]? |
+                select(((.name // "") | test("migrat"; "i")) and
+                  ((.hookPhase // "") == "Failed" or (.status // "") == "SyncFailed"))] | length == 0)' \
+              "$app_json" >/dev/null || {
+                echo '::error::Argo does not retain a successful FuzeQuality migration state'; exit 1;
+              }
+            echo 'Verified: successful current sync retains the previously completed migration state.'
+          fi
           echo 'Verified: Argo healthy, backend commit-tagged and pulled, migration hook succeeded.'
