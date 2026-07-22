@@ -5,7 +5,6 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -82,10 +81,15 @@ func (c *HTTPClient) invalidateToken() {
 func newRequestID() string {
 	b := make([]byte, 16)
 	if _, err := rand.Read(b); err != nil {
-		// Fallback: on error, use a timestamp-free counter (but crypto/rand effectively never fails)
-		return fmt.Sprintf("req-%d", time.Now().UnixNano())
+		// Fallback (crypto/rand effectively never fails). Still a valid UUID
+		// shape — Contabo's API rejects a non-UUID x-request-id with HTTP 400.
+		return fmt.Sprintf("00000000-0000-4000-8000-%012d", time.Now().UnixNano()%1_000_000_000_000)
 	}
-	return hex.EncodeToString(b)
+	// Contabo requires x-request-id to be a UUID; format 16 random bytes as
+	// UUID v4 (raw hex is rejected with HTTP 400 on the compute API).
+	b[6] = (b[6] & 0x0f) | 0x40 // version 4
+	b[8] = (b[8] & 0x3f) | 0x80 // variant 10x
+	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
 }
 
 // token returns a valid OAuth2 bearer token, refreshing if necessary.
