@@ -79,9 +79,9 @@ variable "ssh_public_key" {
 }
 
 variable "k3s_channel" {
-  description = "k3s release channel or version pin passed to the installer (INSTALL_K3S_CHANNEL). Pin to match the server's k3s version."
+  description = "k3s release channel or version pin passed to the installer (INSTALL_K3S_CHANNEL). Pin to match the server's k3s version. Default v1.36 matches current cluster (FuzeInfra#318)."
   type        = string
-  default     = "stable"
+  default     = "v1.36"
 }
 
 # ---------------------------------------------------------------------------
