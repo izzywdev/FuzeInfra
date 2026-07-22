@@ -265,12 +265,161 @@ func TestCreate_RollsBackOnTagAssignFailure(t *testing.T) {
 	}))
 	defer srv.Close()
 	c := NewClient(Config{BaseURL: srv.URL, AuthURL: srv.URL})
+	// Speed up the test: the tag assignment endpoint here always 500s, so
+	// assignTagWithRetry will exhaust its full retry budget before Create
+	// gives up and rolls back — use a small attempt count and near-zero
+	// backoff instead of the production defaults (6 attempts * 5s).
+	c.tagAssignRetryAttempts = 2
+	c.tagAssignRetryInterval = time.Millisecond
 	_, err := c.Create(context.Background(), CreateReq{Name: "fuzeinfra-elastic-3", ProductID: "V45", ImageID: "img", Region: "EU", UserData: "#cloud-config", Tags: []string{"fuzeinfra-elastic"}})
 	if err == nil {
 		t.Fatal("expected Create to return an error when tag assignment fails")
 	}
 	if !canceled {
 		t.Fatal("expected Create to roll back (cancel) the instance when tag assignment fails")
+	}
+}
+
+// TestAssignTag_RetriesOn404ThenSucceeds verifies the core race-fix
+// behavior: a tag-assignment call that 404s ("Entry Resource not found by
+// resourceId") because Contabo's tag subsystem hasn't caught up yet is
+// retried (rather than failing Create outright) and succeeds once the
+// subsystem catches up — mirroring the live prod failure where instance
+// 203459381 was created successfully but its tag assignment 404'd.
+func TestAssignTag_RetriesOn404ThenSucceeds(t *testing.T) {
+	var assignAttempts int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/compute/instances":
+			w.Write([]byte(`{"data":[{"instanceId":201,"displayName":"fuzeinfra-elastic-6","status":"provisioning"}]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/compute/instances/201":
+			w.Write([]byte(`{"data":[{"instanceId":201,"displayName":"fuzeinfra-elastic-6","status":"provisioning"}]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/tags":
+			w.Write([]byte(`{"data":[{"tagId":11,"name":"fuzeinfra-elastic","color":"#0A78C3"}]}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/tags/11/assignments/instance/201":
+			assignAttempts++
+			if assignAttempts < 3 {
+				w.WriteHeader(http.StatusNotFound)
+				w.Write([]byte(`{"message":"Entry Resource not found by resourceId = 201"}`))
+				return
+			}
+			w.WriteHeader(http.StatusCreated)
+		default:
+			w.Write([]byte(tokenResponse))
+		}
+	}))
+	defer srv.Close()
+	c := NewClient(Config{BaseURL: srv.URL, AuthURL: srv.URL})
+	c.tagAssignRetryAttempts = 5
+	c.tagAssignRetryInterval = time.Millisecond
+	inst, err := c.Create(context.Background(), CreateReq{Name: "fuzeinfra-elastic-6", ProductID: "V45", ImageID: "img", Region: "EU", UserData: "#cloud-config", Tags: []string{"fuzeinfra-elastic"}})
+	if err != nil {
+		t.Fatalf("expected Create to succeed after the tag assignment retries past its 404s, got: %v", err)
+	}
+	if inst.ID != 201 {
+		t.Fatalf("expected instance id 201, got %d", inst.ID)
+	}
+	if assignAttempts != 3 {
+		t.Fatalf("expected exactly 3 tag-assignment attempts (2 404s then success), got %d", assignAttempts)
+	}
+}
+
+// TestCreate_WaitsForInstanceVisibleThenSucceeds verifies the other half of
+// the race fix: when GET /v1/compute/instances/{id} itself 404s for a few
+// attempts right after create (the instance not yet visible at all, a step
+// earlier than the tag-assignment race TestAssignTag_RetriesOn404ThenSucceeds
+// covers), Create polls until it becomes visible and only then proceeds to
+// tag it, rather than failing or tagging prematurely.
+func TestCreate_WaitsForInstanceVisibleThenSucceeds(t *testing.T) {
+	var getAttempts, assignAttempts int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/compute/instances":
+			w.Write([]byte(`{"data":[{"instanceId":301,"displayName":"fuzeinfra-elastic-7","status":"provisioning"}]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/compute/instances/301":
+			getAttempts++
+			if getAttempts < 3 {
+				w.WriteHeader(http.StatusNotFound)
+				return
+			}
+			w.Write([]byte(`{"data":[{"instanceId":301,"displayName":"fuzeinfra-elastic-7","status":"provisioning"}]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/tags":
+			w.Write([]byte(`{"data":[{"tagId":13,"name":"fuzeinfra-elastic","color":"#0A78C3"}]}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/tags/13/assignments/instance/301":
+			assignAttempts++
+			w.WriteHeader(http.StatusCreated)
+		default:
+			w.Write([]byte(tokenResponse))
+		}
+	}))
+	defer srv.Close()
+	c := NewClient(Config{BaseURL: srv.URL, AuthURL: srv.URL})
+	c.instancePollAttempts = 5
+	c.instancePollInterval = time.Millisecond
+	inst, err := c.Create(context.Background(), CreateReq{Name: "fuzeinfra-elastic-7", ProductID: "V45", ImageID: "img", Region: "EU", UserData: "#cloud-config", Tags: []string{"fuzeinfra-elastic"}})
+	if err != nil {
+		t.Fatalf("expected Create to succeed once the instance becomes visible, got: %v", err)
+	}
+	if inst.ID != 301 {
+		t.Fatalf("expected instance id 301, got %d", inst.ID)
+	}
+	if getAttempts != 3 {
+		t.Fatalf("expected exactly 3 instance-visibility GETs (2 404s then visible), got %d", getAttempts)
+	}
+	if assignAttempts != 1 {
+		t.Fatalf("expected tag assignment to be attempted exactly once (only after visibility confirmed), got %d", assignAttempts)
+	}
+}
+
+// TestCreate_RollbackCancelRetriesOn404ThenSucceeds verifies the third leg
+// of the race fix: when tagging permanently fails (forcing Create to roll
+// back) AND the rollback cancel call itself 404s a few times before
+// succeeding (the same eventual-consistency window biting the cancel call),
+// Delete's internal retry keeps the instance from being leaked — Create
+// still returns the tag error, but the cancel is confirmed to have
+// eventually succeeded rather than giving up on the first 404.
+func TestCreate_RollbackCancelRetriesOn404ThenSucceeds(t *testing.T) {
+	var cancelAttempts int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/compute/instances":
+			w.Write([]byte(`{"data":[{"instanceId":401,"displayName":"fuzeinfra-elastic-8","status":"provisioning"}]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/compute/instances/401":
+			w.Write([]byte(`{"data":[{"instanceId":401,"displayName":"fuzeinfra-elastic-8","status":"provisioning"}]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/tags":
+			w.Write([]byte(`{"data":[{"tagId":17,"name":"fuzeinfra-elastic","color":"#0A78C3"}]}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/tags/17/assignments/instance/401":
+			// Tag assignment permanently fails -> forces rollback.
+			w.WriteHeader(http.StatusInternalServerError)
+			w.Write([]byte(`{"message":"internal error"}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/compute/instances/401/cancel":
+			cancelAttempts++
+			if cancelAttempts < 3 {
+				w.WriteHeader(http.StatusNotFound)
+				w.Write([]byte(`{"message":"Entry Resource not found by resourceId = 401"}`))
+				return
+			}
+			w.WriteHeader(http.StatusCreated)
+			w.Write([]byte(`{"data":[{"instanceId":401,"cancelDate":"2026-08-01"}]}`))
+		default:
+			w.Write([]byte(tokenResponse))
+		}
+	}))
+	defer srv.Close()
+	c := NewClient(Config{BaseURL: srv.URL, AuthURL: srv.URL})
+	c.tagAssignRetryAttempts = 1
+	c.tagAssignRetryInterval = time.Millisecond
+	c.cancelRetryAttempts = 5
+	c.cancelRetryInterval = time.Millisecond
+	_, err := c.Create(context.Background(), CreateReq{Name: "fuzeinfra-elastic-8", ProductID: "V45", ImageID: "img", Region: "EU", UserData: "#cloud-config", Tags: []string{"fuzeinfra-elastic"}})
+	if err == nil {
+		t.Fatal("expected Create to return an error (tag assignment permanently failed)")
+	}
+	if strings.Contains(err.Error(), "rollback cancel also failed") {
+		t.Fatalf("expected the rollback cancel to eventually succeed (retrying past its 404s), but Create reported it failed: %v", err)
+	}
+	if cancelAttempts != 3 {
+		t.Fatalf("expected exactly 3 cancel attempts (2 404s then success), got %d", cancelAttempts)
 	}
 }
 
