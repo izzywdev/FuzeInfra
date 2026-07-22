@@ -35,6 +35,15 @@ type Instance struct {
 	Status    string
 	PrivateIP string
 	Tags      []string
+	// CreatedDate is the instance's creation timestamp, parsed from
+	// Contabo's createdDate field on GET /v1/compute/instances (see
+	// ListByTag). It anchors the monthly billing period the billing-aware
+	// reaper (internal/reaper) uses to decide when an elastic instance is
+	// about to renew. The zero value means the field was absent or
+	// unparsable on the API response — callers MUST treat a zero
+	// CreatedDate as "unknown" and skip any billing-period decision for
+	// that instance rather than guessing.
+	CreatedDate time.Time
 }
 
 // CreateReq is the request to create a new instance.
@@ -237,6 +246,7 @@ func (c *HTTPClient) ListByTag(ctx context.Context, tag string) ([]Instance, err
 			InstanceID  int64  `json:"instanceId"`
 			DisplayName string `json:"displayName"`
 			Status      string `json:"status"`
+			CreatedDate string `json:"createdDate"`
 			Addresses   struct {
 				Private []struct {
 					IP string `json:"ip"`
@@ -262,16 +272,43 @@ func (c *HTTPClient) ListByTag(ctx context.Context, tag string) ([]Instance, err
 			privateIP = inst.Addresses.Private[0].IP
 		}
 
+		createdDate, ok := parseContaboTime(inst.CreatedDate)
+		if !ok && inst.CreatedDate != "" {
+			// Non-empty but unparsable is a real anomaly worth flagging; an
+			// empty field is expected from older mocks/fixtures.
+			log.Printf("contabo: instance %d (%s) has unparsable createdDate %q; leaving CreatedDate zero (billing-period decisions will be skipped for it)", inst.InstanceID, inst.DisplayName, inst.CreatedDate)
+		}
+
 		instances = append(instances, Instance{
-			ID:        inst.InstanceID,
-			Name:      inst.DisplayName,
-			Status:    inst.Status,
-			PrivateIP: privateIP,
-			Tags:      []string{tag},
+			ID:          inst.InstanceID,
+			Name:        inst.DisplayName,
+			Status:      inst.Status,
+			PrivateIP:   privateIP,
+			Tags:        []string{tag},
+			CreatedDate: createdDate,
 		})
 	}
 
 	return instances, nil
+}
+
+// parseContaboTime parses a Contabo API timestamp field (e.g. createdDate),
+// documented as an RFC3339 datetime. It tolerates both the fractional- and
+// whole-second forms. Returns the zero time and false if s is empty or does
+// not parse in either form — callers must treat that as "unknown", never as
+// "epoch" (a zero time.Time would otherwise look like a decades-overdue
+// billing anchor to any consumer that doesn't check ok).
+func parseContaboTime(s string) (time.Time, bool) {
+	if s == "" {
+		return time.Time{}, false
+	}
+	if t, err := time.Parse(time.RFC3339Nano, s); err == nil {
+		return t, true
+	}
+	if t, err := time.Parse(time.RFC3339, s); err == nil {
+		return t, true
+	}
+	return time.Time{}, false
 }
 
 // listAssignedInstanceIDs returns the set of instance ids that GET

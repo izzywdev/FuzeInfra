@@ -1,0 +1,119 @@
+# Billing-aware reaper — releases idle Contabo elastic instances only once
+# they are within clusterAutoscaler.reaper.releaseWindow of their projected
+# monthly renewal (see cluster-autoscaler/contabo-externalgrpc/cmd/reaper and
+# internal/reaper for the full rationale). Runs as an hourly one-shot
+# CronJob using the SAME image as the provider Deployment
+# (clusterAutoscaler.provider.image), just with a different entrypoint
+# (/reaper instead of the image's default /server).
+#
+# Gated on BOTH clusterAutoscaler.enabled (the whole Contabo CA stack) and
+# clusterAutoscaler.reaper.enabled (this component specifically) so the
+# reaper can never run without the provider/CA it depends on.
+{{- if and .Values.clusterAutoscaler.enabled .Values.clusterAutoscaler.reaper.enabled }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: fuzeinfra-ca-reaper
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "fuzeinfra.labels" . | nindent 4 }}
+    {{- include "fuzeinfra.selectorLabels" (dict "component" "ca-reaper" "root" $) | nindent 4 }}
+---
+# Least-privilege RBAC for the reaper's actual behavior (internal/reaper.go):
+#   - list/watch/get elastic instances' matching Nodes + cluster-wide Pods
+#     (to determine idle status: spec.nodeName field-selected Pod listing).
+#   - patch Nodes (cordon: merge-patch spec.unschedulable=true).
+#   - create pods/eviction (drain via the Eviction API, honors PDBs).
+# No delete/update on pods, no write access to any other resource — the
+# reaper never deletes a Node object itself (Contabo's own instance
+# cancellation + the Cluster Autoscaler/kubelet lifecycle removes it).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ .Release.Namespace }}-fuzeinfra-ca-reaper
+  labels:
+    {{- include "fuzeinfra.labels" . | nindent 4 }}
+    {{- include "fuzeinfra.selectorLabels" (dict "component" "ca-reaper" "root" $) | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list", "watch", "patch"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods/eviction"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ .Release.Namespace }}-fuzeinfra-ca-reaper
+  labels:
+    {{- include "fuzeinfra.labels" . | nindent 4 }}
+    {{- include "fuzeinfra.selectorLabels" (dict "component" "ca-reaper" "root" $) | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ .Release.Namespace }}-fuzeinfra-ca-reaper
+subjects:
+  - kind: ServiceAccount
+    name: fuzeinfra-ca-reaper
+    namespace: {{ .Release.Namespace }}
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: fuzeinfra-ca-reaper
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "fuzeinfra.labels" . | nindent 4 }}
+    {{- include "fuzeinfra.selectorLabels" (dict "component" "ca-reaper" "root" $) | nindent 4 }}
+spec:
+  schedule: {{ .Values.clusterAutoscaler.reaper.schedule | default "0 * * * *" | quote }}
+  # Never let a slow/stuck pass overlap the next hourly trigger — a second
+  # concurrent reaper pass racing the first against the same fleet is a
+  # correctness risk (double-cordon/double-cancel), not just wasted work.
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: {{ .Values.clusterAutoscaler.reaper.successfulJobsHistoryLimit | default 3 }}
+  failedJobsHistoryLimit: {{ .Values.clusterAutoscaler.reaper.failedJobsHistoryLimit | default 3 }}
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      activeDeadlineSeconds: {{ .Values.clusterAutoscaler.reaper.activeDeadlineSeconds | default 600 }}
+      template:
+        metadata:
+          labels:
+            {{- include "fuzeinfra.labels" . | nindent 12 }}
+            {{- include "fuzeinfra.selectorLabels" (dict "component" "ca-reaper" "root" $) | nindent 12 }}
+        spec:
+          serviceAccountName: fuzeinfra-ca-reaper
+          restartPolicy: Never
+          containers:
+            - name: reaper
+              image: {{ .Values.clusterAutoscaler.provider.image }}
+              imagePullPolicy: {{ include "fuzeinfra.pullPolicy" . }}
+              # Overrides the image's default ENTRYPOINT (/server) — same
+              # image, one-shot reaper binary instead of the long-running
+              # gRPC provider (see cluster-autoscaler/contabo-externalgrpc/Dockerfile).
+              command: ["/reaper"]
+              envFrom:
+                # Same Secret the provider Deployment consumes — supplies
+                # CONTABO_CLIENT_ID/CLIENT_SECRET/API_USER/API_PASSWORD,
+                # which are the reaper's only required env vars
+                # (cmd/reaper/main.go). Extra keys in the Secret (e.g.
+                # K3S_NODE_TOKEN) are harmless unused env vars here.
+                - secretRef:
+                    name: {{ .Values.clusterAutoscaler.provider.existingSecret }}
+              env:
+                - name: RELEASE_WINDOW
+                  value: {{ .Values.clusterAutoscaler.reaper.releaseWindow | quote }}
+                - name: BILLING_PERIOD
+                  value: {{ .Values.clusterAutoscaler.reaper.billingPeriod | quote }}
+                # Kept in lockstep with the provider's own elasticTag so the
+                # reaper reaps exactly the fleet the provider creates.
+                - name: ELASTIC_TAG
+                  value: {{ .Values.clusterAutoscaler.provider.elasticTag | quote }}
+              resources:
+                {{- .Values.clusterAutoscaler.reaper.resources | toYaml | nindent 16 }}
+{{- end }}

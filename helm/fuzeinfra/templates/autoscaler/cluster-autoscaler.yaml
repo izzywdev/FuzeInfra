@@ -186,7 +186,7 @@ spec:
             - --cloud-provider=externalgrpc
             - --cloud-config=/etc/ca/cloud-config.yaml
             - --nodes={{ .Values.clusterAutoscaler.nodeGroup.minSize }}:{{ .Values.clusterAutoscaler.nodeGroup.maxSize }}:elastic
-            - --scale-down-enabled=true
+            - --scale-down-enabled={{ .Values.clusterAutoscaler.scaleDownEnabled | default false }}
             - --scale-down-unneeded-time={{ .Values.clusterAutoscaler.scaleDownUnneededTime | default "45m" }}
             - --scale-down-delay-after-add={{ .Values.clusterAutoscaler.scaleDownDelayAfterAdd | default "20m" }}
             - --max-node-provision-time={{ .Values.clusterAutoscaler.maxNodeProvisionTime | default "15m" }}
