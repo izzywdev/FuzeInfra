@@ -3,6 +3,7 @@ package provider_test
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/izzywdev/fuzeinfra/contabo-externalgrpc/internal/contabo"
@@ -78,17 +79,18 @@ func TestIncreaseSize_HappyPath(t *testing.T) {
 		t.Fatalf("want 2 create calls, got %d", fc.createCalls)
 	}
 
-	// Verify instance names are correct
+	// Verify instance names are correct: prefixed, and unique from each other
+	// (naming is now a random suffix, not a sequential index — see
+	// uniqueInstanceName in scale.go).
 	if len(fc.instances) != 2 {
 		t.Fatalf("want 2 instances, got %d", len(fc.instances))
 	}
 
-	if fc.instances[0].Name != "fuzeinfra-elastic-0" {
-		t.Fatalf("want instance[0].Name=fuzeinfra-elastic-0, got %q", fc.instances[0].Name)
-	}
+	assertElasticName(t, fc.instances[0].Name, "fuzeinfra-elastic")
+	assertElasticName(t, fc.instances[1].Name, "fuzeinfra-elastic")
 
-	if fc.instances[1].Name != "fuzeinfra-elastic-1" {
-		t.Fatalf("want instance[1].Name=fuzeinfra-elastic-1, got %q", fc.instances[1].Name)
+	if fc.instances[0].Name == fc.instances[1].Name {
+		t.Fatalf("want unique instance names, got duplicate %q", fc.instances[0].Name)
 	}
 }
 
@@ -144,8 +146,13 @@ func TestIncreaseSize_ListErrorPropagates(t *testing.T) {
 	}
 }
 
-func TestIncreaseSize_NamingContinuesFromExisting(t *testing.T) {
-	// Pre-load with instances named 0,1,2 and verify next index is 3
+func TestIncreaseSize_NamingAvoidsCollisionWithExisting(t *testing.T) {
+	// Pre-load with an untracked/still-cancelling instance holding the
+	// lowest-numbered legacy sequential name. A sequential-index scheme
+	// would try to reuse "fuzeinfra-elastic-0" (already taken -> Contabo
+	// 400s on duplicate display name); the random-suffix scheme must instead
+	// produce names that are prefixed, unique from each other, and distinct
+	// from every pre-existing name.
 	fc := &fakeCloudCapTest{
 		instances: []contabo.Instance{
 			{ID: 10, Name: "fuzeinfra-elastic-0", Tags: []string{"fuzeinfra-elastic"}},
@@ -178,17 +185,51 @@ func TestIncreaseSize_NamingContinuesFromExisting(t *testing.T) {
 		t.Fatalf("want non-nil response")
 	}
 
-	// Verify 2 new instances created with indices 3 and 4
 	if len(fc.instances) != 5 {
 		t.Fatalf("want 5 instances total, got %d", len(fc.instances))
 	}
 
-	if fc.instances[3].Name != "fuzeinfra-elastic-3" {
-		t.Fatalf("want instance[3].Name=fuzeinfra-elastic-3, got %q", fc.instances[3].Name)
+	newNames := map[string]struct{}{
+		fc.instances[3].Name: {},
+		fc.instances[4].Name: {},
+	}
+	if len(newNames) != 2 {
+		t.Fatalf("want 2 distinct new instance names, got %v", newNames)
 	}
 
-	if fc.instances[4].Name != "fuzeinfra-elastic-4" {
-		t.Fatalf("want instance[4].Name=fuzeinfra-elastic-4, got %q", fc.instances[4].Name)
+	preExisting := map[string]struct{}{
+		"fuzeinfra-elastic-0": {},
+		"fuzeinfra-elastic-1": {},
+		"fuzeinfra-elastic-2": {},
+	}
+	for name := range newNames {
+		assertElasticName(t, name, "fuzeinfra-elastic")
+		if _, collides := preExisting[name]; collides {
+			t.Fatalf("new instance name %q collides with a pre-existing name", name)
+		}
+	}
+}
+
+// assertElasticName asserts name has the given prefix followed by
+// "-<8-hex-chars>" (the random suffix format from uniqueInstanceName), and
+// nothing else.
+func assertElasticName(t *testing.T, name, prefix string) {
+	t.Helper()
+
+	wantPrefix := prefix + "-"
+	if !strings.HasPrefix(name, wantPrefix) {
+		t.Fatalf("want name with prefix %q, got %q", wantPrefix, name)
+	}
+
+	suffix := strings.TrimPrefix(name, wantPrefix)
+	if len(suffix) != 8 {
+		t.Fatalf("want an 8-char hex suffix, got %q (len %d) in name %q", suffix, len(suffix), name)
+	}
+	for _, r := range suffix {
+		isHex := (r >= '0' && r <= '9') || (r >= 'a' && r <= 'f')
+		if !isHex {
+			t.Fatalf("want a lowercase-hex suffix, got %q in name %q", suffix, name)
+		}
 	}
 }
 
