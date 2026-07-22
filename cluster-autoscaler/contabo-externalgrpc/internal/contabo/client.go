@@ -40,9 +40,14 @@ type CreateReq struct {
 	ProductID string
 	ImageID   string
 	Region    string
-	SSHKeyID  int64
-	UserData  string
-	Tags      []string
+	// SSHKeyID is the Contabo secrets-API SSH key id to register on the new
+	// instance via the sshKeys field. Optional: when <= 0, "sshKeys" is
+	// omitted from the create request entirely (no registered SSH-key
+	// secret is referenced) — break-glass SSH access is instead provisioned
+	// via cloud-init (UserData), which every node already receives.
+	SSHKeyID int64
+	UserData string
+	Tags     []string
 }
 
 // Client defines the Contabo API client interface.
@@ -247,20 +252,32 @@ func (c *HTTPClient) ListByTag(ctx context.Context, tag string) ([]Instance, err
 func (c *HTTPClient) Create(ctx context.Context, req CreateReq) (Instance, error) {
 	// Helper to perform the actual create request
 	doCreate := func(tok string) (Instance, bool, error) {
-		// Prepare the request body
+		// Prepare the request body. SSHKeys uses `omitempty` on a slice left
+		// nil (not an empty-but-non-nil slice) whenever req.SSHKeyID <= 0, so
+		// the "sshKeys" field is OMITTED from the marshaled JSON entirely in
+		// that case rather than sent as [0]. This matters because the
+		// FuzeInfra Contabo account has zero registered SSH-key secrets — SSH
+		// access to elastic nodes is instead provisioned via cloud-init (see
+		// deploy/elastic-userdata.template), and Contabo's create-instance API
+		// accepts an omitted sshKeys field. Sending sshKeys:[0] (an
+		// unregistered/invalid secret id) would make every create fail.
+		var sshKeys []int64
+		if req.SSHKeyID > 0 {
+			sshKeys = []int64{req.SSHKeyID}
+		}
 		createBody := struct {
 			DisplayName string  `json:"displayName"`
 			ImageID     string  `json:"imageId"`
 			ProductID   string  `json:"productId"`
 			Region      string  `json:"region"`
-			SSHKeys     []int64 `json:"sshKeys"`
+			SSHKeys     []int64 `json:"sshKeys,omitempty"`
 			UserData    string  `json:"userData"`
 		}{
 			DisplayName: req.Name,
 			ImageID:     req.ImageID,
 			ProductID:   req.ProductID,
 			Region:      req.Region,
-			SSHKeys:     []int64{req.SSHKeyID},
+			SSHKeys:     sshKeys,
 			UserData:    base64.StdEncoding.EncodeToString([]byte(req.UserData)),
 		}
 

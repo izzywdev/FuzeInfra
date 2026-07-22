@@ -2,6 +2,8 @@ package contabo
 
 import (
 	"context"
+	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -61,5 +63,67 @@ func TestCreateAndDelete(t *testing.T) {
 	}
 	if !created || !deleted {
 		t.Fatal("endpoints not hit")
+	}
+}
+
+// TestCreate_SSHKeysOmittedWhenZero verifies that when CreateReq.SSHKeyID is
+// unset (0), the create-instance request body has NO "sshKeys" field at all
+// — not an empty array, not [0]. The FuzeInfra Contabo account has zero
+// registered SSH-key secrets, so referencing any secret id (including 0)
+// would make every real create call fail; SSH access instead comes from
+// cloud-init (see deploy/elastic-userdata.template).
+func TestCreate_SSHKeysOmittedWhenZero(t *testing.T) {
+	var gotBody map[string]interface{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == "POST" && r.URL.Path == "/v1/compute/instances":
+			body, _ := io.ReadAll(r.Body)
+			if err := json.Unmarshal(body, &gotBody); err != nil {
+				t.Fatalf("unmarshal create request body: %v", err)
+			}
+			w.Write([]byte(`{"data":[{"instanceId":100,"displayName":"fuzeinfra-elastic-2","status":"provisioning"}]}`))
+		default:
+			w.Write([]byte(`{"access_token":"tok","expires_in":300}`))
+		}
+	}))
+	defer srv.Close()
+	c := NewClient(Config{BaseURL: srv.URL})
+	if _, err := c.Create(context.Background(), CreateReq{Name: "fuzeinfra-elastic-2", ProductID: "V45", ImageID: "img", Region: "EU", UserData: "#cloud-config"}); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if _, ok := gotBody["sshKeys"]; ok {
+		t.Fatalf("expected \"sshKeys\" to be omitted from the request body when SSHKeyID is unset, got: %v", gotBody["sshKeys"])
+	}
+}
+
+// TestCreate_SSHKeysPresentWhenPositive verifies the inverse: when
+// CreateReq.SSHKeyID is > 0, "sshKeys" IS present in the request body and
+// contains exactly that id.
+func TestCreate_SSHKeysPresentWhenPositive(t *testing.T) {
+	var gotBody map[string]interface{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == "POST" && r.URL.Path == "/v1/compute/instances":
+			body, _ := io.ReadAll(r.Body)
+			if err := json.Unmarshal(body, &gotBody); err != nil {
+				t.Fatalf("unmarshal create request body: %v", err)
+			}
+			w.Write([]byte(`{"data":[{"instanceId":101,"displayName":"fuzeinfra-elastic-3","status":"provisioning"}]}`))
+		default:
+			w.Write([]byte(`{"access_token":"tok","expires_in":300}`))
+		}
+	}))
+	defer srv.Close()
+	c := NewClient(Config{BaseURL: srv.URL})
+	if _, err := c.Create(context.Background(), CreateReq{Name: "fuzeinfra-elastic-3", ProductID: "V45", ImageID: "img", Region: "EU", SSHKeyID: 777, UserData: "#cloud-config"}); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	sshKeys, ok := gotBody["sshKeys"]
+	if !ok {
+		t.Fatal("expected \"sshKeys\" to be present in the request body when SSHKeyID > 0")
+	}
+	arr, ok := sshKeys.([]interface{})
+	if !ok || len(arr) != 1 || arr[0].(float64) != 777 {
+		t.Fatalf("expected sshKeys=[777], got %v", sshKeys)
 	}
 }
