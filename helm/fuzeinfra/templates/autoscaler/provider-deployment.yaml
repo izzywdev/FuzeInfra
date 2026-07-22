@@ -21,7 +21,7 @@ spec:
       containers:
         - name: provider
           image: {{ .Values.clusterAutoscaler.provider.image }}
-          imagePullPolicy: {{ include "fuzeinfra.pullPolicy" . }}
+          imagePullPolicy: Always # :latest must re-pull to pick up rebuilds
           ports:
             - name: grpc
               containerPort: 8086
