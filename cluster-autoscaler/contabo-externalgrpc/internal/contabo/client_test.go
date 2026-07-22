@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 // tokenResponse is what the mock AuthURL returns for every request that
@@ -47,6 +48,75 @@ func TestListByTag(t *testing.T) {
 	}
 	if got[0].Status != "running" {
 		t.Fatalf("expected Status=running, got %s", got[0].Status)
+	}
+}
+
+// TestListByTag_ParsesCreatedDate verifies that the createdDate field on the
+// GET /v1/compute/instances response is parsed into Instance.CreatedDate as
+// an RFC3339 time.Time — the billing-aware reaper (internal/reaper) anchors
+// its monthly-renewal calculation on this field, so a silent parse failure
+// would make it guess wrong about when an instance renews.
+func TestListByTag_ParsesCreatedDate(t *testing.T) {
+	const created = "2026-01-15T10:30:00Z"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/tags":
+			w.Write([]byte(`{"data":[{"tagId":7,"name":"fuzeinfra-elastic","color":"#0A78C3"}]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/tags/7/assignments":
+			w.Write([]byte(`{"data":[{"tagId":7,"tagName":"fuzeinfra-elastic","resourceType":"instance","resourceId":"42","resourceName":"fuzeinfra-elastic-0"}],"_pagination":{"totalElements":1}}`))
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/v1/compute/instances"):
+			w.Write([]byte(`{"data":[{"instanceId":42,"displayName":"fuzeinfra-elastic-0","status":"running","createdDate":"` + created + `","addresses":{"private":[{"ip":"10.0.0.5"}]}}]}`))
+		default:
+			w.Write([]byte(tokenResponse))
+		}
+	}))
+	defer srv.Close()
+	c := NewClient(Config{BaseURL: srv.URL, AuthURL: srv.URL})
+	got, err := c.ListByTag(context.Background(), "fuzeinfra-elastic")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("expected 1 instance, got %d", len(got))
+	}
+	want, err := time.Parse(time.RFC3339, created)
+	if err != nil {
+		t.Fatalf("test setup: parsing expected time: %v", err)
+	}
+	if !got[0].CreatedDate.Equal(want) {
+		t.Fatalf("CreatedDate = %v, want %v", got[0].CreatedDate, want)
+	}
+}
+
+// TestListByTag_MissingCreatedDateStaysZero verifies that when the API
+// response omits createdDate entirely (or it fails to parse), CreatedDate is
+// left as the zero time.Time rather than erroring the whole call — that
+// field is metadata for the reaper, not required for CA's core scale-up/down
+// path, and other tests in this file rely on responses that never set it.
+func TestListByTag_MissingCreatedDateStaysZero(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/tags":
+			w.Write([]byte(`{"data":[{"tagId":7,"name":"fuzeinfra-elastic","color":"#0A78C3"}]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/tags/7/assignments":
+			w.Write([]byte(`{"data":[{"tagId":7,"tagName":"fuzeinfra-elastic","resourceType":"instance","resourceId":"42","resourceName":"fuzeinfra-elastic-0"}],"_pagination":{"totalElements":1}}`))
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/v1/compute/instances"):
+			w.Write([]byte(`{"data":[{"instanceId":42,"displayName":"fuzeinfra-elastic-0","status":"running"}]}`))
+		default:
+			w.Write([]byte(tokenResponse))
+		}
+	}))
+	defer srv.Close()
+	c := NewClient(Config{BaseURL: srv.URL, AuthURL: srv.URL})
+	got, err := c.ListByTag(context.Background(), "fuzeinfra-elastic")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("expected 1 instance, got %d", len(got))
+	}
+	if !got[0].CreatedDate.IsZero() {
+		t.Fatalf("expected zero CreatedDate when createdDate is absent, got %v", got[0].CreatedDate)
 	}
 }
 

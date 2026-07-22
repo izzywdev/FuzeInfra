@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"sync"
+	"time"
 )
 
 // MemClient is an in-memory implementation of Client, used to exercise the
@@ -57,10 +58,11 @@ func (m *MemClient) Create(_ context.Context, req CreateReq) (Instance, error) {
 	defer m.mu.Unlock()
 
 	inst := Instance{
-		ID:     m.nextID,
-		Name:   req.Name,
-		Status: "running",
-		Tags:   append([]string(nil), req.Tags...),
+		ID:          m.nextID,
+		Name:        req.Name,
+		Status:      "running",
+		Tags:        append([]string(nil), req.Tags...),
+		CreatedDate: time.Now(),
 	}
 	m.nextID++
 	m.instances = append(m.instances, inst)
