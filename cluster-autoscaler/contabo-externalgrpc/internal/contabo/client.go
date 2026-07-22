@@ -11,6 +11,8 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
+	"strings"
 	"sync"
 	"time"
 )
@@ -107,36 +109,28 @@ func (c *HTTPClient) token(ctx context.Context) (string, error) {
 		return c.tok, nil
 	}
 
-	// Determine auth endpoint
+	// Determine auth endpoint. Contabo's OAuth2 token endpoint is a Keycloak
+	// realm endpoint that is used DIRECTLY (no "/oauth/token" suffix) and
+	// expects a form-urlencoded password grant — NOT JSON. Using the wrong
+	// URL/body shape returns HTTP 404.
 	authURL := c.cfg.AuthURL
 	if authURL == "" {
-		authURL = c.cfg.BaseURL
+		authURL = "https://auth.contabo.com/auth/realms/contabo/protocol/openid-connect/token"
 	}
 
-	// Build request body with real credentials
-	credBody := struct {
-		ClientID     string `json:"clientId"`
-		ClientSecret string `json:"clientSecret"`
-		Username     string `json:"username"`
-		Password     string `json:"password"`
-	}{
-		ClientID:     c.cfg.ClientID,
-		ClientSecret: c.cfg.ClientSecret,
-		Username:     c.cfg.User,
-		Password:     c.cfg.Pass,
-	}
-	reqBody, err := json.Marshal(credBody)
-	if err != nil {
-		return "", fmt.Errorf("marshal token request: %w", err)
-	}
+	// Build the form-urlencoded password-grant body with real credentials.
+	form := url.Values{}
+	form.Set("client_id", c.cfg.ClientID)
+	form.Set("client_secret", c.cfg.ClientSecret)
+	form.Set("username", c.cfg.User)
+	form.Set("password", c.cfg.Pass)
+	form.Set("grant_type", "password")
 
-	// POST password grant to /oauth/token
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, authURL+"/oauth/token", bytes.NewReader(reqBody))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, authURL, strings.NewReader(form.Encode()))
 	if err != nil {
 		return "", fmt.Errorf("create token request: %w", err)
 	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("x-request-id", newRequestID())
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
 	resp, err := c.hc.Do(req)
 	if err != nil {

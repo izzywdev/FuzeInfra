@@ -19,7 +19,7 @@ func TestListByTag(t *testing.T) {
 		w.Write([]byte(`{"access_token":"tok","expires_in":300}`)) // token endpoint
 	}))
 	defer srv.Close()
-	c := NewClient(Config{BaseURL: srv.URL})
+	c := NewClient(Config{BaseURL: srv.URL, AuthURL: srv.URL})
 	got, err := c.ListByTag(context.Background(), "fuzeinfra-elastic")
 	if err != nil {
 		t.Fatal(err)
@@ -53,7 +53,7 @@ func TestCreateAndDelete(t *testing.T) {
 		}
 	}))
 	defer srv.Close()
-	c := NewClient(Config{BaseURL: srv.URL})
+	c := NewClient(Config{BaseURL: srv.URL, AuthURL: srv.URL})
 	inst, err := c.Create(context.Background(), CreateReq{Name: "fuzeinfra-elastic-1", ProductID: "V45", ImageID: "img", Region: "EU", UserData: "#cloud-config", Tags: []string{"fuzeinfra-elastic"}})
 	if err != nil || inst.ID != 99 {
 		t.Fatalf("create: %v %+v", err, inst)
@@ -87,7 +87,7 @@ func TestCreate_SSHKeysOmittedWhenZero(t *testing.T) {
 		}
 	}))
 	defer srv.Close()
-	c := NewClient(Config{BaseURL: srv.URL})
+	c := NewClient(Config{BaseURL: srv.URL, AuthURL: srv.URL})
 	if _, err := c.Create(context.Background(), CreateReq{Name: "fuzeinfra-elastic-2", ProductID: "V45", ImageID: "img", Region: "EU", UserData: "#cloud-config"}); err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -114,7 +114,7 @@ func TestCreate_SSHKeysPresentWhenPositive(t *testing.T) {
 		}
 	}))
 	defer srv.Close()
-	c := NewClient(Config{BaseURL: srv.URL})
+	c := NewClient(Config{BaseURL: srv.URL, AuthURL: srv.URL})
 	if _, err := c.Create(context.Background(), CreateReq{Name: "fuzeinfra-elastic-3", ProductID: "V45", ImageID: "img", Region: "EU", SSHKeyID: 777, UserData: "#cloud-config"}); err != nil {
 		t.Fatalf("create: %v", err)
 	}
