@@ -35,7 +35,7 @@ var productSpecs = map[string]productSpec{
 	"V47": {VCPU: 10, MemGi: 32}, // VPS XL — best-effort; verify against catalog
 	// VDS product line
 	"V76": {VCPU: 6, MemGi: 16},  // VDS S — best-effort; verify against catalog
-	"V92": {VCPU: 12, MemGi: 48}, // VDS M — best-effort; verify against catalog
+	"V92": {VCPU: 4, MemGi: 8}, // verified against live Contabo instance via ca-cutover GATE A (was a wrong 12/48 guess)
 }
 
 // NodeGroupTemplateNodeInfo returns a synthetic Node describing the capacity,
