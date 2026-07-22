@@ -338,13 +338,18 @@ jobs:
           ' "$KEYS_RESP" | head -1)
           if [ -z "$SSH_KEY_ID" ]; then
             # Non-secret diagnostic (ids/types/names only — values NEVER printed).
+            INV=$(jq -r '(.data // .)[]? | "\(.secretId // .id // "?")\ttype=\(.type // "?")\tname=\(.name // "?")"' "$KEYS_RESP" | head -30)
+            SSH_COUNT=$(jq -r '[(.data // .)[]? | select((.type // "") == "ssh")] | length' "$KEYS_RESP")
+            echo "GATE B DISCOVERY: Contabo secret inventory (id / type / name — non-secret identifiers):"
+            echo "$INV"
+            echo "GATE B DISCOVERY: type=ssh secret count = ${SSH_COUNT}"
             {
               echo "### GATE B — SSH key not resolved"
-              echo "No secret's key body matched NODE_SSH_PUBLIC_KEY. Non-secret inventory:"
+              echo "type=ssh secret count: ${SSH_COUNT}. Non-secret inventory:"
               echo '```'
-              jq -r '(.data // .)[]? | "\(.secretId // .id // "?")\ttype=\(.type // "?")\tname=\(.name // "?")"' "$KEYS_RESP" | head -20
+              echo "$INV"
               echo '```'
-              echo "If NO type=ssh secret is listed, register NODE_SSH_PUBLIC_KEY in Contabo first. If ssh secrets ARE listed but none matched, the key body differs — verify NODE_SSH_PUBLIC_KEY."
+              echo "If ssh count is 0, register NODE_SSH_PUBLIC_KEY in Contabo first. If >0 but none matched, the key body differs — verify NODE_SSH_PUBLIC_KEY."
             } >> "$GITHUB_STEP_SUMMARY"
             rm -f "$KEYS_RESP"
             echo "::error::GATE B: no Contabo type=ssh secret matches NODE_SSH_PUBLIC_KEY's key body (via GET /v1/secrets). See job summary for the (non-secret) secret inventory. Fail-closed."
