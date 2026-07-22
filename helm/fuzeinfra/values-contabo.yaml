@@ -17,33 +17,28 @@ global:
   # Change back to <ip>.nip.io if the tunnel is disabled for debugging.
   domain: "prod.fuzefront.com"
   imagePullPolicy: IfNotPresent
-
 ingress:
   enabled: true
   className: traefik
   tls:
-    enabled: false   # enable once cert-manager is wired up
-
+    enabled: false # enable once cert-manager is wired up
 # Sizing for 4 vCPU / 8 GB RAM single node.
 # Leave headroom for k3s, ArgoCD, and system processes (~2 GB).
 postgres:
   storage: 20Gi
   resources:
-    requests: { cpu: 250m, memory: 512Mi }
-    limits:   { cpu: "1",  memory: 1Gi }
-
+    requests: {cpu: 250m, memory: 512Mi}
+    limits: {cpu: "1", memory: 1Gi}
 mongodb:
   storage: 10Gi
   resources:
-    requests: { cpu: 100m, memory: 256Mi }
-    limits:   { cpu: "1",  memory: 512Mi }
-
+    requests: {cpu: 100m, memory: 256Mi}
+    limits: {cpu: "1", memory: 512Mi}
 redis:
   storage: 2Gi
   resources:
-    requests: { cpu: 50m,  memory: 128Mi }
-    limits:   { cpu: 500m, memory: 256Mi }
-
+    requests: {cpu: 50m, memory: 128Mi}
+    limits: {cpu: 500m, memory: 256Mi}
 # TEMPORARY headroom reduction for the saturated single control-plane node (#93).
 # elasticsearch / rabbitmq / airflow are scaled to 0 pods. Their StatefulSets and
 # PVCs are RETAINED (no prune, no data loss) — set replicas back to 1 to restore.
@@ -53,28 +48,23 @@ elasticsearch:
   storage: 20Gi
   javaOpts: "-Xms512m -Xmx512m"
   resources:
-    requests: { cpu: 250m, memory: 1Gi }
-    limits:   { cpu: "1",  memory: 1536Mi }
-
+    requests: {cpu: 250m, memory: 1Gi}
+    limits: {cpu: "1", memory: 1536Mi}
 rabbitmq:
-  replicas: 0   # TEMP headroom (#93) — restore to 1 when the node has capacity
-
+  replicas: 0 # TEMP headroom (#93) — restore to 1 when the node has capacity
 kafka:
   storage: 10Gi
-
 prometheus:
   storage: 20Gi
   # Let downstream apps ship Prometheus alert/recording rules from their own
   # namespaces via ConfigMaps labeled `prometheus_rule: "1"`.
   ruleSidecar:
     enabled: true
-
 grafana:
   # Auto-load dashboards from any namespace via ConfigMaps labeled
   # `grafana_dashboard: "1"`.
   dashboardSidecar:
     enabled: true
-
 # Alertmanager: wire real notification receivers here. Example webhook receiver:
 # alertmanager:
 #   config:
@@ -106,17 +96,15 @@ grafana:
 #     bucket: "fuzeinfra-loki"
 #     s3ForcePathStyle: true
 #     existingSecret: "loki-s3"
-
 airflow:
-  replicas: 0          # TEMP headroom (#93): webserver/scheduler/flower -> 0 pods
-  workerReplicas: 0    # TEMP headroom (#93): celery worker -> 0 pods
+  replicas: 0 # TEMP headroom (#93): webserver/scheduler/flower -> 0 pods
+  workerReplicas: 0 # TEMP headroom (#93): celery worker -> 0 pods
   # 4 vCPU / 8 GB node — cap concurrency and memory to stop the worker from
   # crowding out CoreDNS/Postgres under memory pressure.
   celeryWorkerConcurrency: 4
   workerResources:
-    requests: { cpu: 500m, memory: 512Mi }
-    limits:   { cpu: "2",  memory: 1536Mi }
-
+    requests: {cpu: 500m, memory: 512Mi}
+    limits: {cpu: "2", memory: 1536Mi}
 # Cloudflare tunnel: all traffic enters via the named tunnel; no host-level
 # ports 80/443 need to be open.  The tunnel token lives in fuzeinfra-secrets
 # (key: CLOUDFLARE_TUNNEL_TOKEN) which is patched by terraform/cloudflare or
@@ -128,7 +116,6 @@ cloudflareTunnel:
   # Ingress rules are managed by Terraform in cloudflare_zero_trust_tunnel_cloudflared_config.
   # (tunnelId would switch to local-config mode requiring CLOUDFLARE_TUNNEL_CREDENTIALS JSON
   # which we don't provision — omitting it keeps the simpler token-based connection.)
-
 # Handoff MCP server — exposed at mcp-handoff.prod.fuzefront.com through the CF tunnel
 # (Ingress in helm/fuzeinfra/templates/handoff-mcp.yaml) with a more-specific CF Access
 # "bypass" app (terraform/contabo/cloudflare.tf, var handoff_mcp_access_enabled) so
@@ -142,11 +129,9 @@ cloudflareTunnel:
 # Enabling before the secret exists CrashLoops the pod (CreateContainerConfigError).
 handoffMcp:
   enabled: false
-
 # dnsmasq not needed on a remote server (use real DNS / nip.io)
 dnsmasq:
   enabled: false
-
 # -----------------------------------------------------------------------------
 # Cluster Autoscaler elastic pool (Contabo).
 # Maintains an elastic node pool sized 0:2 (min:max) via the externalgrpc
@@ -165,7 +150,7 @@ dnsmasq:
 # k3sServerUrl + canonical elastic userDataTemplateB64 exist would CrashLoop the
 # provider into prod. Flip to true ONLY as part of the gated Task 18 cutover.
 clusterAutoscaler:
-  enabled: false
+  enabled: true
   provider:
     # TODO: replace with the published image once fuzeinfra-contabo-ca-provider
     # has a tagged release (see cluster-autoscaler/contabo-externalgrpc).
@@ -173,23 +158,21 @@ clusterAutoscaler:
     existingSecret: fuzeinfra-ca-provider
     # TODO: fill in the Contabo product/image IDs for the elastic node flavor
     # (contabo API: GET /v1/compute/instances/images, /v1/pricing).
-    productId: ""
-    imageId: ""
+    productId: "V92"
+    imageId: "d64d5c6c-9dda-4e38-8174-0ee282474d8a"
     region: EU
     # TODO: set to the k3s server URL the elastic nodes join
     # (e.g. https://<contabo-server-ip>:6443).
-    k3sServerUrl: ""
+    k3sServerUrl: "https://161.97.118.134:6443"
     # TODO: base64 of cluster-autoscaler/contabo-externalgrpc/deploy/elastic-userdata.template
     # (the canonical elastic-node cloud-init template) — e.g.
     # `base64 -w0 cluster-autoscaler/contabo-externalgrpc/deploy/elastic-userdata.template`.
     # See that file's header for the template vars (.NodeName/.K3SServerURL/.K3SNodeToken)
     # and why --kubelet-arg=provider-id=contabo://{{.NodeName}} is load-bearing for scale-down.
-    userDataTemplateB64: ""
-
+    userDataTemplateB64: "I2Nsb3VkLWNvbmZpZwojIENhbm9uaWNhbCBjbG91ZC1pbml0IFVzZXJEYXRhIHRlbXBsYXRlIGZvciBDb250YWJvIGVsYXN0aWMgKGF1dG9zY2FsZXItbWFuYWdlZCkKIyBub2Rlcy4gVGhpcyBmaWxlIGlzIE5PVCByZWFkIGRpcmVjdGx5IGJ5IHRoZSBwcm92aWRlciDigJQgaXQgaXMgYSBzb3VyY2UKIyBhcnRpZmFjdCB0aGF0IGFuIG9wZXJhdG9yIGJhc2U2NC1lbmNvZGVzIGludG8gdGhlIEhlbG0gdmFsdWUKIyBjbHVzdGVyQXV0b3NjYWxlci5wcm92aWRlci51c2VyRGF0YVRlbXBsYXRlQjY0IChzZWUgaGVsbS9mdXplaW5mcmEvdmFsdWVzLWNvbnRhYm8ueWFtbCksCiMgd2hpY2ggdGhlIGNvbnRhYm8tZXh0ZXJuYWxncnBjIHNlcnZlciBkZWNvZGVzIGludG8gVVNFUl9EQVRBX1RFTVBMQVRFX0I2NCAvCiMgcHJvdmlkZXIuQ29uZmlnLlVzZXJEYXRhVG1wbCBhbmQgcmVuZGVycyBvbmNlIHBlciBuZXcgaW5zdGFuY2UgdmlhCiMgaW50ZXJuYWwvcHJvdmlkZXIvc2NhbGUuZ28ncyByZW5kZXJVc2VyRGF0YS4KIwojIFRlbXBsYXRlIHZhcmlhYmxlcyBhdmFpbGFibGUgKEdvIHRleHQvdGVtcGxhdGUsIGV4ZWMnZCBwZXIgbm9kZSBhdCBjcmVhdGUKIyB0aW1lIOKAlCBzZWUgcmVuZGVyVXNlckRhdGEgaW4gaW50ZXJuYWwvcHJvdmlkZXIvc2NhbGUuZ28pOgojICAge3suTm9kZU5hbWV9fSAgICAgLSB0aGUgZWxhc3RpYyBpbnN0YW5jZSBuYW1lLCBlLmcuIGZ1emVpbmZyYS1lbGFzdGljLTMKIyAgIHt7LkszU1NlcnZlclVSTH19IC0gdGhlIGszcyBzZXJ2ZXIgVVJMIHRvIGpvaW4gKGZyb20gSzNTX1NFUlZFUl9VUkwgZW52KQojICAge3suSzNTTm9kZVRva2VufX0gLSB0aGUgazNzIGFnZW50IGpvaW4gdG9rZW4gKGZyb20gSzNTX05PREVfVE9LRU4gZW52KQojCiMgSU1QT1JUQU5UOiAtLWt1YmVsZXQtYXJnICdwcm92aWRlci1pZD1jb250YWJvOi8ve3suTm9kZU5hbWV9fScgaXMgd2hhdCBtYWtlcwojIENsdXN0ZXIgQXV0b3NjYWxlcidzIHNjYWxlLWRvd24gY29ycmVsYXRpb24gd29yay4gQ0EgaWRlbnRpZmllcyB3aGljaCBrOHMKIyBOb2RlIHRvIGRlbGV0ZSB2aWEgTm9kZS5TcGVjLlByb3ZpZGVySUQsIHdoaWNoIE5vZGVHcm91cE5vZGVzIChzaXplLmdvKQojIHJlcG9ydHMgYXMgImNvbnRhYm86Ly88bmFtZT4iIOKAlCBhIG5hbWUtYmFzZWQgc2NoZW1lLCBOT1QgdGhlIG51bWVyaWMgQ29udGFibwojIGluc3RhbmNlIGlkLCBiZWNhdXNlIHRoZSBudW1lcmljIGlkIGlzIG5vdCBrbm93biB0byB0aGUgbm9kZSBhdCBib290L2pvaW4KIyB0aW1lLiBJZiB0aGlzIGZsYWcgaXMgZHJvcHBlZCBvciB0aGUgbmFtZSBkb2Vzbid0IG1hdGNoLCBzY2FsZS1kb3duIGJyZWFrczoKIyBDQSB3aWxsIG5ldmVyIGZpbmQgYSBtYXRjaGluZyBub2RlIHRvIGRlbGV0ZS4KIwojIFNTSCBBQ0NFU1M6IHRoZSBGdXplSW5mcmEgQ29udGFibyBhY2NvdW50IGhhcyB6ZXJvIHJlZ2lzdGVyZWQgU1NILWtleQojIHNlY3JldHMgKG9ubHkgYSB0eXBlPXBhc3N3b3JkIHNlY3JldCBleGlzdHMpLCBzbyBpbnN0YW5jZSBjcmVhdGlvbiBkb2VzIE5PVAojIHJlZmVyZW5jZSBDb250YWJvJ3Mgc3NoS2V5cyBtZWNoYW5pc20gKGludGVybmFsL2NvbnRhYm8vY2xpZW50LmdvIG9taXRzCiMgInNzaEtleXMiIGZyb20gdGhlIGNyZWF0ZSByZXF1ZXN0IHdoZW4gU1NIS2V5SUQgaXMgdW5zZXQg4oCUIHNlZQojIGNhLWN1dG92ZXIueW1sIEdBVEUgQiwgd2hpY2ggbm93IHdhcm5zIHJhdGhlciB0aGFuIGZhaWxzIHdoZW4gbm8gbWF0Y2hpbmcKIyBzc2ggc2VjcmV0IGlzIGZvdW5kKS4gSW5zdGVhZCwgYnJlYWstZ2xhc3MgU1NIIGFjY2VzcyBpcyBncmFudGVkIHRoZSBzYW1lCiMgd2F5IHRoZSBleGlzdGluZyBiYXNlbGluZSBub2RlcyBnZXQgaXQgKG1vZHVsZXMvY29udGFiby1rM3Mtbm9kZS9jbG91ZC1pbml0LnRmdHBsKToKIyBhdXRob3JpemluZyBhIHB1YmxpYyBrZXkgZGlyZWN0bHkgdmlhIGNsb3VkLWluaXQncyBgdXNlcnM6YCBibG9jayBiZWxvdy4gVGhlCiMgbGl0ZXJhbCB0b2tlbiBzc2gtZWQyNTUxOSBBQUFBQzNOemFDMWxaREkxTlRFNUFBQUFJSUI5ZWM2NjlOd3RMb1MxM29wM09jZ2RhUTkzalhUSUJ5M3h1Yi9mMkxmbCBpenp5LndlaW5iZXJnQGdtYWlsLmNvbSBpcyBzdWJzdGl0dXRlZCB3aXRoIHRoZSByZWFsCiMgTk9ERV9TU0hfUFVCTElDX0tFWSBzZWNyZXQgYXQgYmFzZTY0LWVuY29kZSB0aW1lIChjYS1jdXRvdmVyLnltbCkg4oCUIGl0IGlzCiMgTkVWRVIgY29tbWl0dGVkIGFzIGEgcmVhbCBrZXkgYW5kIG5ldmVyIGVjaG9lZCB0byBhIGxvZy4KCnVzZXJzOgogIC0gbmFtZTogcm9vdAogICAgc3NoX2F1dGhvcml6ZWRfa2V5czoKICAgICAgLSBzc2gtZWQyNTUxOSBBQUFBQzNOemFDMWxaREkxTlRFNUFBQUFJSUI5ZWM2NjlOd3RMb1MxM29wM09jZ2RhUTkzalhUSUJ5M3h1Yi9mMkxmbCBpenp5LndlaW5iZXJnQGdtYWlsLmNvbQoKd3JpdGVfZmlsZXM6CiAgIyBrM3Mgam9pbiBzZWNyZXRzIGxhbmQgaW4gYSByb290LW9ubHkgZW52IGZpbGUgcmF0aGVyIHRoYW4gdGhlIHByb2Nlc3MKICAjIHRhYmxlLCBzbyB0aGUgdG9rZW4gbmV2ZXIgc2hvd3MgdXAgaW4gYHBzYC9jbG91ZC1pbml0IGxvZ3MgYXMgYSBDTEkgYXJnLgogIC0gcGF0aDogL2V0Yy9rM3MtYWdlbnQuZW52CiAgICBwZXJtaXNzaW9uczogIjA2MDAiCiAgICBvd25lcjogcm9vdDpyb290CiAgICBjb250ZW50OiB8CiAgICAgIEszU19VUkw9e3suSzNTU2VydmVyVVJMfX0KICAgICAgSzNTX1RPS0VOPXt7LkszU05vZGVUb2tlbn19CgpydW5jbWQ6CiAgIyBIb3N0IGZpcmV3YWxsOiBhZ2VudCBuZWVkcyB0byByZWFjaCB0aGUgazNzIEFQSSAoNjQ0Mykgb3V0Ym91bmQgYW5kIGFjY2VwdAogICMga3ViZWxldCAoMTAyNTApICsgdGhlIGZsYW5uZWwgb3ZlcmxheSBmcm9tIHRoZSBzZXJ2ZXIuIDUxODIwL3VkcCBpcyB0aGUKICAjIFdpcmVHdWFyZCBiYWNrZW5kICh3aXJlZ3VhcmQtbmF0aXZlKSB0aGUgc2VydmVyIGlzIGJlaW5nIHJlcHJvdmlzaW9uZWQKICAjIG9udG87IDg0NzIvdWRwIChWWExBTikgaXMga2VwdCBhbG9uZ3NpZGUgaXQgZHVyaW5nIHRoZSB0cmFuc2l0aW9uLgogIC0gWyBzaCwgLWMsICJ1ZncgYWxsb3cgMjIvdGNwIHx8IHRydWUiIF0KICAtIFsgc2gsIC1jLCAidWZ3IGFsbG93IDEwMjUwL3RjcCB8fCB0cnVlIiBdCiAgLSBbIHNoLCAtYywgInVmdyBhbGxvdyA4NDcyL3VkcCB8fCB0cnVlIiBdCiAgLSBbIHNoLCAtYywgInVmdyBhbGxvdyA1MTgyMC91ZHAgfHwgdHJ1ZSIgXQogIC0gWyBzaCwgLWMsICJ1ZncgLS1mb3JjZSBlbmFibGUgfHwgdHJ1ZSIgXQogICMgSm9pbiBhcyBhIGszcyBhZ2VudCB1c2luZyB0aGUgam9pbiBzZWNyZXRzIHdyaXR0ZW4gYWJvdmUuIC0tbm9kZS1uYW1lIGFuZAogICMgLS1rdWJlbGV0LWFyZz1wcm92aWRlci1pZCBhcmUgd2hhdCBsZXQgTm9kZUdyb3VwTm9kZXMvTm9kZUdyb3VwRGVsZXRlTm9kZXMKICAjIGNvcnJlbGF0ZSB0aGlzIGs4cyBOb2RlIGJhY2sgdG8gdGhpcyBleGFjdCBDb250YWJvIFZQUyBieSBuYW1lIChzZWUgdGhlCiAgIyBJTVBPUlRBTlQgbm90ZSBhYm92ZSkuIFRoZSBwb29sIGxhYmVsICsgUHJlZmVyTm9TY2hlZHVsZSB0YWludCBtaXJyb3IKICAjIE5vZGVHcm91cFRlbXBsYXRlTm9kZUluZm8ncyBzY2FsZS1mcm9tLXplcm8gc2ltdWxhdGlvbiAoaW50ZXJuYWwvcHJvdmlkZXIvdGVtcGxhdGUuZ28pCiAgIyBleGFjdGx5IOKAlCBrZWVwIHRoZW0gaW4gc3luYyBpZiBlaXRoZXIgc2lkZSBjaGFuZ2VzLgogIC0gWyBzaCwgLWMsICJzZXQgLWE7IC4gL2V0Yy9rM3MtYWdlbnQuZW52OyBzZXQgK2E7IGN1cmwgLXNmTCBodHRwczovL2dldC5rM3MuaW8gfCBzaCAtcyAtIGFnZW50IC0tbm9kZS1uYW1lICd7ey5Ob2RlTmFtZX19JyAtLWt1YmVsZXQtYXJnICdwcm92aWRlci1pZD1jb250YWJvOi8ve3suTm9kZU5hbWV9fScgLS1ub2RlLWxhYmVsICdmdXplaW5mcmEuaW8vcG9vbD1lbGFzdGljJyAtLW5vZGUtdGFpbnQgJ2Z1emVpbmZyYS5pby9lbGFzdGljPXRydWU6UHJlZmVyTm9TY2hlZHVsZSciIF0K"
 overprovisioning:
   # Enabled together with clusterAutoscaler during the gated Task 18 cutover.
-  enabled: false
-
+  enabled: true
 # Per-service Postgres provisioning (issue #153) — PROD.
 #
 # The provisioning hook Job reads each role password via `secretKeyRef` from a
@@ -256,7 +239,6 @@ serviceDatabases:
     passwordSecret:
       name: fuzequality-db-credentials
       key: password
-
 # Per-service MongoDB provisioning (Helm REPLACES lists, so the full set must be
 # declared here — the base values default every entry to enabled: false).
 #
@@ -284,8 +266,8 @@ serviceMongoDatabases:
     managePassword: false
     database: robot_catalog
     roles:
-      - { role: readWrite, db: robot_catalog }
-      - { role: readWrite, db: mendys }
+      - {role: readWrite, db: robot_catalog}
+      - {role: readWrite, db: mendys}
   # FuzePicker backend (issue #242). FuzeInfra creates the least-privilege user
   # `fuzepicker_svc` on the shared mongo server with readWrite on its own
   # `fuzepicker` database. managePassword defaults true, so the provisioning Job
@@ -299,7 +281,6 @@ serviceMongoDatabases:
     passwordSecret:
       name: fuzepicker-db-credentials
       key: password
-
 # Chroma allocations are enabled only with a matching strict-scoped
 # SealedSecret in deploy/sealed-secrets. Chroma binds each bearer token to the
 # declared tenant/database; the NetworkPolicy also admits only the named pods.
