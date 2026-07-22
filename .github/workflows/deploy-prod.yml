@@ -34,6 +34,15 @@ jobs:
         uses: azure/setup-helm@v5
         with:
           version: v3.16.4
+      - name: Install verified Argo CD CLI
+        run: |
+          set -euo pipefail
+          version=v3.4.2
+          curl -fsSLO "https://github.com/argoproj/argo-cd/releases/download/${version}/argocd-linux-amd64"
+          curl -fsSLO "https://github.com/argoproj/argo-cd/releases/download/${version}/cli_checksums.txt"
+          grep ' argocd-linux-amd64$' cli_checksums.txt | sha256sum -c -
+          sudo install -m0755 argocd-linux-amd64 /usr/local/bin/argocd
+          argocd version --client
 
       - name: Helm lint (contabo values)
         run: helm lint helm/fuzeinfra -f helm/fuzeinfra/values-contabo.yaml
@@ -87,7 +96,9 @@ jobs:
             age_seconds=$(( $(date +%s) - $(date -d "$started" +%s) ))
             if [ "$age_seconds" -gt 900 ]; then
               echo "cancelling stale FuzeQuality migration-hook operation (${age_seconds}s old)"
-              kubectl -n argocd patch application fuzequality --type merge -p '{"operation":null}'
+              kubectl config set-context --current --namespace=argocd
+              argocd login --core
+              argocd app terminate-op fuzequality --core
               for _ in $(seq 1 30); do
                 current_phase=$(kubectl -n argocd get application fuzequality -o jsonpath='{.status.operationState.phase}')
                 [ "$current_phase" != Running ] && break
