@@ -324,18 +324,33 @@ jobs:
             rm -f "$KEYS_RESP"
             exit 1
           fi
-          NORM_WANT=$(printf '%s' "$NODE_SSH_PUBLIC_KEY" | tr -d '[:space:]')
-          SSH_KEY_ID=$(jq -r --arg want "$NORM_WANT" '
+          # Match on the base64 KEY BODY (field 2 of "ssh-<type> <base64> [comment]"),
+          # the stable identity — robust to trailing-comment / prefix differences.
+          WANT_BLOB=$(printf '%s' "$NODE_SSH_PUBLIC_KEY" | awk '{print $2}')
+          [ -n "$WANT_BLOB" ] || WANT_BLOB=$(printf '%s' "$NODE_SSH_PUBLIC_KEY" | tr -d '[:space:]')
+          SSH_KEY_ID=$(jq -r --arg want "$WANT_BLOB" '
             (.data // .)[]?
             | select((.type // "ssh") == "ssh")
-            | select(((.value // .publicKey // .sshKey // "") | gsub("\\s"; "")) == $want)
+            | ((.value // .publicKey // .sshKey // "") | gsub("^\\s+";"") | split(" ")
+               | (if length >= 2 then .[1] else .[0] end)) as $b
+            | select($b == $want)
             | (.secretId // .id // .sshKeyId // empty)
           ' "$KEYS_RESP" | head -1)
-          rm -f "$KEYS_RESP"
           if [ -z "$SSH_KEY_ID" ]; then
-            echo "::error::GATE B: no Contabo SSH key matches NODE_SSH_PUBLIC_KEY (compared against GET /v1/secrets, type=ssh). Fail-closed — the key must already be registered in Contabo before elastic nodes can be created with it."
+            # Non-secret diagnostic (ids/types/names only — values NEVER printed).
+            {
+              echo "### GATE B — SSH key not resolved"
+              echo "No secret's key body matched NODE_SSH_PUBLIC_KEY. Non-secret inventory:"
+              echo '```'
+              jq -r '(.data // .)[]? | "\(.secretId // .id // "?")\ttype=\(.type // "?")\tname=\(.name // "?")"' "$KEYS_RESP" | head -20
+              echo '```'
+              echo "If NO type=ssh secret is listed, register NODE_SSH_PUBLIC_KEY in Contabo first. If ssh secrets ARE listed but none matched, the key body differs — verify NODE_SSH_PUBLIC_KEY."
+            } >> "$GITHUB_STEP_SUMMARY"
+            rm -f "$KEYS_RESP"
+            echo "::error::GATE B: no Contabo type=ssh secret matches NODE_SSH_PUBLIC_KEY's key body (via GET /v1/secrets). See job summary for the (non-secret) secret inventory. Fail-closed."
             exit 1
           fi
+          rm -f "$KEYS_RESP"
           echo "ssh_key_id=${SSH_KEY_ID}" >> "$GITHUB_OUTPUT"
           echo "GATE B: SSH key resolved to id=${SSH_KEY_ID}."
           {
