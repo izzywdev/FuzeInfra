@@ -86,16 +86,15 @@ jobs:
             echo "registered $app"
           done
 
-          # Recover only a demonstrably stale FuzeQuality migration-hook operation.
-          # A newer chart cannot replace its BeforeHookCreation hook while the old
-          # operation remains Running indefinitely.
+          # Recover a demonstrably stale FuzeQuality operation. A newer chart
+          # cannot change hooks or rollout strategy while an old operation remains
+          # Running indefinitely.
           phase=$(kubectl -n argocd get application fuzequality -o jsonpath='{.status.operationState.phase}')
-          message=$(kubectl -n argocd get application fuzequality -o jsonpath='{.status.operationState.message}')
           started=$(kubectl -n argocd get application fuzequality -o jsonpath='{.status.operationState.startedAt}')
-          if [ "$phase" = Running ] && [[ "$message" == *"fuzequality-migrations-"* ]] && [ -n "$started" ]; then
+          if [ "$phase" = Running ] && [ -n "$started" ]; then
             age_seconds=$(( $(date +%s) - $(date -d "$started" +%s) ))
             if [ "$age_seconds" -gt 900 ]; then
-              echo "cancelling stale FuzeQuality migration-hook operation (${age_seconds}s old)"
+              echo "cancelling stale FuzeQuality operation (${age_seconds}s old)"
               kubectl config set-context --current --namespace=argocd
               argocd login --core
               argocd app terminate-op fuzequality --core
