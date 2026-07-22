@@ -81,6 +81,14 @@ func TestElasticUserDataTemplate_RendersValidCloudConfig(t *testing.T) {
 		"--kubelet-arg 'provider-id=contabo://fuzeinfra-elastic-a1b2c3d4'",
 		"--node-label 'fuzeinfra.io/pool=elastic'",
 		"--node-taint 'fuzeinfra.io/elastic=true:PreferNoSchedule'",
+		// Pinned to the same channel as the baseline module (v1.36, per
+		// #318/#366) rather than a floating "stable" channel, so an elastic
+		// agent joins in lockstep with the rest of the fleet.
+		"INSTALL_K3S_CHANNEL=v1.36",
+		// The live prod cluster runs flannel wireguard-native on all nodes
+		// (#366), so an elastic agent must allow WireGuard traffic or it can
+		// never pass pod-overlay traffic even after joining the API server.
+		"ufw allow 51820/udp",
 	} {
 		if !strings.Contains(rendered, want) {
 			t.Errorf("rendered userdata missing %q\n--- rendered ---\n%s", want, rendered)
