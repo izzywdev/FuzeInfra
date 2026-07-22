@@ -43,30 +43,33 @@ package_update: true
 write_files:
   # k3s join secrets land in a root-only env file rather than the process
   # table, so the token never shows up in `ps`/cloud-init logs as a CLI arg.
-  # INSTALL_K3S_CHANNEL is pinned to "stable" to match
-  # modules/contabo-k3s-node's k3s_channel default (see its variables.tf /
-  # README "k3s version skew" note) — an agent more than one minor
-  # ahead/behind the server is unsupported, so this must track whatever
-  # channel the running k3s server was installed from.
+  # INSTALL_K3S_CHANNEL is pinned to "v1.36" to mirror
+  # modules/contabo-k3s-node's k3s_channel default (see its variables.tf,
+  # updated by FuzeInfra#318/#366) — same minor as the fleet, which is live
+  # on v1.36.2+k3s1 across all 4 nodes including the control-plane. An agent
+  # more than one minor ahead/behind the server is unsupported, so this must
+  # track whatever channel the baseline module pins.
   - path: /etc/k3s-agent.env
     permissions: "0600"
     owner: root:root
     content: |
       K3S_URL={{.K3SServerURL}}
       K3S_TOKEN={{.K3SNodeToken}}
-      INSTALL_K3S_CHANNEL=stable
+      INSTALL_K3S_CHANNEL=v1.36
 
 runcmd:
   # Host firewall: agent needs to reach the API (6443) outbound and accept
-  # kubelet (10250) + the flannel VXLAN overlay (8472/udp) from the server.
-  # WireGuard overlay is a separate, cluster-wide hardening initiative —
-  # intentionally NOT coupled to autoscaling; elastic nodes join over the
-  # same public-IP + VXLAN path as the baseline nodes provisioned by
-  # modules/contabo-k3s-node (mirror that module's firewall rules exactly;
-  # do not add a WireGuard port here unless it does too).
+  # kubelet (10250) from the server, plus whichever flannel backend the
+  # cluster is actually running. The live prod cluster runs flannel
+  # wireguard-native on ALL nodes (FuzeInfra#366), so an elastic agent MUST
+  # allow 51820/udp or it can register with the API server but never pass
+  # WireGuard pod-overlay traffic — the likely reason a prior elastic
+  # instance never truly joined. 8472/udp (VXLAN) is kept too since it's
+  # harmless and mirrors the baseline module's firewall rules.
   - [ sh, -c, "ufw allow 22/tcp || true" ]
   - [ sh, -c, "ufw allow 10250/tcp || true" ]
   - [ sh, -c, "ufw allow 8472/udp || true" ]
+  - [ sh, -c, "ufw allow 51820/udp || true" ]
   - [ sh, -c, "ufw --force enable || true" ]
   # Join as a k3s agent using the join secrets written above. --node-name and
   # --kubelet-arg=provider-id are what let NodeGroupNodes/NodeGroupDeleteNodes
