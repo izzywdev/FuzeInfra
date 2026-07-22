@@ -318,21 +318,22 @@ jobs:
           KEYS_CODE=$(curl -sS -o "$KEYS_RESP" -w '%{http_code}' \
             -H "Authorization: Bearer ${CONTABO_TOKEN}" \
             -H "x-request-id: $(cat /proc/sys/kernel/random/uuid)" \
-            "https://api.contabo.com/v1/compute/ssh-keys")
+            "https://api.contabo.com/v1/secrets")
           if [ "$KEYS_CODE" != "200" ]; then
-            echo "::error::GATE B: SSH key list failed (HTTP $KEYS_CODE) via GET /v1/compute/ssh-keys. Fail-closed. NOTE: current Contabo docs reference a 'Secrets Management API' for SSH keys — if this consistently 404s, the endpoint may have moved to /v1/secrets; update this gate accordingly."
+            echo "::error::GATE B: secrets/ssh-key list failed (HTTP $KEYS_CODE) via GET /v1/secrets. Fail-closed — cannot resolve the SSH key id."
             rm -f "$KEYS_RESP"
             exit 1
           fi
           NORM_WANT=$(printf '%s' "$NODE_SSH_PUBLIC_KEY" | tr -d '[:space:]')
           SSH_KEY_ID=$(jq -r --arg want "$NORM_WANT" '
             (.data // .)[]?
+            | select((.type // "ssh") == "ssh")
             | select(((.value // .publicKey // .sshKey // "") | gsub("\\s"; "")) == $want)
             | (.secretId // .id // .sshKeyId // empty)
           ' "$KEYS_RESP" | head -1)
           rm -f "$KEYS_RESP"
           if [ -z "$SSH_KEY_ID" ]; then
-            echo "::error::GATE B: no Contabo SSH key matches NODE_SSH_PUBLIC_KEY (compared against GET /v1/compute/ssh-keys). Fail-closed — the key must already be registered in Contabo before elastic nodes can be created with it."
+            echo "::error::GATE B: no Contabo SSH key matches NODE_SSH_PUBLIC_KEY (compared against GET /v1/secrets, type=ssh). Fail-closed — the key must already be registered in Contabo before elastic nodes can be created with it."
             exit 1
           fi
           echo "ssh_key_id=${SSH_KEY_ID}" >> "$GITHUB_OUTPUT"
