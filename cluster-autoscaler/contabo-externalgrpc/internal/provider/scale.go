@@ -2,8 +2,8 @@ package provider
 
 import (
 	"context"
+	"crypto/rand"
 	"fmt"
-	"strconv"
 	"strings"
 	"text/template"
 
@@ -42,15 +42,22 @@ func (s *Server) NodeGroupIncreaseSize(ctx context.Context, req *protos.NodeGrou
 			current, req.Delta, s.cfg.MaxSize)
 	}
 
-	// Compute next available index for naming.
-	// Find the max numeric suffix among existing elastic instance names,
-	// then increment to get the start index for new instances.
-	nextIndex := computeNextIndex(instances, s.cfg.NamePrefix)
+	// Track names already known (from the tagged fleet) or freshly minted in
+	// this loop, so a random-suffix collision is retried locally rather than
+	// sent to Contabo (which 400s on a duplicate display name).
+	usedNames := make(map[string]struct{}, len(instances)+int(req.Delta))
+	for _, inst := range instances {
+		usedNames[inst.Name] = struct{}{}
+	}
 
 	// Create Delta instances.
 	for i := 0; i < int(req.Delta); i++ {
-		// Build instance name
-		instanceName := fmt.Sprintf("%s-%d", s.cfg.NamePrefix, nextIndex+i)
+		// Build a unique instance name.
+		instanceName, err := uniqueInstanceName(s.cfg.NamePrefix, usedNames)
+		if err != nil {
+			return nil, status.Errorf(codes.Internal, "NodeGroupIncreaseSize: generating instance name: %v", err)
+		}
+		usedNames[instanceName] = struct{}{}
 
 		// Render UserData from template
 		userData, err := renderUserData(s.cfg.UserDataTmpl, instanceName, s.cfg.K3SServerURL, s.cfg.K3SNodeToken)
@@ -76,38 +83,49 @@ func (s *Server) NodeGroupIncreaseSize(ctx context.Context, req *protos.NodeGrou
 	return &protos.NodeGroupIncreaseSizeResponse{}, nil
 }
 
-// computeNextIndex finds the max numeric suffix in existing instance names
-// matching the NamePrefix pattern and returns the next index to use.
-// If no matching instances, returns 0.
-func computeNextIndex(instances []contabo.Instance, namePrefix string) int {
-	prefix := namePrefix + "-"
-	maxIdx := -1
+// maxNameSuffixAttempts bounds the retry loop in uniqueInstanceName against a
+// pathological run of random collisions. At 4 random bytes (32 bits) of
+// suffix space, exhausting this many attempts in practice indicates a bug
+// (e.g. a broken RNG) rather than bad luck.
+const maxNameSuffixAttempts = 20
 
-	for _, inst := range instances {
-		// Check if the name starts with the expected prefix
-		if !strings.HasPrefix(inst.Name, prefix) {
-			continue
-		}
-
-		// Extract the suffix after the prefix
-		suffix := inst.Name[len(prefix):]
-
-		// Try to parse the suffix as an integer
-		idx, err := strconv.Atoi(suffix)
+// uniqueInstanceName generates an instance name of the form
+// "<namePrefix>-<8-hex-suffix>" that is not already present in used.
+//
+// The suffix is a short random value (crypto/rand, mirroring the UUID
+// request-id helper in internal/contabo/client.go) rather than a sequential
+// index. A sequential index collides whenever a prior create left an
+// untracked or still-cancelling instance holding a name: Contabo's cancel is
+// end-of-billing, so a cancelled instance keeps its display name (and thus
+// blocks reuse of that name) for the remainder of the billing period, and
+// Contabo's create API 400s ("There is already an instance with the same
+// display name") on any collision. The prefix invariant is preserved and the
+// resulting name still flows unmodified through create -> tag -> cloud-init
+// --node-name -> providerID, which is all NodeGroupForNode/
+// NodeGroupDeleteNodes require for correlation — nothing depends on the
+// suffix being sequential or predictable, only unique.
+func uniqueInstanceName(namePrefix string, used map[string]struct{}) (string, error) {
+	for attempt := 0; attempt < maxNameSuffixAttempts; attempt++ {
+		suffix, err := randomHexSuffix()
 		if err != nil {
-			// Suffix is not a valid integer; skip this instance
-			continue
+			return "", err
 		}
-
-		if idx > maxIdx {
-			maxIdx = idx
+		name := fmt.Sprintf("%s-%s", namePrefix, suffix)
+		if _, collision := used[name]; !collision {
+			return name, nil
 		}
 	}
+	return "", fmt.Errorf("could not generate a unique instance name after %d attempts", maxNameSuffixAttempts)
+}
 
-	if maxIdx < 0 {
-		return 0
+// randomHexSuffix returns 4 crypto/rand bytes rendered as 8 lowercase hex
+// characters, e.g. "a1b2c3d4".
+func randomHexSuffix() (string, error) {
+	b := make([]byte, 4)
+	if _, err := rand.Read(b); err != nil {
+		return "", fmt.Errorf("generating random name suffix: %w", err)
 	}
-	return maxIdx + 1
+	return fmt.Sprintf("%x", b), nil
 }
 
 // renderUserData renders cfg.UserDataTmpl with the provided nodeName and the
