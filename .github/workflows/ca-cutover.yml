@@ -230,7 +230,7 @@ jobs:
           #     instance whose productId == our SKU (the current baseline nodes
           #     typically already run it).
           RESP="$(mktemp)"; trap 'rm -f "$RESP"' EXIT
-          REQ_ID="$(openssl rand -hex 16 2>/dev/null || date +%s%N)"
+          REQ_ID="$(cat /proc/sys/kernel/random/uuid)"  # Contabo requires x-request-id to be a UUID
           HTTP_CODE=$(curl -sS -o "$RESP" -w '%{http_code}' \
             -H "Authorization: Bearer ${CONTABO_TOKEN}" \
             -H "x-request-id: ${REQ_ID}" \
@@ -299,9 +299,11 @@ jobs:
           [ -n "$NODE_SSH_PUBLIC_KEY" ] || { echo "::error::NODE_SSH_PUBLIC_KEY secret is empty. Fail-closed."; exit 1; }
 
           # --- image exists (read-only GET) ---------------------------------
+          # Contabo requires x-request-id to be a UUID on every compute call.
           IMG_RESP="$(mktemp)"
           IMG_CODE=$(curl -sS -o "$IMG_RESP" -w '%{http_code}' \
             -H "Authorization: Bearer ${CONTABO_TOKEN}" \
+            -H "x-request-id: $(cat /proc/sys/kernel/random/uuid)" \
             "https://api.contabo.com/v1/compute/images/${IMAGE_ID}")
           if [ "$IMG_CODE" != "200" ]; then
             echo "::error::GATE B: imageId=${IMAGE_ID} lookup failed (HTTP $IMG_CODE) via GET /v1/compute/images/{id}. Fail-closed — the image must exist before it's referenced in values-contabo.yaml."
@@ -315,6 +317,7 @@ jobs:
           KEYS_RESP="$(mktemp)"
           KEYS_CODE=$(curl -sS -o "$KEYS_RESP" -w '%{http_code}' \
             -H "Authorization: Bearer ${CONTABO_TOKEN}" \
+            -H "x-request-id: $(cat /proc/sys/kernel/random/uuid)" \
             "https://api.contabo.com/v1/compute/ssh-keys")
           if [ "$KEYS_CODE" != "200" ]; then
             echo "::error::GATE B: SSH key list failed (HTTP $KEYS_CODE) via GET /v1/compute/ssh-keys. Fail-closed. NOTE: current Contabo docs reference a 'Secrets Management API' for SSH keys — if this consistently 404s, the endpoint may have moved to /v1/secrets; update this gate accordingly."
