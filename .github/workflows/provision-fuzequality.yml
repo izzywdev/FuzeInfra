@@ -221,6 +221,8 @@ jobs:
           fi
           if [ "$health_status" != Healthy ]; then
             jq -r '.status.resources[]? | select(.health.status != "Healthy") | "resource: \(.kind)/\(.name) sync=\(.status // "Unknown") health=\(.health.status // "Unknown") message=\(.health.message // "")"' "$app_json"
+            kubectl -n fuzequality get deployments -l app.kubernetes.io/name=fuzequality -o json | jq -r '.items[]? | .metadata.name as $name | "deployment: \($name) desired=\(.spec.replicas // 0) ready=\(.status.readyReplicas // 0) available=\(.status.availableReplicas // 0) unavailable=\(.status.unavailableReplicas // 0)", (.status.conditions[]? | select(.status != "True" or .type == "Progressing") | "deployment condition: \($name) \(.type)=\(.status) reason=\(.reason // "") message=\(.message // "")")'
+            kubectl -n fuzequality get pods -l app.kubernetes.io/name=fuzequality -o json | jq -r '.items[]? | "workload pod: \(.metadata.name) component=\(.metadata.labels["app.kubernetes.io/component"] // "unknown") phase=\(.status.phase // "Unknown")", (.status.containerStatuses[]? | "workload container: \(.name) ready=\(.ready) waiting=\(.state.waiting.reason // "none") waitingMessage=\(.state.waiting.message // "") terminated=\(.state.terminated.reason // "none") exitCode=\(.state.terminated.exitCode // "none") restarts=\(.restartCount)")'
             echo "::error::FuzeQuality Argo application is not Healthy (actual: $health_status)"
             exit 1
           fi
