@@ -20,6 +20,23 @@
 # instance id, because the numeric id is not known to the node at boot/join
 # time. If this flag is dropped or the name doesn't match, scale-down breaks:
 # CA will never find a matching node to delete.
+#
+# SSH ACCESS: the FuzeInfra Contabo account has zero registered SSH-key
+# secrets (only a type=password secret exists), so instance creation does NOT
+# reference Contabo's sshKeys mechanism (internal/contabo/client.go omits
+# "sshKeys" from the create request when SSHKeyID is unset — see
+# ca-cutover.yml GATE B, which now warns rather than fails when no matching
+# ssh secret is found). Instead, break-glass SSH access is granted the same
+# way the existing baseline nodes get it (modules/contabo-k3s-node/cloud-init.tftpl):
+# authorizing a public key directly via cloud-init's `users:` block below. The
+# literal token __SSH_PUBLIC_KEY__ is substituted with the real
+# NODE_SSH_PUBLIC_KEY secret at base64-encode time (ca-cutover.yml) — it is
+# NEVER committed as a real key and never echoed to a log.
+
+users:
+  - name: root
+    ssh_authorized_keys:
+      - __SSH_PUBLIC_KEY__
 
 write_files:
   # k3s join secrets land in a root-only env file rather than the process

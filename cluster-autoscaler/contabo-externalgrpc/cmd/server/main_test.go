@@ -127,7 +127,6 @@ func TestLoadConfig_MissingRequiredVar(t *testing.T) {
 		"PRODUCT_ID",
 		"IMAGE_ID",
 		"REGION",
-		"SSH_KEY_ID",
 	}
 
 	for _, key := range requiredKeys {
@@ -176,6 +175,39 @@ func TestLoadConfig_NonNumericSSHKeyID(t *testing.T) {
 	_, _, _, err := loadConfig(getenvFromMap(env))
 	if err == nil {
 		t.Fatalf("loadConfig with non-numeric SSH_KEY_ID: want error, got nil")
+	}
+}
+
+// TestLoadConfig_SSHKeyIDDefaultsToZeroWhenUnset covers the elastic-node
+// SSH-via-cloud-init decision: the FuzeInfra Contabo account has zero
+// registered SSH-key secrets, so SSH_KEY_ID is no longer a required env var.
+// When it's absent entirely, loadConfig must succeed with SSHKeyID=0 (which
+// internal/contabo/client.go's Create() then treats as "omit sshKeys").
+func TestLoadConfig_SSHKeyIDDefaultsToZeroWhenUnset(t *testing.T) {
+	env := fullEnv()
+	delete(env, "SSH_KEY_ID")
+	provCfg, _, _, err := loadConfig(getenvFromMap(env))
+	if err != nil {
+		t.Fatalf("loadConfig with SSH_KEY_ID unset: want success, got error: %v", err)
+	}
+	if provCfg.SSHKeyID != 0 {
+		t.Errorf("SSHKeyID = %d, want 0 (default when SSH_KEY_ID is unset)", provCfg.SSHKeyID)
+	}
+}
+
+// TestLoadConfig_SSHKeyIDEmptyStringTreatedAsUnset covers the case where the
+// SSH_KEY_ID key is present in the environment (e.g. sourced from a
+// SealedSecret key that resolves to an empty value) but its value is the
+// empty string — same defaulting behavior as fully unset.
+func TestLoadConfig_SSHKeyIDEmptyStringTreatedAsUnset(t *testing.T) {
+	env := fullEnv()
+	env["SSH_KEY_ID"] = ""
+	provCfg, _, _, err := loadConfig(getenvFromMap(env))
+	if err != nil {
+		t.Fatalf("loadConfig with SSH_KEY_ID=\"\": want success, got error: %v", err)
+	}
+	if provCfg.SSHKeyID != 0 {
+		t.Errorf("SSHKeyID = %d, want 0 (default when SSH_KEY_ID is empty)", provCfg.SSHKeyID)
 	}
 }
 

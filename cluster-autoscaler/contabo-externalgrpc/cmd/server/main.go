@@ -51,8 +51,13 @@ import (
 //     Default: 0
 //   - MAX_SIZE                (optional) Maximum elastic node group size
 //     (hard cap enforced by the provider). Default: 2
-//   - SSH_KEY_ID              (required) Contabo SSH key ID injected into new
-//     instances.
+//   - SSH_KEY_ID              (optional) Contabo secrets-API SSH key ID to
+//     register on new instances via the sshKeys field. Default: 0 (unset).
+//     The FuzeInfra Contabo account has zero registered SSH-key secrets, so
+//     this is normally left unset — internal/contabo/client.go's Create()
+//     omits "sshKeys" from the create request entirely whenever SSHKeyID <=
+//     0. Break-glass SSH access is instead provisioned via cloud-init (see
+//     USER_DATA_TEMPLATE_B64 below / deploy/elastic-userdata.template).
 //   - GRPC_LISTEN             (optional) gRPC server listen address.
 //     Default: :8086
 //   - USER_DATA_TEMPLATE_B64  (optional) Base64-encoded Go text/template used
@@ -170,14 +175,18 @@ func loadConfig(getenv func(string) string) (provider.Config, contabo.Config, st
 		maxSize = parsed
 	}
 
-	// SSH_KEY_ID: required, parsed as int64.
-	sshKeyIDStr := get("SSH_KEY_ID")
-	if sshKeyIDStr == "" {
-		return provider.Config{}, contabo.Config{}, "", fmt.Errorf("missing required environment variable SSH_KEY_ID")
-	}
-	sshKeyID, err := strconv.ParseInt(sshKeyIDStr, 10, 64)
-	if err != nil {
-		return provider.Config{}, contabo.Config{}, "", fmt.Errorf("parsing SSH_KEY_ID=%q: %w", sshKeyIDStr, err)
+	// SSH_KEY_ID: optional, parsed as int64, defaults to 0 (unset). A 0/unset
+	// value means the created instance references no registered Contabo
+	// SSH-key secret at all — internal/contabo/client.go's Create() omits
+	// "sshKeys" from the request body in that case. See the SSH_KEY_ID doc
+	// comment above for why this is now optional.
+	var sshKeyID int64
+	if sshKeyIDStr := get("SSH_KEY_ID"); sshKeyIDStr != "" {
+		parsed, err := strconv.ParseInt(sshKeyIDStr, 10, 64)
+		if err != nil {
+			return provider.Config{}, contabo.Config{}, "", fmt.Errorf("parsing SSH_KEY_ID=%q: %w", sshKeyIDStr, err)
+		}
+		sshKeyID = parsed
 	}
 
 	// Validate size bounds: a misconfigured autoscaler must fail fast.
