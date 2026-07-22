@@ -196,6 +196,12 @@ variable "ci_worker_product_id" {
   default     = ""
 }
 
+variable "ci_worker_region" {
+  description = "Contabo region for CI runner nodes."
+  type        = string
+  default     = "EU"
+}
+
 variable "k3s_node_token" {
   description = "k3s node-token from the running server (/var/lib/rancher/k3s/server/node-token), used to join baseline worker nodes as k3s agents. Same secret already used by the infra-request-handler workflow (K3S_NODE_TOKEN) and modules/contabo-k3s-node — sourced from CI secrets / terraform.tfvars, never hardcoded."
   type        = string
