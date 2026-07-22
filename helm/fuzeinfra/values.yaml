@@ -536,6 +536,13 @@ clusterAutoscaler:
   maxNodeProvisionTime: 15m
   maxTotalUnreadyPercentage: 45
   expander: least-waste
+  # Billing-aware model (see reaper below): Contabo only terminates a
+  # canceled instance at the END of its current paid month, so CA's normal
+  # utilization-based scale-down (cordon+drain an idle node immediately)
+  # just wastes the rest of the paid period. Scale-down is disabled here;
+  # the reaper CronJob is what actually releases idle elastic capacity, and
+  # only right before the instance would renew anyway.
+  scaleDownEnabled: false
   provider:
     image: ghcr.io/izzywdev/fuzeinfra-contabo-ca-provider:latest
     existingSecret: fuzeinfra-ca-provider
@@ -549,6 +556,30 @@ clusterAutoscaler:
     maxSize: 2
     grpcListen: ":8086"
     userDataTemplateB64: ""
+  # Billing-aware reaper (cluster-autoscaler/contabo-externalgrpc/cmd/reaper):
+  # an hourly one-shot CronJob, run from the SAME image as the provider
+  # (command: /reaper), that cordons/drains/cancels an elastic instance only
+  # once it is within releaseWindow of its projected monthly renewal AND
+  # currently idle. Off by default; enable per-overlay alongside
+  # clusterAutoscaler.enabled (the template gates on both).
+  reaper:
+    enabled: false
+    schedule: "0 * * * *"
+    releaseWindow: 24h
+    billingPeriod: 720h
+    successfulJobsHistoryLimit: 3
+    failedJobsHistoryLimit: 3
+    # Bounds a single CronJob run; the binary's own internal context timeout
+    # is 10m (cmd/reaper/main.go) — this gives it a little headroom before
+    # Kubernetes itself kills the Job.
+    activeDeadlineSeconds: 600
+    resources:
+      requests:
+        cpu: 50m
+        memory: 64Mi
+      limits:
+        cpu: 200m
+        memory: 128Mi
 
 # -----------------------------------------------------------------------------
 # Handoff MCP server — agent-to-agent orchestration carrier for the FuzeOne
