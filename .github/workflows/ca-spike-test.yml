@@ -1,0 +1,293 @@
+# =============================================================================
+# ca-spike-test — gated end-to-end validation of the Contabo cluster-autoscaler
+# prod cutover (docs/runbooks/contabo-autoscaling-cutover.md, step 7).
+# =============================================================================
+# Run this ONLY after ca-cutover.yml's PR has merged to main and Argo CD has
+# synced cleanly (clusterAutoscaler + contabo-ca-provider pods Running/Ready —
+# see the runbook step 6 verification commands). This is the one place in this
+# family of workflows that is allowed to touch a REAL prod resource end-to-end
+# (a genuine elastic Contabo VPS gets created, joins, and is later destroyed by
+# Cluster Autoscaler's own scale-down) — that is the whole point: this is
+# where tag-assignment / name-based-providerID correctness is truly proven,
+# which ca-cutover.yml's GATE B deliberately does NOT canary (see that
+# workflow's GATE B comment for why).
+#
+# SAFETY: on ANY failure (timeout waiting for the node, node never becomes
+# Ready with a providerID) this workflow AUTOMATICALLY rolls back by opening a
+# PR that flips clusterAutoscaler.enabled / overprovisioning.enabled back to
+# false in helm/fuzeinfra/values-contabo.yaml, and FAILS THE JOB LOUDLY. It
+# never leaves autoscaling silently half-broken in prod. The rollback can be
+# suppressed (skip_rollback_on_failure) ONLY for deliberate manual debugging —
+# doing so still fails the job loudly, it just skips opening the PR.
+#
+# This workflow, like ca-cutover.yml, NEVER pushes to main directly — the
+# rollback is a PR, gated by the same green-required ruleset + auto-merge.yml
+# as every other automated PR in this repo.
+#
+# Requires: KUBE_CONFIG secret (base64 kubeconfig — same secret used by
+# cluster-query.yml / apply-cluster-config.yml / argo-outofsync-autofix.yml).
+# Runs on the `staging` self-hosted runner (network-adjacent to the prod
+# cluster), matching every other workflow that talks to it directly.
+# =============================================================================
+name: ca-spike-test
+
+on:
+  workflow_dispatch:
+    inputs:
+      timeout_minutes:
+        description: 'Max minutes to wait for the elastic node to appear + become Ready'
+        required: false
+        default: '20'
+      skip_rollback_on_failure:
+        description: 'DANGEROUS: on failure, skip opening the automatic rollback PR (leaves autoscaler enabled, unvalidated, for manual debugging). The job still fails loudly either way.'
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  # Shared with ca-cutover.yml — both can mutate values-contabo.yaml and must
+  # never race each other.
+  group: ca-values-contabo
+  cancel-in-progress: false
+
+env:
+  NAMESPACE: fuzeinfra
+  VALUES_PATH: helm/fuzeinfra/values-contabo.yaml
+  LOAD_DEPLOYMENT_NAME: ca-spike-test-load
+
+jobs:
+  spike-test:
+    runs-on: staging
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: azure/setup-kubectl@829323503d1be3d00ca8346e5391ca0b07a9ab0d # v5.1.0
+
+      - name: Configure kubectl
+        env:
+          KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
+        run: |
+          set -euo pipefail
+          [ -n "$KUBE_CONFIG" ] || { echo "::error::KUBE_CONFIG unset"; exit 1; }
+          mkdir -p "$HOME/.kube"
+          printf '%s' "$KUBE_CONFIG" | base64 -d > "$HOME/.kube/config"
+          chmod 600 "$HOME/.kube/config"
+          echo "KUBECONFIG=$HOME/.kube/config" >> "$GITHUB_ENV"
+
+      - name: Preconditions — autoscaler must already be deployed + Ready
+        run: |
+          set -euo pipefail
+          FOUND=$(kubectl -n "$NAMESPACE" get deploy fuzeinfra-cluster-autoscaler -o name 2>/dev/null || true)
+          if [ -z "$FOUND" ]; then
+            echo "::error::No fuzeinfra-cluster-autoscaler Deployment in ns/${NAMESPACE}. Run this AFTER the ca-cutover PR has merged and Argo has synced (docs/runbooks/contabo-autoscaling-cutover.md step 6) — there is nothing to spike-test (and nothing meaningful for the rollback step to roll back) if the autoscaler isn't even deployed."
+            exit 1
+          fi
+          NOT_READY=$(kubectl -n "$NAMESPACE" get pods -l app.kubernetes.io/name=fuzeinfra-cluster-autoscaler \
+            -o jsonpath='{range .items[*]}{.status.containerStatuses[0].ready}{"\n"}{end}' 2>/dev/null | grep -c -v '^true$' || true)
+          if [ "${NOT_READY:-1}" -gt 0 ]; then
+            echo "::error::fuzeinfra-cluster-autoscaler pod(s) not Ready. Fix the deployment (see runbook step 6 verification) before spike-testing."
+            exit 1
+          fi
+          echo "Preconditions OK: cluster-autoscaler is deployed and Ready."
+
+      - name: Record baseline node count
+        id: baseline
+        run: |
+          set -euo pipefail
+          COUNT=$(kubectl get nodes --no-headers | wc -l)
+          echo "count=$COUNT" >> "$GITHUB_OUTPUT"
+          echo "Baseline node count (before load, per the runbook's 'record this before starting' step): $COUNT"
+
+      - name: Apply oversized load Deployment (forces at least one Pending pod)
+        run: |
+          set -euo pipefail
+          # 3 replicas x cpu=3/mem=4Gi is sized to exceed remaining headroom on
+          # a 4 vCPU / 8 GB baseline node (values-contabo.yaml's documented
+          # sizing) plus overprovisioning's pause-pod buffer, forcing at least
+          # one pod Pending against the elastic pool's template capacity —
+          # exactly what NodeGroupTemplateNodeInfo (template.go) needs to size
+          # a scale-up from zero.
+          cat <<'EOF' | kubectl apply -f -
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: ca-spike-test-load
+            namespace: fuzeinfra
+            labels:
+              app: ca-spike-test-load
+              fuzeinfra.io/purpose: ca-spike-test
+          spec:
+            replicas: 3
+            selector:
+              matchLabels:
+                app: ca-spike-test-load
+            template:
+              metadata:
+                labels:
+                  app: ca-spike-test-load
+              spec:
+                terminationGracePeriodSeconds: 5
+                containers:
+                  - name: pause
+                    image: registry.k8s.io/pause:3.9
+                    resources:
+                      requests:
+                        cpu: "3"
+                        memory: "4Gi"
+                      limits:
+                        cpu: "3"
+                        memory: "4Gi"
+          EOF
+          echo "Applied ${LOAD_DEPLOYMENT_NAME} (3x cpu=3/mem=4Gi) to force unschedulable pods."
+
+      - name: Watch for the elastic node to appear + join (up to timeout)
+        id: watch
+        env:
+          TIMEOUT_MIN: ${{ inputs.timeout_minutes }}
+        run: |
+          set -euo pipefail
+          DEADLINE=$(( $(date +%s) + TIMEOUT_MIN * 60 ))
+          FOUND=""
+          while [ "$(date +%s)" -lt "$DEADLINE" ]; do
+            NODE=$(kubectl get nodes -l fuzeinfra.io/pool=elastic --no-headers 2>/dev/null | awk '{print $1}' | head -1 || true)
+            if [ -n "$NODE" ]; then
+              STATUS=$(kubectl get node "$NODE" -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || true)
+              PROVIDER_ID=$(kubectl get node "$NODE" -o jsonpath='{.spec.providerID}' 2>/dev/null || true)
+              if [ "$STATUS" = "True" ] && [ -n "$PROVIDER_ID" ]; then
+                echo "Elastic node ${NODE} is Ready with providerID=${PROVIDER_ID}."
+                FOUND="$NODE"
+                break
+              fi
+            fi
+            sleep 15
+          done
+          if [ -z "$FOUND" ]; then
+            echo "spike_result=timeout" >> "$GITHUB_OUTPUT"
+            echo "::error::Timed out after ${TIMEOUT_MIN}m waiting for an elastic node (label fuzeinfra.io/pool=elastic) to appear and become Ready with a providerID. This is exactly the failure this spike test exists to catch — see the automatic rollback step below."
+            exit 1
+          fi
+          echo "node_name=${FOUND}" >> "$GITHUB_OUTPUT"
+          echo "spike_result=success" >> "$GITHUB_OUTPUT"
+
+      - name: Confirm the pending load actually schedules onto the new node
+        if: success()
+        env:
+          NODE_NAME: ${{ steps.watch.outputs.node_name }}
+        run: |
+          set -euo pipefail
+          sleep 10
+          ON_NODE=$(kubectl -n "$NAMESPACE" get pods -l app=ca-spike-test-load --field-selector="spec.nodeName=${NODE_NAME}" --no-headers 2>/dev/null | wc -l)
+          echo "ca-spike-test-load pods scheduled onto ${NODE_NAME}: ${ON_NODE}"
+          if [ "$ON_NODE" -eq 0 ]; then
+            echo "::warning::No ca-spike-test-load pod landed on ${NODE_NAME} yet (scheduler may still be catching up, or the PreferNoSchedule taint pushed it elsewhere legitimately) — the node itself DID join Ready with a providerID, which is the primary pass criterion. Treating as a soft warning, not a failure."
+          fi
+
+      - name: Confirm CA + provider logs show the scale-up (provider-side confirmation)
+        if: success()
+        run: |
+          set -euo pipefail
+          CA_POD=$(kubectl -n "$NAMESPACE" get pods -l app.kubernetes.io/name=fuzeinfra-cluster-autoscaler -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+          PROVIDER_POD=$(kubectl -n "$NAMESPACE" get pods -l app.kubernetes.io/name=fuzeinfra-contabo-ca-provider -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+          {
+            echo "### Scale-up evidence"
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ -n "$CA_POD" ]; then
+            echo "--- CA (${CA_POD}) last 200 lines, filtered for scale-up ---"
+            kubectl -n "$NAMESPACE" logs "$CA_POD" --tail=200 | grep -iE 'scale.?up|increasesize|nodegroupincreasesize' \
+              && echo "CA log: scale-up evidence found." >> "$GITHUB_STEP_SUMMARY" \
+              || echo "::warning::No explicit scale-up log line matched in CA logs — the node still appeared and joined Ready, so this is informational only."
+          fi
+          if [ -n "$PROVIDER_POD" ]; then
+            echo "--- provider (${PROVIDER_POD}) last 200 lines, filtered for create/elastic ---"
+            kubectl -n "$NAMESPACE" logs "$PROVIDER_POD" --tail=200 | grep -iE 'creat|elastic' \
+              && echo "Provider log: create/elastic evidence found (this is where tag-assignment correctness is proven)." >> "$GITHUB_STEP_SUMMARY" \
+              || echo "::warning::No explicit create/elastic log line matched in the provider pod logs."
+          else
+            echo "::warning::Could not find the fuzeinfra-contabo-ca-provider pod to check its logs."
+          fi
+
+      - name: Remove the load Deployment (always — success or failure)
+        if: always()
+        run: |
+          kubectl -n "$NAMESPACE" delete deployment "$LOAD_DEPLOYMENT_NAME" --ignore-not-found=true --wait=false
+          echo "Removed ${LOAD_DEPLOYMENT_NAME}. NOTE: this does NOT wait for the elastic node's own scale-down — CA's default scale-down-unneeded-time is 45m, well outside this job's ~${{ inputs.timeout_minutes }}m budget. Confirm the node is actually drained + the Contabo VPS deleted separately (runbook step 7.5-7.7): kubectl get nodes / the Contabo dashboard, and that 'terraform plan' in terraform/contabo stays clean (the elastic node must never appear in Terraform state)."
+
+      # -----------------------------------------------------------------
+      # AUTOMATIC ROLLBACK — only reached if a prior `if: success()` step's
+      # predecessor failed (the watch step's timeout is the primary trigger).
+      # -----------------------------------------------------------------
+      - name: AUTOMATIC ROLLBACK — disable the autoscaler stack (spike test failed)
+        if: failure() && !inputs.skip_rollback_on_failure
+        env:
+          GH_TOKEN: ${{ secrets.GH_TF_TOKEN || secrets.GITHUB_TOKEN }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          curl -fsSL -o /tmp/yq "https://github.com/mikefarah/yq/releases/download/v4.44.3/yq_linux_amd64"
+          sudo install -m0755 /tmp/yq /usr/local/bin/yq
+          yq -i '
+            .clusterAutoscaler.enabled = false |
+            .overprovisioning.enabled = false
+          ' "$VALUES_PATH"
+          if git diff --quiet -- "$VALUES_PATH"; then
+            echo "::warning::Rollback found nothing to change in ${VALUES_PATH} (already disabled?) — opening no PR. The spike-test job still FAILS (see the next step)."
+            exit 0
+          fi
+          BRANCH="automated/ca-rollback-${RUN_ID}"
+          git config user.name "FuzeInfra CA Cutover"
+          git config user.email "ca-cutover@fuzeinfra"
+          git checkout -b "$BRANCH"
+          git add "$VALUES_PATH"
+          {
+            printf 'revert(ca): AUTOMATIC rollback — disable autoscaler stack (spike test failed)\n\n'
+            printf 'ca-spike-test.yml run %s FAILED (the elastic node never became Ready with a\n' "$RUN_ID"
+            printf 'valid providerID within the timeout). Auto-rolling back\n'
+            printf 'clusterAutoscaler.enabled and overprovisioning.enabled to false so prod does\n'
+            printf 'not keep running a half-validated autoscaler. See the failed run for full\n'
+            printf 'detail: %s\n\n' "$RUN_URL"
+            printf 'Co-Authored-By: FuzeInfra CA Cutover Workflow <ca-cutover@fuzeinfra>\n'
+            printf 'Rollback-Run-Id: %s\n' "$RUN_ID"
+          } > /tmp/rollback_commit_msg.txt
+          git commit -F /tmp/rollback_commit_msg.txt
+          git push origin "$BRANCH"
+          # shellcheck disable=SC2016  # backticks below are literal markdown code-formatting, not command substitution
+          {
+            printf '%s\n\n' "AUTOMATIC rollback: ca-spike-test.yml failed, so this PR disables the Contabo cluster-autoscaler stack (flips clusterAutoscaler.enabled and overprovisioning.enabled back to false in helm/fuzeinfra/values-contabo.yaml) to avoid leaving a half-validated autoscaler running in prod."
+            printf -- '- Failed run: [%s](%s)\n' "$RUN_ID" "$RUN_URL"
+            printf -- '- Investigate the failure (node never appeared/joined, CA/provider logs show errors, or a Contabo API/tag-assignment problem) before re-attempting the cutover via ca-cutover.yml.\n\n'
+            printf '%s\n' "This PR should be reviewed/merged promptly — until it merges and Argo syncs, prod still has autoscaling enabled but UNVALIDATED."
+          } > /tmp/rollback_pr_body.md
+          gh pr create --base main --head "$BRANCH" \
+            --title "revert(ca): AUTOMATIC rollback — disable autoscaler (spike test failed, run ${RUN_ID})" \
+            --body-file /tmp/rollback_pr_body.md --label "ca-cutover,rollback" 2>/dev/null \
+            || gh pr create --base main --head "$BRANCH" \
+                 --title "revert(ca): AUTOMATIC rollback — disable autoscaler (spike test failed, run ${RUN_ID})" \
+                 --body-file /tmp/rollback_pr_body.md
+          echo "Automatic rollback PR opened on branch ${BRANCH}." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Fail loudly (spike test did not succeed)
+        if: failure()
+        run: |
+          if [ "${{ inputs.skip_rollback_on_failure }}" = "true" ]; then
+            echo "::error::ca-spike-test FAILED. skip_rollback_on_failure=true — NO rollback PR was opened. Autoscaling remains ENABLED in prod, UNVALIDATED. Roll back manually or re-run without skip_rollback_on_failure."
+          else
+            echo "::error::ca-spike-test FAILED. An automatic rollback PR was opened by the prior step (or none was needed) — merge it promptly. See docs/runbooks/contabo-autoscaling-cutover.md 'Rollback' section for the manual fallback."
+          fi
+          exit 1
+
+      - name: Summarize
+        if: always()
+        run: |
+          {
+            echo "### ca-spike-test — run ${{ github.run_id }}"
+            echo "- Baseline node count: ${{ steps.baseline.outputs.count }}"
+            echo "- Result: ${{ steps.watch.outputs.spike_result || 'did not reach the watch step' }}"
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ -n "${{ steps.watch.outputs.node_name }}" ]; then
+            echo "- Elastic node observed: \`${{ steps.watch.outputs.node_name }}\`" >> "$GITHUB_STEP_SUMMARY"
+          fi

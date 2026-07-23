@@ -2,6 +2,7 @@ package provider_test
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/izzywdev/fuzeinfra/contabo-externalgrpc/internal/contabo"
@@ -16,6 +17,16 @@ type fakeCloud struct {
 
 func (f *fakeCloud) ListByTag(_ context.Context, _ string) ([]contabo.Instance, error) {
 	return f.instances, nil
+}
+
+func (f *fakeCloud) ListByNamePrefix(_ context.Context, prefix string) ([]contabo.Instance, error) {
+	var matches []contabo.Instance
+	for _, inst := range f.instances {
+		if strings.HasPrefix(inst.Name, prefix) {
+			matches = append(matches, inst)
+		}
+	}
+	return matches, nil
 }
 
 func (f *fakeCloud) Create(_ context.Context, req contabo.CreateReq) (contabo.Instance, error) {

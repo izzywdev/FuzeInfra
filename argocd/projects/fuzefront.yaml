@@ -16,12 +16,16 @@ metadata:
   name: fuzefront
   namespace: argocd
 spec:
-  description: FuzeFront product (consumer of FuzeInfra) — may deploy ONLY into its own namespace.
+  description: FuzeFront products (consumers of FuzeInfra) — may deploy ONLY into their assigned namespaces.
   sourceRepos:
     - https://github.com/izzywdev/FuzeFront.git
   destinations:
     # The product's workloads.
     - namespace: fuzefront
+      server: https://kubernetes.default.svc
+    # FuzeQuality is maintained in the FuzeFront repository but has an isolated
+    # workload namespace and consumes shared infrastructure over service DNS.
+    - namespace: fuzequality
       server: https://kubernetes.default.svc
     # The app-of-apps creates child Application objects here.
     - namespace: argocd

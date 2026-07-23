@@ -3,11 +3,12 @@
   "class": "oss-public",
   "tier": "infra",
   "expert": "fuzeinfra-expert",
-  "baselineRef": "main",
+  "baselineRef": "v1",
   "agents": [
     "contract-designer",
     "backend-engineer",
     "database-engineer",
+    "frontend-engineer",
     "devops-engineer",
     "test-engineer",
     "docs-maintainer",
@@ -15,6 +16,47 @@
     "platform-governance",
     "fuzeinfra-expert"
   ],
+  "roles": {
+    "source": "agent-templates/",
+    "runtime": "managed-agents",
+    "provider": "anthropic",
+    "defined": [
+      "backend",
+      "frontend",
+      "qa",
+      "devops",
+      "openapi-maintainer",
+      "mcp-engineer",
+      "mobile-engineer",
+      "product-manager",
+      "ux-designer",
+      "sales-rep",
+      "marketing",
+      "support-rep",
+      "ceo",
+      "cto",
+      "cfo",
+      "ciso",
+      "digital-persona"
+    ],
+    "environments": [
+      "cloud-backend",
+      "cloud-frontend",
+      "cloud-qa",
+      "selfhosted-devops",
+      "cloud-openapi-maintainer",
+      "cloud-mcp-engineer",
+      "cloud-mobile-engineer",
+      "cloud-product",
+      "cloud-gtm",
+      "cloud-exec",
+      "cloud-digital-persona"
+    ],
+    "coordinators": [
+      "coordinator",
+      "exec-coordinator"
+    ]
+  },
   "hardening": {
     "ruleset": true,
     "requireSignatures": true,

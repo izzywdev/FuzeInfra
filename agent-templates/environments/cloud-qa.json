@@ -1,0 +1,17 @@
+{
+  "$schema": "../schema/environment.schema.json",
+  "name": "fuzeinfra-cloud-qa",
+  "config": {
+    "type": "cloud",
+    "packages": {
+      "apt": ["jq"],
+      "pip": ["pytest", "pytest-asyncio", "requests", "playwright"]
+    },
+    "networking": {
+      "type": "limited",
+      "allowed_hosts": ["*.prod.fuzefront.com", "*.dev.local"],
+      "allow_mcp_servers": true,
+      "allow_package_managers": true
+    }
+  }
+}

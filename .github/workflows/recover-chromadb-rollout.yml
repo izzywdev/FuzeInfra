@@ -1,0 +1,93 @@
+name: Recover ChromaDB StatefulSet rollout
+
+# A StatefulSet can retain an unhealthy pod from currentRevision while a fixed
+# updateRevision is waiting. This narrowly-scoped, audited operation recycles
+# only that pod; its PVC and all declarative resources remain untouched.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  recover:
+    runs-on: staging
+    environment: production
+    steps:
+      - uses: azure/setup-kubectl@829323503d1be3d00ca8346e5391ca0b07a9ab0d # v5.1.0
+
+      - name: Configure kubectl
+        env:
+          KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
+        run: |
+          set -euo pipefail
+          test -n "$KUBE_CONFIG" || { echo "::error::KUBE_CONFIG unset"; exit 1; }
+          mkdir -p "$HOME/.kube"
+          printf '%s' "$KUBE_CONFIG" | base64 -d > "$HOME/.kube/config"
+          chmod 600 "$HOME/.kube/config"
+
+      - name: Install matching Argo CD CLI
+        run: |
+          set -euo pipefail
+          curl --fail --location --silent --show-error \
+            https://github.com/argoproj/argo-cd/releases/download/v3.4.4/argocd-linux-amd64 \
+            --output /tmp/argocd
+          echo 'b93c312956880c9597a246a7d1e705fbb7ee7f19c5229affdec99b26d5663e09  /tmp/argocd' | sha256sum --check
+          chmod 0755 /tmp/argocd
+
+      - name: Supersede a stale Argo CD operation
+        run: |
+          set -euo pipefail
+          app=fuzeinfra-prod
+          phase=$(kubectl -n argocd get application "$app" -o jsonpath='{.status.operationState.phase}')
+          operation_revision=$(kubectl -n argocd get application "$app" -o jsonpath='{.status.operationState.operation.sync.revision}')
+          desired_revision=$(kubectl -n argocd get application "$app" -o jsonpath='{.status.sync.revision}')
+          initial_update=$(kubectl -n fuzeinfra get statefulset fuzeinfra-chromadb -o jsonpath='{.status.updateRevision}')
+
+          if [ "$phase" = "Running" ] && [ "$operation_revision" != "$desired_revision" ]; then
+            echo "Terminating stale Argo operation: $operation_revision (desired $desired_revision)"
+            kubectl config set-context --current --namespace=argocd
+            /tmp/argocd app terminate-op "$app" --core
+          fi
+
+          for _ in $(seq 1 60); do
+            phase=$(kubectl -n argocd get application "$app" -o jsonpath='{.status.operationState.phase}')
+            [ "$phase" != "Running" ] && break
+            sleep 2
+          done
+          [ "$phase" != "Running" ] || { echo "::error::stale Argo operation did not terminate"; exit 1; }
+
+          kubectl -n argocd patch application "$app" --type merge \
+            -p '{"operation":{"initiatedBy":{"username":"chroma-rollout-recovery"},"sync":{}}}'
+
+          for _ in $(seq 1 60); do
+            update=$(kubectl -n fuzeinfra get statefulset fuzeinfra-chromadb -o jsonpath='{.status.updateRevision}')
+            [ "$update" != "$initial_update" ] && exit 0
+            sleep 2
+          done
+          echo "::error::latest ChromaDB revision was not applied by Argo CD"
+          exit 1
+
+      - name: Recycle only a stale unhealthy ChromaDB pod
+        run: |
+          set -euo pipefail
+          namespace=fuzeinfra
+          statefulset=fuzeinfra-chromadb
+          pod=fuzeinfra-chromadb-0
+
+          current=$(kubectl -n "$namespace" get statefulset "$statefulset" -o jsonpath='{.status.currentRevision}')
+          update=$(kubectl -n "$namespace" get statefulset "$statefulset" -o jsonpath='{.status.updateRevision}')
+          ready=$(kubectl -n "$namespace" get pod "$pod" -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}')
+
+          if [ "$current" = "$update" ]; then
+            echo "No stale ChromaDB revision; nothing to recover."
+            exit 0
+          fi
+          if [ "$ready" = "True" ]; then
+            echo "::error::$pod is healthy; refusing to recycle it."
+            exit 1
+          fi
+
+          echo "Recycling unhealthy $pod: $current -> $update"
+          kubectl -n "$namespace" delete pod "$pod" --wait=true --timeout=2m
+          kubectl -n "$namespace" rollout status statefulset/"$statefulset" --timeout=5m

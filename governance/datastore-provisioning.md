@@ -1,4 +1,4 @@
-# Shared datastore provisioning (Postgres / Redis / Mongo / Neo4j)
+# Shared datastore provisioning (Postgres / Redis / Mongo / Neo4j / ChromaDB)
 
 How a consumer repo gets a least-privilege silo on FuzeInfra's shared datastores
 — **without any credential ever appearing in plaintext in git, issues, or logs**.
@@ -90,6 +90,45 @@ gh secret set <APP>_REDIS_URL -R izzywdev/<consumer> \
   the issue is closed.
 - If ACLs are unavailable on the deployed Redis, fall back to shared password
   + dedicated DB index, and record the accepted risk in the issue.
+
+## ChromaDB recipe — authenticated tenant/database allocations
+
+Every consumer receives a unique bearer token, tenant, and database. Chroma's
+OSS authentication provider binds that token to exactly one tenant/database;
+the server-side binding, not a collection prefix, is the authorization
+boundary. A NetworkPolicy additionally admits only the consumer's declared
+namespace and pod labels.
+
+The token must be committed only as a strict-scoped SealedSecret (key `token`)
+in `deploy/sealed-secrets/`. Add the secret and the enabled allocation in the
+same PR. The PostSync Job creates the tenant/database with its sealed admin
+credential, reconciles bootstrap collections, performs positive own-tenant
+CRUD, and proves that cross-tenant list/CRUD is denied. Any failed assertion
+fails the sync.
+
+The pinned Chroma 0.5.23 client emits default-tenant v2 URLs for collection item
+operations. The custom server authorization provider resolves collection UUIDs
+against the system database before authorizing those operations; a URL or known
+UUID is never trusted as the isolation boundary. The executable runtime test in
+`tests/integration/test_chroma_auth_runtime.py` guards this compatibility rule.
+
+Within a database, use `<service>_<purpose>` for shared collection names.
+Dynamic per-resource collections such as `repo_<projectId>` are created by the
+service on demand and are not declared in Helm.
+
+```yaml
+serviceChromaCollections:
+  - name: example-indexer
+    enabled: true
+    tenant: example
+    database: indexer
+    credentialSecret: { name: example-indexer-chroma-credentials, key: token }
+    networkPolicy:
+      namespace: example
+      podLabels: { app.kubernetes.io/name: indexer }
+    collections:
+      - example_indexer_ready
+```
 
 ## Security invariants
 

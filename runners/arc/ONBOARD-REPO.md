@@ -91,3 +91,44 @@ The tooling for this lives in FuzeInfra:
 
 The register-repo.sh script is idempotent — re-running the workflow is safe and
 will upgrade the scale set in place.
+
+## Docker / Docker-in-Docker (DinD)
+
+Every scale set registered via `register-repo.sh` runs with **`containerMode: dind`**,
+so runner pods get a **real Docker daemon** (a privileged `docker:dind` sidecar +
+`init-dind-externals` initContainer, with `DOCKER_HOST` wired for the runner). This
+means these work out of the box on `runs-on: <SCALE_SET_NAME>` — no separate
+`kind-host` runner is needed for image builds:
+
+- `docker build` / `docker buildx build --push` (GHCR image builds) ✅
+- `docker run` / `docker ps` (daemon reachable via `DOCKER_HOST`) ✅
+
+**`docker compose` works by default now.** `register-repo.sh` defaults the runner
+image to the **FuzeInfra CI-capable image** (`ghcr.io/izzywdev/fuzeinfra-arc-runner`,
+built from `runners/arc/Dockerfile`), which bakes in the **compose-v2 & buildx CLI
+plugins**, `jq`/`curl`, a warm Python/Node toolcache, and **Playwright browser OS
+deps**. So `docker compose -f …`, `docker buildx …`, and `npx playwright install
+<browser>` all work on `runs-on: <SCALE_SET_NAME>` out of the box.
+
+> **Prerequisite:** that image must be **published + PUBLIC** on GHCR (or an
+> `imagePullSecret` wired into `arc-runners`) or runner pods `ImagePullBackOff`.
+> Publish it once via the `build-runner-image` workflow
+> (`runners/arc/workflows-to-install/build-runner-image.yml` → move into
+> `.github/workflows/`) or `runners/arc/build-and-push-runner-image.sh`.
+
+To fall back to the stock image (no compose), pass `--runner-image
+ghcr.io/actions/actions-runner:latest`. DinD alone does **not** add compose.
+
+**Re-register existing scale sets to pick up DinD.** The dind sidecar only appears
+on pods created *after* the Helm values change. Any scale set registered before DinD
+was enabled must be re-registered once:
+
+- Consumer repos: re-run your `arc-register.yml` (workflow_dispatch, action=install).
+- FuzeInfra's own `staging` set: run `arc-reinstall-scaleset.yml` (or let the
+  `arc-runners-staging` Argo CD app sync the updated `runner-scale-set-values.yaml`).
+
+**Capacity note.** DinD raises per-runner limits to cpu:4 / mem:4Gi (requests stay
+modest at cpu:500m / mem:1Gi so scheduling isn't blocked). The CI node
+`fuzeinfra-ci-runner-1` is 4 CPU / 7.75 GB, so heavy parallel image builds across
+many scale sets can contend — scale the CI pool (see the node-autoscaling design
+doc) if builds start queuing on capacity.

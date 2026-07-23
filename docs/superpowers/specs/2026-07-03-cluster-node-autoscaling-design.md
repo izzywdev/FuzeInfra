@@ -65,10 +65,14 @@ Missing (this feature builds it):
    (Postgres, Kafka, Elasticsearch, Neo4j, Prometheus) to the node holding their
    data. The autoscaler may only add/remove **stateless-workload elastic nodes**
    and must never assume stateful pods reschedule.
-3. **Public-internet node joins need WireGuard overlay.** Elastic nodes join
-   across public IPs, so the k3s server must use Flannel `wireguard-native`
-   (`51820/udp`) rather than plain VXLAN (`8472/udp`). This is a cluster-wide
-   setting applied once at k3s server install — a prerequisite.
+3. **Elastic nodes join the same way existing consumer-dispatched workers
+   do.** Prod already has worker nodes provisioned out-of-band by consumer
+   repos (FuzeFront, mendyrobotics) via the `infra-request-handler` dispatch
+   workflow, joining over public IP + Flannel VXLAN (`8472/udp`) — verified in
+   prod. Elastic nodes use that exact same public-IP + VXLAN path; this
+   feature does not touch the overlay network. (A cluster-wide move to
+   WireGuard is a separate, optional hardening initiative, decoupled from
+   autoscaling — see section 5.)
 4. **Control plane is single-node / non-HA** (see scope exclusion).
 
 ## 4. Chosen approach
@@ -90,29 +94,49 @@ Rejected alternatives:
 - **B (bespoke reconcile controller):** re-implements scale-down/drain/PDB safety
   that CA already provides; less battle-tested; cuts against "common tools."
 
-## 5. Architecture — the Terraform / CA boundary
+## 5. Architecture — identity-scoped floating baseline, not a fixed count
 
-Two distinct node groups with two distinct owners (the standard "static system
-pool + autoscaling pool" model used by GKE/EKS):
+FuzeInfra is a **shared platform**; consuming repos (FuzeFront, mendyrobotics)
+are the ones who need worker capacity, and they request it in **their own**
+repos by dispatching to FuzeInfra's `infra-request-handler` workflow, which
+provisions the Contabo VPS (FuzeInfra holds the Contabo credentials) but stays
+**unaware of the consumer's specifics** (their CF config, S3 buckets, why they
+need it). FuzeInfra's Terraform (`terraform/contabo`) manages **exactly one**
+node — the control-plane VPS (`contabo_instance.prod` in `vps.tf`) — and never
+provisions worker capacity on a consumer's behalf. Prod today already has 3
+nodes: 1 control-plane (TF-managed) + 2 workers dispatched out-of-band by
+consumers (NOT in FuzeInfra's TF state). Tomorrow it may be 4 or 5 — FuzeInfra
+does not track or predict that count.
 
-| | Baseline pool | Elastic pool |
+The cluster autoscaler must therefore scope itself by **identity**, not by a
+hardcoded total:
+
+| | Baseline ("floating") | Elastic pool |
 |---|---|---|
-| Owner | **Terraform** (declarative, gated) | **Cluster Autoscaler** (live) |
-| Provisioned by | `terraform/contabo` + `modules/contabo-k3s-node` | CA → gRPC provider → Contabo API (reusing module cloud-init) |
-| Size | Fixed: **3 nodes total** (incl. control-plane) | `min=0 … max=2` |
-| Identity | untagged / `role=baseline` | tag/label `fuzeinfra.io/pool=elastic` |
-| In CA config? | **No** — CA never touches these | **Yes** — the only group CA scales |
+| Owner | Control-plane: **Terraform** (FuzeInfra). Workers: **consumer repos**, via dispatch | **Cluster Autoscaler** (live) |
+| Provisioned by | `terraform/contabo` (control-plane only) + consumer-triggered `infra-request-handler` dispatch (workers) | CA → gRPC provider → Contabo API (reusing module cloud-init) |
+| Size | **Implicit and dynamic** — whatever exists right now (control-plane + however many consumer workers have been dispatched; 3 nodes today) | `min=0 … max=2` **additional** nodes |
+| Identity | anything NOT tagged `fuzeinfra-elastic` | tag `fuzeinfra-elastic` |
+| In CA config? | **No** — CA never touches these; it only counts their capacity for scheduling | **Yes** — the only group CA scales |
 
-- **Cluster floor** = 3 TF baseline nodes (never scales below).
-- **Cluster ceiling** = 3 baseline + 2 elastic = **5 nodes total**.
-- CA is configured with *only* the elastic group. Baseline + control-plane nodes
-  are "foreign" to CA: it counts their capacity for scheduling decisions but will
-  **never delete or resize them**.
-- Terraform stays the source of truth for the baseline and all other infra
-  (S3 buckets, CF tunnels, DNS, etc.) and has **zero** knowledge of dynamic
-  nodes. Terraform config excludes `fuzeinfra.io/pool=elastic` instances via
-  tag / `lifecycle` so a future `terraform apply` never adopts or destroys them.
-  No state fight.
+- **There is no fixed "3-node baseline" and no "5-node ceiling."** The baseline
+  is "all non-elastic nodes, whatever/however many" — it grows or shrinks only
+  when a consumer repo dispatches a request, never via this Terraform. The
+  elastic pool is purely **additive on top**: total nodes = current baseline +
+  up to 2 elastic.
+- CA is configured with *only* the elastic group. The provider's
+  `NodeGroupForNode` classifies nodes by the `fuzeinfra-elastic` tag — every
+  other node (control-plane, consumer workers, anything dispatched in the
+  future) is "foreign": counted for scheduling capacity, **never a scale-down
+  candidate**.
+- **Decoupling principle:** Terraform in this directory never enumerates
+  Contabo's account-wide instance list (no `data "contabo_instance"` /
+  for_each over "all instances"). It owns only the named control-plane
+  resource, so `terraform apply` can never adopt, diff against, or destroy a
+  consumer-dispatched worker or an elastic node — there is no mechanism by
+  which it could. This is what keeps FuzeInfra decoupled from consumer
+  specifics: it provisions the VPS when asked, and stays unaware of everything
+  else.
 
 ## 6. Components
 
@@ -173,7 +197,8 @@ utilization low for scale-down-unneeded-time (~30-60 min)
   → CA picks an elastic node, checks PDBs + safe-to-evict
   → CA cordons + drains (stateful pods excluded by annotation)
   → CA.DeleteNodes([node]) → gRPC provider → Contabo API delete VPS
-  → floor respected: never below the 3 TF baseline
+  → floor respected: never below the current (floating) baseline — CA only
+    ever deletes `fuzeinfra-elastic`-tagged nodes it created itself
 ```
 
 ## 8. Failure modes
@@ -184,7 +209,7 @@ utilization low for scale-down-unneeded-time (~30-60 min)
 | Node never joins | Provider marks instance failed after timeout; CA retries; max-retry + backoff prevents thrash; tag-scoped reaper deletes orphaned instances. |
 | Partial join (VM up, kubelet not Ready) | CA `unready` handling + `max-total-unready-percentage`; provider deletes nodes stuck unready past a deadline. |
 | Terraform drift | Elastic instances tag-excluded from TF; CI check asserts no elastic-tagged instance appears in the TF plan. |
-| Scale-down eviction risk | Stateful pods `safe-to-evict:false`; PDBs on stateless services; graceful drain; floor pinned at 3. |
+| Scale-down eviction risk | Stateful pods `safe-to-evict:false`; PDBs on stateless services; graceful drain; CA only ever deletes `fuzeinfra-elastic`-tagged nodes, so the floating baseline is never touched. |
 | Monthly-billing waste | `scale-down-unneeded-time` coarse (30–60 min); documented that savings require living past the monthly renewal. |
 | Runaway scale-up | Hard `max=2` cap enforced in the provider even if CA asks for more. |
 | Control-plane SPOF | Out of scope; documented caveat. |
@@ -197,19 +222,24 @@ utilization low for scale-down-unneeded-time (~30-60 min)
   floor enforcement.
 - **Integration (kind):** CA + provider against a fake cloud provider — assert
   unschedulable pods → IncreaseSize called; low utilization → DeleteNodes called;
-  baseline nodes never selected.
+  non-elastic (foreign) nodes never selected regardless of how many exist.
 - **Staging e2e (real Contabo, gated):** one manual spike test — apply load,
   watch a real elastic node provision + join + drain + delete; verify the TF plan
   stays clean throughout.
 - **Guardrail tests:** a stateful pod is never scheduled to / evicted from an
-  elastic node; scale-down never drops below 3.
+  elastic node; scale-down never deletes a node lacking the `fuzeinfra-elastic`
+  tag, regardless of the current baseline count.
 
 ## 10. Prerequisites & sequencing notes
 
-1. **WireGuard overlay** must be set on the k3s server before public-IP elastic
-   nodes can join reliably — likely a coordinated baseline change.
-2. Baseline must be brought to the intended **3-node** shape (TF) before / as
-   part of enabling the elastic pool.
+1. Elastic nodes join over the same public-IP + VXLAN (`8472/udp`) path the
+   existing consumer-dispatched workers already use — no overlay-network
+   change is required or in scope for this feature. (A cluster-wide move to
+   WireGuard, if ever undertaken, is a separate hardening initiative.)
+2. The baseline is whatever nodes exist at cutover time (today: control-plane
+   + 2 consumer-dispatched workers = 3) — there is nothing to "bring to shape"
+   in this Terraform, since FuzeInfra does not provision consumer worker
+   capacity. The elastic pool is enabled against whatever baseline is current.
 3. Contabo API credentials (OAuth2) already exist as CI secrets and will be
    consumed by the gRPC provider (via k8s Secret / SealedSecret) — reuse, do not
    duplicate.

@@ -1,0 +1,89 @@
+name: Recover ChromaDB bootstrap hook
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  recover:
+    runs-on: staging
+    environment: production
+    steps:
+      - uses: azure/setup-kubectl@829323503d1be3d00ca8346e5391ca0b07a9ab0d # v5.1.0
+
+      - name: Configure kubectl
+        env:
+          KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
+        run: |
+          set -euo pipefail
+          test -n "$KUBE_CONFIG" || { echo "::error::KUBE_CONFIG unset"; exit 1; }
+          mkdir -p "$HOME/.kube"
+          printf '%s' "$KUBE_CONFIG" | base64 -d > "$HOME/.kube/config"
+          chmod 600 "$HOME/.kube/config"
+
+      - name: Replace only a failed ChromaDB bootstrap hook
+        run: |
+          set -euo pipefail
+          namespace=fuzeinfra
+          job=fuzeinfra-service-chroma-provision
+          app=fuzeinfra-prod
+
+          ready=$(kubectl -n "$namespace" get pod fuzeinfra-chromadb-0 -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}')
+          [ "$ready" = "True" ] || { echo "::error::ChromaDB is not ready"; exit 1; }
+
+          failed=$(kubectl -n "$namespace" get job "$job" -o jsonpath='{.status.failed}')
+          succeeded=$(kubectl -n "$namespace" get job "$job" -o jsonpath='{.status.succeeded}')
+          [ "${failed:-0}" -gt 0 ] || { echo "::error::$job has no failed attempts; refusing recovery"; exit 1; }
+          [ "${succeeded:-0}" -eq 0 ] || { echo "::error::$job already succeeded; refusing recovery"; exit 1; }
+
+          kubectl -n "$namespace" delete job "$job" --wait=false
+
+          # A failed Argo hook can remain in Terminating when the operation that
+          # owned its hook finalizer has already ended. Remove only that exact
+          # finalizer, and only after the guarded failed/unsucceeded checks above.
+          for _ in $(seq 1 10); do
+            kubectl -n "$namespace" get job "$job" >/dev/null 2>&1 || break
+            sleep 1
+          done
+          if kubectl -n "$namespace" get job "$job" >/dev/null 2>&1; then
+            deleting=$(kubectl -n "$namespace" get job "$job" -o jsonpath='{.metadata.deletionTimestamp}')
+            finalizers=$(kubectl -n "$namespace" get job "$job" -o jsonpath='{.metadata.finalizers}')
+            [ -n "$deleting" ] || { echo "::error::$job is not deleting; refusing finalizer recovery"; exit 1; }
+            [ "$finalizers" = '["argocd.argoproj.io/hook-finalizer"]' ] || {
+              echo "::error::unexpected finalizers on $job: $finalizers"; exit 1;
+            }
+            kubectl -n "$namespace" patch job "$job" --type merge -p '{"metadata":{"finalizers":null}}'
+          fi
+          kubectl -n "$namespace" wait --for=delete job/"$job" --timeout=2m
+          kubectl -n argocd annotate application "$app" argocd.argoproj.io/refresh=hard --overwrite
+
+          # The refresh request is asynchronous. Starting a sync before Argo
+          # consumes it can recreate the hook from a stale Helm manifest.
+          for _ in $(seq 1 60); do
+            refresh=$(kubectl -n argocd get application "$app" \
+              -o go-template='{{index .metadata.annotations "argocd.argoproj.io/refresh"}}')
+            [ "$refresh" != "hard" ] && break
+            sleep 2
+          done
+          [ "$refresh" != "hard" ] || { echo "::error::Argo did not consume the hard refresh request"; exit 1; }
+
+          kubectl -n argocd patch application "$app" --type merge \
+            -p '{"operation":{"initiatedBy":{"username":"chroma-bootstrap-recovery"},"sync":{}}}'
+
+          for _ in $(seq 1 180); do
+            phase=$(kubectl -n argocd get application "$app" -o jsonpath='{.status.operationState.phase}')
+            health=$(kubectl -n argocd get application "$app" -o jsonpath='{.status.health.status}')
+            initiator=$(kubectl -n argocd get application "$app" -o jsonpath='{.status.operationState.operation.initiatedBy.username}')
+            if [ "$initiator" = "chroma-bootstrap-recovery" ] && [ "$phase" = "Succeeded" ] && [ "$health" = "Healthy" ]; then
+              echo "ChromaDB bootstrap and security verification succeeded."
+              exit 0
+            fi
+            case "$phase" in
+              Failed|Error) echo "::error::Argo operation ended in $phase"; exit 1 ;;
+            esac
+            sleep 2
+          done
+          echo "::error::timed out waiting for ChromaDB bootstrap"
+          exit 1

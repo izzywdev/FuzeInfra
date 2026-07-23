@@ -1,0 +1,25 @@
+{
+  "$schema": "../../schema/role-manifest.schema.json",
+  "role": "product-manager",
+  "name": "FuzeOne Product Manager",
+  "description": "Defines WHAT to build and why: prioritized requirements, specs, acceptance criteria, roadmap; owns the backlog content. Feeds ux-designer, openapi-maintainer, and the SDLC coordinator; verifies delivery against acceptance criteria.",
+  "persona": ".claude/agents/product-manager.md",
+  "model": "claude-opus-4-8",
+  "environment": "cloud-product",
+  "system_append": "You define product requirements + priorities; you do not design UI, define the API contract, or write code. READ across GitHub/Jira/Slack + metrics; write well-formed tickets/specs with acceptance criteria; DELEGATE build via handoff (ask_agent/spawn_agent to the SDLC coordinator) and design via handoff to ux-designer. For a binding product decision the human owns, use reach_human.",
+  "tools": [
+    { "type": "agent_toolset_20260401", "default_config": { "permission_policy": { "type": "always_allow" } } },
+    { "type": "mcp_toolset", "mcp_server_name": "github", "default_config": { "permission_policy": { "type": "always_allow" } } },
+    { "type": "mcp_toolset", "mcp_server_name": "handoff", "default_config": { "permission_policy": { "type": "always_allow" } } },
+    { "type": "mcp_toolset", "mcp_server_name": "atlassian", "default_config": { "permission_policy": { "type": "always_allow" } } },
+    { "type": "mcp_toolset", "mcp_server_name": "slack", "default_config": { "permission_policy": { "type": "always_allow" } } }
+  ],
+  "mcp_servers": [
+    { "type": "url", "name": "github", "url": "${GITHUB_MCP_URL}" },
+    { "type": "url", "name": "handoff", "url": "${HANDOFF_MCP_URL}" },
+    { "type": "url", "name": "atlassian", "url": "${ATLASSIAN_MCP_URL}" },
+    { "type": "url", "name": "slack", "url": "${SLACK_MCP_URL}" }
+  ],
+  "services": { "github": "read", "k8s": "none", "cloud": "none" },
+  "metadata": { "role": "product-manager", "tier": "product" }
+}

@@ -14,7 +14,7 @@ from the single-source-of-truth [`versions.env`](../versions.env).
 | Postgres | `POSTGRES_IMAGE` (`postgres:15`) | `5432` |
 | Redis | `REDIS_IMAGE` (`redis:7-alpine`) | `6379` |
 | Kafka (KRaft) | `KAFKA_IMAGE` (`confluentinc/cp-kafka:7.6.1`) | `29092` |
-| ChromaDB | `CHROMADB_IMAGE` (`chromadb/chroma:latest`) | `8000` |
+| ChromaDB | `CHROMADB_IMAGE` (`chromadb/chroma:0.5.23`) | `8000` |
 | MailHog | `MAILHOG_IMAGE` (`mailhog/mailhog:v1.0.1`) | `1025` SMTP / `8025` UI |
 
 The datastore/queue tags mirror `docker-compose.FuzeInfra.yml`. MailHog has no

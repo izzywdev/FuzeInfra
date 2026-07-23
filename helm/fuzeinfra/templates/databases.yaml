@@ -490,6 +490,55 @@ spec:
         {{- include "fuzeinfra.labels" . | nindent 8 }}
         {{- include "fuzeinfra.selectorLabels" (dict "component" "chromadb" "root" $) | nindent 8 }}
     spec:
+      initContainers:
+        - name: render-auth-config
+          image: {{ .Values.chromadb.image }}
+          imagePullPolicy: {{ include "fuzeinfra.pullPolicy" . }}
+          env:
+            - name: CHROMA_ADMIN_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ required "chromadb.auth.adminSecret.name is required" .Values.chromadb.auth.adminSecret.name }}
+                  key: {{ required "chromadb.auth.adminSecret.key is required" .Values.chromadb.auth.adminSecret.key }}
+            {{- range .Values.serviceChromaCollections }}
+            {{- if .enabled }}
+            - name: TOKEN_{{ .name | upper | replace "-" "_" }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ required (printf "serviceChromaCollections[%s].credentialSecret.name is required" .name) .credentialSecret.name }}
+                  key: {{ required (printf "serviceChromaCollections[%s].credentialSecret.key is required" .name) .credentialSecret.key }}
+            {{- end }}
+            {{- end }}
+          command: [python, -c]
+          args:
+            - |
+              import os
+              import string
+              from pathlib import Path
+
+              def token(name):
+                  value = os.environ[name].strip()
+                  if not value or any(char not in string.printable or char.isspace() for char in value):
+                      raise ValueError(f"{name} must contain printable, non-whitespace ASCII characters only")
+                  return value
+
+              users = [
+                  {"id": "fuzeinfra-chroma-admin", "role": "admin", "tenant": "*", "databases": ["*"], "token": token("CHROMA_ADMIN_TOKEN")},
+              {{- range .Values.serviceChromaCollections }}
+              {{- if .enabled }}
+                  {"id": {{ .name | quote }}, "role": "write", "tenant": {{ required (printf "serviceChromaCollections[%s].tenant is required" .name) .tenant | quote }}, "databases": [{{ required (printf "serviceChromaCollections[%s].database is required" .name) .database | quote }}], "token": token({{ printf "TOKEN_%s" (.name | upper | replace "-" "_") | quote }})},
+              {{- end }}
+              {{- end }}
+              ]
+              def q(value):
+                  return "'" + value.replace("'", "''") + "'"
+              credentials = ["users:"]
+              for user in users:
+                  credentials += [f"  - id: {q(user['id'])}", f"    role: {user['role']}", f"    tenant: {q(user['tenant'])}", "    databases:", *[f"      - {q(db)}" for db in user["databases"]], "    tokens:", f"      - {q(user['token'])}"]
+              Path("/auth/credentials.yaml").write_text("\n".join(credentials) + "\n")
+          volumeMounts:
+            - name: auth
+              mountPath: /auth
       containers:
         - name: chromadb
           image: {{ .Values.chromadb.image }}
@@ -500,11 +549,29 @@ spec:
             - name: PERSIST_DIRECTORY
               value: /chroma/chroma
             - name: ALLOW_RESET
+              value: "false"
+            - name: CHROMA_SERVER_AUTHN_PROVIDER
+              value: chromadb.auth.token_authn.TokenAuthenticationServerProvider
+            - name: CHROMA_SERVER_AUTHN_CREDENTIALS_FILE
+              value: /auth/credentials.yaml
+            - name: CHROMA_SERVER_AUTHZ_PROVIDER
+              value: fuzeinfra_chroma_authz.TenantDatabaseAuthorizationProvider
+            - name: PYTHONPATH
+              value: /auth-provider
+            - name: CHROMA_AUTH_TOKEN_TRANSPORT_HEADER
+              value: Authorization
+            - name: CHROMA_OVERWRITE_SINGLETON_TENANT_DATABASE_ACCESS_FROM_AUTH
               value: "true"
           ports:
             - containerPort: 8000
               name: http
           volumeMounts:
+            - name: auth
+              mountPath: /auth
+              readOnly: true
+            - name: auth-provider
+              mountPath: /auth-provider
+              readOnly: true
             - name: data
               mountPath: /chroma/chroma
           # chromadb/chroma is distroless; probe externally via TCP.
@@ -514,6 +581,13 @@ spec:
             initialDelaySeconds: 15
             periodSeconds: 10
             failureThreshold: 6
+      volumes:
+        - name: auth
+          emptyDir:
+            medium: Memory
+        - name: auth-provider
+          configMap:
+            name: fuzeinfra-chromadb-authz
   volumeClaimTemplates:
     - apiVersion: v1
       kind: PersistentVolumeClaim

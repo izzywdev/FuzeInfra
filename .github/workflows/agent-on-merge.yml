@@ -1,0 +1,75 @@
+name: Agent — refresh MCP + Swagger + mobile on merge
+
+# When a PR merges to main, have the mcp-engineer check/update the stdio + remote
+# SSE MCP server, and the openapi-maintainer refresh the live Swagger — if the merged
+# change requires it. Guarded: no-ops cleanly unless the Managed-Agents secrets are set
+# (agent creation needs a Managed-Agents-entitled key + the MCP URLs — see
+# agent-templates/PORTING-TO-FUZEAGENT.md). Slated to move to FuzeAgent.
+
+on:
+  pull_request:
+    types: [closed]
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: "PR number to review (context for the agents)"
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  refresh:
+    # only on real merges (or manual dispatch)
+    if: github.event.pull_request.merged == true || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Guard — Managed Agents configured?
+        id: guard
+        env:
+          MA_KEY: ${{ secrets.MANAGED_AGENTS_API_KEY }}
+        run: |
+          if [ -z "${MA_KEY}" ]; then
+            echo "::notice::MANAGED_AGENTS_API_KEY not set — skipping (agents not provisionable). See agent-templates/PORTING-TO-FUZEAGENT.md."
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Checkout
+        if: steps.guard.outputs.ok == 'true'
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        if: steps.guard.outputs.ok == 'true'
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Install deps
+        if: steps.guard.outputs.ok == 'true'
+        run: pip install --quiet jsonschema requests
+
+      - name: Provision (idempotent) + launch mcp-engineer & openapi-maintainer
+        if: steps.guard.outputs.ok == 'true'
+        working-directory: agent-templates
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.MANAGED_AGENTS_API_KEY }}
+          GITHUB_MCP_URL: ${{ secrets.GH_MCP_URL }}
+          GITHUB_MCP_TOKEN: ${{ secrets.GH_MCP_TOKEN }}
+          HANDOFF_MCP_URL: ${{ secrets.HANDOFF_MCP_URL }}
+          ATLASSIAN_MCP_URL: ${{ secrets.ATLASSIAN_MCP_URL }}
+          SLACK_MCP_URL: ${{ secrets.SLACK_MCP_URL }}
+          STRIPE_MCP_URL: ${{ secrets.STRIPE_MCP_URL }}
+          GMAIL_MCP_URL: ${{ secrets.GMAIL_MCP_URL }}
+          TELEGRAM_MCP_URL: ${{ secrets.TELEGRAM_MCP_URL }}
+          TWILIO_MCP_URL: ${{ secrets.TWILIO_MCP_URL }}
+          PR: ${{ github.event.pull_request.number || github.event.inputs.pr }}
+        run: |
+          set -euo pipefail
+          python providers/provision.py --provider anthropic
+          for role in openapi-maintainer mcp-engineer mobile-engineer; do
+            python sync/launch_session.py --role "$role" --auto allow \
+              --prompt "PR #${PR} just merged to main. If it changes your surface, update it and open a PR; otherwise report no change. Do NOT touch prod directly — open PRs only."
+          done

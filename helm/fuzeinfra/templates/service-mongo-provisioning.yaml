@@ -143,9 +143,14 @@ spec:
 
               echo "All MongoDB users provisioned."
           resources:
-            # mongosh is Node/V8-based; its heap + process footprint needs well
-            # over 128Mi (that limit OOMKilled the Job before it could apply the
-            # grant — FuzeInfra #245). 512Mi gives comfortable headroom.
+            # mongosh (the mongo:7 client) is a Node.js/V8 process and needs
+            # substantial heap headroom even for a trivial `ping`/`createUser`.
+            # A 128Mi limit reliably OOM-kills it (exit 137) before the admin
+            # auth handshake completes — the Job then loops "Waiting for
+            # MongoDB ..." and the PostSync hook never finishes, blocking the
+            # whole Argo sync. This was misdiagnosed as credential drift; the
+            # admin credentials authenticate fine. Give mongosh real headroom
+            # (FuzeInfra #245).
             requests: { cpu: 50m, memory: 128Mi }
             limits:   { cpu: 250m, memory: 512Mi }
 {{- end }}

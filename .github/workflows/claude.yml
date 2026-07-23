@@ -26,19 +26,48 @@ on:
 
 jobs:
   claude:
-    # Gate 1: @claude is actually mentioned (or the issue is assigned to claude).
+    # DEDUP: at most one run per issue/PR at a time (latest wins). An issue CREATED
+    # WITH labels emits BOTH an `issues.opened` and an `issues.labeled` event; without
+    # this guard the (expensive, cluster-capable) job would fire twice. cancel-in-progress
+    # collapses the near-simultaneous duplicate into a single run — and, as a bonus,
+    # a rapid follow-up @claude on the same thread supersedes the prior in-flight run
+    # instead of stacking a second cluster session on top of it.
+    concurrency:
+      group: claude-${{ github.event.issue.number || github.event.pull_request.number }}
+      cancel-in-progress: true
+    # Gate 1: @claude is actually mentioned (or the issue is labeled/assigned to claude).
+    #   Each branch is scoped to a specific github.event.action so a single intent maps
+    #   to a single matching branch — the trigger-level half of the dedup (concurrency
+    #   above is the safety net for the opened+labeled-at-creation overlap).
     # Gate 2 (SECURITY): the author is a trusted collaborator. author_association
     # is evaluated per event source. Anything else is ignored silently.
+    # Gate 3 (LOOP-BREAKER): this workflow's OWN failure notice (posted below via a
+    #   trusted PAT) contains the literal "@claude" and would otherwise re-trigger the
+    #   gate above — a definitive failure (e.g. Anthropic out of credits) then loops
+    #   forever, one failing run + one notice comment every ~20s (issue #255: 691
+    #   comments). The notice carries the hidden `claude-loop-guard` sentinel (an
+    #   HTML comment stamped by the "Alert on Claude failure" step below); any
+    #   comment/review containing that string is ignored here, so the responder
+    #   fails ONCE, posts ONE notice, and waits for a human/funded retrigger.
     if: |
       (
         (github.event_name == 'issue_comment' && contains(github.event.comment.body, '@claude') &&
+          !contains(github.event.comment.body, 'claude-loop-guard') &&
           contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association)) ||
         (github.event_name == 'pull_request_review_comment' && contains(github.event.comment.body, '@claude') &&
+          !contains(github.event.comment.body, 'claude-loop-guard') &&
           contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association)) ||
         (github.event_name == 'pull_request_review' && contains(github.event.review.body, '@claude') &&
+          !contains(github.event.review.body, 'claude-loop-guard') &&
           contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.review.author_association)) ||
-        (github.event_name == 'issues' &&
+        (github.event_name == 'issues' && github.event.action == 'opened' &&
           (contains(github.event.issue.body, '@claude') || contains(github.event.issue.title, '@claude')) &&
+          contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.issue.author_association)) ||
+        (github.event_name == 'issues' && github.event.action == 'labeled' &&
+          github.event.label.name == 'claude' &&
+          contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.issue.author_association)) ||
+        (github.event_name == 'issues' && github.event.action == 'assigned' &&
+          github.event.assignee.login == 'claude' &&
           contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.issue.author_association))
       )
     runs-on: ubuntu-latest
@@ -50,7 +79,7 @@ jobs:
       actions: read
     steps:
       - name: Checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 1
 
@@ -61,11 +90,11 @@ jobs:
       - name: Set up kubectl
         uses: azure/setup-kubectl@829323503d1be3d00ca8346e5391ca0b07a9ab0d # v5.1.0
       - name: Set up helm
-        uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4
+        uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
         with:
           version: v3.14.4
       - name: Set up terraform
-        uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3
+        uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
         with:
           terraform_version: "1.6.6"
           terraform_wrapper: false
@@ -121,8 +150,64 @@ jobs:
         run: |
           git ls-remote origin 'refs/heads/claude/*' | awk '{print $2}' | sort > /tmp/branches-before.txt
 
+      # PREVENTION (item a): the responder has silently died when the very FIRST
+      # Anthropic API call failed — the run reported is_error after ~200ms having
+      # done nothing (num_turns=1, $0), then the action's own post-processing threw
+      # an unhandled 404 (compare main...<branch> for a branch that was never made),
+      # and nobody was told. Preflight with a 1-token live call so a KNOWN-BAD
+      # key/credit/model fails fast HERE (skipping the expensive, cluster-capable
+      # run) and surfaces the REAL error. Transient conditions (429/5xx/timeout) do
+      # NOT block — the action has its own retries; only definitive auth/credit/
+      # model errors hard-stop. NOTE: preflight uses the base model id; the 1M
+      # context beta the action may append ([1m]) is a header, not a model string —
+      # if entitlement for that is the culprit the detect+alert path below still
+      # catches it.
+      - name: Preflight — Anthropic API reachable & key valid
+        id: preflight
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          set -uo pipefail
+          if [ -z "${ANTHROPIC_API_KEY:-}" ]; then
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+            echo "reason=ANTHROPIC_API_KEY secret is empty or unset" >> "$GITHUB_OUTPUT"
+            echo "::error::ANTHROPIC_API_KEY secret is empty or unset"
+            exit 0
+          fi
+          code=$(curl -sS -o /tmp/preflight.json -w '%{http_code}' --max-time 20 \
+            -X POST https://api.anthropic.com/v1/messages \
+            -H "x-api-key: ${ANTHROPIC_API_KEY}" \
+            -H "anthropic-version: 2023-06-01" \
+            -H "content-type: application/json" \
+            -d '{"model":"claude-opus-4-8","max_tokens":1,"messages":[{"role":"user","content":"ping"}]}' \
+            || echo "000")
+          err=$(jq -r '.error.message // empty' /tmp/preflight.json 2>/dev/null || true)
+          case "$code" in
+            200)
+              echo "ok=true" >> "$GITHUB_OUTPUT"
+              echo "Anthropic API preflight OK" ;;
+            400|401|402|403)
+              # Deterministic, will-fail-every-time: invalid key, no credits, or the
+              # model/beta isn't entitled. Don't enter the run — go straight to alert.
+              [ -z "$err" ] && err="HTTP $code"
+              echo "ok=false" >> "$GITHUB_OUTPUT"
+              echo "reason=Anthropic API rejected preflight (HTTP $code): $err" >> "$GITHUB_OUTPUT"
+              echo "::error::Anthropic API rejected preflight (HTTP $code): $err" ;;
+            *)
+              # Transient (429/5xx/timeout/000): don't block — let the action attempt
+              # and lean on its own retries. If it still fails, detect+alert covers it.
+              echo "ok=true" >> "$GITHUB_OUTPUT"
+              echo "::warning::Anthropic API preflight inconclusive (HTTP $code) — proceeding; the action has its own retries." ;;
+          esac
+
       - name: Run Claude
-        uses: anthropics/claude-code-action@ba0aafd4308cbba7165f9f2cdb0cfbed5a3c99ce # v1.0.168
+        id: claude
+        # Preflight gates entry: don't spend a cluster-capable run on a known-bad key.
+        # continue-on-error lets the detect + alert steps below run and OWN the job's
+        # final status, instead of the action failing silently with no notification.
+        if: steps.preflight.outputs.ok == 'true'
+        continue-on-error: true
+        uses: anthropics/claude-code-action@b76a0776ae74036e77cd11018083743453d7ad35 # v1.0.179
         env:
           # KUBECONFIG (set above) + a real-user PAT for things GITHUB_TOKEN can't
           # do (GHCR package visibility, cross-repo gh api). The agent reads any
@@ -152,6 +237,91 @@ jobs:
             --permission-mode bypassPermissions
             --max-turns 60
             --append-system-prompt "EXPERT-FIRST: begin every task by invoking the fuzeinfra-expert subagent (via Task) to load this repo's architecture/deploy/gotcha context before planning or coding. If .claude/agents/fuzeinfra-expert.md is ever missing, create it from .claude/templates/repo-expert.template.md (explore the repo to fill it in), open a PR adding it, then use it. Runner has PROD cluster access: KUBECONFIG targets the FuzeInfra Contabo k3s cluster; kubectl/helm/terraform installed; GH_TOKEN is a PAT. GitOps guardrails: prod is GitOps under ArgoCD selfHeal — never kubectl-patch/edit chart-managed resources (reverted); reconcile via chart+PR. Imperatively creating NON-chart-managed cluster Secrets to unblock go-live IS allowed. Never run destructive kubectl (delete/drain/cordon) against prod without explicit instruction. Prefer the fuzeinfra-expert and devops-engineer agents for infra delegations. End issue replies with DONE: or BLOCKED: so cross-repo monitors can key off it. CROSS-REPO HAND-OFF: if a delegated issue's REMAINING work belongs to another repo (e.g. the fix is in FuzeFront's app-of-apps, not FuzeInfra), do NOT leave it open here — open (or comment on) an issue in that repo mentioning its @claude with full context + a STATE block, post a closing note here ('Closing on FuzeInfra's end — handed to <repo>#N, please take it on your side'), and CLOSE this issue. Only keep it open if FuzeInfra itself still has work to do."
+
+      # DETECT (item b): did the responder actually fail? Three signals — a preflight
+      # hard-stop, the action step's own failure, or an is_error result in the
+      # execution log (the ~200ms "did nothing" failure). continue-on-error on the
+      # step above means we own the verdict here rather than the action deciding it.
+      - name: Detect Claude failure
+        id: detect
+        if: always()
+        env:
+          EXEC_FILE: ${{ steps.claude.outputs.execution_file }}
+          PREFLIGHT_OK: ${{ steps.preflight.outputs.ok }}
+          PREFLIGHT_REASON: ${{ steps.preflight.outputs.reason }}
+          STEP_OUTCOME: ${{ steps.claude.outcome }}
+        run: |
+          set -uo pipefail
+          failed=false; reason=""
+          if [ "${PREFLIGHT_OK:-}" != "true" ]; then
+            failed=true; reason="${PREFLIGHT_REASON:-preflight did not pass}"
+          elif [ "${STEP_OUTCOME:-}" = "failure" ]; then
+            failed=true; reason="claude-code-action step failed"
+          elif [ -n "${EXEC_FILE:-}" ] && [ -f "$EXEC_FILE" ] && \
+               grep -Eq '"is_error"[[:space:]]*:[[:space:]]*true' "$EXEC_FILE"; then
+            turns=$(jq -rs '[.[]|.. |objects|select(.type?=="result")]|last|.num_turns // ""' "$EXEC_FILE" 2>/dev/null || true)
+            failed=true; reason="Claude run returned is_error (num_turns=${turns:-?}) — it errored before completing the task"
+          fi
+          echo "failed=$failed" >> "$GITHUB_OUTPUT"
+          echo "reason=$reason" >> "$GITHUB_OUTPUT"
+          if [ "$failed" = "true" ]; then
+            echo "::error::@claude responder failed: $reason"
+          else
+            echo "@claude responder completed without an error signal"
+          fi
+
+      # ALERT (item b): a failed responder used to die silently. Now it (1) pings
+      # Telegram — the same channel as argo-deploy-notify / argo-outofsync-autofix —
+      # and (2) tells the human who typed @claude, on their own issue/PR, that it
+      # failed and how to retry. Best-effort: a notify hiccup must not mask the
+      # failure. We deliberately do NOT open a @claude triage issue here (as
+      # ci-failure-triage does for deploy workflows): summoning a broken responder to
+      # fix itself would just fail again.
+      - name: Alert on Claude failure
+        if: always() && steps.detect.outputs.failed == 'true'
+        env:
+          TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          CHAT: ${{ secrets.TELEGRAM_CHAT_ID }}
+          GH_TOKEN: ${{ secrets.GH_TOKEN || secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          ISSUE: ${{ github.event.issue.number || github.event.pull_request.number }}
+          ACTOR: ${{ github.actor }}
+          REASON: ${{ steps.detect.outputs.reason }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -uo pipefail
+          # 1) Telegram 🔴
+          if [ -n "${TOKEN:-}" ]; then
+            TEXT=$(printf '🔴 @claude responder FAILED\nRepo: %s\nIssue/PR: #%s\nBy: %s\nReason: %s\nRun: %s' \
+              "$REPO" "${ISSUE:-?}" "$ACTOR" "$REASON" "$RUN_URL")
+            curl -s -X POST "https://api.telegram.org/bot${TOKEN}/sendMessage" \
+              --data-urlencode "chat_id=${CHAT:-}" \
+              --data-urlencode "text=${TEXT}" \
+              --data "disable_web_page_preview=true" >/dev/null \
+              && echo "telegram alert sent" || echo "::warning::telegram send failed"
+          else
+            echo "::warning::TELEGRAM_BOT_TOKEN unset — skipping Telegram alert"
+          fi
+          # 2) Tell the requester on their own thread (gh issue comment works for PRs).
+          #    LOOP-BREAKER: this comment is posted with a trusted PAT and mentions
+          #    "@claude", so without a guard it re-triggers this very workflow (Gate 3
+          #    in the job `if:`). The hidden `claude-loop-guard` sentinel below is what
+          #    Gate 3 keys off to ignore it — DO NOT remove it or the runaway in
+          #    issue #255 (691 self-triggered comments) returns. Also: the retry
+          #    instruction deliberately does NOT put a bare "@claude" on its own line,
+          #    and tells the operator to FUND/FIX first — one failure, then wait.
+          if [ -n "${ISSUE:-}" ]; then
+            {
+              printf '<!-- claude-loop-guard: automated failure notice — this comment must NOT re-trigger the Claude workflow -->\n'
+              printf '### ⚠️ Claude responder did not run to completion\n\n'
+              printf 'The responder errored before finishing your request, so **no changes were made and no branch was created**.\n\n'
+              printf -- '- **Reason:** %s\n' "$REASON"
+              printf -- '- **Run log:** %s\n\n' "$RUN_URL"
+              printf 'This notice is automated and will **not** retry on its own — the responder stops after one failure and waits. If this looks like an API-side problem (key revoked / **out of credits** / model or 1M-context beta not entitled / Anthropic outage), an operator should **check the `ANTHROPIC_API_KEY` secret and fund/repair the Anthropic account first**, then re-trigger by posting a new comment mentioning the responder.\n'
+            } > /tmp/claude-fail.md
+            gh issue comment "$ISSUE" --repo "$REPO" --body-file /tmp/claude-fail.md \
+              && echo "posted failure notice to #$ISSUE" || echo "::warning::could not comment on #$ISSUE"
+          fi
 
       - name: Open draft PR for new claude branch
         if: always()
@@ -186,3 +356,14 @@ jobs:
             --fill \
             --body "$BODY" \
             && echo "Draft PR opened for $NEW"
+
+      # Reflect the failure in the job status (Run Claude ran with continue-on-error
+      # so alert + PR-open could execute first). Kept LAST so the job goes red only
+      # after the requester and Telegram have been notified.
+      - name: Fail job if Claude failed
+        if: always() && steps.detect.outputs.failed == 'true'
+        env:
+          REASON: ${{ steps.detect.outputs.reason }}
+        run: |
+          echo "::error::Marking job failed — @claude responder did not complete: ${REASON}"
+          exit 1

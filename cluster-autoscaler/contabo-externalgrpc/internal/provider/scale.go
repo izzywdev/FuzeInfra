@@ -2,8 +2,9 @@ package provider
 
 import (
 	"context"
+	"crypto/rand"
 	"fmt"
-	"strconv"
+	"log"
 	"strings"
 	"text/template"
 
@@ -17,45 +18,96 @@ import (
 // It enforces a hard maximum node count via cfg.MaxSize as a safety cap
 // against runaway autoscaler scaling.
 //
+// The cap is enforced against a NAME-PREFIX count (ListByNamePrefix), NOT
+// ListByTag. This is deliberate and safety-critical: a live prod incident
+// showed a Contabo tag-assignment race can leave a just-created instance
+// permanently untagged, which made ListByTag report 0 elastic instances
+// forever — the MaxSize cap never bound, and cluster-autoscaler ordered a
+// new paid VPS on every backoff cycle (leaked machines, real money). Because
+// every instance this provider creates is named "<NamePrefix>-<suffix>"
+// regardless of whether tagging later succeeds, counting by name prefix
+// instead is authoritative: it catches untagged orphans too, so a tagging
+// bug can never again defeat the cap.
+//
 // Returns codes.InvalidArgument if Delta <= 0.
-// Returns codes.OutOfRange if the requested size would exceed MaxSize.
-// Propagates ListByTag or Create errors.
+// Returns codes.OutOfRange if the name-prefix count is already >= MaxSize,
+// or if satisfying Delta would push it over MaxSize.
+// Propagates ListByNamePrefix or Create errors.
 func (s *Server) NodeGroupIncreaseSize(ctx context.Context, req *protos.NodeGroupIncreaseSizeRequest) (*protos.NodeGroupIncreaseSizeResponse, error) {
 	// Validate Delta
 	if req.Delta <= 0 {
 		return nil, status.Errorf(codes.InvalidArgument, "Delta must be positive, got %d", req.Delta)
 	}
 
-	// Fetch current elastic instances to check cap
-	instances, err := s.cloud.ListByTag(ctx, s.cfg.ElasticTag)
+	// Fetch ALL instances matching the elastic name prefix — tagged AND
+	// untagged — as the authoritative count for the hard cap. See the doc
+	// comment above for why this replaces a ListByTag-based count.
+	prefixInstances, err := s.cloud.ListByNamePrefix(ctx, s.cfg.NamePrefix)
 	if err != nil {
-		return nil, status.Errorf(codes.Unavailable, "NodeGroupIncreaseSize: listing elastic instances: %v", err)
+		return nil, status.Errorf(codes.Unavailable, "NodeGroupIncreaseSize: listing elastic instances by name prefix %q: %v", s.cfg.NamePrefix, err)
 	}
 
-	current := len(instances)
-	requested := current + int(req.Delta)
+	currentByPrefix := len(prefixInstances)
 
-	// Enforce hard cap
+	// HARD CAP BY REAL COUNT (critical anti-runaway guard): refuse outright,
+	// creating nothing, if the name-prefix count is already at or beyond
+	// MaxSize — regardless of what ListByTag/CA's own view says. This must
+	// be checked BEFORE looking at Delta at all, since the whole point is
+	// that a broken tag view must never let scale-up proceed anyway.
+	if currentByPrefix >= s.cfg.MaxSize {
+		log.Printf("cluster-autoscaler(contabo): REFUSING NodeGroupIncreaseSize — elastic instance count by name prefix %q is %d, already >= MaxSize %d (Delta requested=%d); creating NOTHING", s.cfg.NamePrefix, currentByPrefix, s.cfg.MaxSize, req.Delta)
+		return nil, status.Errorf(codes.OutOfRange,
+			"would exceed MaxSize: current (name-prefix count)=%d, Delta=%d, MaxSize=%d",
+			currentByPrefix, req.Delta, s.cfg.MaxSize)
+	}
+
+	requested := currentByPrefix + int(req.Delta)
 	if requested > s.cfg.MaxSize {
 		return nil, status.Errorf(codes.OutOfRange,
-			"would exceed MaxSize: current=%d, Delta=%d, MaxSize=%d",
-			current, req.Delta, s.cfg.MaxSize)
+			"would exceed MaxSize: current (name-prefix count)=%d, Delta=%d, MaxSize=%d",
+			currentByPrefix, req.Delta, s.cfg.MaxSize)
 	}
 
-	// Compute next available index for naming.
-	// Find the max numeric suffix among existing elastic instance names,
-	// then increment to get the start index for new instances.
-	nextIndex := computeNextIndex(instances, s.cfg.NamePrefix)
+	// Track names already known (from the full name-prefix fleet — tagged
+	// AND untagged — so an orphan doesn't collide with a freshly minted
+	// name) or freshly minted in this loop, so a random-suffix collision is
+	// retried locally rather than sent to Contabo (which 400s on a
+	// duplicate display name).
+	usedNames := make(map[string]struct{}, len(prefixInstances)+int(req.Delta))
+	for _, inst := range prefixInstances {
+		usedNames[inst.Name] = struct{}{}
+	}
 
 	// Create Delta instances.
 	for i := 0; i < int(req.Delta); i++ {
-		// Build instance name
-		instanceName := fmt.Sprintf("%s-%d", s.cfg.NamePrefix, nextIndex+i)
+		// Build a unique instance name.
+		instanceName, err := uniqueInstanceName(s.cfg.NamePrefix, usedNames)
+		if err != nil {
+			return nil, status.Errorf(codes.Internal, "NodeGroupIncreaseSize: generating instance name: %v", err)
+		}
+		usedNames[instanceName] = struct{}{}
 
 		// Render UserData from template
 		userData, err := renderUserData(s.cfg.UserDataTmpl, instanceName, s.cfg.K3SServerURL, s.cfg.K3SNodeToken)
 		if err != nil {
 			return nil, fmt.Errorf("NodeGroupIncreaseSize: rendering UserData for %q: %w", instanceName, err)
+		}
+
+		// EMAIL WARNING (best-effort, non-blocking): fired in a background
+		// goroutine — detached from ctx (the RPC's lifetime), so a slow SMTP
+		// relay can neither delay this Create call nor get cancelled the
+		// instant the RPC returns — immediately before every provisioning
+		// call, so an operator gets a heads-up in real time rather than
+		// after the fact. A nil Notifier (NOTIFY_EMAIL_ENABLED unset) is a
+		// no-op; see provider.Config.Notifier's doc comment.
+		if s.cfg.Notifier != nil {
+			subject := fmt.Sprintf("[contabo-ca] provisioning %s (elastic %d -> %d)", instanceName, currentByPrefix, currentByPrefix+1)
+			body := fmt.Sprintf(
+				"instance=%s\ncurrent_elastic_count(by name-prefix)=%d\ntarget_size=%d\ndelta_requested=%d\nreason=cluster-autoscaler requested NodeGroupIncreaseSize\n",
+				instanceName, currentByPrefix, requested, req.Delta,
+			)
+			notifier := s.cfg.Notifier
+			go notifier.Notify(subject, body)
 		}
 
 		// Create the instance
@@ -71,43 +123,55 @@ func (s *Server) NodeGroupIncreaseSize(ctx context.Context, req *protos.NodeGrou
 		if err != nil {
 			return nil, status.Errorf(codes.Unavailable, "NodeGroupIncreaseSize: creating %q: %v", instanceName, err)
 		}
+		currentByPrefix++
 	}
 
 	return &protos.NodeGroupIncreaseSizeResponse{}, nil
 }
 
-// computeNextIndex finds the max numeric suffix in existing instance names
-// matching the NamePrefix pattern and returns the next index to use.
-// If no matching instances, returns 0.
-func computeNextIndex(instances []contabo.Instance, namePrefix string) int {
-	prefix := namePrefix + "-"
-	maxIdx := -1
+// maxNameSuffixAttempts bounds the retry loop in uniqueInstanceName against a
+// pathological run of random collisions. At 4 random bytes (32 bits) of
+// suffix space, exhausting this many attempts in practice indicates a bug
+// (e.g. a broken RNG) rather than bad luck.
+const maxNameSuffixAttempts = 20
 
-	for _, inst := range instances {
-		// Check if the name starts with the expected prefix
-		if !strings.HasPrefix(inst.Name, prefix) {
-			continue
-		}
-
-		// Extract the suffix after the prefix
-		suffix := inst.Name[len(prefix):]
-
-		// Try to parse the suffix as an integer
-		idx, err := strconv.Atoi(suffix)
+// uniqueInstanceName generates an instance name of the form
+// "<namePrefix>-<8-hex-suffix>" that is not already present in used.
+//
+// The suffix is a short random value (crypto/rand, mirroring the UUID
+// request-id helper in internal/contabo/client.go) rather than a sequential
+// index. A sequential index collides whenever a prior create left an
+// untracked or still-cancelling instance holding a name: Contabo's cancel is
+// end-of-billing, so a cancelled instance keeps its display name (and thus
+// blocks reuse of that name) for the remainder of the billing period, and
+// Contabo's create API 400s ("There is already an instance with the same
+// display name") on any collision. The prefix invariant is preserved and the
+// resulting name still flows unmodified through create -> tag -> cloud-init
+// --node-name -> providerID, which is all NodeGroupForNode/
+// NodeGroupDeleteNodes require for correlation — nothing depends on the
+// suffix being sequential or predictable, only unique.
+func uniqueInstanceName(namePrefix string, used map[string]struct{}) (string, error) {
+	for attempt := 0; attempt < maxNameSuffixAttempts; attempt++ {
+		suffix, err := randomHexSuffix()
 		if err != nil {
-			// Suffix is not a valid integer; skip this instance
-			continue
+			return "", err
 		}
-
-		if idx > maxIdx {
-			maxIdx = idx
+		name := fmt.Sprintf("%s-%s", namePrefix, suffix)
+		if _, collision := used[name]; !collision {
+			return name, nil
 		}
 	}
+	return "", fmt.Errorf("could not generate a unique instance name after %d attempts", maxNameSuffixAttempts)
+}
 
-	if maxIdx < 0 {
-		return 0
+// randomHexSuffix returns 4 crypto/rand bytes rendered as 8 lowercase hex
+// characters, e.g. "a1b2c3d4".
+func randomHexSuffix() (string, error) {
+	b := make([]byte, 4)
+	if _, err := rand.Read(b); err != nil {
+		return "", fmt.Errorf("generating random name suffix: %w", err)
 	}
-	return maxIdx + 1
+	return fmt.Sprintf("%x", b), nil
 }
 
 // renderUserData renders cfg.UserDataTmpl with the provided nodeName and the

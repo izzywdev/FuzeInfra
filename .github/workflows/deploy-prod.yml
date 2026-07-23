@@ -9,8 +9,12 @@ on:
     branches: [main]
     paths:
       - 'helm/**'
+      - 'deploy/sealed-secrets/**'
       - 'argocd/applications/fuzeinfra-prod.yaml'
+      - 'argocd/applications/fuzeinfra-sealed-secrets.yaml'
       - 'argocd/applications/sealed-secrets.yaml'
+      - 'argocd/applications/fuzequality.yaml'
+      - 'argocd/projects/fuzefront.yaml'
       - '.github/workflows/deploy-prod.yml'
   workflow_dispatch:
 
@@ -23,10 +27,22 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      - name: Set up kubectl
+        uses: azure/setup-kubectl@829323503d1be3d00ca8346e5391ca0b07a9ab0d # v5.1.0
+
       - name: Set up Helm
-        uses: azure/setup-helm@v4
+        uses: azure/setup-helm@v5
         with:
           version: v3.16.4
+      - name: Install verified Argo CD CLI
+        run: |
+          set -euo pipefail
+          version=v3.4.2
+          curl -fsSLO "https://github.com/argoproj/argo-cd/releases/download/${version}/argocd-linux-amd64"
+          curl -fsSLO "https://github.com/argoproj/argo-cd/releases/download/${version}/cli_checksums.txt"
+          grep ' argocd-linux-amd64$' cli_checksums.txt | sha256sum -c -
+          sudo install -m0755 argocd-linux-amd64 /usr/local/bin/argocd
+          argocd version --client
 
       - name: Helm lint (contabo values)
         run: helm lint helm/fuzeinfra -f helm/fuzeinfra/values-contabo.yaml
@@ -46,29 +62,59 @@ jobs:
         env:
           KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
         run: |
+          set -euo pipefail
           if [ -z "$KUBE_CONFIG" ]; then
-            echo "::warning::KUBE_CONFIG secret not set — ArgoCD sync not triggered."
+            echo "::error::KUBE_CONFIG secret not set — production sync cannot run."
             echo "Run 'terraform apply' in terraform/contabo/ to provision the server and set the secret."
-            exit 0
+            exit 1
           fi
           echo "$KUBE_CONFIG" | base64 -d > /tmp/kubeconfig
           chmod 600 /tmp/kubeconfig
           export KUBECONFIG=/tmp/kubeconfig
 
+          # AppProjects are the destination/security boundary and must exist
+          # before their Applications are registered or synchronized.
+          kubectl apply -f argocd/projects/fuzefront.yaml
+          echo "registered fuzefront AppProject"
+
           # Register the standalone Application manifests idempotently on every prod
           # deploy. Terraform only applies them on first-provision, so on a VPS
           # rebuild (or if one was never registered — e.g. sealed-secrets, #88) they
           # would silently go missing. apply -f makes the repo the source of truth.
-          for app in fuzeinfra-prod sealed-secrets; do
-            kubectl apply -f "argocd/applications/$app.yaml" \
-              && echo "registered $app" \
-              || echo "::warning::failed to register $app"
+          for app in fuzeinfra-prod sealed-secrets fuzeinfra-sealed-secrets fuzequality; do
+            kubectl apply -f "argocd/applications/$app.yaml"
+            echo "registered $app"
           done
 
+          # Recover a demonstrably stale FuzeQuality operation. A newer chart
+          # cannot change hooks or rollout strategy while an old operation remains
+          # Running indefinitely.
+          phase=$(kubectl -n argocd get application fuzequality -o jsonpath='{.status.operationState.phase}')
+          started=$(kubectl -n argocd get application fuzequality -o jsonpath='{.status.operationState.startedAt}')
+          if [ "$phase" = Running ] && [ -n "$started" ]; then
+            age_seconds=$(( $(date +%s) - $(date -d "$started" +%s) ))
+            # The deployment verifier uses the same five-minute rollout budget.
+            if [ "$age_seconds" -gt 300 ]; then
+              echo "cancelling stale FuzeQuality operation (${age_seconds}s old)"
+              kubectl config set-context --current --namespace=argocd
+              argocd login --core
+              argocd app terminate-op fuzequality --core
+              for _ in $(seq 1 30); do
+                current_phase=$(kubectl -n argocd get application fuzequality -o jsonpath='{.status.operationState.phase}')
+                [ "$current_phase" != Running ] && break
+                sleep 2
+              done
+              current_phase=$(kubectl -n argocd get application fuzequality -o jsonpath='{.status.operationState.phase}')
+              [ "$current_phase" != Running ] || { echo '::error::stale FuzeQuality operation did not terminate'; exit 1; }
+            fi
+          fi
           # Kick an immediate sync so the rollout starts seconds after merge.
-          for app in fuzeinfra-prod sealed-secrets; do
+          for app in fuzeinfra-prod sealed-secrets fuzeinfra-sealed-secrets fuzequality; do
+            # Ensure the sync renders this Git revision instead of reusing a
+            # cached Helm result whose reported revision has already advanced.
+            kubectl -n argocd annotate application "$app" \
+              argocd.argoproj.io/refresh=hard --overwrite
             kubectl -n argocd patch application "$app" --type merge \
-              -p '{"operation":{"initiatedBy":{"username":"ci"},"sync":{}}}' \
-              && echo "sync triggered for $app" \
-              || echo "::warning::sync patch failed for $app"
+              -p '{"operation":{"initiatedBy":{"username":"ci"},"sync":{}}}'
+            echo "sync triggered for $app"
           done

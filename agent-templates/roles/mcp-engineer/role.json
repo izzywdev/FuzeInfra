@@ -1,0 +1,12 @@
+{
+  "$schema": "../../schema/role-manifest.schema.json",
+  "role": "mcp-engineer",
+  "extends": "_base",
+  "name": "FuzeInfra mcp-engineer",
+  "description": "Maintains the repo's stdio + remote SSE/streamable-HTTP MCP server against the frozen contract; triggered on merge to main to update the MCP contract and the live remote endpoint if the change requires it.",
+  "persona": ".claude/agents/mcp-engineer.md",
+  "environment": "cloud-mcp-engineer",
+  "system_append": "TRIGGER: runs on PR merged to main. First decide whether the merged change alters the MCP surface (endpoints / request-response schemas / auth / events). If NOT, report 'no MCP change' and stop. If it does, update BOTH the stdio server and the remote SSE/streamable-HTTP server from the frozen contract, keep the two transports in parity, validate with the MCP inspector, roll out the live remote endpoint via the repo's GitOps path, and open a PR.",
+  "services": { "github": "write", "k8s": "none", "cloud": "none" },
+  "metadata": { "role": "mcp-engineer", "channel": "mcp" }
+}

@@ -4,7 +4,9 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"strings"
 	"sync"
+	"time"
 )
 
 // MemClient is an in-memory implementation of Client, used to exercise the
@@ -50,6 +52,25 @@ func (m *MemClient) ListByTag(_ context.Context, tag string) ([]Instance, error)
 	return matches, nil
 }
 
+// ListByNamePrefix returns all in-memory instances whose Name starts with
+// prefix, regardless of tag state — mirrors HTTPClient.ListByNamePrefix
+// (see internal/contabo/client.go), which is the authoritative source for
+// the provider's anti-runaway cap.
+func (m *MemClient) ListByNamePrefix(_ context.Context, prefix string) ([]Instance, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	var matches []Instance
+	for _, inst := range m.instances {
+		if strings.HasPrefix(inst.Name, prefix) {
+			matches = append(matches, inst)
+		}
+	}
+
+	log.Printf("[fake-cloud] ListByNamePrefix prefix=%q matched=%d", prefix, len(matches))
+	return matches, nil
+}
+
 // Create appends a new running instance to the in-memory slice, assigning it
 // the next incrementing ID.
 func (m *MemClient) Create(_ context.Context, req CreateReq) (Instance, error) {
@@ -57,10 +78,11 @@ func (m *MemClient) Create(_ context.Context, req CreateReq) (Instance, error) {
 	defer m.mu.Unlock()
 
 	inst := Instance{
-		ID:     m.nextID,
-		Name:   req.Name,
-		Status: "running",
-		Tags:   append([]string(nil), req.Tags...),
+		ID:          m.nextID,
+		Name:        req.Name,
+		Status:      "running",
+		Tags:        append([]string(nil), req.Tags...),
+		CreatedDate: time.Now(),
 	}
 	m.nextID++
 	m.instances = append(m.instances, inst)

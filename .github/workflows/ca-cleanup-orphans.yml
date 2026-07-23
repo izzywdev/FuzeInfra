@@ -1,0 +1,102 @@
+name: ca-cleanup-orphans
+
+# EMERGENCY orphan cleanup for the Contabo cluster-autoscaler.
+# Enumerates every Contabo instance whose displayName starts with
+# "fuzeinfra-elastic" (elastic nodes, INCLUDING untagged orphans the tag-based
+# reaper can't see) and — in cancel mode — POSTs /cancel for each.
+#
+# Uses the same secrets as ca-cutover: CONTABO_CLIENT_ID/_CLIENT_SECRET/
+# _API_USER/_API_PASSWORD. Contabo requires x-request-id to be a UUID.
+# Contabo has no hard delete — /cancel terminates at end of billing period.
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'list = enumerate only (safe); cancel = POST /cancel each elastic instance'
+        type: choice
+        options: [list, cancel]
+        default: list
+        required: true
+      confirm:
+        description: 'For mode=cancel ONLY: type CANCEL-ALL to proceed. Ignored in list mode.'
+        default: ''
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Enumerate (and optionally cancel) fuzeinfra-elastic instances
+        env:
+          CID: ${{ secrets.CONTABO_CLIENT_ID }}
+          CSEC: ${{ secrets.CONTABO_CLIENT_SECRET }}
+          CUSER: ${{ secrets.CONTABO_API_USER }}
+          CPASS: ${{ secrets.CONTABO_API_PASSWORD }}
+          MODE: ${{ inputs.mode }}
+          CONFIRM: ${{ inputs.confirm }}
+        run: |
+          set -euo pipefail
+          for v in CID CSEC CUSER CPASS; do
+            eval "val=\${$v}"; [ -n "$val" ] || { echo "::error::secret $v is empty"; exit 1; }
+          done
+          TOK=$(curl -sS -X POST -H "Content-Type: application/x-www-form-urlencoded" \
+            "https://auth.contabo.com/auth/realms/contabo/protocol/openid-connect/token" \
+            --data-urlencode "client_id=${CID}" --data-urlencode "client_secret=${CSEC}" \
+            --data-urlencode "username=${CUSER}" --data-urlencode "password=${CPASS}" \
+            --data-urlencode "grant_type=password" | jq -r .access_token)
+          [ -n "$TOK" ] && [ "$TOK" != "null" ] || { echo "::error::Contabo auth failed"; exit 1; }
+
+          page=1; : > /tmp/elastic.txt; TOTAL=0
+          while :; do
+            RESP=$(curl -sS -H "Authorization: Bearer $TOK" \
+              -H "x-request-id: $(cat /proc/sys/kernel/random/uuid)" \
+              "https://api.contabo.com/v1/compute/instances?size=100&page=${page}")
+            if [ "$page" = "1" ]; then echo "DEBUG http/raw page0 (first 800):"; echo "$RESP" | head -c 800; echo; echo "DEBUG keys:"; echo "$RESP" | jq -r 'keys? // "not-an-object"' 2>/dev/null || echo "not-json"; fi
+            n=$(echo "$RESP" | jq '.data | length')
+            [ "$n" -gt 0 ] || break
+            TOTAL=$((TOTAL+n))
+            echo "$RESP" | jq -r '.data[] | "\(.instanceId)	\(.displayName)	\(.status)	cancelDate=\(.cancelDate)"' >> /tmp/all.txt || true
+            echo "$RESP" | jq -r '.data[] | select(.displayName|startswith("fuzeinfra-elastic")) | "\(.instanceId)\t\(.displayName)\t\(.status)\t\(.createdDate)"' >> /tmp/elastic.txt || true
+            page=$((page+1)); [ "$page" -gt 30 ] && { echo "::warning::page cap hit"; break; }
+          done
+
+          COUNT=$(grep -c . /tmp/elastic.txt || true)
+          echo "===================================================="
+          echo "Total Contabo instances scanned: $TOTAL"
+          echo "fuzeinfra-elastic instances found: $COUNT"
+          echo "----------------------------------------------------"
+          echo -e "INSTANCE_ID\tNAME\tSTATUS\tCREATED"
+          cat /tmp/elastic.txt || true
+          echo "----- ALL instances (id/name/status/product) -----"
+          cat /tmp/all.txt || true
+          echo "----- IPs (id name status ip) -----"
+          for IID in 203458548 203459381 203459441 203459485 203459537 203408869; do
+            curl -sS -H "Authorization: Bearer $TOK" -H "x-request-id: $(cat /proc/sys/kernel/random/uuid)"               "https://api.contabo.com/v1/compute/instances/$IID"               | jq -r '.data[0] | "\(.instanceId)	\(.displayName)	\(.status)	\(.ipConfig.v4.ip)"' || true
+          done
+          echo "===================================================="
+          {
+            echo "## ca-cleanup-orphans ($MODE)"
+            echo "- Total instances scanned: **$TOTAL**"
+            echo "- fuzeinfra-elastic instances: **$COUNT**"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "$MODE" = "cancel" ]; then
+            [ "$CONFIRM" = "CANCEL-ALL" ] || { echo "::error::mode=cancel requires confirm=CANCEL-ALL"; exit 1; }
+            OK=0; ERR=0
+            while IFS=$'\t' read -r ID NAME STATUS CREATED; do
+              [ -n "$ID" ] || continue
+              CODE=$(curl -sS -o /tmp/c.json -w '%{http_code}' -X POST \
+                -H "Authorization: Bearer $TOK" \
+                -H "x-request-id: $(cat /proc/sys/kernel/random/uuid)" \
+                "https://api.contabo.com/v1/compute/instances/${ID}/cancel" || echo "000")
+              if [ "$CODE" = "200" ] || [ "$CODE" = "201" ]; then OK=$((OK+1)); else ERR=$((ERR+1)); fi
+              echo "cancel ${ID} (${NAME}) -> HTTP ${CODE}"
+              sleep 1
+            done < /tmp/elastic.txt
+            echo "===== cancel complete: ok=${OK} err=${ERR} ====="
+            echo "- Cancelled OK: **$OK**, errors: **$ERR**" >> "$GITHUB_STEP_SUMMARY"
+            [ "$ERR" -eq 0 ] || echo "::warning::$ERR cancel calls returned non-2xx — re-run to retry"
+          fi

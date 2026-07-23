@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>FuzeOne — Agent Templates × Environments → Sessions</title>
+  <link rel="stylesheet" href="https://unpkg.com/reactflow@11.11.4/dist/style.css" />
+  <script crossorigin src="https://unpkg.com/react@18.3.1/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/reactflow@11.11.4/dist/umd/index.js"></script>
+  <style>
+    :root { color-scheme: light dark; }
+    html, body, #root { height: 100%; margin: 0; }
+    body { font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; background: #f7f8fb; }
+    #root { position: relative; width: 100vw; height: 100vh; }
+    .panel {
+      position: absolute; z-index: 5; background: rgba(255,255,255,.93);
+      border: 1px solid #e2e6ef; border-radius: 12px; padding: 12px 14px;
+      box-shadow: 0 6px 20px rgba(20,30,60,.08); backdrop-filter: blur(6px);
+    }
+    .title { top: 14px; left: 14px; max-width: 500px; }
+    .title h1 { margin: 0 0 4px; font-size: 18px; letter-spacing: -.01em; }
+    .title p { margin: 0; font-size: 12.5px; color: #5b6478; line-height: 1.45; }
+    .legend { top: 14px; right: 14px; font-size: 12px; }
+    .legend b { display:block; font-size: 11px; text-transform: uppercase; letter-spacing:.06em; color:#8a92a6; margin-bottom:6px; }
+    .row { display:flex; align-items:center; gap:8px; margin:3px 0; }
+    .sw { width:14px; height:14px; border-radius:4px; flex:0 0 auto; }
+    .foot { bottom: 14px; left: 14px; font-size: 11.5px; color:#5b6478; max-width: 640px; }
+    .foot code { background:#eef1f7; padding:1px 5px; border-radius:5px; }
+    .react-flow__node { font-weight: 600; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+  <div class="panel title">
+    <h1>FuzeOne — Templates × Environments → Sessions</h1>
+    <p>The four engineer roles are <b>reusable, repo-agnostic agent templates</b> (one <code>/v1/agents</code> each).
+       A repo isn't a different agent — it's a different <b>environment</b> bound at launch (toolchain, checkout,
+       networking, creds) plus its repo-expert. A <b>session</b> is one <code>role × environment</code> instantiation;
+       you run many in parallel per feature.</p>
+  </div>
+  <div class="panel legend" id="legend"></div>
+  <div class="panel foot">
+    Reading L→R: pick a <b>role template</b> → bind a <b>per-repo environment</b> (this harnesses it to the repo boundary)
+    → get <b>sessions</b> (many, parallel). Cross-product features (billing, RAG, security, identity) are
+    <b>skills/MCP attached at launch</b> (via <code>agent_with_overrides</code>), not per-repo agents. So
+    <b>"fuzefront-backend" = the Backend template × the FuzeFront env (+ its skills/vault)</b> — assembled at
+    <code>sessions.create</code>, not a 16th stored agent.
+  </div>
+
+  <script>
+    const RF = window.ReactFlow;
+    const ReactFlow = RF.default || RF.ReactFlow;
+    const { Background, Controls, MiniMap, MarkerType, useNodesState, useEdgesState } = RF;
+    const h = React.createElement;
+
+    // ---- model -----------------------------------------------------------
+    const roles = [
+      { id: "frontend", label: "Frontend" },
+      { id: "backend",  label: "Backend"  },
+      { id: "qa",       label: "QA"        },
+      { id: "devops",   label: "DevOps"   },
+    ];
+    const repos = [
+      { id: "infra",      label: "FuzeInfra",      color: "#0891b2", host: "cloud + self-hosted" },
+      { id: "fuzefront",  label: "FuzeFront",      color: "#7c3aed", host: "cloud" },
+      { id: "fuzesocial", label: "FuzeSocial",     color: "#db2777", host: "cloud" },
+      { id: "mendys",     label: "MendysRobotics", color: "#ea580c", host: "cloud" },
+    ];
+    const features = [
+      { id: "billing",  label: "Billing / Payments", color: "#16a34a" },
+      { id: "rag",      label: "RAG Chats / LLM",    color: "#2563eb" },
+      { id: "security", label: "Security / AppSec",  color: "#dc2626" },
+      { id: "identity", label: "Identity / Auth",    color: "#9333ea" },
+    ];
+    const orchestration = [
+      { id: "coordinator", label: "Coordinator\n(routes role × repo)",  kind: "orch" },
+      { id: "contract",    label: "Contract-Designer\n(frozen-contract gate)", kind: "orch" },
+      { id: "governance",  label: "Platform-Governance",       kind: "mgmt" },
+      { id: "agile",       label: "Agile-Manager (PMO)",       kind: "mgmt" },
+    ];
+
+    // ---- palette / layout ------------------------------------------------
+    const slate = "#1e293b", indigo = "#4338ca", teal = "#0d9488";
+    const W = 214, H = 66;
+    const COL = { tpl: 90, env: 470, ses: 860 };
+    const rowY = [180, 280, 380, 480];
+
+    const box = (id, label, x, y, opts = {}) => ({
+      id, position: { x, y }, data: { label },
+      sourcePosition: "right", targetPosition: "left",
+      style: {
+        width: W, minHeight: H, padding: 9, whiteSpace: "pre-line", textAlign: "center",
+        display: "flex", alignItems: "center", justifyContent: "center",
+        fontSize: 12, borderRadius: 10, borderWidth: 2, borderStyle: "solid",
+        borderColor: "#cbd5e1", background: "#ffffff", color: "#0f172a", ...opts,
+      },
+    });
+    const header = (id, label, x, y) => ({
+      id, position: { x, y }, data: { label }, selectable: false, draggable: false,
+      style: { width: W, border: "none", background: "transparent", color: "#8a92a6",
+               fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: ".05em" },
+    });
+
+    const nodes = [], edges = [];
+    const dash = (stroke, label) => ({ type: "smoothstep", label,
+      labelStyle: { fontSize: 9, fill: stroke }, style: { stroke, strokeWidth: 1.3, strokeDasharray: "5 4", opacity: .9 },
+      markerEnd: { type: MarkerType.ArrowClosed, color: stroke } });
+    const solid = (stroke, label, animated) => ({ type: "smoothstep", label, animated: !!animated,
+      labelStyle: { fontSize: 9, fill: stroke }, style: { stroke, strokeWidth: 1.5 },
+      markerEnd: { type: MarkerType.ArrowClosed, color: stroke } });
+
+    // orchestration band (top)
+    orchestration.forEach((o, i) => {
+      const filled = o.kind === "orch";
+      nodes.push(box(o.id, o.label, 60 + i * 300, 20, {
+        background: filled ? slate : "#ffffff", color: filled ? "#f8fafc" : "#334155",
+        borderColor: slate, fontWeight: 700, borderStyle: o.kind === "mgmt" ? "dashed" : "solid",
+      }));
+    });
+    ["governance", "agile"].forEach(m => edges.push({ id: "m-" + m, source: m, target: "coordinator",
+      type: "smoothstep", style: { stroke: "#94a3b8", strokeDasharray: "3 4" } }));
+
+    // column headers
+    nodes.push(header("h-tpl", "① Role agent templates — reusable, repo-agnostic", COL.tpl, 120));
+    nodes.push(header("h-env", "② Per-repo environments — bound at launch", COL.env, 120));
+    nodes.push(header("h-ses", "③ Runtime sessions — many, parallel", COL.ses, 120));
+
+    // 1. role templates (one /v1/agents each)
+    roles.forEach((r, i) => {
+      nodes.push(box("tpl-" + r.id, r.label + "\n1 agent template", COL.tpl, rowY[i], {
+        background: indigo, color: "#ffffff", borderColor: indigo, fontWeight: 700,
+      }));
+      edges.push({ id: "gate-" + r.id, source: "contract", target: "tpl-" + r.id, ...dash("#64748b", i ? "" : "contract gate") });
+      edges.push({ id: "t2s-" + r.id, source: "tpl-" + r.id, target: "session", ...dash(indigo, i ? "" : "role") });
+    });
+
+    // 2. per-repo environments (toolchain + checkout + networking + expert + vault + memory)
+    repos.forEach((d, i) => {
+      nodes.push(box("env-" + d.id, d.label + " env\ntoolchain · checkout · net · " + d.host + "\n+ expert · vault · memory",
+        COL.env, rowY[i], { borderColor: d.color, background: "#ffffff", color: "#0f172a", fontWeight: 600 }));
+      edges.push({ id: "e2s-" + d.id, source: "env-" + d.id, target: "session", ...dash(d.color, i ? "" : "repo") });
+    });
+
+    // 3. sessions (the role × env instantiation) + N-parallel + the worked example
+    nodes.push(box("session", "Session\n= role × environment\n(+vault, memory, skills)", COL.ses, 250, {
+      background: teal, color: "#ffffff", borderColor: teal, fontWeight: 700,
+    }));
+    nodes.push(box("parallel", "× N in parallel\nper feature / contract", COL.ses, 360, {
+      borderColor: teal, background: "#ffffff", color: teal, borderStyle: "dashed",
+    }));
+    nodes.push(box("example", "e.g. “fuzefront-backend” =\nBackend × FuzeFront env\n+ Kafka-Zod skill + FF vault", COL.ses, 470, {
+      borderColor: "#7c3aed", background: "#faf5ff", color: "#5b21b6", fontSize: 11,
+    }));
+    edges.push({ id: "co-ses", source: "coordinator", target: "session", ...solid(slate, "routes", true) });
+    edges.push({ id: "ses-par", source: "session", target: "parallel", ...solid(teal) });
+    edges.push({ id: "ses-ex", source: "session", target: "example", ...dash("#7c3aed", "override") });
+
+    // cross-product feature capabilities — skills/MCP attached at launch
+    nodes.push(header("h-cap", "Cross-product capabilities — skills / MCP attached at launch (agent_with_overrides), span all repos", 300, 585));
+    features.forEach((f, i) => {
+      nodes.push(box("cap-" + f.id, f.label + "\nskill / MCP", 90 + i * 240, 630, {
+        background: f.color, color: "#ffffff", borderColor: f.color, fontWeight: 700, width: 200,
+      }));
+      edges.push({ id: "cap-" + f.id + "-s", source: "cap-" + f.id, target: "session", ...dash(f.color, "") });
+    });
+
+    // ---- legend ----------------------------------------------------------
+    const items = [
+      ["Role template (reusable agent)", indigo],
+      ["Session (role × env)", teal],
+      ...repos.map(d => [d.label + " env", d.color]),
+      ...features.map(f => [f.label + " (skill/MCP)", f.color]),
+      ["Orchestration / management", slate],
+    ];
+    document.getElementById("legend").innerHTML = "<b>Legend</b>" + items.map(([t, c]) =>
+      `<div class="row"><span class="sw" style="background:${c}"></span>${t}</div>`).join("");
+
+    // ---- render ----------------------------------------------------------
+    function Flow() {
+      const [n, , onNodesChange] = useNodesState(nodes);
+      const [e, , onEdgesChange] = useEdgesState(edges);
+      return h(ReactFlow, {
+        nodes: n, edges: e, onNodesChange, onEdgesChange,
+        fitView: true, minZoom: 0.2, maxZoom: 1.6, fitViewOptions: { padding: 0.1 },
+        proOptions: { hideAttribution: true }, defaultEdgeOptions: { type: "smoothstep" },
+      },
+        h(Background, { gap: 22, color: "#e2e8f0" }),
+        h(MiniMap, { pannable: true, zoomable: true, nodeColor: nd => nd.style?.borderColor || "#94a3b8" }),
+        h(Controls, null),
+      );
+    }
+    ReactDOM.createRoot(document.getElementById("root")).render(h(Flow));
+  </script>
+</body>
+</html>

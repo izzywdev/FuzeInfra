@@ -21,7 +21,7 @@ spec:
       containers:
         - name: provider
           image: {{ .Values.clusterAutoscaler.provider.image }}
-          imagePullPolicy: {{ include "fuzeinfra.pullPolicy" . }}
+          imagePullPolicy: Always # :latest must re-pull to pick up rebuilds
           ports:
             - name: grpc
               containerPort: 8086
@@ -50,6 +50,32 @@ spec:
               value: {{ .Values.clusterAutoscaler.provider.grpcListen | quote }}
             - name: USER_DATA_TEMPLATE_B64
               value: {{ .Values.clusterAutoscaler.provider.userDataTemplateB64 | quote }}
+            # Best-effort provisioning-warning email (see internal/notify).
+            # NOTIFY_SMTP_USER/NOTIFY_SMTP_PASS are intentionally NOT set
+            # here — if the SMTP relay needs auth, add those two keys to the
+            # existingSecret Secret above (envFrom already imports every key
+            # in it as an env var), never as a plain Helm value.
+            - name: NOTIFY_EMAIL_ENABLED
+              value: {{ .Values.clusterAutoscaler.provider.notifyEmailEnabled | quote }}
+            - name: NOTIFY_SMTP_HOST
+              value: {{ .Values.clusterAutoscaler.provider.notifySmtpHost | quote }}
+            - name: NOTIFY_SMTP_PORT
+              value: {{ .Values.clusterAutoscaler.provider.notifySmtpPort | quote }}
+            - name: NOTIFY_EMAIL_FROM
+              value: {{ .Values.clusterAutoscaler.provider.notifyEmailFrom | quote }}
+            - name: NOTIFY_EMAIL_TO
+              value: {{ .Values.clusterAutoscaler.provider.notifyEmailTo | quote }}
+            # Same before-provision warning, delivered via the Telegram Bot
+            # API instead of email (see internal/notify.Telegram). Takes
+            # precedence over the email notifier above when both are
+            # enabled. NOTIFY_TELEGRAM_BOT_TOKEN is intentionally NOT set
+            # here as a plain Helm value — it must be a KEY in the
+            # existingSecret Secret above (envFrom already imports every key
+            # in it as an env var), sourced from @BotFather via SealedSecret.
+            - name: NOTIFY_TELEGRAM_ENABLED
+              value: {{ .Values.clusterAutoscaler.provider.notifyTelegramEnabled | quote }}
+            - name: NOTIFY_TELEGRAM_CHAT_ID
+              value: {{ .Values.clusterAutoscaler.provider.notifyTelegramChatId | quote }}
           livenessProbe:
             tcpSocket:
               port: grpc

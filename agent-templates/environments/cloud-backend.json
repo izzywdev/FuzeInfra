@@ -1,0 +1,27 @@
+{
+  "$schema": "../schema/environment.schema.json",
+  "name": "fuzeinfra-cloud-backend",
+  "config": {
+    "type": "cloud",
+    "packages": {
+      "apt": ["jq", "postgresql-client"],
+      "pip": [
+        "pytest",
+        "requests",
+        "psycopg2-binary",
+        "pymongo",
+        "redis",
+        "neo4j",
+        "elasticsearch",
+        "kafka-python",
+        "pika"
+      ]
+    },
+    "networking": {
+      "type": "limited",
+      "allowed_hosts": [],
+      "allow_mcp_servers": true,
+      "allow_package_managers": true
+    }
+  }
+}

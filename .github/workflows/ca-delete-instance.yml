@@ -1,0 +1,80 @@
+name: ca-delete-instance
+on:
+  workflow_dispatch:
+    inputs:
+      instance_id:
+        description: 'Contabo instance id to DELETE (e.g. an orphaned fuzeinfra-elastic node)'
+        required: true
+        default: ''
+      confirm:
+        description: 'Type DELETE to confirm'
+        required: true
+        default: ''
+permissions:
+  contents: read
+jobs:
+  delete:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Interlock
+        env:
+          CONFIRM: ${{ inputs.confirm }}
+        run: |
+          set -euo pipefail
+          [ "$CONFIRM" = "DELETE" ] || { echo "::error::confirm must be the literal DELETE"; exit 1; }
+      - name: Auth + cancel instance
+        env:
+          CID: ${{ secrets.CONTABO_CLIENT_ID }}
+          CSEC: ${{ secrets.CONTABO_CLIENT_SECRET }}
+          CUSER: ${{ secrets.CONTABO_API_USER }}
+          CPASS: ${{ secrets.CONTABO_API_PASSWORD }}
+          IID: ${{ inputs.instance_id }}
+        run: |
+          set -euo pipefail
+          [ -n "$IID" ] || { echo "::error::instance_id required"; exit 1; }
+          RESP=$(mktemp)
+          HTTP=$(curl -sS -o "$RESP" -w '%{http_code}' -X POST \
+            "https://auth.contabo.com/auth/realms/contabo/protocol/openid-connect/token" \
+            --data-urlencode "client_id=$CID" --data-urlencode "client_secret=$CSEC" \
+            --data-urlencode "username=$CUSER" --data-urlencode "password=$CPASS" \
+            --data-urlencode "grant_type=password")
+          [ "$HTTP" = "200" ] || { echo "::error::Contabo auth failed (HTTP $HTTP)"; exit 1; }
+          TOK=$(jq -r '.access_token // empty' "$RESP"); echo "::add-mask::$TOK"
+          [ -n "$TOK" ] || { echo "::error::no access_token"; exit 1; }
+          echo "Target instance (non-secret):"
+          curl -sS -H "Authorization: Bearer $TOK" -H "x-request-id: $(cat /proc/sys/kernel/random/uuid)" \
+            "https://api.contabo.com/v1/compute/instances/${IID}" | jq -r '.data[0] | "id=\(.instanceId) name=\(.displayName) status=\(.status)"' || true
+          # NOTE: Contabo's InstancesApi has NO `DELETE /v1/compute/instances/{id}`
+          # endpoint — it 404s ("Cannot DELETE ..."), confirmed against the real
+          # API. The correct call to remove an instance is
+          # `POST /v1/compute/instances/{id}/cancel` (an empty JSON body is
+          # accepted), same as internal/contabo/client.go's HTTPClient.Delete.
+          # Cancellation is also NOT immediate — Contabo schedules removal for
+          # the end of the current billing period (see the returned
+          # cancelDate) rather than terminating the instance on the spot.
+          # Retry a handful of times on 404/5xx: an instance that was JUST
+          # created (e.g. an orphan from the tag-assignment race this repo's
+          # CA provider fix addresses) can still be eventually-consistent from
+          # Contabo's point of view.
+          CODE=0
+          for attempt in 1 2 3 4 5; do
+            RESP=$(mktemp)
+            CODE=$(curl -sS -o "$RESP" -w '%{http_code}' -X POST \
+              -H "Authorization: Bearer $TOK" -H "Content-Type: application/json" \
+              -H "x-request-id: $(cat /proc/sys/kernel/random/uuid)" \
+              -d '{}' \
+              "https://api.contabo.com/v1/compute/instances/${IID}/cancel")
+            echo "cancel instance ${IID} attempt ${attempt} -> HTTP ${CODE}: $(cat "$RESP")"
+            case "$CODE" in
+              200|201|204) break ;;
+              404|5??) sleep $((attempt * 3)) ;;
+              *) break ;;
+            esac
+          done
+          case "$CODE" in
+            200|201|204)
+              CANCEL_DATE=$(jq -r '.data[0].cancelDate // empty' "$RESP")
+              echo "Cancelled OK.${CANCEL_DATE:+ Scheduled removal: $CANCEL_DATE (NOT immediate — remains billed until then).}"
+              ;;
+            *) echo "::error::cancel failed (HTTP $CODE) after retries"; exit 1 ;;
+          esac

@@ -7,6 +7,7 @@ import (
 	"context"
 
 	"github.com/izzywdev/fuzeinfra/contabo-externalgrpc/internal/contabo"
+	"github.com/izzywdev/fuzeinfra/contabo-externalgrpc/internal/notify"
 	"github.com/izzywdev/fuzeinfra/contabo-externalgrpc/internal/protos"
 )
 
@@ -26,7 +27,12 @@ type Config struct {
 	MinSize int
 	// MaxSize is the maximum number of nodes the node group may scale to.
 	MaxSize int
-	// SSHKeyID is the Contabo SSH key ID to inject into created instances.
+	// SSHKeyID is the Contabo secrets-API SSH key ID to reference on created
+	// instances via the sshKeys field. Optional: 0 (the default when
+	// SSH_KEY_ID is unset — see cmd/server/main.go's loadConfig) means no
+	// registered SSH-key secret is referenced at all; internal/contabo's
+	// Client.Create() omits "sshKeys" from the request entirely in that
+	// case. Break-glass SSH access instead comes via cloud-init (UserDataTmpl).
 	SSHKeyID int64
 	// UserDataTmpl is a Go template string executed at node creation time.
 	// See renderUserData for the fields exposed to the template.
@@ -38,6 +44,13 @@ type Config struct {
 	// K3SNodeToken is the k3s node join token. It is exposed to UserDataTmpl as
 	// {{.K3SNodeToken}}. Same rationale as K3SServerURL.
 	K3SNodeToken string
+	// Notifier is an optional best-effort email warning sent immediately
+	// before each Create call in NodeGroupIncreaseSize (see scale.go). A nil
+	// Notifier (the zero value — e.g. NOTIFY_EMAIL_ENABLED unset) is a
+	// no-op: the cap/create logic behaves identically either way, since the
+	// notifier is purely informational, never authoritative (the prefix-
+	// count hard cap is what actually prevents runaway scaling).
+	Notifier notify.Notifier
 }
 
 // Server is the gRPC CloudProvider server implementation for Contabo.

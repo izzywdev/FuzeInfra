@@ -1,0 +1,23 @@
+{
+  "$schema": "../schema/vault.schema.json",
+  "display_name": "fuzeinfra-shared",
+  "metadata": { "purpose": "shared credentials for FuzeInfra role agents (MCP auth)" },
+  "credentials": [
+    {
+      "display_name": "GitHub MCP (static bearer)",
+      "auth": {
+        "type": "static_bearer",
+        "mcp_server_url": "${GITHUB_MCP_URL}",
+        "token": "${GITHUB_MCP_TOKEN}"
+      }
+    },
+    {
+      "display_name": "Handoff MCP (static bearer)",
+      "auth": {
+        "type": "static_bearer",
+        "mcp_server_url": "${HANDOFF_MCP_URL}",
+        "token": "${HANDOFF_MCP_TOKEN}"
+      }
+    }
+  ]
+}

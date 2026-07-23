@@ -1,0 +1,11 @@
+{
+  "$schema": "../schema/memory.schema.json",
+  "name": "FuzeOne Handoff",
+  "description": "Shared cross-session handoff workspace. Agents persist concise work-state and durable context here (under /handoff/<id>.md) so a spawned or resumed agent can read prior state instead of it being inlined into prompts. Persists across sessions; write small focused files.",
+  "seed": [
+    {
+      "path": "/README.md",
+      "content": "# Handoff memory\n\nThis store is mounted into every role session. Use it as the durable channel for agent-to-agent handoff:\n\n- Write your work-state to `/handoff/<originating-session-id>.md` (small, focused).\n- When you hand forward or resume another agent, pass the memory path in your summary/context_ref rather than pasting content.\n- Read the relevant `/handoff/*.md` before starting delegated work.\n\nKeep entries concise; prune stale ones. Individual memories cap at ~100kB; a store holds up to 2,000."
+    }
+  ]
+}

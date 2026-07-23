@@ -1,0 +1,73 @@
+# =============================================================================
+# build-runner-image  —  build & push the FuzeInfra ARC runner image
+# -----------------------------------------------------------------------------
+# NOTE: this file is staged under runners/arc/workflows-to-install/ because the
+# Claude GitHub App cannot write to .github/workflows/**. To activate it:
+#
+#     git mv runners/arc/workflows-to-install/build-runner-image.yml \
+#            .github/workflows/build-runner-image.yml
+#     git commit && git push   # (a human/PAT with workflow scope)
+#
+# It builds runners/arc/Dockerfile (stock actions-runner + docker compose/buildx
+# plugins + warm Python 3.10/3.11 & Node 20 tool-cache) and pushes it to
+# ghcr.io/<owner>/fuzeinfra-arc-runner. After the first successful publish, flip
+# the `image:` line in runners/arc/runner-scale-set-values.yaml to the custom
+# image so Argo rolls the scale set onto it. See issue #236 / #223 / #230.
+#
+# The job GITHUB_TOKEN (packages:write) CAN create the package on first push,
+# which a plain App installation token cannot. Make the package PUBLIC afterward
+# (or add an imagePullSecret to arc-runners) so runner pods can pull it.
+# =============================================================================
+name: build-runner-image
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'runners/arc/Dockerfile'
+      - 'runners/arc/warm-python-toolcache.sh'
+      - 'runners/arc/build-and-push-runner-image.sh'
+      - '.github/workflows/build-runner-image.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build-and-push:
+    name: Build & push FuzeInfra ARC runner image
+    # Stays on ubuntu-latest: this builds the very image the self-hosted runners
+    # use, so it must not depend on that image already being healthy.
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/fuzeinfra-arc-runner
+          tags: |
+            type=sha
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build and push
+        uses: docker/build-push-action@v7
+        with:
+          context: runners/arc
+          file: runners/arc/Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
