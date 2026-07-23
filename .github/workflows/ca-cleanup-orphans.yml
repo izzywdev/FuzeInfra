@@ -49,12 +49,12 @@ jobs:
             --data-urlencode "grant_type=password" | jq -r .access_token)
           [ -n "$TOK" ] && [ "$TOK" != "null" ] || { echo "::error::Contabo auth failed"; exit 1; }
 
-          page=0; : > /tmp/elastic.txt; TOTAL=0
+          page=1; : > /tmp/elastic.txt; TOTAL=0
           while :; do
             RESP=$(curl -sS -H "Authorization: Bearer $TOK" \
               -H "x-request-id: $(cat /proc/sys/kernel/random/uuid)" \
               "https://api.contabo.com/v1/compute/instances?size=100&page=${page}")
-            if [ "$page" = "0" ]; then echo "DEBUG http/raw page0 (first 800):"; echo "$RESP" | head -c 800; echo; echo "DEBUG keys:"; echo "$RESP" | jq -r 'keys? // "not-an-object"' 2>/dev/null || echo "not-json"; fi
+            if [ "$page" = "1" ]; then echo "DEBUG http/raw page0 (first 800):"; echo "$RESP" | head -c 800; echo; echo "DEBUG keys:"; echo "$RESP" | jq -r 'keys? // "not-an-object"' 2>/dev/null || echo "not-json"; fi
             n=$(echo "$RESP" | jq '.data | length')
             [ "$n" -gt 0 ] || break
             TOTAL=$((TOTAL+n))
