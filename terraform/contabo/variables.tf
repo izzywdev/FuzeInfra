@@ -215,6 +215,45 @@ variable "k3s_channel" {
   default     = "v1.36"
 }
 
+# ---------------------------------------------------------------------------
+# Private networking (Contabo VPC) — control-plane attachment
+#
+# All OFF by default: enabling requires the per-instance VPC add-on to be
+# bought manually in the Contabo panel first (HTTP 402 otherwise — see
+# private-network.tf). Nothing here mutates prod until a human flips the gate
+# AND supplies a concrete private IP, so k3s never gets `node-ip:`/`flannel-iface`
+# pointed at an interface that isn't up.
+# ---------------------------------------------------------------------------
+variable "enable_private_network" {
+  description = "Codify + attach the Contabo private network (net 60932, 10.0.0.0/22) to the control-plane VPS, and route k3s node/overlay traffic over eth1. OFF by default; requires the per-VPS VPC add-on purchased in the Contabo panel first (Terraform cannot buy it)."
+  type        = bool
+  default     = false
+}
+
+variable "private_network_name" {
+  description = "Name of the Contabo private network to codify/import (the live net 60932 is named this). Used as the resource name; import with `terraform import contabo_private_network.prod[0] 60932`."
+  type        = string
+  default     = "FuzeInfra-prod"
+}
+
+variable "private_network_region" {
+  description = "Contabo region locator for the private network. The live net 60932 lives in data center 'European Union 2' (region EU). CIDR (10.0.0.0/22) and data_center are Contabo-assigned read-only attributes and cannot be set here."
+  type        = string
+  default     = "EU"
+}
+
+variable "private_iface" {
+  description = "Private NIC device name inside the VPS that the Contabo VPC attaches as (eth1 on a 2-NIC Ubuntu 24.04 image). Used for netplan bring-up and k3s --flannel-iface."
+  type        = string
+  default     = "eth1"
+}
+
+variable "private_node_ip" {
+  description = "Static private IPv4 of the control-plane node within the private network CIDR (10.0.0.0/22), e.g. 10.0.0.10. Required when enable_private_network is true — used for k3s node-ip and the private tls-san. Empty leaves the k3s private-network config inert even if enable_private_network is true."
+  type        = string
+  default     = ""
+}
+
 variable "enable_argocd_provisioner" {
   description = <<-EOT
     Run null_resource.argocd_sync, which SSHes to the server (using

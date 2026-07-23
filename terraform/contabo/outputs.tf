@@ -40,6 +40,11 @@ output "argocd_url_public" {
   value       = "https://argocd.${var.prod_subdomain}.${var.zone_name}"
 }
 
+output "private_network_id" {
+  description = "ID of the codified Contabo private network (net 60932), or empty when enable_private_network is false. Import with `terraform import contabo_private_network.prod[0] 60932`."
+  value       = var.enable_private_network ? contabo_private_network.prod[0].id : ""
+}
+
 # ---------------------------------------------------------------------------
 # Contabo Object Storage (S3) — see object-storage.tf.
 # Endpoint/region are read from state, never hardcoded. Empty strings/[] when
