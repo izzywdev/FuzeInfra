@@ -215,6 +215,45 @@ variable "k3s_channel" {
   default     = "v1.36"
 }
 
+# ---------------------------------------------------------------------------
+# Private networking (Contabo VPC) — control-plane attachment
+#
+# All OFF by default: enabling requires the per-instance VPC add-on to be
+# bought manually in the Contabo panel first (HTTP 402 otherwise — see
+# private-network.tf). Nothing here mutates prod until a human flips the gate
+# AND supplies a concrete private IP, so k3s never gets `node-ip:`/`flannel-iface`
+# pointed at an interface that isn't up.
+# ---------------------------------------------------------------------------
+variable "enable_private_network" {
+  description = "Codify + attach the Contabo private network (net 60932, 10.0.0.0/22) to the control-plane VPS, and route k3s node/overlay traffic over eth1. OFF by default; requires the per-VPS VPC add-on purchased in the Contabo panel first (Terraform cannot buy it)."
+  type        = bool
+  default     = false
+}
+
+variable "private_network_name" {
+  description = "Name of the Contabo private network to codify/import (the live net 60932 is named this). Used as the resource name; import with `terraform import contabo_private_network.prod[0] 60932`."
+  type        = string
+  default     = "FuzeInfra-prod"
+}
+
+variable "private_network_region" {
+  description = "Contabo region locator for the private network. The live net 60932 lives in data center 'European Union 2' (region EU). CIDR (10.0.0.0/22) and data_center are Contabo-assigned read-only attributes and cannot be set here."
+  type        = string
+  default     = "EU"
+}
+
+variable "private_iface" {
+  description = "Private NIC device name inside the VPS that the Contabo VPC attaches as (eth1 on a 2-NIC Ubuntu 24.04 image). Used for netplan bring-up and k3s --flannel-iface."
+  type        = string
+  default     = "eth1"
+}
+
+variable "private_node_ip" {
+  description = "Static private IPv4 of the control-plane node within the private network CIDR (10.0.0.0/22), e.g. 10.0.0.10. Required when enable_private_network is true — used for k3s node-ip and the private tls-san. Empty leaves the k3s private-network config inert even if enable_private_network is true."
+  type        = string
+  default     = ""
+}
+
 variable "enable_argocd_provisioner" {
   description = <<-EOT
     Run null_resource.argocd_sync, which SSHes to the server (using
@@ -227,5 +266,79 @@ variable "enable_argocd_provisioner" {
   EOT
   type        = bool
   default     = false
+}
+
+# ---------------------------------------------------------------------------
+# Contabo Object Storage (S3) — see object-storage.tf and
+# docs/design/s3-and-private-networking.md.
+#
+# PAID: enabling this PURCHASES storage (~EUR 6.99/mo per 1 TB). Default OFF so
+# a routine apply never buys storage. The S3 access key / secret are NOT
+# produced by any resource here — they are account-level credentials fetched
+# once from the Contabo panel and delivered as an offline-sealed SealedSecret
+# (deploy/sealed-secrets/loki-s3-credentials.yaml.template). Never commit real
+# keys or put them in tfvars.
+# ---------------------------------------------------------------------------
+variable "enable_object_storage" {
+  description = "Provision Contabo Object Storage + buckets (PAID). Default off so a routine apply never buys storage. Flip to true only in an explicit human-reviewed apply."
+  type        = bool
+  default     = false
+}
+
+variable "object_storage_region" {
+  description = "Contabo Object Storage region. 'EU' -> eu2.contabostorage.com (co-located with the EU2 prod node). Other values: 'US-central', 'SIN'."
+  type        = string
+  default     = "EU"
+
+  validation {
+    condition     = contains(["EU", "US-central", "SIN"], var.object_storage_region)
+    error_message = "object_storage_region must be one of: EU, US-central, SIN."
+  }
+}
+
+variable "object_storage_purchased_tb" {
+  description = "Purchased quota in TB. Smallest tier is ~0.25 TB (250 GB); confirm the provider/account accepts sub-1TB in your region."
+  type        = number
+  default     = 0.25
+
+  validation {
+    condition     = var.object_storage_purchased_tb > 0
+    error_message = "object_storage_purchased_tb must be greater than 0."
+  }
+}
+
+variable "object_storage_autoscaling_limit_tb" {
+  description = "If > 0, enable auto-scaling of purchased quota up to this hard ceiling (TB) so a log/backup spike never fails writes while capping the bill. 0 disables auto-scaling."
+  type        = number
+  default     = 0
+
+  validation {
+    condition     = var.object_storage_autoscaling_limit_tb >= 0
+    error_message = "object_storage_autoscaling_limit_tb must be >= 0 (0 disables auto-scaling)."
+  }
+}
+
+variable "object_storage_display_name" {
+  description = "Display name for the Object Storage tenant in the Contabo panel."
+  type        = string
+  default     = "fuzeinfra-storage"
+}
+
+variable "object_storage_bucket_loki" {
+  description = "Bucket name for Loki log chunks (native S3 object-store backend)."
+  type        = string
+  default     = "fuzeinfra-loki"
+}
+
+variable "object_storage_bucket_backups" {
+  description = "Bucket name for scheduled DB dump/snapshot backups (CronJob offload)."
+  type        = string
+  default     = "fuzeinfra-backups"
+}
+
+variable "object_storage_bucket_blobs" {
+  description = "Bucket name for application blob/artifact storage."
+  type        = string
+  default     = "fuzeinfra-blobs"
 }
 

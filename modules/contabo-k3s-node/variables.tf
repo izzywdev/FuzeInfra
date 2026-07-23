@@ -102,3 +102,9 @@ variable "private_network_region" {
   type        = string
   default     = "EU"
 }
+
+variable "private_iface" {
+  description = "Private NIC device name the Contabo VPC attaches as (eth1 on a 2-NIC Ubuntu 24.04 image). When private_network_name is set, the node brings this interface up via netplan and k3s routes its overlay (--flannel-iface) + node-ip over it. NOTE: the per-instance Contabo VPC add-on is a MANUAL panel purchase (HTTP 402 otherwise) that Terraform cannot order."
+  type        = string
+  default     = "eth1"
+}

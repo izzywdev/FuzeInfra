@@ -19,7 +19,29 @@ resource "contabo_instance" "prod" {
       - name: root
         ssh_authorized_keys:
           - ${var.ssh_public_key}
+    write_files:
+      # Persistent bring-up of the private NIC (Contabo VPC attaches as eth1).
+      # `optional: true` + `dhcp4` means boot NEVER hangs waiting on eth1 when the
+      # per-instance VPC add-on has not been purchased yet (the NIC is simply
+      # absent) — so this is safe to bake into every build. Once the add-on is
+      # bought and the instance attached to net 60932 (10.0.0.0/22), eth1 comes
+      # up via the VPC DHCP. For a pinned static address, replace `dhcp4: true`
+      # with `addresses: [10.0.0.10/22]` matching var.private_node_ip.
+      # NOTE: the VPC add-on itself is a MANUAL Contabo panel purchase (HTTP 402
+      # otherwise) that Terraform cannot order — see private-network.tf.
+      - path: /etc/netplan/60-eth1-private.yaml
+        permissions: "0600"
+        owner: root:root
+        content: |
+          network:
+            version: 2
+            ethernets:
+              ${var.private_iface}:
+                dhcp4: true
+                optional: true
     runcmd:
+      # Apply the private-NIC netplan (no-op / harmless when eth1 is absent).
+      - netplan apply || true
       # Ports 80/443 are intentionally omitted — all HTTP(S) traffic flows through
       # the Cloudflare Named Tunnel (outbound-only from cloudflared).
       # 8472/udp = Flannel VXLAN overlay (bootstrap default; live runtime rule scoped

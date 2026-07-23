@@ -19,8 +19,29 @@ write_files:
       K3S_URL=${k3s_server_url}
       K3S_TOKEN=${k3s_node_token}
       INSTALL_K3S_CHANNEL=${k3s_channel}
+%{ if private_network_enabled ~}
+  # Persistent bring-up of the private NIC (Contabo VPC attaches as ${private_iface}).
+  # `optional: true` means boot never hangs when the per-instance VPC add-on has
+  # not been purchased. NOTE: that add-on is a MANUAL Contabo panel purchase
+  # (HTTP 402 otherwise) that Terraform cannot order.
+  - path: /etc/netplan/60-eth1-private.yaml
+    permissions: "0600"
+    owner: root:root
+    content: |
+      network:
+        version: 2
+        ethernets:
+          ${private_iface}:
+            dhcp4: true
+            optional: true
+%{ endif ~}
 
 runcmd:
+%{ if private_network_enabled ~}
+  # Apply the private-NIC netplan before joining so k3s can bind its overlay/
+  # node-ip to the private interface (no-op / harmless when the NIC is absent).
+  - [ sh, -c, "netplan apply || true" ]
+%{ endif ~}
   # Host firewall: agent needs to reach the API (6443) outbound and accept
   # kubelet (10250), the flannel VXLAN overlay (8472/udp), and the flannel
   # WireGuard-native overlay (51820/udp) from the server and peer nodes.
@@ -34,4 +55,8 @@ runcmd:
   # Join as a k3s agent and label the node. Secrets come from the env file above;
   # --node-name and the labels are baked in by Terraform per request.
   # For elastic nodes, also apply a PreferNoSchedule taint to keep stateless workloads there.
-  - [ sh, -c, "set -a; . /etc/k3s-agent.env; set +a; curl -sfL https://get.k3s.io | sh -s - agent --node-name '${node_name}' --node-label 'fuzeinfra.io/pool=${role}' ${node_labels}%{ if role == "elastic" } --node-taint 'fuzeinfra.io/elastic=true:PreferNoSchedule'%{ endif }%{ if role == "ci" } --node-taint 'fuzeinfra.io/ci=true:NoSchedule'%{ endif }" ]
+  # When private networking is on, resolve the private (${private_iface}) and public
+  # (eth0) IPv4s at runtime and hand them to k3s: --flannel-iface keeps the overlay
+  # on the private net, --node-ip is the private address, --node-external-ip keeps
+  # the public IP advertised. IPs are unquoted (single IPv4, no spaces).
+  - [ sh, -c, "set -a; . /etc/k3s-agent.env; set +a;%{ if private_network_enabled } PRIVIP=$(ip -4 -o addr show ${private_iface} 2>/dev/null | awk '{print $4}' | cut -d/ -f1); PUBIP=$(ip -4 -o addr show eth0 2>/dev/null | awk '{print $4}' | cut -d/ -f1);%{ endif } curl -sfL https://get.k3s.io | sh -s - agent --node-name '${node_name}' --node-label 'fuzeinfra.io/pool=${role}' ${node_labels}%{ if private_network_enabled } --flannel-iface ${private_iface} --node-ip $PRIVIP --node-external-ip $PUBIP%{ endif }%{ if role == "elastic" } --node-taint 'fuzeinfra.io/elastic=true:PreferNoSchedule'%{ endif }%{ if role == "ci" } --node-taint 'fuzeinfra.io/ci=true:NoSchedule'%{ endif }" ]
