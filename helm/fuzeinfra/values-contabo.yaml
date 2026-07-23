@@ -82,30 +82,40 @@ grafana:
 #       repeat_interval: 1h
 
 # Loki S3 backend (Contabo Object Storage) — keeps logs off the node disk.
-# 1. Provision the tenant + bucket via Terraform (human-gated, PAID):
-#      cd terraform/contabo && terraform apply \
-#        -var enable_object_storage=true        # buys storage; see object-storage.tf
-#    Read the endpoint from state (never hardcode):
-#      terraform output object_storage_s3_url   # e.g. https://eu2.contabostorage.com
-# 2. Deliver the S3 credentials as a SealedSecret (GitOps — NOT `kubectl create
-#    secret`, which orphans a hand-made Secret and contradicts the no-hand-mutate
-#    rule). Fetch the account S3 key/secret from the Contabo panel
-#    (Account -> Security & Access -> S3 Object Storage Credentials) and seal them
-#    OFFLINE with the repo's canonical tool — see the template + instructions in
-#    deploy/sealed-secrets/loki-s3-credentials.yaml.template:
-#      scripts/seal-secret.sh fuzeinfra/loki-s3 \
-#        LOKI_S3_ACCESS_KEY_ID=@key.txt LOKI_S3_SECRET_ACCESS_KEY=@secret.txt \
-#        --out deploy/sealed-secrets/loki-s3-credentials.yaml
-#    Argo (fuzeinfra-sealed-secrets app) decrypts it into the `loki-s3` Secret.
-# 3. Then flip the chart on (this stays disabled until a human does the above):
-# loki:
-#   s3:
-#     enabled: true
-#     endpoint: "eu2.contabostorage.com"   # bare host from object_storage_s3_url (strip scheme)
-#     region: "default"
-#     bucket: "fuzeinfra-loki"
-#     s3ForcePathStyle: true
-#     existingSecret: "loki-s3"
+#
+# The endpoint/bucket are wired here for prod; the switch is `enabled`, kept
+# FALSE until the credential SealedSecret is present (flipping it on without the
+# secret would crash-loop Loki). This is a human-gated phase — see
+# docs/backups-and-blobs.md.
+#
+# To turn on (GitOps — never `kubectl create secret` in prod):
+#   1. Fetch the S3 key pair from the Contabo panel for the `fuzeinfra-loki`
+#      bucket (provisioned by terraform object-storage).
+#   2. Seal it OFFLINE into a SealedSecret named `loki-s3` in the fuzeinfra
+#      namespace with keys LOKI_S3_ACCESS_KEY_ID / LOKI_S3_SECRET_ACCESS_KEY,
+#      commit it, let Argo sync.
+#   3. Flip loki.s3.enabled -> true here, commit, let Argo sync.
+loki:
+  s3:
+    enabled: false            # human-gated flip (needs the loki-s3 SealedSecret)
+    endpoint: "eu2.contabostorage.com"
+    region: "default"
+    bucket: "fuzeinfra-loki"
+    s3ForcePathStyle: true
+    insecure: false
+    existingSecret: "loki-s3"
+
+# Scheduled DB backups → S3 (Contabo Object Storage). Bucket/endpoint wired for
+# prod; kept OFF until the `fuzeinfra-backups-s3` SealedSecret is committed.
+# See docs/backups-and-blobs.md for the enable + retention-policy steps.
+backups:
+  enabled: false             # human-gated flip (needs the fuzeinfra-backups-s3 SealedSecret)
+  s3:
+    endpoint: "https://eu2.contabostorage.com"
+    region: "default"
+    bucket: "fuzeinfra-backups"
+    prefix: "db"
+    existingSecret: "fuzeinfra-backups-s3"
 airflow:
   replicas: 0 # TEMP headroom (#93): webserver/scheduler/flower -> 0 pods
   workerReplicas: 0 # TEMP headroom (#93): celery worker -> 0 pods
