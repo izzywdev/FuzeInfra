@@ -22,7 +22,7 @@ concurrency:
 
 jobs:
   gate-lint:
-    runs-on: staging
+    runs-on: ubuntu-latest  # was: staging (ARC scaleset broken — creates 0 runners; see MendysRobotics-shared arc-systems)
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
@@ -45,7 +45,7 @@ jobs:
           echo "lint complete (report-only)"; exit 0
 
   gate-test:
-    runs-on: staging
+    runs-on: ubuntu-latest  # was: staging (ARC scaleset broken — creates 0 runners; see MendysRobotics-shared arc-systems)
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
@@ -65,7 +65,7 @@ jobs:
           echo "test complete (report-only)"; exit 0
 
   gate-build:
-    runs-on: staging
+    runs-on: ubuntu-latest  # was: staging (ARC scaleset broken — creates 0 runners; see MendysRobotics-shared arc-systems)
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
@@ -80,7 +80,7 @@ jobs:
           echo "build complete (report-only)"; exit 0
 
   gate-sast:
-    runs-on: staging
+    runs-on: ubuntu-latest  # was: staging (ARC scaleset broken — creates 0 runners; see MendysRobotics-shared arc-systems)
     steps:
       - uses: actions/checkout@v7
       - name: Semgrep (report-only, SARIF)
@@ -97,7 +97,7 @@ jobs:
           category: semgrep
 
   gate-secret-scan:
-    runs-on: staging
+    runs-on: ubuntu-latest  # was: staging (ARC scaleset broken — creates 0 runners; see MendysRobotics-shared arc-systems)
     steps:
       - uses: actions/checkout@v7
         with: { fetch-depth: 0 }
@@ -107,7 +107,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   gate-dependency-scan:
-    runs-on: staging
+    runs-on: ubuntu-latest  # was: staging (ARC scaleset broken — creates 0 runners; see MendysRobotics-shared arc-systems)
     steps:
       - uses: actions/checkout@v7
       - name: Trivy filesystem scan (report-only, SARIF)
@@ -129,7 +129,7 @@ jobs:
   gate-authz:
     # Endpoint security / authorization (BOLA/BOPLA). Report-only first pass; security
     # ratchets to enforcing per-repo once the rules are tuned green (see architecture-guidelines.md).
-    runs-on: staging
+    runs-on: ubuntu-latest  # was: staging (ARC scaleset broken — creates 0 runners; see MendysRobotics-shared arc-systems)
     steps:
       - uses: actions/checkout@v7
         with: { fetch-depth: 0 }
@@ -152,7 +152,7 @@ jobs:
     # Bounded local deployability. Stands up FuzeInfra consumer-test (if vendored) + validates the
     # Helm chart; warns (tracked) when no bounded local-up is wired yet. local-env-verifier ratchets
     # to enforcing per-repo (see local-environment.md).
-    runs-on: staging
+    runs-on: ubuntu-latest  # was: staging (ARC scaleset broken — creates 0 runners; see MendysRobotics-shared arc-systems)
     steps:
       - uses: actions/checkout@v7
         with: { submodules: recursive }
@@ -187,7 +187,7 @@ jobs:
     # SemVer discipline (governance/versioning.md): a changed npm package or API contract
     # must bump its version. Report-only first pass; ratchet to enforcing per repo.
     if: github.event_name == 'pull_request'
-    runs-on: staging
+    runs-on: ubuntu-latest  # was: staging (ARC scaleset broken — creates 0 runners; see MendysRobotics-shared arc-systems)
     steps:
       - uses: actions/checkout@v7
         with: { fetch-depth: 0 }
