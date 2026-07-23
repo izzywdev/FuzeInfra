@@ -39,3 +39,8 @@ output "argocd_url_public" {
   description = "ArgoCD public URL (public once Cloudflare tunnel is wired)"
   value       = "https://argocd.${var.prod_subdomain}.${var.zone_name}"
 }
+
+output "private_network_id" {
+  description = "ID of the codified Contabo private network (net 60932), or empty when enable_private_network is false. Import with `terraform import contabo_private_network.prod[0] 60932`."
+  value       = var.enable_private_network ? contabo_private_network.prod[0].id : ""
+}

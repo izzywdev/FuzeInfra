@@ -112,8 +112,24 @@ resource "null_resource" "provision" {
       "# All nodes need UDP 51820 open. Switch from default VXLAN requires rolling",
       "# restart of all k3s-agent nodes after the server adopts this config.",
       "flannel-backend: wireguard-native",
+      # --- Private networking (Contabo VPC) — INERT unless enabled ---
+      # When local.private_net_enabled (var.enable_private_network AND a concrete
+      # var.private_node_ip), route the k3s node identity + flannel overlay over
+      # the private NIC (var.private_iface, eth1) instead of the public IP:
+      #   flannel-iface     -> overlay peers over the private 10.0.0.0/22 net
+      #   node-ip           -> the node's private address (internal cluster IP)
+      #   node-external-ip  -> keeps the public IP as the advertised external IP
+      # These emit as empty lines (valid YAML) when disabled, so prod is unchanged
+      # until the VPC add-on is bought + the gate flipped. NOTE: the per-instance
+      # Contabo VPC add-on is a MANUAL panel purchase (HTTP 402 otherwise) that
+      # Terraform cannot order — see private-network.tf.
+      "%{if local.private_net_enabled}flannel-iface: ${var.private_iface}%{endif}",
+      "%{if local.private_net_enabled}node-ip: ${var.private_node_ip}%{endif}",
+      "%{if local.private_net_enabled}node-external-ip: ${local.server_ip}%{endif}",
       "tls-san:",
       "  - ${local.server_ip}",
+      # Private tls-san so kubeconfigs/agents can reach the API over the private IP.
+      "%{if local.private_net_enabled}  - ${var.private_node_ip}%{endif}",
       "node-taint:",
       "  - node-role.kubernetes.io/control-plane=:PreferNoSchedule",
       "KCFG",
