@@ -1,0 +1,19 @@
+name: staging-runner-smoke
+# Verifies the shared Contabo ARC 'staging' runner actually fetches + runs jobs.
+# Dispatch this before moving any gate back onto [self-hosted, staging] so we
+# never pay GitHub-hosted minutes AND the VPS at the same time.
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  smoke:
+    runs-on: [self-hosted, staging]
+    timeout-minutes: 5
+    steps:
+      - name: Prove we ran on the staging VPS runner
+        run: |
+          echo "runner name : $RUNNER_NAME"
+          echo "runner os   : $RUNNER_OS / $RUNNER_ARCH"
+          echo "hostname    : $(hostname)"
+          echo "staging runner OK"
