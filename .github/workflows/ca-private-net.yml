@@ -2,16 +2,23 @@ name: ca-private-net
 
 # Contabo Private Networking operations for the FuzeInfra prod cluster
 # (issue #318 hardening: move the pod-network underlay onto a private VLAN).
-# Read-only 'list'/'describe' are safe; 'create-network' and 'assign' MUTATE
-# the Contabo account. 'assign' may trigger a node reboot to surface eth1 —
-# do it one node at a time, non-critical first, control-plane LAST.
+# Read-only 'list'/'describe' are safe; the rest MUTATE the Contabo account.
+#
+# CORRECT PER-NODE SEQUENCE (an assign BEFORE the add-on is ordered returns
+# HTTP 402 — that was the earlier mistake, NOT a "panel-only" limitation):
+#   1. upgrade  — order the paid Private Networking add-on via the API
+#                 (POST /v1/compute/instances/{id}/upgrade {"privateNetworking":{}}).
+#   2. reinstall — Contabo requires a reinstall to surface the eth1 NIC
+#                 (use ca-salvage-enroll with the -privnet cloud-init template).
+#   3. assign   — attach the instance to the private network (no 402 now).
+# Do it one node at a time, non-critical first, control-plane LAST.
 on:
   workflow_dispatch:
     inputs:
       action:
-        description: 'create-network | list | describe | assign | unassign'
+        description: 'create-network | list | describe | upgrade | assign | unassign'
         type: choice
-        options: [list, describe, create-network, assign, unassign]
+        options: [list, describe, create-network, upgrade, assign, unassign]
         default: list
         required: true
       name:
@@ -67,9 +74,26 @@ jobs:
               echo "=== creating private network name=$PNAME region=$REGION ==="
               RESP=$(req -X POST -d "$(jq -n --arg n "$PNAME" --arg r "$REGION" '{name:$n, region:$r}')" "$BASE")
               echo "$RESP" | jq '.data[0] | {privateNetworkId,name,region,cidr,dataCenter}' || { echo "raw: $RESP"; exit 1; } ;;
+            upgrade)
+              [ -n "$INSTANCE_ID" ] || { echo "::error::instance_id required"; exit 1; }
+              echo "=== ordering Private Networking add-on for instance $INSTANCE_ID via API (paid) ==="
+              # POST /v1/compute/instances/{id}/upgrade  body {"privateNetworking":{}}
+              # This is the step whose absence caused the 402 on assign. It is
+              # fully API-orderable (Compute Management API) — no panel needed.
+              RC=$(curl -sS -o /tmp/up.json -w '%{http_code}' -X POST -H "Authorization: Bearer $TOK" \
+                -H "x-request-id: $(cat /proc/sys/kernel/random/uuid)" -H "Content-Type: application/json" \
+                -d '{"privateNetworking":{}}' \
+                "https://api.contabo.com/v1/compute/instances/${INSTANCE_ID}/upgrade")
+              echo "upgrade -> HTTP $RC"; cat /tmp/up.json | jq . 2>/dev/null || cat /tmp/up.json
+              if [ "$RC" = "200" ] || [ "$RC" = "201" ]; then
+                echo "::notice::add-on ordered. NEXT: reinstall $INSTANCE_ID with the -privnet cloud-init (ca-salvage-enroll) to surface eth1, THEN action=assign."
+              else
+                echo "::error::upgrade failed (HTTP $RC) — add-on NOT ordered; do not assign yet."; exit 1
+              fi ;;
             assign)
               [ -n "$NETWORK_ID" ] && [ -n "$INSTANCE_ID" ] || { echo "::error::network_id + instance_id required"; exit 1; }
               echo "=== assigning instance $INSTANCE_ID to private network $NETWORK_ID (may reboot the node) ==="
+              echo "    (prereq: action=upgrade already ordered the add-on for this instance, else this 402s)"
               RC=$(curl -sS -o /tmp/a.json -w '%{http_code}' -X POST -H "Authorization: Bearer $TOK" \
                 -H "x-request-id: $(cat /proc/sys/kernel/random/uuid)" \
                 "${BASE}/${NETWORK_ID}/instances/${INSTANCE_ID}")

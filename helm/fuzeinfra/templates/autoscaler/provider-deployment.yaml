@@ -76,6 +76,14 @@ spec:
               value: {{ .Values.clusterAutoscaler.provider.notifyTelegramEnabled | quote }}
             - name: NOTIFY_TELEGRAM_CHAT_ID
               value: {{ .Values.clusterAutoscaler.provider.notifyTelegramChatId | quote }}
+            # Order the paid Contabo Private Networking add-on on every created
+            # elastic node (so it can attach to the private VLAN without a
+            # separate /upgrade — the missing add-on is what returns HTTP 402).
+            # Default false: enable ONLY during the coordinated private-VLAN
+            # cutover — a node on private-only flannel cannot join a still-public
+            # control plane. See internal/contabo createAddOns.
+            - name: CONTABO_PRIVATE_NETWORKING
+              value: {{ .Values.clusterAutoscaler.provider.privateNetworking | quote }}
           livenessProbe:
             tcpSocket:
               port: grpc

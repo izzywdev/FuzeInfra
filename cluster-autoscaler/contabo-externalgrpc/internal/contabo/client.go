@@ -73,6 +73,23 @@ type CreateReq struct {
 	// base64-encoded).
 	UserData string
 	Tags     []string
+	// PrivateNetworking, when true, orders the paid Contabo "Private
+	// Networking" add-on as part of the create request (addOns.privateNetworking).
+	// A node born with the add-on can be attached to the private VLAN without a
+	// separate /upgrade call (which is what returns HTTP 402 when the add-on is
+	// missing). Default false: enable only during the coordinated private-VLAN
+	// cutover — a node on private-only flannel cannot join a still-public cluster.
+	PrivateNetworking bool
+}
+
+// privateNetworkingAddOn is the (currently empty) configuration object for the
+// Contabo Private Networking add-on. Contabo's createInstance API expresses
+// add-ons as a named object: {"addOns":{"privateNetworking":{}}}.
+type privateNetworkingAddOn struct{}
+
+// createAddOns is the "addOns" object of the createInstance request body.
+type createAddOns struct {
+	PrivateNetworking *privateNetworkingAddOn `json:"privateNetworking,omitempty"`
 }
 
 // Client defines the Contabo API client interface.
@@ -901,19 +918,28 @@ func (c *HTTPClient) Create(ctx context.Context, req CreateReq) (Instance, error
 		if req.SSHKeyID > 0 {
 			sshKeys = []int64{req.SSHKeyID}
 		}
+		// Order the Private Networking add-on at create time only when asked.
+		// nil (omitempty) => the addOns key is absent, i.e. no paid add-on.
+		var addOns *createAddOns
+		if req.PrivateNetworking {
+			addOns = &createAddOns{PrivateNetworking: &privateNetworkingAddOn{}}
+		}
+
 		createBody := struct {
-			DisplayName string  `json:"displayName"`
-			ImageID     string  `json:"imageId"`
-			ProductID   string  `json:"productId"`
-			Region      string  `json:"region"`
-			SSHKeys     []int64 `json:"sshKeys,omitempty"`
-			UserData    string  `json:"userData"`
+			DisplayName string        `json:"displayName"`
+			ImageID     string        `json:"imageId"`
+			ProductID   string        `json:"productId"`
+			Region      string        `json:"region"`
+			SSHKeys     []int64       `json:"sshKeys,omitempty"`
+			UserData    string        `json:"userData"`
+			AddOns      *createAddOns `json:"addOns,omitempty"`
 		}{
 			DisplayName: req.Name,
 			ImageID:     req.ImageID,
 			ProductID:   req.ProductID,
 			Region:      req.Region,
 			SSHKeys:     sshKeys,
+			AddOns:      addOns,
 			// PLAIN text, NOT base64. Contabo's POST /v1/compute/instances
 			// userData field expects the raw cloud-config text as-is — this
 			// was previously (wrongly) base64-encoded here, which made

@@ -44,6 +44,13 @@ type Config struct {
 	// K3SNodeToken is the k3s node join token. It is exposed to UserDataTmpl as
 	// {{.K3SNodeToken}}. Same rationale as K3SServerURL.
 	K3SNodeToken string
+	// PrivateNetworking, when true, makes NodeGroupIncreaseSize order the paid
+	// Contabo Private Networking add-on on every created elastic node (so it can
+	// join the private VLAN without a separate /upgrade). Sourced from
+	// CONTABO_PRIVATE_NETWORKING (see cmd/server/main.go). Default false: turn on
+	// only during the coordinated private-VLAN cutover, since a node on
+	// private-only flannel cannot join a still-public control plane.
+	PrivateNetworking bool
 	// Notifier is an optional best-effort email warning sent immediately
 	// before each Create call in NodeGroupIncreaseSize (see scale.go). A nil
 	// Notifier (the zero value — e.g. NOTIFY_EMAIL_ENABLED unset) is a
