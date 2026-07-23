@@ -2,9 +2,12 @@ package notify
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"io"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"net/smtp"
 	"strings"
 	"testing"
@@ -242,3 +245,177 @@ func TestSend_MissingConfigFieldsError(t *testing.T) {
 		})
 	}
 }
+
+// --- Telegram -------------------------------------------------------------
+
+func telegramCfg() Config {
+	return Config{
+		TelegramEnabled:  true,
+		TelegramBotToken: "123456:ABC-DEF",
+		TelegramChatID:   "-1001234567890",
+	}
+}
+
+// TestTelegramNotify_DisabledIsNoOp verifies the mandatory gate: with
+// TelegramEnabled=false, Notify must never make an HTTP request at all.
+func TestTelegramNotify_DisabledIsNoOp(t *testing.T) {
+	var calls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	cfg := telegramCfg()
+	cfg.TelegramEnabled = false
+	tg := NewTelegram(cfg)
+	tg.TelegramAPIBase = srv.URL
+
+	tg.Notify("subject", "body")
+
+	if calls != 0 {
+		t.Fatalf("Notify with TelegramEnabled=false: want 0 HTTP calls, got %d", calls)
+	}
+}
+
+// TestTelegramNotify_NilReceiverIsNoOp verifies callers never need to
+// nil-check a *Telegram before calling Notify (mirrors Emailer's contract).
+func TestTelegramNotify_NilReceiverIsNoOp(t *testing.T) {
+	var tg *Telegram
+	// Must not panic.
+	tg.Notify("subject", "body")
+}
+
+// TestTelegramNotify_HappyPath verifies a fully successful send POSTs
+// chat_id+text as JSON to <base>/bot<token>/sendMessage.
+func TestTelegramNotify_HappyPath(t *testing.T) {
+	type gotReq struct {
+		method      string
+		path        string
+		contentType string
+		body        telegramSendMessageReq
+	}
+	var got gotReq
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got.method = r.Method
+		got.path = r.URL.Path
+		got.contentType = r.Header.Get("Content-Type")
+		if err := json.NewDecoder(r.Body).Decode(&got.body); err != nil {
+			t.Errorf("decoding request body: %v", err)
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer srv.Close()
+
+	cfg := telegramCfg()
+	tg := NewTelegram(cfg)
+	tg.TelegramAPIBase = srv.URL
+
+	tg.Notify("provisioning fuzeinfra-elastic-abcd1234", "instance=fuzeinfra-elastic-abcd1234\ncurrent=2\ntarget=3\n")
+
+	if got.method != http.MethodPost {
+		t.Errorf("method = %q, want POST", got.method)
+	}
+	wantPath := "/bot123456:ABC-DEF/sendMessage"
+	if got.path != wantPath {
+		t.Errorf("path = %q, want %q", got.path, wantPath)
+	}
+	if !strings.Contains(got.contentType, "application/json") {
+		t.Errorf("Content-Type = %q, want application/json", got.contentType)
+	}
+	if got.body.ChatID != cfg.TelegramChatID {
+		t.Errorf("chat_id = %q, want %q", got.body.ChatID, cfg.TelegramChatID)
+	}
+	if !strings.Contains(got.body.Text, "provisioning fuzeinfra-elastic-abcd1234") {
+		t.Errorf("text missing subject: %q", got.body.Text)
+	}
+	if !strings.Contains(got.body.Text, "instance=fuzeinfra-elastic-abcd1234") {
+		t.Errorf("text missing body: %q", got.body.Text)
+	}
+}
+
+// TestTelegramNotify_NonSuccessStatusIsTolerated verifies that a non-2xx
+// response from the Telegram API (e.g. 401 bad token, 400 bad chat) is
+// swallowed rather than propagated or panicking.
+func TestTelegramNotify_NonSuccessStatusIsTolerated(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"ok":false,"description":"Unauthorized"}`))
+	}))
+	defer srv.Close()
+
+	cfg := telegramCfg()
+	tg := NewTelegram(cfg)
+	tg.TelegramAPIBase = srv.URL
+
+	// Must return normally (no panic) despite the non-2xx response.
+	tg.Notify("subject", "body")
+}
+
+// TestTelegramNotify_DialFailureIsTolerated verifies that when the HTTP
+// request itself fails (e.g. unreachable API base), Notify swallows the
+// error — it must not panic or block the caller.
+func TestTelegramNotify_DialFailureIsTolerated(t *testing.T) {
+	cfg := telegramCfg()
+	tg := NewTelegram(cfg)
+	// Port 0 on the loopback resolves but nothing listens there, so the
+	// dial itself fails without needing a real unreachable host (and
+	// without depending on external network/DNS being unavailable in CI).
+	tg.TelegramAPIBase = "http://127.0.0.1:0"
+
+	// Must return normally (no panic) despite the dial failure.
+	tg.Notify("subject", "body")
+}
+
+// TestTelegramSend_MissingConfigFieldsError verifies send fails fast (an
+// error Notify will log and swallow) when required delivery fields are
+// blank, rather than silently posting a malformed request.
+func TestTelegramSend_MissingConfigFieldsError(t *testing.T) {
+	cases := []struct {
+		name string
+		mut  func(*Config)
+	}{
+		{"empty bot token", func(c *Config) { c.TelegramBotToken = "" }},
+		{"empty chat id", func(c *Config) { c.TelegramChatID = "" }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := telegramCfg()
+			tc.mut(&cfg)
+			tg := NewTelegram(cfg)
+			if err := tg.send("subject", "body"); err == nil {
+				t.Fatal("want an error, got nil")
+			}
+		})
+	}
+}
+
+// TestTelegramSend_DefaultAPIBaseWhenUnset verifies send falls back to
+// defaultTelegramAPIBase (rather than an invalid empty-base URL) when
+// TelegramAPIBase is left as the zero value — covers a Telegram struct built
+// without NewTelegram (e.g. a future direct literal). No real network call
+// is made: the client's transport is faked out via http.Client.Transport so
+// the request is inspected instead of dialed.
+func TestTelegramSend_DefaultAPIBaseWhenUnset(t *testing.T) {
+	var gotURL string
+	rt := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		gotURL = r.URL.String()
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader("{}"))}, nil
+	})
+	tg := &Telegram{cfg: telegramCfg(), client: &http.Client{Transport: rt}}
+
+	if err := tg.send("subject", "body"); err != nil {
+		t.Fatalf("send: unexpected error: %v", err)
+	}
+	wantPrefix := defaultTelegramAPIBase + "/bot"
+	if !strings.HasPrefix(gotURL, wantPrefix) {
+		t.Fatalf("request URL = %q, want prefix %q", gotURL, wantPrefix)
+	}
+}
+
+// roundTripFunc adapts a function to http.RoundTripper so tests can fake the
+// entire HTTP transport without opening a real socket.
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }

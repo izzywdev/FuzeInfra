@@ -2,6 +2,8 @@ package main
 
 import (
 	"testing"
+
+	"github.com/izzywdev/fuzeinfra/contabo-externalgrpc/internal/notify"
 )
 
 // fullEnv returns a fully-populated, valid environment map covering every
@@ -372,6 +374,87 @@ func TestLoadConfig_NotifyEnabled_SucceedsWithAllFields(t *testing.T) {
 	}
 	if provCfg.Notifier == nil {
 		t.Fatal("want a non-nil Notifier")
+	}
+}
+
+// --- NOTIFY_TELEGRAM_* wiring (best-effort Telegram warning; see internal/notify) ---
+
+// TestLoadConfig_TelegramDisabledByDefault verifies the off-path: with no
+// NOTIFY_TELEGRAM_* vars set, loadConfig succeeds and falls back to the
+// (disabled, safe no-op) email notifier rather than leaving Notifier nil.
+func TestLoadConfig_TelegramDisabledByDefault(t *testing.T) {
+	env := fullEnv() // no NOTIFY_* keys at all
+	provCfg, _, _, err := loadConfig(getenvFromMap(env))
+	if err != nil {
+		t.Fatalf("loadConfig with no NOTIFY_* vars: want success, got error: %v", err)
+	}
+	if provCfg.Notifier == nil {
+		t.Fatal("want a non-nil Notifier even when NOTIFY_TELEGRAM_ENABLED is unset (it must be a safe no-op)")
+	}
+	// Must not block or panic when called — the disabled-by-default path.
+	provCfg.Notifier.Notify("subject", "body")
+}
+
+// TestLoadConfig_TelegramEnabled_RequiresDeliveryFields verifies the on-path:
+// once NOTIFY_TELEGRAM_ENABLED is set, the fields Notify needs to actually
+// deliver (bot token + chat id) become required — fail fast at startup.
+func TestLoadConfig_TelegramEnabled_RequiresDeliveryFields(t *testing.T) {
+	requiredKeys := []string{"NOTIFY_TELEGRAM_BOT_TOKEN", "NOTIFY_TELEGRAM_CHAT_ID"}
+	for _, key := range requiredKeys {
+		t.Run(key, func(t *testing.T) {
+			env := fullEnv()
+			env["NOTIFY_TELEGRAM_ENABLED"] = "true"
+			env["NOTIFY_TELEGRAM_BOT_TOKEN"] = "123456:ABC-DEF"
+			env["NOTIFY_TELEGRAM_CHAT_ID"] = "-1001234567890"
+			delete(env, key)
+
+			_, _, _, err := loadConfig(getenvFromMap(env))
+			if err == nil {
+				t.Fatalf("loadConfig with NOTIFY_TELEGRAM_ENABLED=true and missing %s: want error, got nil", key)
+			}
+		})
+	}
+}
+
+// TestLoadConfig_TelegramEnabled_SucceedsWithAllFields verifies the full
+// on-path succeeds and provCfg.Notifier is populated.
+func TestLoadConfig_TelegramEnabled_SucceedsWithAllFields(t *testing.T) {
+	env := fullEnv()
+	env["NOTIFY_TELEGRAM_ENABLED"] = "1"
+	env["NOTIFY_TELEGRAM_BOT_TOKEN"] = "123456:ABC-DEF"
+	env["NOTIFY_TELEGRAM_CHAT_ID"] = "-1001234567890"
+
+	provCfg, _, _, err := loadConfig(getenvFromMap(env))
+	if err != nil {
+		t.Fatalf("loadConfig with NOTIFY_TELEGRAM_ENABLED=1 and all fields set: want success, got error: %v", err)
+	}
+	if provCfg.Notifier == nil {
+		t.Fatal("want a non-nil Notifier")
+	}
+	if _, ok := provCfg.Notifier.(*notify.Telegram); !ok {
+		t.Fatalf("Notifier = %T, want *notify.Telegram", provCfg.Notifier)
+	}
+}
+
+// TestLoadConfig_TelegramTakesPrecedenceOverEmail verifies that when both
+// NOTIFY_EMAIL_ENABLED and NOTIFY_TELEGRAM_ENABLED are set, the selected
+// Notifier is the Telegram one (only one notifier is ever wired up).
+func TestLoadConfig_TelegramTakesPrecedenceOverEmail(t *testing.T) {
+	env := fullEnv()
+	env["NOTIFY_EMAIL_ENABLED"] = "true"
+	env["NOTIFY_SMTP_HOST"] = "smtp.example.com"
+	env["NOTIFY_EMAIL_FROM"] = "ca@example.com"
+	env["NOTIFY_EMAIL_TO"] = "ops@example.com"
+	env["NOTIFY_TELEGRAM_ENABLED"] = "true"
+	env["NOTIFY_TELEGRAM_BOT_TOKEN"] = "123456:ABC-DEF"
+	env["NOTIFY_TELEGRAM_CHAT_ID"] = "-1001234567890"
+
+	provCfg, _, _, err := loadConfig(getenvFromMap(env))
+	if err != nil {
+		t.Fatalf("loadConfig with both NOTIFY_EMAIL_ENABLED and NOTIFY_TELEGRAM_ENABLED: want success, got error: %v", err)
+	}
+	if _, ok := provCfg.Notifier.(*notify.Telegram); !ok {
+		t.Fatalf("Notifier = %T, want *notify.Telegram (Telegram must take precedence over email)", provCfg.Notifier)
 	}
 }
 

@@ -571,6 +571,14 @@ clusterAutoscaler:
     notifySmtpPort: "587"
     notifyEmailFrom: ""
     notifyEmailTo: ""
+    # Same before-provision warning, delivered via the Telegram Bot API
+    # (internal/notify.Telegram) instead of email — takes precedence over
+    # notifyEmailEnabled above when both are true. Off by default.
+    # NOTIFY_TELEGRAM_BOT_TOKEN is deliberately NOT a values field — it must
+    # be added as a KEY to the existingSecret above (fuzeinfra-ca-provider)
+    # via SealedSecret, never a plain Helm value.
+    notifyTelegramEnabled: false
+    notifyTelegramChatId: ""
   # Billing-aware reaper (cluster-autoscaler/contabo-externalgrpc/cmd/reaper):
   # an hourly one-shot CronJob, run from the SAME image as the provider
   # (command: /reaper), that cordons/drains/cancels an elastic instance only

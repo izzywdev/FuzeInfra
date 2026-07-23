@@ -190,6 +190,17 @@ clusterAutoscaler:
     notifySmtpPort: "587"
     notifyEmailFrom: ""
     notifyEmailTo: ""
+    # Telegram delivery for the same before-provision warning (internal/notify.Telegram)
+    # — takes precedence over notifyEmailEnabled above when both are true.
+    # Enabled here; the orchestrator fills in the real chat id below and
+    # seals the bot token as a NEW key (NOTIFY_TELEGRAM_BOT_TOKEN) on the
+    # existingSecret SealedSecret (helm/fuzeinfra/templates/autoscaler/sealed-secret-ca-provider.yaml)
+    # — never as a plain value here.
+    notifyTelegramEnabled: true
+    # TODO(operator): replace with the real destination chat id (or source
+    # this value from the sealed secret / a separate values overlay instead
+    # of committing the literal id here).
+    notifyTelegramChatId: "__TELEGRAM_CHAT_ID__"
   # Billing-aware reaper -- releases an idle elastic instance only within 24h
   # of its projected monthly renewal (see cmd/reaper). billingPeriod matches
   # the chart default (720h/~30d); set explicitly here so prod release window

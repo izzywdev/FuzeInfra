@@ -1,37 +1,47 @@
-// Package notify implements a best-effort, non-blocking email notifier used
-// by the Contabo cluster-autoscaler provider to warn a human operator
-// immediately before it provisions a new elastic VPS (see
+// Package notify implements best-effort, non-blocking notifiers used by the
+// Contabo cluster-autoscaler provider to warn a human operator immediately
+// before it provisions a new elastic VPS (see
 // internal/provider/scale.go's NodeGroupIncreaseSize).
+//
+// Two delivery mechanisms are implemented — Emailer (SMTP) and Telegram (the
+// Bot API) — selected by cmd/server/main.go's loadConfig (Telegram takes
+// precedence over email when both are enabled).
 //
 // This exists purely as an early-warning signal — the authoritative
 // anti-runaway safeguard is the prefix-count hard cap in scale.go, not this
-// email. Delivery must therefore NEVER gate, delay, or fail a scale-up:
-// Notify swallows every error internally (logging it) rather than returning
-// one, and is disabled by default (Config.Enabled defaults to the zero value
-// false) so an unconfigured/misconfigured SMTP endpoint can never affect a
-// fresh deploy.
+// notification. Delivery must therefore NEVER gate, delay, or fail a
+// scale-up: Notify swallows every error internally (logging it) rather than
+// returning one, and each notifier is disabled by default (Config.Enabled /
+// Config.TelegramEnabled default to the zero value false) so an
+// unconfigured/misconfigured endpoint can never affect a fresh deploy.
 package notify
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
 	"net"
+	"net/http"
 	"net/smtp"
 	"strings"
 	"time"
 )
 
-// Config configures the SMTP emailer. All fields are sourced from env vars
-// by cmd/server/main.go's loadConfig:
+// Config configures both notifiers. All fields are sourced from env vars by
+// cmd/server/main.go's loadConfig:
 //
-//   - NOTIFY_EMAIL_ENABLED (bool)            -> Enabled
-//   - NOTIFY_SMTP_HOST     (string)          -> SMTPHost
-//   - NOTIFY_SMTP_PORT     (string)          -> SMTPPort
-//   - NOTIFY_SMTP_USER     (string, optional)-> SMTPUser
-//   - NOTIFY_SMTP_PASS     (string, optional)-> SMTPPass
-//   - NOTIFY_EMAIL_FROM    (string)          -> From
-//   - NOTIFY_EMAIL_TO      (string)          -> To (comma-separated)
+//   - NOTIFY_EMAIL_ENABLED      (bool)             -> Enabled
+//   - NOTIFY_SMTP_HOST          (string)           -> SMTPHost
+//   - NOTIFY_SMTP_PORT          (string)           -> SMTPPort
+//   - NOTIFY_SMTP_USER          (string, optional) -> SMTPUser
+//   - NOTIFY_SMTP_PASS          (string, optional) -> SMTPPass
+//   - NOTIFY_EMAIL_FROM         (string)           -> From
+//   - NOTIFY_EMAIL_TO           (string)           -> To (comma-separated)
+//   - NOTIFY_TELEGRAM_ENABLED   (bool)             -> TelegramEnabled
+//   - NOTIFY_TELEGRAM_BOT_TOKEN (string)           -> TelegramBotToken
+//   - NOTIFY_TELEGRAM_CHAT_ID   (string)           -> TelegramChatID
 type Config struct {
 	Enabled  bool
 	SMTPHost string
@@ -40,10 +50,15 @@ type Config struct {
 	SMTPPass string
 	From     string
 	To       string
+
+	TelegramEnabled  bool
+	TelegramBotToken string
+	TelegramChatID   string
 }
 
 // Notifier sends a best-effort notification. Implementations must never
-// propagate a delivery failure as an error to the caller — see Emailer.Notify.
+// propagate a delivery failure as an error to the caller — see
+// Emailer.Notify / Telegram.Notify.
 type Notifier interface {
 	Notify(subject, body string)
 }
@@ -194,4 +209,106 @@ func buildMessage(from string, to []string, subject, body string, now time.Time)
 	b.WriteString(body)
 	b.WriteString("\r\n")
 	return []byte(b.String())
+}
+
+// telegramHTTPTimeout bounds the whole Telegram Bot API HTTP round trip
+// (connect + write + read) so a stalled/unreachable API can never hang the
+// calling goroutine indefinitely — same intent as Emailer's dialTimeout.
+const telegramHTTPTimeout = 5 * time.Second
+
+// defaultTelegramAPIBase is the production Telegram Bot API base URL.
+const defaultTelegramAPIBase = "https://api.telegram.org"
+
+// Telegram is an HTTP-backed Notifier that posts to the Telegram Bot API's
+// sendMessage endpoint (https://core.telegram.org/bots/api#sendmessage).
+// Same failure-tolerance contract as Emailer: Notify never returns an error
+// or panics; every failure is logged and swallowed so an unreachable/
+// misconfigured bot can never affect a scale-up.
+type Telegram struct {
+	cfg    Config
+	client *http.Client
+
+	// TelegramAPIBase overrides the Telegram Bot API base URL. Defaults to
+	// defaultTelegramAPIBase (https://api.telegram.org); tests point this at
+	// an httptest.Server so no real network call is ever made.
+	TelegramAPIBase string
+}
+
+// NewTelegram builds a Telegram notifier backed by a real HTTP client with a
+// telegramHTTPTimeout bound.
+func NewTelegram(cfg Config) *Telegram {
+	return &Telegram{
+		cfg:             cfg,
+		client:          &http.Client{Timeout: telegramHTTPTimeout},
+		TelegramAPIBase: defaultTelegramAPIBase,
+	}
+}
+
+// Notify posts subject/body as a best-effort Telegram message if
+// t.cfg.TelegramEnabled, logging (never returning) any delivery failure. A
+// nil receiver or TelegramEnabled=false is a silent no-op — callers do not
+// need to nil-check before calling Notify.
+func (t *Telegram) Notify(subject, body string) {
+	if t == nil || !t.cfg.TelegramEnabled {
+		return
+	}
+	if err := t.send(subject, body); err != nil {
+		log.Printf("notify: telegram send failed (non-blocking, scaling proceeds regardless): %v", err)
+	}
+}
+
+// telegramSendMessageReq is the minimal request body for the Bot API's
+// sendMessage method: https://core.telegram.org/bots/api#sendmessage.
+type telegramSendMessageReq struct {
+	ChatID string `json:"chat_id"`
+	Text   string `json:"text"`
+}
+
+func (t *Telegram) send(subject, body string) error {
+	if t.cfg.TelegramBotToken == "" {
+		return fmt.Errorf("NOTIFY_TELEGRAM_BOT_TOKEN is empty")
+	}
+	if t.cfg.TelegramChatID == "" {
+		return fmt.Errorf("NOTIFY_TELEGRAM_CHAT_ID is empty")
+	}
+
+	text := subject
+	if body != "" {
+		text = subject + "\n\n" + body
+	}
+
+	payload, err := json.Marshal(telegramSendMessageReq{ChatID: t.cfg.TelegramChatID, Text: text})
+	if err != nil {
+		return fmt.Errorf("marshal telegram sendMessage payload: %w", err)
+	}
+
+	base := t.TelegramAPIBase
+	if base == "" {
+		base = defaultTelegramAPIBase
+	}
+	url := fmt.Sprintf("%s/bot%s/sendMessage", base, t.cfg.TelegramBotToken)
+
+	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(payload))
+	if err != nil {
+		return fmt.Errorf("build telegram sendMessage request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	client := t.client
+	if client == nil {
+		client = &http.Client{Timeout: telegramHTTPTimeout}
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("telegram sendMessage request: %w", err)
+	}
+	defer resp.Body.Close()
+	// Drain the body so the connection can be reused; the response content
+	// itself is not needed since delivery failures are only ever logged.
+	_, _ = io.Copy(io.Discard, resp.Body)
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("telegram sendMessage: unexpected status %d", resp.StatusCode)
+	}
+	return nil
 }
