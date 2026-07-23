@@ -314,6 +314,67 @@ func TestLoadConfig_RealMode_StillRequiresContaboAndK3SCreds(t *testing.T) {
 	}
 }
 
+// --- NOTIFY_* wiring (best-effort email warning; see internal/notify) -----
+
+// TestLoadConfig_NotifyDisabledByDefault verifies the off-path: with no
+// NOTIFY_* vars set at all, loadConfig must still succeed (NOTIFY_EMAIL_ENABLED
+// defaults to false, so none of the delivery fields are required) and must
+// populate provCfg.Notifier with a non-nil no-op notifier rather than leaving
+// it nil — Notify() itself is the thing gated on Enabled, not this field.
+func TestLoadConfig_NotifyDisabledByDefault(t *testing.T) {
+	env := fullEnv() // no NOTIFY_* keys at all
+	provCfg, _, _, err := loadConfig(getenvFromMap(env))
+	if err != nil {
+		t.Fatalf("loadConfig with no NOTIFY_* vars: want success, got error: %v", err)
+	}
+	if provCfg.Notifier == nil {
+		t.Fatal("want a non-nil Notifier even when NOTIFY_EMAIL_ENABLED is unset (it must be a safe no-op)")
+	}
+	// Must not block or panic when called — the disabled-by-default path.
+	provCfg.Notifier.Notify("subject", "body")
+}
+
+// TestLoadConfig_NotifyEnabled_RequiresDeliveryFields verifies the on-path:
+// once NOTIFY_EMAIL_ENABLED is set, the fields Notify needs to actually
+// deliver (host/from/to) become required — a misconfigured notifier should
+// fail fast at startup, not silently never send anything.
+func TestLoadConfig_NotifyEnabled_RequiresDeliveryFields(t *testing.T) {
+	requiredKeys := []string{"NOTIFY_SMTP_HOST", "NOTIFY_EMAIL_FROM", "NOTIFY_EMAIL_TO"}
+	for _, key := range requiredKeys {
+		t.Run(key, func(t *testing.T) {
+			env := fullEnv()
+			env["NOTIFY_EMAIL_ENABLED"] = "true"
+			env["NOTIFY_SMTP_HOST"] = "smtp.example.com"
+			env["NOTIFY_EMAIL_FROM"] = "ca@example.com"
+			env["NOTIFY_EMAIL_TO"] = "ops@example.com"
+			delete(env, key)
+
+			_, _, _, err := loadConfig(getenvFromMap(env))
+			if err == nil {
+				t.Fatalf("loadConfig with NOTIFY_EMAIL_ENABLED=true and missing %s: want error, got nil", key)
+			}
+		})
+	}
+}
+
+// TestLoadConfig_NotifyEnabled_SucceedsWithAllFields verifies the full
+// on-path succeeds and NOTIFY_SMTP_PORT defaults when unset.
+func TestLoadConfig_NotifyEnabled_SucceedsWithAllFields(t *testing.T) {
+	env := fullEnv()
+	env["NOTIFY_EMAIL_ENABLED"] = "1"
+	env["NOTIFY_SMTP_HOST"] = "smtp.example.com"
+	env["NOTIFY_EMAIL_FROM"] = "ca@example.com"
+	env["NOTIFY_EMAIL_TO"] = "ops@example.com,oncall@example.com"
+
+	provCfg, _, _, err := loadConfig(getenvFromMap(env))
+	if err != nil {
+		t.Fatalf("loadConfig with NOTIFY_EMAIL_ENABLED=1 and all fields set: want success, got error: %v", err)
+	}
+	if provCfg.Notifier == nil {
+		t.Fatal("want a non-nil Notifier")
+	}
+}
+
 func TestLoadConfig_FakeCloudFalseVariantsBehaveAsRealMode(t *testing.T) {
 	falseVariants := []string{"", "0", "false", "no", "FAKE"}
 	for _, v := range falseVariants {

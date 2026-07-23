@@ -556,6 +556,21 @@ clusterAutoscaler:
     maxSize: 2
     grpcListen: ":8086"
     userDataTemplateB64: ""
+    # Best-effort email warning sent immediately before each Create call in
+    # NodeGroupIncreaseSize (internal/notify + internal/provider/scale.go) —
+    # purely informational, never the authoritative safeguard (the MaxSize
+    # name-prefix hard cap is enforced regardless of whether email is
+    # configured/enabled/reachable). Off by default. NOTIFY_SMTP_USER/
+    # NOTIFY_SMTP_PASS are deliberately NOT set here — if the chosen SMTP
+    # relay needs auth, add those two keys to the existingSecret above
+    # (fuzeinfra-ca-provider) via SealedSecret; they arrive as env vars
+    # automatically through that Secret's envFrom, so no separate values
+    # field is needed for them.
+    notifyEmailEnabled: false
+    notifySmtpHost: ""
+    notifySmtpPort: "587"
+    notifyEmailFrom: ""
+    notifyEmailTo: ""
   # Billing-aware reaper (cluster-autoscaler/contabo-externalgrpc/cmd/reaper):
   # an hourly one-shot CronJob, run from the SAME image as the provider
   # (command: /reaper), that cordons/drains/cancels an elastic instance only

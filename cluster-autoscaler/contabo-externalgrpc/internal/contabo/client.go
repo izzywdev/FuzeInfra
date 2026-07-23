@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -44,6 +43,14 @@ type Instance struct {
 	// CreatedDate as "unknown" and skip any billing-period decision for
 	// that instance rather than guessing.
 	CreatedDate time.Time
+	// CancelDate is set by Contabo once an instance's cancel (Delete) has
+	// been requested; it is the REAL termination date (cancellation is
+	// end-of-billing-period, never immediate — see Delete's doc comment
+	// below). The zero value means the instance has NOT been cancelled.
+	// Callers (the billing-aware reaper, internal/reaper) MUST treat a
+	// non-zero CancelDate as the authoritative termination anchor and MUST
+	// NOT re-cancel an instance that already carries one.
+	CancelDate time.Time
 }
 
 // CreateReq is the request to create a new instance.
@@ -58,6 +65,12 @@ type CreateReq struct {
 	// secret is referenced) — break-glass SSH access is instead provisioned
 	// via cloud-init (UserData), which every node already receives.
 	SSHKeyID int64
+	// UserData is PLAIN cloud-config/cloud-init text (e.g. starting with
+	// "#cloud-config"), NOT base64. Create sends it to Contabo's
+	// POST /v1/compute/instances `userData` field verbatim — Contabo expects
+	// plain text there, never base64 (see Create's doc comment on the
+	// createBody literal for the incident this caused when it was wrongly
+	// base64-encoded).
 	UserData string
 	Tags     []string
 }
@@ -65,6 +78,14 @@ type CreateReq struct {
 // Client defines the Contabo API client interface.
 type Client interface {
 	ListByTag(ctx context.Context, tag string) ([]Instance, error)
+	// ListByNamePrefix lists ALL Contabo instances (regardless of tag state)
+	// whose displayName starts with prefix, fully paginated. This is the
+	// authoritative source for the cluster-autoscaler provider's hard
+	// anti-runaway cap (see internal/provider/scale.go) — unlike ListByTag,
+	// it also catches untagged orphans (e.g. an instance a tag-assignment
+	// bug left untagged), which is exactly the failure mode that let the
+	// provider's MaxSize cap be silently defeated in prod (see PR history).
+	ListByNamePrefix(ctx context.Context, prefix string) ([]Instance, error)
 	Create(ctx context.Context, req CreateReq) (Instance, error)
 	Delete(ctx context.Context, id int64) error
 }
@@ -314,6 +335,7 @@ func (c *HTTPClient) ListByTag(ctx context.Context, tag string) ([]Instance, err
 			DisplayName string `json:"displayName"`
 			Status      string `json:"status"`
 			CreatedDate string `json:"createdDate"`
+			CancelDate  string `json:"cancelDate"`
 			Addresses   struct {
 				Private []struct {
 					IP string `json:"ip"`
@@ -346,6 +368,11 @@ func (c *HTTPClient) ListByTag(ctx context.Context, tag string) ([]Instance, err
 			log.Printf("contabo: instance %d (%s) has unparsable createdDate %q; leaving CreatedDate zero (billing-period decisions will be skipped for it)", inst.InstanceID, inst.DisplayName, inst.CreatedDate)
 		}
 
+		cancelDate, ok := parseContaboTime(inst.CancelDate)
+		if !ok && inst.CancelDate != "" {
+			log.Printf("contabo: instance %d (%s) has unparsable cancelDate %q; leaving CancelDate zero", inst.InstanceID, inst.DisplayName, inst.CancelDate)
+		}
+
 		instances = append(instances, Instance{
 			ID:          inst.InstanceID,
 			Name:        inst.DisplayName,
@@ -353,10 +380,150 @@ func (c *HTTPClient) ListByTag(ctx context.Context, tag string) ([]Instance, err
 			PrivateIP:   privateIP,
 			Tags:        []string{tag},
 			CreatedDate: createdDate,
+			CancelDate:  cancelDate,
 		})
 	}
 
 	return instances, nil
+}
+
+// listComputeInstancesPageSize/listComputeInstancesMaxPages bound
+// listAllComputeInstances' page walk. 100 is Contabo's max page size; the
+// 50-page cap (5000 instances) is far beyond any realistic FuzeInfra fleet
+// and exists only so a pagination bug (e.g. a page that never comes back
+// short) can't loop forever — hitting it is logged loudly since it means the
+// result is a silent undercount, which matters a lot to a caller using it as
+// a safety-cap authority (ListByNamePrefix).
+const (
+	listComputeInstancesPageSize = 100
+	listComputeInstancesMaxPages = 50
+)
+
+// listAllComputeInstances fetches EVERY Contabo compute instance across all
+// pages of GET /v1/compute/instances, decoding each into an Instance
+// (Tags left nil — this is a global, not tag-scoped, listing; ListByTag sets
+// Tags itself from the tag-assignments lookup it already did).
+//
+// Contabo's pagination is 1-based (page=1 is the first page, NOT page=0) —
+// confirmed live via the ca-cleanup-orphans workflow
+// (.github/workflows/ca-cleanup-orphans.yml) after page=0 silently returned
+// the same first page forever.
+func (c *HTTPClient) listAllComputeInstances(ctx context.Context, tok string) ([]Instance, error) {
+	var all []Instance
+	for page := 1; page <= listComputeInstancesMaxPages; page++ {
+		items, err := c.fetchComputeInstancesPage(ctx, tok, page, listComputeInstancesPageSize)
+		if err != nil {
+			return nil, err
+		}
+		if len(items) == 0 {
+			return all, nil
+		}
+		all = append(all, items...)
+		if len(items) < listComputeInstancesPageSize {
+			// A short page means this was the last one.
+			return all, nil
+		}
+	}
+	log.Printf("contabo: WARNING listAllComputeInstances hit the %d-page cap (%d instances collected) — the walk stopped early and the result may be an undercount", listComputeInstancesMaxPages, len(all))
+	return all, nil
+}
+
+// fetchComputeInstancesPage fetches a single (1-based) page of GET
+// /v1/compute/instances and decodes each entry into an Instance, including
+// CreatedDate/CancelDate/PrivateIP (Tags is left nil; see
+// listAllComputeInstances).
+func (c *HTTPClient) fetchComputeInstancesPage(ctx context.Context, tok string, page, size int) ([]Instance, error) {
+	u := fmt.Sprintf("%s/v1/compute/instances?page=%d&size=%d", c.cfg.BaseURL, page, size)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	if err != nil {
+		return nil, fmt.Errorf("create instances request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+tok)
+	req.Header.Set("x-request-id", newRequestID())
+
+	resp, err := c.hc.Do(req)
+	if err != nil {
+		log.Printf("contabo: GET %s failed: %v", u, err)
+		return nil, fmt.Errorf("instances request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	log.Printf("contabo: GET /v1/compute/instances?page=%d&size=%d -> %d", page, size, resp.StatusCode)
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("instances request (page=%d) failed with status %d: %s", page, resp.StatusCode, string(body))
+	}
+
+	var result struct {
+		Data []struct {
+			InstanceID  int64  `json:"instanceId"`
+			DisplayName string `json:"displayName"`
+			Status      string `json:"status"`
+			CreatedDate string `json:"createdDate"`
+			CancelDate  string `json:"cancelDate"`
+			Addresses   struct {
+				Private []struct {
+					IP string `json:"ip"`
+				} `json:"private"`
+			} `json:"addresses"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("decode instances response (page=%d): %w", page, err)
+	}
+
+	items := make([]Instance, 0, len(result.Data))
+	for _, inst := range result.Data {
+		privateIP := ""
+		if len(inst.Addresses.Private) > 0 {
+			privateIP = inst.Addresses.Private[0].IP
+		}
+
+		createdDate, ok := parseContaboTime(inst.CreatedDate)
+		if !ok && inst.CreatedDate != "" {
+			log.Printf("contabo: instance %d (%s) has unparsable createdDate %q; leaving CreatedDate zero", inst.InstanceID, inst.DisplayName, inst.CreatedDate)
+		}
+		cancelDate, ok := parseContaboTime(inst.CancelDate)
+		if !ok && inst.CancelDate != "" {
+			log.Printf("contabo: instance %d (%s) has unparsable cancelDate %q; leaving CancelDate zero", inst.InstanceID, inst.DisplayName, inst.CancelDate)
+		}
+
+		items = append(items, Instance{
+			ID:          inst.InstanceID,
+			Name:        inst.DisplayName,
+			Status:      inst.Status,
+			PrivateIP:   privateIP,
+			CreatedDate: createdDate,
+			CancelDate:  cancelDate,
+		})
+	}
+	return items, nil
+}
+
+// ListByNamePrefix implements Client.ListByNamePrefix. It walks every page
+// of GET /v1/compute/instances (see listAllComputeInstances) and filters
+// client-side on prefix, deliberately WITHOUT consulting tag state — see the
+// interface doc comment on why: this is the authoritative count the
+// provider's anti-runaway cap relies on, and must catch untagged orphans
+// that ListByTag structurally cannot see.
+func (c *HTTPClient) ListByNamePrefix(ctx context.Context, prefix string) ([]Instance, error) {
+	tok, err := c.token(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("get token: %w", err)
+	}
+
+	all, err := c.listAllComputeInstances(ctx, tok)
+	if err != nil {
+		return nil, fmt.Errorf("list all compute instances: %w", err)
+	}
+
+	var matched []Instance
+	for _, inst := range all {
+		if strings.HasPrefix(inst.Name, prefix) {
+			matched = append(matched, inst)
+		}
+	}
+	return matched, nil
 }
 
 // parseContaboTime parses a Contabo API timestamp field (e.g. createdDate),
@@ -747,7 +914,20 @@ func (c *HTTPClient) Create(ctx context.Context, req CreateReq) (Instance, error
 			ProductID:   req.ProductID,
 			Region:      req.Region,
 			SSHKeys:     sshKeys,
-			UserData:    base64.StdEncoding.EncodeToString([]byte(req.UserData)),
+			// PLAIN text, NOT base64. Contabo's POST /v1/compute/instances
+			// userData field expects the raw cloud-config text as-is — this
+			// was previously (wrongly) base64-encoded here, which made
+			// Contabo deliver base64 gibberish as the instance's user-data;
+			// cloud-init couldn't parse "#cloud-config" and silently skipped
+			// it entirely, so NO created elastic instance ever got its SSH
+			// key or joined k3s (confirmed live: zero join attempts logged
+			// by the k3s server, break-glass SSH key rejected on a live
+			// orphan). The working baseline nodes (Terraform
+			// contabo_instance.user_data = templatefile(...)) always sent
+			// plain text, which is why only the Go-provider-created elastic
+			// nodes were ever affected. See CreateReq.UserData's doc comment
+			// and deploy/elastic-userdata.template.
+			UserData: req.UserData,
 		}
 
 		reqBodyBytes, err := json.Marshal(createBody)

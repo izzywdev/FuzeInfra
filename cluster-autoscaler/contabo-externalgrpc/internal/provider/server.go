@@ -7,6 +7,7 @@ import (
 	"context"
 
 	"github.com/izzywdev/fuzeinfra/contabo-externalgrpc/internal/contabo"
+	"github.com/izzywdev/fuzeinfra/contabo-externalgrpc/internal/notify"
 	"github.com/izzywdev/fuzeinfra/contabo-externalgrpc/internal/protos"
 )
 
@@ -43,6 +44,13 @@ type Config struct {
 	// K3SNodeToken is the k3s node join token. It is exposed to UserDataTmpl as
 	// {{.K3SNodeToken}}. Same rationale as K3SServerURL.
 	K3SNodeToken string
+	// Notifier is an optional best-effort email warning sent immediately
+	// before each Create call in NodeGroupIncreaseSize (see scale.go). A nil
+	// Notifier (the zero value — e.g. NOTIFY_EMAIL_ENABLED unset) is a
+	// no-op: the cap/create logic behaves identically either way, since the
+	// notifier is purely informational, never authoritative (the prefix-
+	// count hard cap is what actually prevents runaway scaling).
+	Notifier notify.Notifier
 }
 
 // Server is the gRPC CloudProvider server implementation for Contabo.

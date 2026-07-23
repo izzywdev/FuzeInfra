@@ -201,6 +201,58 @@ func TestCreateAndDelete(t *testing.T) {
 	}
 }
 
+// TestCreate_UserDataSentAsPlainTextNotBase64 is a regression test for the
+// prod incident where every elastic instance the Go provider created never
+// joined k3s and never accepted the break-glass SSH key: Create was
+// base64-encoding req.UserData before sending it as the `userData` field on
+// POST /v1/compute/instances, but Contabo's API expects PLAIN cloud-config
+// text there (confirmed against the working Terraform-provisioned baseline
+// nodes, which always sent plain text). Base64 gibberish meant cloud-init on
+// the new instance couldn't parse "#cloud-config" and silently did nothing.
+// This asserts the exact request body byte-for-byte equals the plain input.
+func TestCreate_UserDataSentAsPlainTextNotBase64(t *testing.T) {
+	const wantUserData = "#cloud-config\nfoo: bar\n"
+	var gotUserData string
+	var sawRequest bool
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/compute/instances":
+			sawRequest = true
+			var body struct {
+				UserData string `json:"userData"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Errorf("decode create-instance request body: %v", err)
+			}
+			gotUserData = body.UserData
+			w.Write([]byte(`{"data":[{"instanceId":101,"displayName":"fuzeinfra-elastic-2","status":"provisioning"}]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/tags":
+			w.Write([]byte(`{"data":[{"tagId":7,"name":"fuzeinfra-elastic","color":"#0A78C3"}]}`))
+		case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/v1/tags/7/assignments"):
+			w.WriteHeader(http.StatusCreated)
+		default:
+			w.Write([]byte(tokenResponse))
+		}
+	}))
+	defer srv.Close()
+
+	c := NewClient(Config{BaseURL: srv.URL, AuthURL: srv.URL})
+	_, err := c.Create(context.Background(), CreateReq{
+		Name: "fuzeinfra-elastic-2", ProductID: "V45", ImageID: "img", Region: "EU",
+		UserData: wantUserData, Tags: []string{"fuzeinfra-elastic"},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if !sawRequest {
+		t.Fatal("POST /v1/compute/instances was never called")
+	}
+	if gotUserData != wantUserData {
+		t.Fatalf("request body userData = %q, want plain text %q (must NOT be base64-encoded)", gotUserData, wantUserData)
+	}
+}
+
 // TestCreate_ReusesExistingTag verifies that when the tag already exists
 // (GET /v1/tags finds an exact-name match), Create does NOT call POST
 // /v1/tags again — it goes straight to assigning the existing tag id.

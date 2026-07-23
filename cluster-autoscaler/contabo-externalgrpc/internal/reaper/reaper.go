@@ -143,11 +143,25 @@ func decideByRenewal(createdDate, now time.Time, releaseWindow, billingPeriod ti
 }
 
 // Decide is the full pure decision function: given an instance's
-// CreatedDate, the current time, the configured windows, and whether its
-// matching node is currently idle, decide keep vs release. It performs no
-// I/O — tests exercise every branch by passing `now` and `idle` explicitly
-// (see reaper_test.go), independent of any fake clock/API wiring.
-func Decide(createdDate, now time.Time, releaseWindow, billingPeriod time.Duration, idle bool) (Decision, string) {
+// CreatedDate, its CancelDate (zero if not yet cancelled), the current time,
+// the configured windows, and whether its matching node is currently idle,
+// decide keep vs release. It performs no I/O — tests exercise every branch
+// by passing `now` and `idle` explicitly (see reaper_test.go), independent
+// of any fake clock/API wiring.
+//
+// A non-zero cancelDate always means DecisionKeep: Contabo has already
+// scheduled the instance's real termination for that date (cancellation is
+// end-of-billing-period, never immediate — see internal/contabo/client.go's
+// Delete doc comment), the instance remains fully usable until then, and it
+// must NEVER be re-cancelled (a second cancel is redundant at best and an
+// unnecessary API call/risk at worst). This takes priority over the
+// createdDate+billingPeriod renewal projection entirely — an
+// already-cancelled instance has a real termination date, so there is
+// nothing left to project.
+func Decide(createdDate, cancelDate, now time.Time, releaseWindow, billingPeriod time.Duration, idle bool) (Decision, string) {
+	if !cancelDate.IsZero() {
+		return DecisionKeep, fmt.Sprintf("already cancelled, terminates at %s — not re-cancelling", cancelDate.Format(time.RFC3339))
+	}
 	d, reason := decideByRenewal(createdDate, now, releaseWindow, billingPeriod)
 	if d != DecisionRelease {
 		return d, reason
@@ -180,6 +194,15 @@ func (r *Reaper) Run(ctx context.Context) (Summary, error) {
 	now := r.Now()
 
 	for _, inst := range instances {
+		if !inst.CancelDate.IsZero() {
+			// Already cancelled: Contabo owns the real termination (at
+			// CancelDate) from here — never re-cancel, and never treat it as
+			// needing a fresh renewal projection. See Decide's doc comment.
+			log.Printf("reaper: keeping instance %d (%s): already cancelled, terminates at %s — not re-cancelling", inst.ID, inst.Name, inst.CancelDate.Format(time.RFC3339))
+			summary.Kept++
+			continue
+		}
+
 		d, reason := decideByRenewal(inst.CreatedDate, now, r.Cfg.ReleaseWindow, r.Cfg.BillingPeriod)
 		if d != DecisionRelease {
 			log.Printf("reaper: keeping instance %d (%s): %s", inst.ID, inst.Name, reason)

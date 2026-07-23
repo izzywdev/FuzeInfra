@@ -50,6 +50,21 @@ spec:
               value: {{ .Values.clusterAutoscaler.provider.grpcListen | quote }}
             - name: USER_DATA_TEMPLATE_B64
               value: {{ .Values.clusterAutoscaler.provider.userDataTemplateB64 | quote }}
+            # Best-effort provisioning-warning email (see internal/notify).
+            # NOTIFY_SMTP_USER/NOTIFY_SMTP_PASS are intentionally NOT set
+            # here — if the SMTP relay needs auth, add those two keys to the
+            # existingSecret Secret above (envFrom already imports every key
+            # in it as an env var), never as a plain Helm value.
+            - name: NOTIFY_EMAIL_ENABLED
+              value: {{ .Values.clusterAutoscaler.provider.notifyEmailEnabled | quote }}
+            - name: NOTIFY_SMTP_HOST
+              value: {{ .Values.clusterAutoscaler.provider.notifySmtpHost | quote }}
+            - name: NOTIFY_SMTP_PORT
+              value: {{ .Values.clusterAutoscaler.provider.notifySmtpPort | quote }}
+            - name: NOTIFY_EMAIL_FROM
+              value: {{ .Values.clusterAutoscaler.provider.notifyEmailFrom | quote }}
+            - name: NOTIFY_EMAIL_TO
+              value: {{ .Values.clusterAutoscaler.provider.notifyEmailTo | quote }}
           livenessProbe:
             tcpSocket:
               port: grpc
