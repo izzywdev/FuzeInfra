@@ -26,18 +26,26 @@
 #  ⚠  MANUAL PANEL PURCHASE REQUIRED — TERRAFORM CANNOT ORDER THIS  ⚠
 # ===========================================================================
 # Contabo private networking depends on a per-instance "VPC / Private
-# Networking" ADD-ON that must be BOUGHT PER VPS in the Contabo customer
-# panel. Until that add-on is purchased for a given instance, ANY attempt to
-# attach that instance to a private network (API or Terraform) fails with:
+# Networking" ADD-ON. Until that add-on is ordered for a given instance, ANY
+# attempt to attach that instance to a private network fails with:
 #
 #     HTTP 402  Payment Required
 #
-# There is NO Contabo API endpoint and NO Terraform resource that can buy the
-# add-on — it is a billing action a human must perform manually at
-#     https://my.contabo.com  ->  the VPS  ->  "Networking / Private Network"
-# Purchase the add-on for the control-plane VPS FIRST, then run the import
-# above and `terraform apply`. This TF codifies the network + the intended
-# attachment; it can never provision the paid capability behind it.
+# The add-on IS fully API/Terraform-orderable (Compute Management API) — it is
+# NOT panel-only. Three supported ways to order it:
+#   - New instances (autoscaler): createInstance body `addOns:{privateNetworking:{}}`
+#     (wired in the Go provider's client.go create path, gated by a flag).
+#   - Existing instances: POST /v1/compute/instances/{id}/upgrade
+#     {"privateNetworking":{}}  (see the ca-private-net workflow `upgrade` action).
+#   - Terraform: the `contabo_instance` resource takes an `add_ons { id, quantity }`
+#     block. We deliberately DO NOT add it to the live imported control-plane
+#     instance here (an in-place add_ons change risks a provider-driven
+#     modify/replace of the crown-jewel node); the control plane is upgraded via
+#     the API `upgrade` action instead. Use the TF block for fresh/rebuilt nodes.
+#
+# Contabo's docs also require a REINSTALL after the add-on is ordered, to
+# surface the eth1 NIC (see docs/design/s3-and-private-networking.md). Order the
+# add-on FIRST (upgrade), reinstall to get eth1, THEN import + attach.
 # ===========================================================================
 
 locals {

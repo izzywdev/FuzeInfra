@@ -27,10 +27,13 @@ This design does **two orthogonal things** that are often (wrongly) lumped toget
 2. **Private networking.** Codify the already-created Contabo private network
    (id `60932`, CIDR `10.0.0.0/22`, DC "European Union 2") in Terraform, attach the
    explicitly-named control-plane node, and (human-gated) move the k3s node/overlay
-   traffic onto `eth1`. The **per-instance VPC "Private Networking" add-on is a
-   manual panel purchase** — the API returns HTTP 402 without it and the
-   `contabo/contabo` provider cannot buy it — so a human clicks that for existing
-   nodes before any attach can succeed. **Operational rollout (decision
+   traffic onto `eth1`. The **per-instance VPC "Private Networking" add-on is
+   API/Terraform-orderable** (Compute Management API — NOT panel-only; the earlier
+   HTTP 402 was from *assigning* before the add-on was *ordered*): new nodes via
+   `createInstance addOns.privateNetworking`, existing nodes via
+   `POST /instances/{id}/upgrade {"privateNetworking":{}}`, and TF via the
+   `contabo_instance add_ons` block. A **reinstall is required after ordering** to
+   surface `eth1`. **Operational rollout (decision
    2026-07-23): the 3 baseline workers + all elastics go on the VLAN FIRST; the
    control-plane `vmi3383846` is deferred behind A (Longhorn) + B (HA)** because
    its reinstall would wipe the Postgres/Redis data. **New elastic nodes get the
@@ -59,7 +62,7 @@ scheduled S3 backups**."
 | No backup CronJobs exist anywhere in the chart | grep: none |
 | SealedSecrets is the credential-delivery standard: seal **offline** against the published public cert with `scripts/seal-secret.sh`, commit encrypted YAML, Argo syncs; controller is its own Argo app | `scripts/seal-secret.sh`, `argocd/applications/sealed-secrets.yaml`, `deploy/sealed-secrets/*.yaml` |
 | ES + RabbitMQ + Airflow scaled to 0 for node headroom (#93); PVCs retained | `values-contabo.yaml` |
-| Private network `60932` (10.0.0.0/22, "European Union 2") already created live via API; VPC add-on per-instance is a manual panel purchase (HTTP 402 without it) | given / Contabo panel |
+| Private network `60932` (10.0.0.0/22, "European Union 2") already created live via API; the per-instance VPC add-on is API/TF-orderable (upgrade endpoint / addOns / TF add_ons) — reinstall then surfaces eth1 | given / Contabo API |
 
 ---
 
@@ -189,14 +192,19 @@ comment** — hand-created secrets get orphaned and contradict the no-hand-mutat
 
 ### 3.1 What the provider can and cannot do
 
-- **Cannot:** buy the per-instance **"Private Networking" VPC add-on**. That is a
-  paid panel purchase; the Contabo API returns **HTTP 402** when you try to attach
-  an instance that lacks the add-on, and `contabo/contabo` has no resource for the
-  purchase. **A human buys the add-on for the control-plane node in the panel
-  first.** This is exactly the same manual-gate class as the object-storage
-  purchase — it is not the automation's job.
+- **Can (API/TF, no panel):** order the paid per-instance **"Private Networking"
+  add-on**. Three supported paths — (1) new instances: `createInstance` body
+  `addOns:{privateNetworking:{}}` (wired into the Go autoscaler provider, gated by
+  `CONTABO_PRIVATE_NETWORKING`); (2) existing instances: `POST
+  /v1/compute/instances/{id}/upgrade` with `{"privateNetworking":{}}` (the
+  `ca-private-net` workflow `upgrade` action); (3) Terraform: the `contabo_instance`
+  resource's `add_ons { id, quantity }` block. The **HTTP 402 was self-inflicted** —
+  it came from *assigning* an instance to the network before the add-on was
+  *ordered*, not from any panel-only limitation.
+- **Reinstall caveat:** Contabo requires a **reinstall after ordering** the add-on
+  to surface the `eth1` NIC (confirmed live on elastic-0). Order → reinstall → assign.
 - **Can:** import the already-created private network `60932` and attach the
-  explicitly-named control-plane instance once the add-on exists.
+  explicitly-named control-plane instance once the add-on is ordered + eth1 is up.
 
 ### 3.2 New file `terraform/contabo/private-network.tf`
 
@@ -205,9 +213,11 @@ comment** — hand-created secrets get orphaned and contradict the no-hand-mutat
 # live via the Contabo API. Import it — do NOT recreate:
 #   terraform import contabo_private_network.fuzeinfra 60932
 #
-# PREREQUISITE (manual, human): the per-instance "Private Networking" add-on must
-# be purchased in the Contabo panel for the control-plane node, or attach returns
-# HTTP 402. Terraform CANNOT buy the add-on.
+# PREREQUISITE: the per-instance "Private Networking" add-on must be ORDERED for
+# the control-plane node before attach, or assign returns HTTP 402. It is
+# API/TF-orderable (POST /instances/{id}/upgrade {"privateNetworking":{}} — the
+# ca-private-net workflow `upgrade` action — or the contabo_instance add_ons
+# block), then a REINSTALL surfaces eth1. NOT a panel-only step.
 resource "contabo_private_network" "fuzeinfra" {
   count       = var.enable_private_network ? 1 : 0
   name        = "fuzeinfra-prod"
@@ -421,8 +431,8 @@ or migrates data as part of this design doc.
 | **P1 — Object Storage TF** | `object-storage.tf`, `variables.tf`, `outputs.tf` (all gated OFF) | Reviewer sets `enable_object_storage=true` and runs the human-reviewed `terraform apply` (PAID). Then fetch S3 keys from panel. |
 | **P2 — Credentials** | `deploy/sealed-secrets/loki-s3-credentials.yaml` + `objstore-s3` (sealed offline) | Sealing is offline; merge → Argo syncs the Secret. No plaintext ever committed. |
 | **P3 — Loki S3 flip** | `values-contabo.yaml` `loki.s3` enablement | **Smoke-test the bucket first** (§4.1 O-1). Merge → Argo enables Loki S3; logs move off disk (helps #93). |
-| **P4 — Private network TF** | `private-network.tf` + `enable_private_network` var (OFF) | Human buys the VPC add-on in the panel, imports net 60932, sets the flag, runs the reviewed apply. This attaches ONLY the control-plane and is gated on **A+B** (below). |
-| **P4a — Workers + elastics on the VLAN (FIRST)** | `modules/contabo-k3s-node` eth1/`flannel-iface` cloud-init (workers) + provider create-time `addOns` (elastics) | Human buys the add-on per existing worker/elastic in the panel; then the automated per-node reinstall-onto-VLAN runs (drain → assign → reinstall → verify), one node at a time. New elastics come up on the VLAN automatically. **This is the operational first step; the control-plane (P4/P5) waits for A+B.** |
+| **P4 — Private network TF** | `private-network.tf` + `enable_private_network` var (OFF) | Order the control-plane add-on via API (`ca-private-net` `upgrade`), reinstall to surface eth1, import net 60932, set the flag, run the reviewed apply. Attaches ONLY the control-plane; gated on **A+B** (below). |
+| **P4a — Workers + elastics on the VLAN (FIRST)** | `modules/contabo-k3s-node` eth1/`flannel-iface` cloud-init (workers) + provider create-time `addOns` gated by `CONTABO_PRIVATE_NETWORKING` (elastics) | Per-node automated flow: **order the add-on via API** (`ca-private-net` `upgrade`) → reinstall-onto-VLAN with the `-privnet` cloud-init → assign → verify, one node at a time. New elastics are born with the add-on when the flag is on. **This is the operational first step; the control-plane (P4/P5) waits for A+B.** |
 | **P5 — Node/overlay migration** | `eth1` cloud-init + k3s `config.yaml` (`flannel-iface: eth1`) in `modules/contabo-k3s-node` + `vps.tf` | **Scheduled, reversible, disruptive.** Do it when the first private-net worker is ready to join. Keep public `tls-san`; rollback plan ready. |
 | **P6 — DB backups** | `templates/backups.yaml` + `backups.*` values (OFF) | Enable Postgres/Mongo/Neo4j after the `fuzeinfra-backups` bucket + `objstore-s3` secret exist; add the S3 lifecycle retention rule. |
 | **P7 — Blobs + Thanos (future)** | integration-guide docs for `fuzeinfra-blobs`; Prometheus/Thanos scoped separately | On demand / when a second node exists. |

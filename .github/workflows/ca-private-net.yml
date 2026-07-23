@@ -2,16 +2,23 @@ name: ca-private-net
 
 # Contabo Private Networking operations for the FuzeInfra prod cluster
 # (issue #318 hardening: move the pod-network underlay onto a private VLAN).
-# Read-only 'list'/'describe' are safe; 'create-network' and 'assign' MUTATE
-# the Contabo account. 'assign' may trigger a node reboot to surface eth1 —
-# do it one node at a time, non-critical first, control-plane LAST.
+# Read-only 'list'/'describe' are safe; the rest MUTATE the Contabo account.
+#
+# CORRECT PER-NODE SEQUENCE (an assign BEFORE the add-on is ordered returns
+# HTTP 402 — that was the earlier mistake, NOT a "panel-only" limitation):
+#   1. upgrade  — order the paid Private Networking add-on via the API
+#                 (POST /v1/compute/instances/{id}/upgrade {"privateNetworking":{}}).
+#   2. reinstall — Contabo requires a reinstall to surface the eth1 NIC
+#                 (use ca-salvage-enroll with the -privnet cloud-init template).
+#   3. assign   — attach the instance to the private network (no 402 now).
+# Do it one node at a time, non-critical first, control-plane LAST.
 on:
   workflow_dispatch:
     inputs:
       action:
-        description: 'create-network | list | describe | assign | unassign'
+        description: 'create-network | list | describe | upgrade | assign | unassign | enroll-elastics'
         type: choice
-        options: [list, describe, create-network, assign, unassign]
+        options: [list, describe, create-network, upgrade, assign, unassign, enroll-elastics]
         default: list
         required: true
       name:
@@ -67,13 +74,67 @@ jobs:
               echo "=== creating private network name=$PNAME region=$REGION ==="
               RESP=$(req -X POST -d "$(jq -n --arg n "$PNAME" --arg r "$REGION" '{name:$n, region:$r}')" "$BASE")
               echo "$RESP" | jq '.data[0] | {privateNetworkId,name,region,cidr,dataCenter}' || { echo "raw: $RESP"; exit 1; } ;;
+            upgrade)
+              [ -n "$INSTANCE_ID" ] || { echo "::error::instance_id required"; exit 1; }
+              echo "=== ordering Private Networking add-on for instance $INSTANCE_ID via API (paid) ==="
+              # POST /v1/compute/instances/{id}/upgrade  body {"privateNetworking":{}}
+              # This is the step whose absence caused the 402 on assign. It is
+              # fully API-orderable (Compute Management API) — no panel needed.
+              RC=$(curl -sS -o /tmp/up.json -w '%{http_code}' -X POST -H "Authorization: Bearer $TOK" \
+                -H "x-request-id: $(cat /proc/sys/kernel/random/uuid)" -H "Content-Type: application/json" \
+                -d '{"privateNetworking":{}}' \
+                "https://api.contabo.com/v1/compute/instances/${INSTANCE_ID}/upgrade")
+              echo "upgrade -> HTTP $RC"; cat /tmp/up.json | jq . 2>/dev/null || cat /tmp/up.json
+              if [ "$RC" = "200" ] || [ "$RC" = "201" ]; then
+                echo "::notice::add-on ordered. NEXT: reinstall $INSTANCE_ID with the -privnet cloud-init (ca-salvage-enroll) to surface eth1, THEN action=assign."
+              else
+                echo "::error::upgrade failed (HTTP $RC) — add-on NOT ordered; do not assign yet."; exit 1
+              fi ;;
             assign)
               [ -n "$NETWORK_ID" ] && [ -n "$INSTANCE_ID" ] || { echo "::error::network_id + instance_id required"; exit 1; }
               echo "=== assigning instance $INSTANCE_ID to private network $NETWORK_ID (may reboot the node) ==="
+              echo "    (prereq: action=upgrade already ordered the add-on for this instance, else this 402s)"
               RC=$(curl -sS -o /tmp/a.json -w '%{http_code}' -X POST -H "Authorization: Bearer $TOK" \
                 -H "x-request-id: $(cat /proc/sys/kernel/random/uuid)" \
                 "${BASE}/${NETWORK_ID}/instances/${INSTANCE_ID}")
               echo "assign -> HTTP $RC"; cat /tmp/a.json | jq . 2>/dev/null || cat /tmp/a.json ;;
+            enroll-elastics)
+              # Batch: put EVERY elastic node (displayName prefix fuzeinfra-elastic)
+              # onto the private network — order the add-on (idempotent) then assign.
+              # This is panel MEMBERSHIP + private-IP allocation (the "assign" step
+              # of the rollout); it does NOT flip flannel — overlay traffic moves
+              # to eth1 only at the coordinated cutover. Safe on elastics
+              # (re-provisionable); assign may reboot a node.
+              [ -n "$NETWORK_ID" ] || { echo "::error::network_id required"; exit 1; }
+              MAPPING=$(req "https://api.contabo.com/v1/compute/instances?size=200&page=1" \
+                | jq -r '.data[] | select(.displayName|startswith("fuzeinfra-elastic")) | "\(.instanceId) \(.displayName)"')
+              [ -n "$MAPPING" ] || { echo "::warning::no fuzeinfra-elastic instances found"; exit 0; }
+              echo "=== elastic instances to enroll on network $NETWORK_ID ==="; echo "$MAPPING"
+              FAIL=0
+              while read -r IID NAME; do
+                [ -n "$IID" ] || continue
+                echo "---- $NAME ($IID) ----"
+                # 1) order the add-on (tolerate 'already ordered' 4xx)
+                UC=$(curl -sS -o /tmp/up.json -w '%{http_code}' -X POST -H "Authorization: Bearer $TOK" \
+                  -H "x-request-id: $(cat /proc/sys/kernel/random/uuid)" -H "Content-Type: application/json" \
+                  -d '{"privateNetworking":{}}' \
+                  "https://api.contabo.com/v1/compute/instances/${IID}/upgrade")
+                echo "  upgrade -> HTTP $UC"
+                if [ "$UC" != "200" ] && [ "$UC" != "201" ]; then
+                  if grep -qiE "already|exist" /tmp/up.json 2>/dev/null; then echo "  (add-on already present, continuing)"; else echo "  body: $(cat /tmp/up.json)"; fi
+                fi
+                # 2) assign to the private network (tolerate 'already assigned')
+                AC=$(curl -sS -o /tmp/as.json -w '%{http_code}' -X POST -H "Authorization: Bearer $TOK" \
+                  -H "x-request-id: $(cat /proc/sys/kernel/random/uuid)" \
+                  "${BASE}/${NETWORK_ID}/instances/${IID}")
+                echo "  assign  -> HTTP $AC"
+                if [ "$AC" != "200" ] && [ "$AC" != "201" ]; then
+                  if grep -qiE "already|assigned|exist" /tmp/as.json 2>/dev/null; then echo "  (already assigned, ok)"; else echo "  body: $(cat /tmp/as.json)"; FAIL=1; fi
+                fi
+              done <<< "$MAPPING"
+              echo "=== resulting membership of network $NETWORK_ID ==="
+              req "${BASE}/${NETWORK_ID}" | jq -r '.data[0].instances[]? | "  \(.instanceId) \(.name)"'
+              [ "$FAIL" = "0" ] || { echo "::error::one or more enrollments failed (see bodies above)"; exit 1; } ;;
             unassign)
               [ -n "$NETWORK_ID" ] && [ -n "$INSTANCE_ID" ] || { echo "::error::network_id + instance_id required"; exit 1; }
               RC=$(curl -sS -o /tmp/u.json -w '%{http_code}' -X DELETE -H "Authorization: Bearer $TOK" \
