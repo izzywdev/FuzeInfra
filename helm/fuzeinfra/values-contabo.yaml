@@ -200,7 +200,8 @@ clusterAutoscaler:
     # TODO(operator): replace with the real destination chat id (or source
     # this value from the sealed secret / a separate values overlay instead
     # of committing the literal id here).
-    notifyTelegramChatId: "__TELEGRAM_CHAT_ID__"
+    notifyTelegramChatId: "5196390841"
+    maxSize: 5
   # Billing-aware reaper -- releases an idle elastic instance only within 24h
   # of its projected monthly renewal (see cmd/reaper). billingPeriod matches
   # the chart default (720h/~30d); set explicitly here so prod release window
@@ -210,6 +211,8 @@ clusterAutoscaler:
     schedule: "0 * * * *"
     releaseWindow: 24h
     billingPeriod: 720h
+  nodeGroup:
+    maxSize: 5
 overprovisioning:
   # Enabled together with clusterAutoscaler during the gated Task 18 cutover.
   enabled: true
