@@ -39,3 +39,37 @@ output "argocd_url_public" {
   description = "ArgoCD public URL (public once Cloudflare tunnel is wired)"
   value       = "https://argocd.${var.prod_subdomain}.${var.zone_name}"
 }
+
+# ---------------------------------------------------------------------------
+# Contabo Object Storage (S3) — see object-storage.tf.
+# Endpoint/region are read from state, never hardcoded. Empty strings/[] when
+# var.enable_object_storage is false.
+# ---------------------------------------------------------------------------
+output "object_storage_id" {
+  description = "Contabo Object Storage tenant ID (empty when object storage is disabled)."
+  value       = var.enable_object_storage ? contabo_object_storage.this[0].id : ""
+}
+
+output "object_storage_region" {
+  description = "Object Storage region (empty when disabled)."
+  value       = var.enable_object_storage ? var.object_storage_region : ""
+}
+
+output "object_storage_s3_url" {
+  description = "Full S3 endpoint incl. scheme (e.g. https://eu2.contabostorage.com). Strip the scheme to get the bare host the Loki chart's loki.s3.endpoint wants. Empty when disabled."
+  value       = var.enable_object_storage ? contabo_object_storage.this[0].s3_url : ""
+}
+
+output "object_storage_s3_tenant_id" {
+  description = "S3 tenant ID (path-style bucket prefix / canonical tenant). Empty when disabled."
+  value       = var.enable_object_storage ? contabo_object_storage.this[0].s3_tenant_id : ""
+}
+
+output "object_storage_buckets" {
+  description = "Names of the provisioned buckets (empty list when disabled)."
+  value = var.enable_object_storage ? [
+    contabo_object_storage_bucket.loki[0].name,
+    contabo_object_storage_bucket.backups[0].name,
+    contabo_object_storage_bucket.blobs[0].name,
+  ] : []
+}

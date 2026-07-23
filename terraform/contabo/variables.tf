@@ -229,3 +229,77 @@ variable "enable_argocd_provisioner" {
   default     = false
 }
 
+# ---------------------------------------------------------------------------
+# Contabo Object Storage (S3) — see object-storage.tf and
+# docs/design/s3-and-private-networking.md.
+#
+# PAID: enabling this PURCHASES storage (~EUR 6.99/mo per 1 TB). Default OFF so
+# a routine apply never buys storage. The S3 access key / secret are NOT
+# produced by any resource here — they are account-level credentials fetched
+# once from the Contabo panel and delivered as an offline-sealed SealedSecret
+# (deploy/sealed-secrets/loki-s3-credentials.yaml.template). Never commit real
+# keys or put them in tfvars.
+# ---------------------------------------------------------------------------
+variable "enable_object_storage" {
+  description = "Provision Contabo Object Storage + buckets (PAID). Default off so a routine apply never buys storage. Flip to true only in an explicit human-reviewed apply."
+  type        = bool
+  default     = false
+}
+
+variable "object_storage_region" {
+  description = "Contabo Object Storage region. 'EU' -> eu2.contabostorage.com (co-located with the EU2 prod node). Other values: 'US-central', 'SIN'."
+  type        = string
+  default     = "EU"
+
+  validation {
+    condition     = contains(["EU", "US-central", "SIN"], var.object_storage_region)
+    error_message = "object_storage_region must be one of: EU, US-central, SIN."
+  }
+}
+
+variable "object_storage_purchased_tb" {
+  description = "Purchased quota in TB. Smallest tier is ~0.25 TB (250 GB); confirm the provider/account accepts sub-1TB in your region."
+  type        = number
+  default     = 0.25
+
+  validation {
+    condition     = var.object_storage_purchased_tb > 0
+    error_message = "object_storage_purchased_tb must be greater than 0."
+  }
+}
+
+variable "object_storage_autoscaling_limit_tb" {
+  description = "If > 0, enable auto-scaling of purchased quota up to this hard ceiling (TB) so a log/backup spike never fails writes while capping the bill. 0 disables auto-scaling."
+  type        = number
+  default     = 0
+
+  validation {
+    condition     = var.object_storage_autoscaling_limit_tb >= 0
+    error_message = "object_storage_autoscaling_limit_tb must be >= 0 (0 disables auto-scaling)."
+  }
+}
+
+variable "object_storage_display_name" {
+  description = "Display name for the Object Storage tenant in the Contabo panel."
+  type        = string
+  default     = "fuzeinfra-storage"
+}
+
+variable "object_storage_bucket_loki" {
+  description = "Bucket name for Loki log chunks (native S3 object-store backend)."
+  type        = string
+  default     = "fuzeinfra-loki"
+}
+
+variable "object_storage_bucket_backups" {
+  description = "Bucket name for scheduled DB dump/snapshot backups (CronJob offload)."
+  type        = string
+  default     = "fuzeinfra-backups"
+}
+
+variable "object_storage_bucket_blobs" {
+  description = "Bucket name for application blob/artifact storage."
+  type        = string
+  default     = "fuzeinfra-blobs"
+}
+

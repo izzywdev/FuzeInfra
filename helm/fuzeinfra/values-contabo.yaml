@@ -82,16 +82,26 @@ grafana:
 #       repeat_interval: 1h
 
 # Loki S3 backend (Contabo Object Storage) — keeps logs off the node disk.
-# 1. Create the bucket in Contabo Object Storage.
-# 2. Create a Secret with the credentials, e.g.:
-#      kubectl -n fuzeinfra create secret generic loki-s3 \
-#        --from-literal=LOKI_S3_ACCESS_KEY_ID=<key> \
-#        --from-literal=LOKI_S3_SECRET_ACCESS_KEY=<secret>
-# 3. Uncomment and fill in:
+# 1. Provision the tenant + bucket via Terraform (human-gated, PAID):
+#      cd terraform/contabo && terraform apply \
+#        -var enable_object_storage=true        # buys storage; see object-storage.tf
+#    Read the endpoint from state (never hardcode):
+#      terraform output object_storage_s3_url   # e.g. https://eu2.contabostorage.com
+# 2. Deliver the S3 credentials as a SealedSecret (GitOps — NOT `kubectl create
+#    secret`, which orphans a hand-made Secret and contradicts the no-hand-mutate
+#    rule). Fetch the account S3 key/secret from the Contabo panel
+#    (Account -> Security & Access -> S3 Object Storage Credentials) and seal them
+#    OFFLINE with the repo's canonical tool — see the template + instructions in
+#    deploy/sealed-secrets/loki-s3-credentials.yaml.template:
+#      scripts/seal-secret.sh fuzeinfra/loki-s3 \
+#        LOKI_S3_ACCESS_KEY_ID=@key.txt LOKI_S3_SECRET_ACCESS_KEY=@secret.txt \
+#        --out deploy/sealed-secrets/loki-s3-credentials.yaml
+#    Argo (fuzeinfra-sealed-secrets app) decrypts it into the `loki-s3` Secret.
+# 3. Then flip the chart on (this stays disabled until a human does the above):
 # loki:
 #   s3:
 #     enabled: true
-#     endpoint: "eu2.contabostorage.com"
+#     endpoint: "eu2.contabostorage.com"   # bare host from object_storage_s3_url (strip scheme)
 #     region: "default"
 #     bucket: "fuzeinfra-loki"
 #     s3ForcePathStyle: true
