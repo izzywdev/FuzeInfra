@@ -103,6 +103,21 @@ variable "private_network_region" {
   default     = "EU"
 }
 
+# ---------------------------------------------------------------------------
+# Longhorn node prerequisites (optional, default OFF)
+#
+# Longhorn attaches volumes over iSCSI and serves RWX over NFS, so every node
+# that will host a Longhorn replica or a Longhorn-backed pod needs open-iscsi
+# (+ iscsid running), nfs-common, and a /var/lib/longhorn data dir. When true,
+# cloud-init installs these on first boot. Default false keeps a merge a no-op
+# for existing consumers. See docs/design/longhorn-storage.md §3.
+# ---------------------------------------------------------------------------
+variable "enable_longhorn_prereqs" {
+  description = "Install Longhorn node prerequisites (open-iscsi, nfs-common, /var/lib/longhorn) via cloud-init on first boot."
+  type        = bool
+  default     = false
+}
+
 variable "private_iface" {
   description = "Private NIC device name the Contabo VPC attaches as (eth1 on a 2-NIC Ubuntu 24.04 image). When private_network_name is set, the node brings this interface up via netplan and k3s routes its overlay (--flannel-iface) + node-ip over it. NOTE: the per-instance Contabo VPC add-on is a MANUAL panel purchase (HTTP 402 otherwise) that Terraform cannot order."
   type        = string
