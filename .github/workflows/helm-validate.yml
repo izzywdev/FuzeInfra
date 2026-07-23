@@ -12,7 +12,11 @@ on:
 jobs:
   validate:
     name: Lint & schema-validate chart
-    runs-on: staging
+    # ubuntu-latest, NOT the `staging` ARC scaleset: that scaleset registers but
+    # never fetches jobs (broker/MTU), so this gate queued forever ("pending")
+    # on every PR. This job is static (helm lint + kubeconform), no cluster
+    # needed — GitHub-hosted runs it fine.
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
 
