@@ -58,6 +58,20 @@ write_files:
       INSTALL_K3S_CHANNEL=v1.36
 
 runcmd:
+  # --- Longhorn node prerequisites (OPT-IN, commented OFF by default) ---
+  # Longhorn attaches volumes over iSCSI and serves RWX over NFS, so any node that
+  # may host a Longhorn replica or mount a Longhorn-backed volume needs the iSCSI
+  # initiator + NFS client + /var/lib/longhorn. Left COMMENTED so a merge is a
+  # no-op: this file is a source artifact an operator must base64-encode into
+  # clusterAutoscaler.provider.userDataTemplateB64 (values-contabo.yaml) for it to
+  # take effect. Uncomment + re-encode ONLY when enabling Longhorn AND elastic
+  # nodes are allowed to run Longhorn-backed pods (see
+  # docs/design/longhorn-storage.md §3/§4.1 — replicas are normally pinned to
+  # DURABLE baseline nodes, off billing-reaped elastic nodes).
+  # - [ sh, -c, "DEBIAN_FRONTEND=noninteractive apt-get update -y || true" ]
+  # - [ sh, -c, "DEBIAN_FRONTEND=noninteractive apt-get install -y open-iscsi nfs-common || true" ]
+  # - [ sh, -c, "systemctl enable --now iscsid || true" ]
+  # - [ sh, -c, "mkdir -p /var/lib/longhorn" ]
   # Host firewall: agent needs to reach the API (6443) outbound and accept
   # kubelet (10250) from the server, plus whichever flannel backend the
   # cluster is actually running. The live prod cluster runs flannel

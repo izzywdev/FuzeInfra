@@ -24,6 +24,8 @@ resource "contabo_instance" "node" {
     k3s_channel    = var.k3s_channel
     node_name      = each.value.name
     role           = each.value.role
+    # Gated Longhorn node prereqs (open-iscsi/nfs-common//var/lib/longhorn).
+    enable_longhorn_prereqs = var.enable_longhorn_prereqs
     # Private networking (Contabo VPC): bring up the private NIC + route k3s
     # over it only when the caller opted into a private network by name.
     private_network_enabled = var.private_network_name != ""

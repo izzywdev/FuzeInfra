@@ -12,11 +12,23 @@
 # Replace with a real domain once you have DNS pointing at the server.
 # =============================================================================
 global:
+  # local-path stays the cluster DEFAULT StorageClass. Longhorn is added as an
+  # OPT-IN `longhorn` class (see `longhorn:` below), never as the default.
   storageClass: "local-path"
   # Cloudflare tunnel routes *.prod.fuzefront.com → Traefik → these Ingress rules.
   # Change back to <ip>.nip.io if the tunnel is disabled for debugging.
   domain: "prod.fuzefront.com"
   imagePullPolicy: IfNotPresent
+# Longhorn opt-in StorageClass. GATED OFF. The controller installs via the
+# independent Argo app argocd/applications/longhorn.yaml (manual sync); this only
+# renders the non-default `longhorn` StorageClass. P4 enable step (design doc §9):
+# flip storageClass.enabled to true AFTER the controller is installed + healthy.
+longhorn:
+  enabled: false
+  storageClass:
+    enabled: false
+    numberOfReplicas: 3
+    reclaimPolicy: Retain
 ingress:
   enabled: true
   className: traefik

@@ -37,6 +37,17 @@ write_files:
 %{ endif ~}
 
 runcmd:
+%{ if enable_longhorn_prereqs ~}
+  # Longhorn node prerequisites (gated by enable_longhorn_prereqs, default off).
+  # Longhorn attaches volumes over iSCSI and serves RWX over NFS, so the node
+  # needs the iSCSI initiator (+ iscsid running), the NFS client, and a data dir.
+  # Missing these → the Longhorn engine pod CrashLoops on attach. See
+  # docs/design/longhorn-storage.md §3.
+  - [ sh, -c, "DEBIAN_FRONTEND=noninteractive apt-get update -y || true" ]
+  - [ sh, -c, "DEBIAN_FRONTEND=noninteractive apt-get install -y open-iscsi nfs-common || true" ]
+  - [ sh, -c, "systemctl enable --now iscsid || true" ]
+  - [ sh, -c, "mkdir -p /var/lib/longhorn" ]
+%{ endif ~}
 %{ if private_network_enabled ~}
   # Apply the private-NIC netplan before joining so k3s can bind its overlay/
   # node-ip to the private interface (no-op / harmless when the NIC is absent).

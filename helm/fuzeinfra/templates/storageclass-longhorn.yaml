@@ -1,0 +1,42 @@
+{{- /*
+============================ Longhorn StorageClass (opt-in) ============================
+An OPT-IN, NON-DEFAULT `longhorn` StorageClass for replicated networked block
+storage. `local-path` remains the cluster default — nothing uses Longhorn unless a
+PVC explicitly sets `storageClassName: longhorn`.
+
+Gated OFF by default (`longhorn.storageClass.enabled=false`). Rendering nothing is
+the safe no-op: merging never changes storage. Enable ONLY after the Longhorn
+controller (argocd/applications/longhorn.yaml) is installed and healthy — the
+provisioner `driver.longhorn.io` must exist for a PVC on this class to bind.
+
+Cluster-scoped object: no namespace. See docs/design/longhorn-storage.md §4.3.
+*/ -}}
+{{- if .Values.longhorn.storageClass.enabled }}
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: {{ .Values.longhorn.storageClass.name | default "longhorn" }}
+  labels:
+    {{- include "fuzeinfra.labels" . | nindent 4 }}
+  annotations:
+    # local-path stays the cluster default; this class is opt-in only.
+    storageclass.kubernetes.io/is-default-class: "false"
+provisioner: driver.longhorn.io
+# Never auto-delete an underlying (replicated) DB volume when a PVC is removed.
+reclaimPolicy: {{ .Values.longhorn.storageClass.reclaimPolicy | default "Retain" }}
+allowVolumeExpansion: true
+volumeBindingMode: {{ .Values.longhorn.storageClass.volumeBindingMode | default "Immediate" }}
+parameters:
+  numberOfReplicas: {{ .Values.longhorn.storageClass.numberOfReplicas | default 3 | quote }}
+  staleReplicaTimeout: {{ .Values.longhorn.storageClass.staleReplicaTimeout | default 30 | quote }}
+  fsType: {{ .Values.longhorn.storageClass.fsType | default "ext4" | quote }}
+  {{- with .Values.longhorn.storageClass.diskSelector }}
+  # Pin replicas to durable (baseline) nodes tagged for Longhorn — keeps replicas
+  # off billing-reaped elastic nodes (see design doc §4.1 / O-6).
+  diskSelector: {{ . | quote }}
+  {{- end }}
+  {{- with .Values.longhorn.storageClass.nodeSelector }}
+  nodeSelector: {{ . | quote }}
+  {{- end }}
+  fromBackup: ""
+{{- end }}
