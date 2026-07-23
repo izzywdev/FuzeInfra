@@ -22,6 +22,9 @@ on:
       confirm:
         description: 'For mode=reinstall ONLY: type SALVAGE to proceed.'
         default: ''
+      template:
+        description: 'cloud-init template path (default public; use the -privnet variant to reinstall onto the VLAN)'
+        default: 'cluster-autoscaler/contabo-externalgrpc/deploy/elastic-userdata.template'
 
 permissions:
   contents: read
@@ -44,9 +47,10 @@ jobs:
           IDS: ${{ inputs.instance_ids }}
           MODE: ${{ inputs.mode }}
           CONFIRM: ${{ inputs.confirm }}
+          TEMPLATE_IN: ${{ inputs.template }}
         run: |
           set -euo pipefail
-          TMPL="cluster-autoscaler/contabo-externalgrpc/deploy/elastic-userdata.template"
+          TMPL="${TEMPLATE_IN:-cluster-autoscaler/contabo-externalgrpc/deploy/elastic-userdata.template}"
           [ -f "$TMPL" ] || { echo "::error::template not found: $TMPL"; exit 1; }
           for v in CID CSEC CUSER CPASS IMAGE_ID K3S_SERVER_URL K3S_NODE_TOKEN NODE_SSH_PUBLIC_KEY; do
             eval "val=\${$v}"; [ -n "$val" ] || { echo "::error::secret/env $v is empty"; exit 1; }
