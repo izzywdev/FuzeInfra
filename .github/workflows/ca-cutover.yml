@@ -402,6 +402,7 @@ jobs:
           CONTABO_API_USER: ${{ secrets.CONTABO_API_USER }}
           CONTABO_API_PASSWORD: ${{ secrets.CONTABO_API_PASSWORD }}
           K3S_NODE_TOKEN: ${{ secrets.K3S_NODE_TOKEN }}
+          NOTIFY_TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           SSH_KEY_ID: ${{ steps.gateb.outputs.ssh_key_id }}
         run: |
           set -euo pipefail
@@ -413,6 +414,7 @@ jobs:
           printf '%s' "$CONTABO_API_USER"      > "$TMPDIR/CONTABO_API_USER"
           printf '%s' "$CONTABO_API_PASSWORD"  > "$TMPDIR/CONTABO_API_PASSWORD"
           printf '%s' "$K3S_NODE_TOKEN"        > "$TMPDIR/K3S_NODE_TOKEN"
+          printf '%s' "$NOTIFY_TELEGRAM_BOT_TOKEN" > "$TMPDIR/NOTIFY_TELEGRAM_BOT_TOKEN"
           mkdir -p "$(dirname "$SEALED_SECRET_PATH")"
           declare -a SEAL_PAIRS=(
             "CONTABO_CLIENT_ID=@${TMPDIR}/CONTABO_CLIENT_ID"
@@ -420,6 +422,7 @@ jobs:
             "CONTABO_API_USER=@${TMPDIR}/CONTABO_API_USER"
             "CONTABO_API_PASSWORD=@${TMPDIR}/CONTABO_API_PASSWORD"
             "K3S_NODE_TOKEN=@${TMPDIR}/K3S_NODE_TOKEN"
+            "NOTIFY_TELEGRAM_BOT_TOKEN=@${TMPDIR}/NOTIFY_TELEGRAM_BOT_TOKEN"
           )
           # SSH_KEY_ID is optional: GATE B leaves it unset when the account has
           # no matching registered SSH-key secret (see GATE B's comment — the
@@ -459,6 +462,7 @@ jobs:
           IMAGE_ID: ${{ secrets.CONTABO_IMAGE_ID }}
           K3S_SERVER_URL_RAW: ${{ secrets.K3S_SERVER_URL }}
           NODE_SSH_PUBLIC_KEY: ${{ secrets.NODE_SSH_PUBLIC_KEY }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
           set -euo pipefail
           umask 077
@@ -503,7 +507,10 @@ jobs:
               .clusterAutoscaler.provider.productId = strenv(PRODUCT_ID) |
               .clusterAutoscaler.provider.imageId = strenv(IMAGE_ID) |
               .clusterAutoscaler.provider.k3sServerUrl = strenv(K3S_URL) |
-              .clusterAutoscaler.provider.userDataTemplateB64 = strenv(USERDATA_B64)
+              .clusterAutoscaler.provider.userDataTemplateB64 = strenv(USERDATA_B64) |
+              .clusterAutoscaler.provider.notifyTelegramChatId = strenv(TELEGRAM_CHAT_ID) |
+              .clusterAutoscaler.provider.maxSize = 5 |
+              .clusterAutoscaler.nodeGroup.maxSize = 5
             ' "$VALUES_PATH"
           rm -f "$RENDERED_USERDATA"
           trap - EXIT
@@ -525,7 +532,7 @@ jobs:
             echo "### Rendered values-contabo.yaml diff (clusterAutoscaler / overprovisioning only)"
             echo "(userDataTemplateB64 lines are elided below — that field now embeds the NODE_SSH_PUBLIC_KEY value, substituted for cloud-init break-glass SSH; it is never printed to a log even though it's a public key.)"
             echo '```diff'
-            git --no-pager diff -- "$VALUES_PATH" | grep -v 'userDataTemplateB64' | head -c 6000
+            { git --no-pager diff -- "$VALUES_PATH" | grep -v 'userDataTemplateB64' | head -c 6000; } || true
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
