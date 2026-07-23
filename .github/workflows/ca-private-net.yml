@@ -1,0 +1,83 @@
+name: ca-private-net
+
+# Contabo Private Networking operations for the FuzeInfra prod cluster
+# (issue #318 hardening: move the pod-network underlay onto a private VLAN).
+# Read-only 'list'/'describe' are safe; 'create-network' and 'assign' MUTATE
+# the Contabo account. 'assign' may trigger a node reboot to surface eth1 —
+# do it one node at a time, non-critical first, control-plane LAST.
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: 'create-network | list | describe | assign | unassign'
+        type: choice
+        options: [list, describe, create-network, assign, unassign]
+        default: list
+        required: true
+      name:
+        description: 'Private network name (for create-network)'
+        default: 'fuzeinfra-prod-priv'
+      region:
+        description: 'Region (must match all instances; nodes are in EU/Lauterbourg)'
+        default: 'EU'
+      network_id:
+        description: 'Private network id (for describe/assign/unassign)'
+        default: ''
+      instance_id:
+        description: 'Contabo instance id (for assign/unassign)'
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  privnet:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Contabo private-network op
+        env:
+          CID: ${{ secrets.CONTABO_CLIENT_ID }}
+          CSEC: ${{ secrets.CONTABO_CLIENT_SECRET }}
+          CUSER: ${{ secrets.CONTABO_API_USER }}
+          CPASS: ${{ secrets.CONTABO_API_PASSWORD }}
+          ACTION: ${{ inputs.action }}
+          PNAME: ${{ inputs.name }}
+          REGION: ${{ inputs.region }}
+          NETWORK_ID: ${{ inputs.network_id }}
+          INSTANCE_ID: ${{ inputs.instance_id }}
+        run: |
+          set -euo pipefail
+          for v in CID CSEC CUSER CPASS; do eval "x=\${$v}"; [ -n "$x" ] || { echo "::error::$v empty"; exit 1; }; done
+          TOK=$(curl -sS -X POST -H "Content-Type: application/x-www-form-urlencoded" \
+            "https://auth.contabo.com/auth/realms/contabo/protocol/openid-connect/token" \
+            --data-urlencode "client_id=${CID}" --data-urlencode "client_secret=${CSEC}" \
+            --data-urlencode "username=${CUSER}" --data-urlencode "password=${CPASS}" \
+            --data-urlencode "grant_type=password" | jq -r .access_token)
+          [ -n "$TOK" ] && [ "$TOK" != "null" ] || { echo "::error::Contabo auth failed"; exit 1; }
+          req() { curl -sS -H "Authorization: Bearer $TOK" -H "x-request-id: $(cat /proc/sys/kernel/random/uuid)" -H "Content-Type: application/json" "$@"; }
+          BASE="https://api.contabo.com/v1/private-networks"
+          case "$ACTION" in
+            list)
+              echo "=== existing private networks ==="
+              req "${BASE}?size=100&page=1" | jq -r '.data[]? | "PN \(.privateNetworkId) name=\(.name) region=\(.region) cidr=\(.cidr) dc=\(.dataCenter) instances=\([.instances[]?.instanceId])"' ;;
+            describe)
+              [ -n "$NETWORK_ID" ] || { echo "::error::network_id required"; exit 1; }
+              req "${BASE}/${NETWORK_ID}" | jq '.data[0] | {privateNetworkId,name,region,cidr,dataCenter,instances:[.instances[]? | {instanceId,name,privateIpConfig:.privateIpConfig}]}' ;;
+            create-network)
+              echo "=== creating private network name=$PNAME region=$REGION ==="
+              RESP=$(req -X POST -d "$(jq -n --arg n "$PNAME" --arg r "$REGION" '{name:$n, region:$r}')" "$BASE")
+              echo "$RESP" | jq '.data[0] | {privateNetworkId,name,region,cidr,dataCenter}' || { echo "raw: $RESP"; exit 1; } ;;
+            assign)
+              [ -n "$NETWORK_ID" ] && [ -n "$INSTANCE_ID" ] || { echo "::error::network_id + instance_id required"; exit 1; }
+              echo "=== assigning instance $INSTANCE_ID to private network $NETWORK_ID (may reboot the node) ==="
+              RC=$(curl -sS -o /tmp/a.json -w '%{http_code}' -X POST -H "Authorization: Bearer $TOK" \
+                -H "x-request-id: $(cat /proc/sys/kernel/random/uuid)" \
+                "${BASE}/${NETWORK_ID}/instances/${INSTANCE_ID}")
+              echo "assign -> HTTP $RC"; cat /tmp/a.json | jq . 2>/dev/null || cat /tmp/a.json ;;
+            unassign)
+              [ -n "$NETWORK_ID" ] && [ -n "$INSTANCE_ID" ] || { echo "::error::network_id + instance_id required"; exit 1; }
+              RC=$(curl -sS -o /tmp/u.json -w '%{http_code}' -X DELETE -H "Authorization: Bearer $TOK" \
+                -H "x-request-id: $(cat /proc/sys/kernel/random/uuid)" \
+                "${BASE}/${NETWORK_ID}/instances/${INSTANCE_ID}")
+              echo "unassign -> HTTP $RC"; cat /tmp/u.json ;;
+          esac
