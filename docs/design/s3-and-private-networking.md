@@ -29,8 +29,12 @@ This design does **two orthogonal things** that are often (wrongly) lumped toget
    explicitly-named control-plane node, and (human-gated) move the k3s node/overlay
    traffic onto `eth1`. The **per-instance VPC "Private Networking" add-on is a
    manual panel purchase** — the API returns HTTP 402 without it and the
-   `contabo/contabo` provider cannot buy it — so a human clicks that before any
-   attach can succeed.
+   `contabo/contabo` provider cannot buy it — so a human clicks that for existing
+   nodes before any attach can succeed. **Operational rollout (decision
+   2026-07-23): the 3 baseline workers + all elastics go on the VLAN FIRST; the
+   control-plane `vmi3383846` is deferred behind A (Longhorn) + B (HA)** because
+   its reinstall would wipe the Postgres/Redis data. **New elastic nodes get the
+   add-on automatically via the provider's create-time `addOns`.**
 
 **The one dishonest framing we refuse:** "move all stateful data to S3." S3 is an
 HTTP object store — no POSIX filesystem, no block writes, no `fsync`/`mmap`/locking.
@@ -219,7 +223,7 @@ resource "contabo_private_network" "fuzeinfra" {
 
   lifecycle {
     # Contabo may reorder/normalize instance_ids; avoid perpetual diffs.
-    ignore_changes = [description]
+    ignore_changes = [instance_ids, description]  # Contabo reorders instance_ids; guard the elastic-exclusion invariant + avoid perpetual diffs
   }
 }
 ```
@@ -417,7 +421,8 @@ or migrates data as part of this design doc.
 | **P1 — Object Storage TF** | `object-storage.tf`, `variables.tf`, `outputs.tf` (all gated OFF) | Reviewer sets `enable_object_storage=true` and runs the human-reviewed `terraform apply` (PAID). Then fetch S3 keys from panel. |
 | **P2 — Credentials** | `deploy/sealed-secrets/loki-s3-credentials.yaml` + `objstore-s3` (sealed offline) | Sealing is offline; merge → Argo syncs the Secret. No plaintext ever committed. |
 | **P3 — Loki S3 flip** | `values-contabo.yaml` `loki.s3` enablement | **Smoke-test the bucket first** (§4.1 O-1). Merge → Argo enables Loki S3; logs move off disk (helps #93). |
-| **P4 — Private network TF** | `private-network.tf` + `enable_private_network` var (OFF) | Human buys the VPC add-on in the panel, imports net 60932, sets the flag, runs the reviewed apply (attach only). |
+| **P4 — Private network TF** | `private-network.tf` + `enable_private_network` var (OFF) | Human buys the VPC add-on in the panel, imports net 60932, sets the flag, runs the reviewed apply. This attaches ONLY the control-plane and is gated on **A+B** (below). |
+| **P4a — Workers + elastics on the VLAN (FIRST)** | `modules/contabo-k3s-node` eth1/`flannel-iface` cloud-init (workers) + provider create-time `addOns` (elastics) | Human buys the add-on per existing worker/elastic in the panel; then the automated per-node reinstall-onto-VLAN runs (drain → assign → reinstall → verify), one node at a time. New elastics come up on the VLAN automatically. **This is the operational first step; the control-plane (P4/P5) waits for A+B.** |
 | **P5 — Node/overlay migration** | `eth1` cloud-init + k3s `config.yaml` (`flannel-iface: eth1`) in `modules/contabo-k3s-node` + `vps.tf` | **Scheduled, reversible, disruptive.** Do it when the first private-net worker is ready to join. Keep public `tls-san`; rollback plan ready. |
 | **P6 — DB backups** | `templates/backups.yaml` + `backups.*` values (OFF) | Enable Postgres/Mongo/Neo4j after the `fuzeinfra-backups` bucket + `objstore-s3` secret exist; add the S3 lifecycle retention rule. |
 | **P7 — Blobs + Thanos (future)** | integration-guide docs for `fuzeinfra-blobs`; Prometheus/Thanos scoped separately | On demand / when a second node exists. |
