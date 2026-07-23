@@ -1,14 +1,14 @@
 name: staging-runner-smoke
-# Verifies the shared Contabo ARC 'staging' runner actually fetches + runs jobs.
-# Dispatch this before moving any gate back onto [self-hosted, staging] so we
-# never pay GitHub-hosted minutes AND the VPS at the same time.
+# Verifies the shared Contabo ARC 'staging' runner fetches + runs jobs. ARC scale
+# sets are targeted by the SCALE-SET NAME (runs-on: staging), NOT the classic
+# [self-hosted, staging]. Dispatch before moving any gate off ubuntu-latest.
 on:
   workflow_dispatch:
 permissions:
   contents: read
 jobs:
   smoke:
-    runs-on: [self-hosted, staging]
+    runs-on: staging
     timeout-minutes: 5
     steps:
       - name: Prove we ran on the staging VPS runner
