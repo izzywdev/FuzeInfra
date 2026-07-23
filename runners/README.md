@@ -1,3 +1,22 @@
+> **ACCOUNT REALITY (2026-07-24): `izzywdev` is a GitHub _User_ account, NOT an
+> organization.** So the "org-level runner group" design below does **not** apply
+> as written — there is no `github.com/organizations/izzywdev`. Until the repos
+> move to the new **`fuzeone` org**, self-hosted runners register at **repo level**
+> (the ARC scale sets are per-repo; the `kind-host` runner registered against
+> `izzywdev/FuzeInfra`). Re-do this org-level once repos are under `fuzeone`.
+>
+> **Two runners exist:** (1) **`kind-host`** — a classic runner **process on the
+> developer Windows host** (not a container) that drives Docker Desktop + kind;
+> (2) **`staging`** — the shared **ARC scale-set in the Contabo k3s cluster**
+> (`arc-systems`/`arc-runners`). Target ARC scale sets with **`runs-on: staging`**
+> (the scale-set NAME) — NOT `[self-hosted, staging]`, which never matches.
+>
+> **Job-fetch gotcha (NOT MTU):** if `staging` jobs queue forever, the usual cause
+> is the **ARC controller stuck after transient `generatejitconfig` TLS timeouts**
+> (it stops creating runner pods). Fix: `kubectl -n arc-systems delete pod <controller>`
+> to force a retry; clear any stale queued-run backlog. Verified working via
+> `staging-runner-smoke.yml`.
+
 # Shared Staging Runner — org-level GitHub Actions Self-Hosted Runner
 
 This directory provisions a **shared, org-level GitHub Actions self-hosted runner** for the
