@@ -688,3 +688,40 @@ handoffMcp:
   resources:
     requests: { cpu: "100m", memory: "256Mi" }
     limits:   { cpu: "500m", memory: "512Mi" }
+
+# -----------------------------------------------------------------------------
+# Longhorn replicated block storage (OPT-IN, default OFF).
+#
+# The Longhorn CONTROLLER (CSI driver, manager DaemonSet, CRDs, UI) deploys via
+# its OWN independent Argo Application `argocd/applications/longhorn.yaml`
+# (manual sync) — NOT this umbrella chart. This block only controls the OPT-IN,
+# NON-DEFAULT `longhorn` StorageClass that the chart renders when
+# `storageClass.enabled=true` (templates/storageclass-longhorn.yaml).
+#
+# `local-path` stays the cluster default (global.storageClass). Enabling this
+# StorageClass changes NOTHING on its own — no existing PVC/StatefulSet is
+# migrated here; each DB is moved onto `longhorn` in a separate, human-gated
+# maintenance window. Enable ONLY after the Longhorn controller is installed and
+# healthy (provisioner driver.longhorn.io must exist). See
+# docs/design/longhorn-storage.md.
+# -----------------------------------------------------------------------------
+longhorn:
+  # Umbrella-level marker (documentation/consistency). The actual controller is
+  # the separate Argo Application; this chart never installs Longhorn itself.
+  enabled: false
+  storageClass:
+    # Render the opt-in `longhorn` StorageClass. Default OFF → renders nothing.
+    enabled: false
+    name: longhorn
+    # 3 replicas across distinct DURABLE (baseline) nodes. Keep replicas off
+    # billing-reaped elastic nodes via diskSelector/nodeSelector (design §4.1).
+    numberOfReplicas: 3
+    # Never reap the underlying replicated DB volume when a PVC is deleted.
+    reclaimPolicy: Retain
+    volumeBindingMode: Immediate
+    staleReplicaTimeout: 30
+    fsType: ext4
+    # Longhorn disk/node tags scoping replicas to durable nodes. Empty = no
+    # scoping (set to e.g. "baseline" once baseline nodes are tagged in Longhorn).
+    diskSelector: ""
+    nodeSelector: ""

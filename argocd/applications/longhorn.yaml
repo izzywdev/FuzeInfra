@@ -1,0 +1,100 @@
+# =============================================================================
+# ArgoCD Application — Longhorn replicated block storage (cluster infra add-on)
+#
+# GATED OFF BY DESIGN. This Application is NOT applied by any automation and its
+# syncPolicy has NO `automated` block (MANUAL sync). Consequences:
+#   * Merging this file into `main` deploys NOTHING — the Application object does
+#     not exist in the cluster until a human runs:
+#         kubectl apply -f argocd/applications/longhorn.yaml
+#   * Even after it is applied, Argo will NOT sync until a human clicks Sync (or
+#     runs `argocd app sync longhorn`). This is the strongest default-OFF gate.
+#
+# PREREQUISITES (human-gated, see docs/design/longhorn-storage.md §3) — do FIRST:
+#   1. Install open-iscsi + nfs-common and create /var/lib/longhorn on every node
+#      that will host a replica (cloud-init for NEW nodes via
+#      modules/contabo-k3s-node enable_longhorn_prereqs=true; Longhorn's
+#      iscsi/nfs installation DaemonSets for LIVE nodes).
+#   2. Run longhorn-environment-check.sh (read-only) — confirm all nodes pass.
+#   3. Confirm ≥3 DURABLE (non-elastic) schedulable nodes for 3-replica anti-affinity.
+#
+# Turn on `automated{prune,selfHeal}` only AFTER a proven-stable manual install
+# (a deliberate follow-up PR) — auto-syncing a privileged CSI DaemonSet before the
+# node prereqs exist just CrashLoops the engine pods.
+# =============================================================================
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: longhorn
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+  annotations:
+    platform.izzywdev/gate: >
+      MANUAL SYNC ONLY. Do not add syncPolicy.automated until the node
+      prerequisites (open-iscsi/nfs-common//var/lib/longhorn) are installed and
+      longhorn-environment-check.sh passes on every node. See
+      docs/design/longhorn-storage.md.
+spec:
+  # project: default so it can install cluster-scoped CRDs + a privileged
+  # DaemonSet into its own namespace, like the sealed-secrets add-on. It must NOT
+  # live under the restrictive `fuzeinfra` AppProject.
+  project: default
+  source:
+    repoURL: https://charts.longhorn.io
+    chart: longhorn
+    # Pin the chart; bump deliberately. Confirm the Longhorn<->k8s compat matrix
+    # against the live k3s version before enabling (design O-1).
+    targetRevision: 1.7.2
+    helm:
+      releaseName: longhorn
+      values: |
+        # --- Node data dir (must match the prereq mkdir in cloud-init) ---
+        defaultSettings:
+          defaultDataPath: /var/lib/longhorn
+          # 3 replicas across DISTINCT nodes. Soft anti-affinity OFF = hard spread.
+          defaultReplicaCount: 3
+          replicaSoftAntiAffinity: false
+          # Small V92 disks: no thin over-provisioning; keep kubelet headroom.
+          storageOverProvisioningPercentage: 100
+          storageMinimalAvailablePercentage: 15
+          # Do not let a node self-select all disks blindly; operator tags durable
+          # nodes for replica placement (design §4.1 / O-6).
+          createDefaultDiskLabeledNodes: true
+          # Guard against replicas landing on autoscaled/reaped elastic nodes.
+          allowVolumeCreationWithDegradedAvailability: false
+        # Keep local-path the cluster default: do NOT create a default-marked
+        # Longhorn StorageClass. The opt-in `longhorn` SC ships from the umbrella
+        # chart (templates/storageclass-longhorn.yaml), non-default.
+        persistence:
+          defaultClass: false
+          defaultClassReplicaCount: 3
+          reclaimPolicy: Retain
+        # Trim footprint on the memory-constrained control-plane.
+        csi:
+          attacherReplicaCount: 1
+          provisionerReplicaCount: 1
+          resizerReplicaCount: 1
+          snapshotterReplicaCount: 1
+        longhornManager:
+          priorityClass: ""
+        # UI stays ClusterIP-only by default; expose via a CF Access app +
+        # Traefik Ingress deliberately later (design O-2), never wide open.
+        ingress:
+          enabled: false
+        # First install: skip the pre-upgrade checker job.
+        preUpgradeChecker:
+          jobEnabled: false
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: longhorn-system
+  syncPolicy:
+    # NO `automated:` block on purpose — MANUAL sync is the default-OFF gate.
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 15s
+        factor: 2
+        maxDuration: 5m
