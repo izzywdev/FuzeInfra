@@ -121,6 +121,7 @@ func (s *Server) NodeGroupIncreaseSize(ctx context.Context, req *protos.NodeGrou
 			Tags:      []string{s.cfg.ElasticTag},
 
 			PrivateNetworking: s.cfg.PrivateNetworking,
+			PrivateNetworkID:  s.cfg.PrivateNetworkID,
 		})
 		if err != nil {
 			return nil, status.Errorf(codes.Unavailable, "NodeGroupIncreaseSize: creating %q: %v", instanceName, err)

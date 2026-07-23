@@ -84,6 +84,11 @@ spec:
             # control plane. See internal/contabo createAddOns.
             - name: CONTABO_PRIVATE_NETWORKING
               value: {{ .Values.clusterAutoscaler.provider.privateNetworking | quote }}
+            # The private-network id created elastic nodes are ATTACHED to
+            # (membership), once the add-on above grants the capability. Both are
+            # needed for a zero-touch VLAN node. 0/"" = no attach.
+            - name: CONTABO_PRIVATE_NETWORK_ID
+              value: {{ .Values.clusterAutoscaler.provider.privateNetworkId | quote }}
           livenessProbe:
             tcpSocket:
               port: grpc

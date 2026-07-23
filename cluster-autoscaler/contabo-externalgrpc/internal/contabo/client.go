@@ -80,6 +80,12 @@ type CreateReq struct {
 	// missing). Default false: enable only during the coordinated private-VLAN
 	// cutover — a node on private-only flannel cannot join a still-public cluster.
 	PrivateNetworking bool
+	// PrivateNetworkID, when > 0 (and PrivateNetworking is true), is the Contabo
+	// private-network id the newly created instance is ASSIGNED to after it
+	// becomes visible. Ordering the add-on grants the paid capability; this call
+	// grants network MEMBERSHIP. Both are required for a truly zero-touch VLAN
+	// node — without the assignment the node has the add-on but stays off the net.
+	PrivateNetworkID int64
 }
 
 // privateNetworkingAddOn is the (currently empty) configuration object for the
@@ -829,6 +835,68 @@ func (c *HTTPClient) applyTags(ctx context.Context, tok string, instanceID int64
 	return nil
 }
 
+// assignPrivateNetwork attaches instanceID to the Contabo private network
+// networkID via POST /v1/private-networks/{networkId}/instances/{instanceId}
+// (no request body). This is the step that puts an autoscaled node ON the VLAN
+// — ordering the add-on (createBody addOns.privateNetworking) grants the paid
+// capability, but network MEMBERSHIP is a separate call; without it, assign is
+// never done and the node stays off the private net (the manual gap that would
+// otherwise defeat zero-touch VLAN autoscaling). 404/5xx are wrapped retryable
+// so assignPrivateNetworkWithRetry can ride out Contabo's eventual consistency.
+func (c *HTTPClient) assignPrivateNetwork(ctx context.Context, tok string, networkID, instanceID int64) error {
+	path := fmt.Sprintf("/v1/private-networks/%d/instances/%d", networkID, instanceID)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.cfg.BaseURL+path, nil)
+	if err != nil {
+		return fmt.Errorf("create private-network-assignment request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+tok)
+	req.Header.Set("x-request-id", newRequestID())
+
+	resp, err := c.hc.Do(req)
+	if err != nil {
+		log.Printf("contabo: POST %s failed: %v", path, err)
+		return fmt.Errorf("private-network-assignment request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	log.Printf("contabo: POST %s -> %d", path, resp.StatusCode)
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(resp.Body)
+		log.Printf("contabo: private-network assignment (networkId=%d instanceId=%d) failed with status %d: %s", networkID, instanceID, resp.StatusCode, string(body))
+		if isRetryableStatus(resp.StatusCode) {
+			return fmt.Errorf("private-network-assignment request failed with status %d: %s: %w", resp.StatusCode, string(body), errRetryable)
+		}
+		return fmt.Errorf("private-network-assignment request failed with status %d: %s", resp.StatusCode, string(body))
+	}
+	return nil
+}
+
+// assignPrivateNetworkWithRetry calls assignPrivateNetwork, retrying retryable
+// failures with the same fixed backoff used for tag assignment (Contabo's
+// private-network subsystem has the same just-created eventual-consistency
+// window). A non-retryable error is returned immediately.
+func (c *HTTPClient) assignPrivateNetworkWithRetry(ctx context.Context, tok string, networkID, instanceID int64) error {
+	var lastErr error
+	for attempt := 0; attempt < c.tagAssignRetryAttempts; attempt++ {
+		if attempt > 0 {
+			if err := sleepCtx(ctx, c.tagAssignRetryInterval); err != nil {
+				return err
+			}
+		}
+		err := c.assignPrivateNetwork(ctx, tok, networkID, instanceID)
+		if err == nil {
+			return nil
+		}
+		lastErr = err
+		if !errors.Is(err, errRetryable) {
+			return err
+		}
+		log.Printf("contabo: private-network assignment (networkId=%d instanceId=%d) retryable failure (attempt %d/%d): %v", networkID, instanceID, attempt+1, c.tagAssignRetryAttempts, err)
+	}
+	return fmt.Errorf("private-network assignment (networkId=%d instanceId=%d) did not succeed after %d attempts: %w", networkID, instanceID, c.tagAssignRetryAttempts, lastErr)
+}
+
 // getInstance retrieves a single instance via GET
 // /v1/compute/instances/{id}. It returns (true, nil) when Contabo reports
 // the instance (HTTP 200), (false, nil) when Contabo returns 404 (not yet
@@ -1038,6 +1106,25 @@ func (c *HTTPClient) Create(ctx context.Context, req CreateReq) (Instance, error
 					return Instance{}, false, fmt.Errorf("tag instance %d: %w (rollback cancel also failed: %v)", inst.InstanceID, tagErr, delErr)
 				}
 				return Instance{}, false, fmt.Errorf("tag instance %d: %w (instance rolled back)", inst.InstanceID, tagErr)
+			}
+		}
+
+		// Attach to the private VLAN when requested. Ordering the add-on above
+		// (createBody addOns) only grants the capability — this call grants
+		// network MEMBERSHIP, and both are needed for a zero-touch VLAN node.
+		// The instance is already confirmed visible (the tag block's
+		// waitForInstanceVisible ran, since elastic nodes always carry a tag).
+		// A VLAN-mode node that fails to attach is non-functional (its privnet
+		// cloud-init binds flannel to eth1), so we roll it back — same policy as
+		// a tag failure — rather than leave a broken node the cap must count.
+		if req.PrivateNetworking && req.PrivateNetworkID > 0 {
+			if pnErr := c.assignPrivateNetworkWithRetry(ctx, tok, req.PrivateNetworkID, inst.InstanceID); pnErr != nil {
+				log.Printf("contabo: instance %d (%s) created+tagged but private-network attach failed (%v); rolling back", inst.InstanceID, inst.DisplayName, pnErr)
+				if delErr := c.Delete(ctx, inst.InstanceID); delErr != nil {
+					log.Printf("contabo: rollback cancel of unattached instance %d ALSO failed: %v — instance %d may be LEAKED, needs manual cleanup", inst.InstanceID, delErr, inst.InstanceID)
+					return Instance{}, false, fmt.Errorf("attach instance %d to private network %d: %w (rollback cancel also failed: %v)", inst.InstanceID, req.PrivateNetworkID, pnErr, delErr)
+				}
+				return Instance{}, false, fmt.Errorf("attach instance %d to private network %d: %w (instance rolled back)", inst.InstanceID, req.PrivateNetworkID, pnErr)
 			}
 		}
 

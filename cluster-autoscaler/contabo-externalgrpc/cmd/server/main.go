@@ -309,6 +309,19 @@ func loadConfig(getenv func(string) string) (provider.Config, contabo.Config, st
 	// cannot join a still-public control plane. See internal/contabo addOns.
 	privateNetworking := envFlagTrue(get("CONTABO_PRIVATE_NETWORKING"))
 
+	// CONTABO_PRIVATE_NETWORK_ID (optional, default 0): the private-network id
+	// each created elastic node is ATTACHED to (only acted on when
+	// privateNetworking is true). Ordering the add-on grants the capability; the
+	// attach grants membership — both are needed for zero-touch VLAN nodes.
+	var privateNetworkID int64
+	if v := get("CONTABO_PRIVATE_NETWORK_ID"); v != "" {
+		parsed, err := strconv.ParseInt(v, 10, 64)
+		if err != nil {
+			return provider.Config{}, contabo.Config{}, "", fmt.Errorf("parsing CONTABO_PRIVATE_NETWORK_ID=%q: %w", v, err)
+		}
+		privateNetworkID = parsed
+	}
+
 	provCfg := provider.Config{
 		ElasticTag:        elasticTag,
 		NamePrefix:        elasticNamePrefix,
@@ -322,6 +335,7 @@ func loadConfig(getenv func(string) string) (provider.Config, contabo.Config, st
 		K3SServerURL:      k3sServerURL,
 		K3SNodeToken:      k3sNodeToken,
 		PrivateNetworking: privateNetworking,
+		PrivateNetworkID:  privateNetworkID,
 		Notifier:          notifier,
 	}
 

@@ -51,6 +51,11 @@ type Config struct {
 	// only during the coordinated private-VLAN cutover, since a node on
 	// private-only flannel cannot join a still-public control plane.
 	PrivateNetworking bool
+	// PrivateNetworkID is the Contabo private-network id newly created elastic
+	// nodes are attached to (when > 0 and PrivateNetworking is true). Sourced
+	// from CONTABO_PRIVATE_NETWORK_ID. Ordering the add-on grants the capability;
+	// this grants membership — both are needed for zero-touch VLAN autoscaling.
+	PrivateNetworkID int64
 	// Notifier is an optional best-effort email warning sent immediately
 	// before each Create call in NodeGroupIncreaseSize (see scale.go). A nil
 	// Notifier (the zero value — e.g. NOTIFY_EMAIL_ENABLED unset) is a

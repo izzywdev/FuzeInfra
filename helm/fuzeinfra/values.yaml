@@ -653,6 +653,11 @@ clusterAutoscaler:
     # coordinated private-VLAN cutover (a node on private-only flannel cannot
     # join a still-public control plane). See docs/design/s3-and-private-networking.md.
     privateNetworking: false
+    # The Contabo private-network id created elastic nodes are ATTACHED to after
+    # the add-on above is ordered (0 = no attach). Ordering the add-on grants the
+    # capability; this grants network membership — both needed for a zero-touch
+    # VLAN node. Set to the live network id (e.g. 60932) only at the cutover.
+    privateNetworkId: 0
   # Billing-aware reaper (cluster-autoscaler/contabo-externalgrpc/cmd/reaper):
   # an hourly one-shot CronJob, run from the SAME image as the provider
   # (command: /reaper), that cordons/drains/cancels an elastic instance only
