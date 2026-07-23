@@ -26,12 +26,16 @@ locals {
   # chart sets its Traefik Ingress host to match (className traefik, TLS off,
   # CF terminates edge TLS). Adding a future public host is a one-line edit.
   #
+  # NOTE: `auth` (auth.fuzefront.com) was retired — FuzeFront now hides its
+  # Authentik IdP behind app.fuzefront.com/api/auth/idp/* (reverse-proxied
+  # in-cluster, see izzywdev/FuzeFront#247), so no public IdP host is needed.
+  #
   # `plan` = FuzePlan (plan.fuzefront.com). FuzeFront's portal loads FuzePlan's
   # module-federation remoteEntry.js from here, so it must be public (outside the
   # *.prod Access wildcard); FuzePlan declares its own Traefik Ingress for this
   # host in izzywdev/FuzePlan. Routing to Traefik is via the catch-all ingress
   # rule below — no per-host tunnel rule is needed.
-  public_vanity_hosts = ["app", "auth", "plan"]
+  public_vanity_hosts = ["app", "plan"]
 }
 
 # 32-byte cryptographically random tunnel secret
@@ -97,7 +101,7 @@ resource "cloudflare_record" "prod_wildcard" {
   ttl     = 1
 }
 
-# DNS: public vanity hosts (app/auth.fuzefront.com) → same tunnel, proxied.
+# DNS: public vanity hosts (app.fuzefront.com) → same tunnel, proxied.
 # Proxied so CF terminates TLS at the edge (Universal SSL covers the apex hosts)
 # and the request reaches cloudflared → the matching ingress_rule above → Traefik.
 # These hosts are NOT covered by the *.prod Access wildcard, so they are public.
