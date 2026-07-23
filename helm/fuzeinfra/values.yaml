@@ -429,6 +429,73 @@ loki:
     accessKeyIdKey: LOKI_S3_ACCESS_KEY_ID
     secretAccessKeyKey: LOKI_S3_SECRET_ACCESS_KEY
 
+# ---------------------------------------------------------------------------
+# Scheduled database backups → S3 (Contabo Object Storage)
+# ---------------------------------------------------------------------------
+# The stateful databases keep running on block/local-path storage — S3 has no
+# POSIX/block semantics, so it is NOT a live data volume for any DB. Its only
+# role here is a *backup offload*: each CronJob below dumps a logical snapshot
+# of a running DB and uploads it to the `fuzeinfra-backups` bucket.
+#
+# Everything is OFF by default. To enable in an overlay:
+#   1. Provision the bucket (terraform object-storage) + an S3 key pair.
+#   2. Seal the key pair OFFLINE into a SealedSecret in the fuzeinfra namespace,
+#      e.g. `fuzeinfra-backups-s3` with keys BACKUP_S3_ACCESS_KEY_ID /
+#      BACKUP_S3_SECRET_ACCESS_KEY. (Never `kubectl create secret` — GitOps.)
+#   3. Set backups.enabled=true, backups.s3.existingSecret, backups.s3.endpoint.
+#
+# Object lifecycle / retention (age-out of old dumps) is enforced by an S3
+# bucket lifecycle policy, NOT by these Jobs — see docs/backups-and-blobs.md.
+backups:
+  enabled: false
+  # aws-cli image used by the upload sidecar step of every CronJob.
+  awsCliImage: amazon/aws-cli:2.17.0
+  # Default cron schedule (UTC). Per-DB `schedule` overrides this when set.
+  schedule: "0 2 * * *"
+  # Keep this many most-recent Jobs' pods around for log inspection.
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  # Fail (and alert via kube-state-metrics job_failed) rather than hang forever.
+  activeDeadlineSeconds: 3600
+  backoffLimit: 2
+  resources:
+    requests: { cpu: 100m, memory: 128Mi }
+    limits:   { cpu: 500m, memory: 512Mi }
+  # S3 destination for all dumps.
+  s3:
+    # Full URL incl. scheme, e.g. https://eu2.contabostorage.com
+    endpoint: ""
+    region: "default"
+    bucket: "fuzeinfra-backups"
+    # Key prefix inside the bucket; each DB adds its own subfolder + timestamp.
+    prefix: "db"
+    # SealedSecret (in the fuzeinfra namespace) holding the S3 credentials.
+    # REQUIRED when backups.enabled=true. Never inlined.
+    existingSecret: ""
+    accessKeyIdKey: BACKUP_S3_ACCESS_KEY_ID
+    secretAccessKeyKey: BACKUP_S3_SECRET_ACCESS_KEY
+  # Per-database toggles. Each dumps a *running* instance (no downtime) and is
+  # independently gated so an overlay can enable only the DBs it runs.
+  postgres:
+    enabled: true
+    # "" -> inherits backups.schedule
+    schedule: ""
+    image: postgres:15          # ships pg_dumpall
+    host: fuzeinfra-postgres
+    port: 5432
+  mongodb:
+    enabled: true
+    schedule: ""
+    image: mongo:7              # ships mongodump
+    host: fuzeinfra-mongodb
+    port: 27017
+  neo4j:
+    enabled: true
+    schedule: ""
+    image: neo4j:5             # ships cypher-shell; APOC stream export (online)
+    host: fuzeinfra-neo4j
+    boltPort: 7687
+
 promtail:
   enabled: true
   image: grafana/promtail:3.2.0

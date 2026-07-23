@@ -1,0 +1,188 @@
+{{- /*
+============================ Scheduled DB backups → S3 ============================
+One CronJob per stateful database. Each dumps a *running* instance (no downtime)
+and uploads the compressed snapshot to the Contabo Object Storage backup bucket.
+
+Structure of every CronJob's pod:
+  * initContainer `dump`  — runs in the DB's own image (so it ships the native
+    dump tool), connects to the in-namespace DB Service, writes a single file to
+    the shared emptyDir at /backup/dump.bin, and records the desired S3 object
+    key in /backup/remote-key.
+  * container    `upload` — runs in the aws-cli image and `aws s3 cp`s that file
+    to s3://<bucket>/<key> against the Contabo S3 endpoint.
+
+Credentials never touch git: DB creds come from `fuzeinfra-secrets` (in-namespace,
+by key only); the S3 key pair comes from an OFFLINE-sealed SealedSecret referenced
+by `backups.s3.existingSecret`. Retention/age-out is an S3 bucket lifecycle policy
+(see docs/backups-and-blobs.md), not this template.
+
+Everything is gated OFF by default (`backups.enabled=false`).
+*/ -}}
+
+{{- /* Reusable pieces shared by every CronJob below (defined at top level). */ -}}
+{{- define "fuzeinfra.backup.s3env" -}}
+- name: AWS_ACCESS_KEY_ID
+  valueFrom:
+    secretKeyRef:
+      name: {{ .b.s3.existingSecret | quote }}
+      key: {{ .b.s3.accessKeyIdKey | quote }}
+- name: AWS_SECRET_ACCESS_KEY
+  valueFrom:
+    secretKeyRef:
+      name: {{ .b.s3.existingSecret | quote }}
+      key: {{ .b.s3.secretAccessKeyKey | quote }}
+- name: AWS_DEFAULT_REGION
+  value: {{ .b.s3.region | quote }}
+- name: S3_ENDPOINT
+  value: {{ .b.s3.endpoint | quote }}
+- name: S3_BUCKET
+  value: {{ .b.s3.bucket | quote }}
+{{- end -}}
+
+{{- define "fuzeinfra.backup.uploadContainer" -}}
+- name: upload
+  image: {{ .b.awsCliImage | quote }}
+  imagePullPolicy: {{ include "fuzeinfra.pullPolicy" .root }}
+  env:
+    {{- include "fuzeinfra.backup.s3env" . | nindent 4 }}
+  command:
+    - /bin/sh
+    - -c
+    - |
+      set -eu
+      key="$(cat /backup/remote-key)"
+      echo "Uploading /backup/dump.bin -> s3://$S3_BUCKET/$key"
+      aws --endpoint-url "$S3_ENDPOINT" s3 cp /backup/dump.bin "s3://$S3_BUCKET/$key"
+      echo "Backup upload complete."
+  volumeMounts:
+    - name: backup
+      mountPath: /backup
+  resources:
+    {{- toYaml .b.resources | nindent 4 }}
+{{- end -}}
+
+{{- if .Values.backups.enabled }}
+{{- $b := .Values.backups }}
+{{- if not $b.s3.existingSecret }}
+{{- fail "backups.s3.existingSecret is required when backups.enabled=true (offline-sealed SealedSecret with the S3 key pair)" }}
+{{- end }}
+{{- if not $b.s3.endpoint }}
+{{- fail "backups.s3.endpoint is required when backups.enabled=true (e.g. https://eu2.contabostorage.com)" }}
+{{- end }}
+{{- $secretName := include "fuzeinfra.secretName" . }}
+{{- $dbs := list
+    (dict "name" "postgres" "cfg" $b.postgres)
+    (dict "name" "mongodb"  "cfg" $b.mongodb)
+    (dict "name" "neo4j"    "cfg" $b.neo4j) -}}
+
+{{- range $dbs }}
+{{- if .cfg.enabled }}
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: fuzeinfra-backup-{{ .name }}
+  labels:
+    {{- include "fuzeinfra.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: backup
+spec:
+  schedule: {{ .cfg.schedule | default $b.schedule | quote }}
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 300
+  successfulJobsHistoryLimit: {{ $b.successfulJobsHistoryLimit }}
+  failedJobsHistoryLimit: {{ $b.failedJobsHistoryLimit }}
+  jobTemplate:
+    spec:
+      backoffLimit: {{ $b.backoffLimit }}
+      activeDeadlineSeconds: {{ $b.activeDeadlineSeconds }}
+      template:
+        metadata:
+          labels:
+            {{- include "fuzeinfra.labels" $ | nindent 12 }}
+            {{- include "fuzeinfra.selectorLabels" (dict "component" (printf "backup-%s" .name) "root" $) | nindent 12 }}
+            app.kubernetes.io/component: backup
+        spec:
+          restartPolicy: Never
+          volumes:
+            - name: backup
+              emptyDir: {}
+          initContainers:
+            - name: dump
+              image: {{ .cfg.image | quote }}
+              imagePullPolicy: {{ include "fuzeinfra.pullPolicy" $ }}
+              env:
+                - name: PREFIX
+                  value: {{ $b.s3.prefix | quote }}
+                {{- if eq .name "postgres" }}
+                - name: PGHOST
+                  value: {{ .cfg.host | quote }}
+                - name: PGPORT
+                  value: {{ .cfg.port | quote }}
+                - name: POSTGRES_USER
+                  valueFrom:
+                    secretKeyRef: { name: {{ $secretName }}, key: POSTGRES_USER }
+                - name: POSTGRES_PASSWORD
+                  valueFrom:
+                    secretKeyRef: { name: {{ $secretName }}, key: POSTGRES_PASSWORD }
+                {{- else if eq .name "mongodb" }}
+                - name: MONGO_HOST
+                  value: {{ .cfg.host | quote }}
+                - name: MONGO_PORT
+                  value: {{ .cfg.port | quote }}
+                - name: MONGODB_USER
+                  valueFrom:
+                    secretKeyRef: { name: {{ $secretName }}, key: MONGODB_USER }
+                - name: MONGODB_PASSWORD
+                  valueFrom:
+                    secretKeyRef: { name: {{ $secretName }}, key: MONGODB_PASSWORD }
+                {{- else if eq .name "neo4j" }}
+                - name: NEO4J_HOST
+                  value: {{ .cfg.host | quote }}
+                - name: NEO4J_BOLT_PORT
+                  value: {{ .cfg.boltPort | quote }}
+                - name: NEO4J_AUTH
+                  valueFrom:
+                    secretKeyRef: { name: {{ $secretName }}, key: NEO4J_AUTH }
+                {{- end }}
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  set -eu
+                  ts="$(date -u +%Y%m%dT%H%M%SZ)"
+                  {{- if eq .name "postgres" }}
+                  # Full logical dump of every database + globals (roles/grants).
+                  export PGPASSWORD="$POSTGRES_PASSWORD"
+                  pg_dumpall -h "$PGHOST" -p "$PGPORT" -U "$POSTGRES_USER" \
+                    | gzip -c > /backup/dump.bin
+                  echo "$PREFIX/postgres/fuzeinfra-postgres-$ts.sql.gz" > /backup/remote-key
+                  {{- else if eq .name "mongodb" }}
+                  # Single-file compressed archive of the whole mongod.
+                  mongodump --host "$MONGO_HOST" --port "$MONGO_PORT" \
+                    -u "$MONGODB_USER" -p "$MONGODB_PASSWORD" \
+                    --authenticationDatabase admin --archive --gzip \
+                    > /backup/dump.bin
+                  echo "$PREFIX/mongodb/fuzeinfra-mongodb-$ts.archive.gz" > /backup/remote-key
+                  {{- else if eq .name "neo4j" }}
+                  # ONLINE logical export via APOC streamed over Bolt (community
+                  # edition has no online `neo4j-admin backup`; APOC ships in the
+                  # cluster image via NEO4J_PLUGINS=["apoc"]). Requires apoc.
+                  NEO4J_USER="${NEO4J_AUTH%%/*}"
+                  NEO4J_PASS="${NEO4J_AUTH#*/}"
+                  cypher-shell -a "bolt://$NEO4J_HOST:$NEO4J_BOLT_PORT" \
+                    -u "$NEO4J_USER" -p "$NEO4J_PASS" --non-interactive --format plain \
+                    "CALL apoc.export.cypher.all(null,{stream:true,format:'cypher-shell'}) YIELD cypherStatements RETURN cypherStatements" \
+                    | gzip -c > /backup/dump.bin
+                  echo "$PREFIX/neo4j/fuzeinfra-neo4j-$ts.cypher.gz" > /backup/remote-key
+                  {{- end }}
+                  echo "Dump written: $(cat /backup/remote-key) ($(wc -c < /backup/dump.bin) bytes)"
+              volumeMounts:
+                - name: backup
+                  mountPath: /backup
+              resources:
+                {{- toYaml $b.resources | nindent 16 }}
+          containers:
+            {{- include "fuzeinfra.backup.uploadContainer" (dict "b" $b "root" $) | nindent 12 }}
+{{- end }}
+{{- end }}
+{{- end }}
