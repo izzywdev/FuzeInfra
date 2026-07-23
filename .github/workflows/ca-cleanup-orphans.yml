@@ -58,7 +58,7 @@ jobs:
             n=$(echo "$RESP" | jq '.data | length')
             [ "$n" -gt 0 ] || break
             TOTAL=$((TOTAL+n))
-            echo "$RESP" | jq -r '.data[] | "\(.instanceId)	\(.displayName)	\(.status)	\(.productId)"' >> /tmp/all.txt || true
+            echo "$RESP" | jq -r '.data[] | "\(.instanceId)	\(.displayName)	\(.status)	cancelDate=\(.cancelDate)"' >> /tmp/all.txt || true
             echo "$RESP" | jq -r '.data[] | select(.displayName|startswith("fuzeinfra-elastic")) | "\(.instanceId)\t\(.displayName)\t\(.status)\t\(.createdDate)"' >> /tmp/elastic.txt || true
             page=$((page+1)); [ "$page" -gt 30 ] && { echo "::warning::page cap hit"; break; }
           done
@@ -72,6 +72,8 @@ jobs:
           cat /tmp/elastic.txt || true
           echo "----- ALL instances (id/name/status/product) -----"
           cat /tmp/all.txt || true
+          echo "----- FULL object: 203408869 (mendys-prod) -----"
+          curl -sS -H "Authorization: Bearer $TOK" -H "x-request-id: $(cat /proc/sys/kernel/random/uuid)"             "https://api.contabo.com/v1/compute/instances/203408869"             | jq '.data[0] | {instanceId,displayName,name,status,cancelDate,createdDate,productId,ipConfig:(.ipConfig.v4.ip)}' || true
           echo "===================================================="
           {
             echo "## ca-cleanup-orphans ($MODE)"
