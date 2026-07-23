@@ -58,6 +58,7 @@ jobs:
             n=$(echo "$RESP" | jq '.data | length')
             [ "$n" -gt 0 ] || break
             TOTAL=$((TOTAL+n))
+            echo "$RESP" | jq -r '.data[] | "\(.instanceId)	\(.displayName)	\(.status)	\(.productId)"' >> /tmp/all.txt || true
             echo "$RESP" | jq -r '.data[] | select(.displayName|startswith("fuzeinfra-elastic")) | "\(.instanceId)\t\(.displayName)\t\(.status)\t\(.createdDate)"' >> /tmp/elastic.txt || true
             page=$((page+1)); [ "$page" -gt 30 ] && { echo "::warning::page cap hit"; break; }
           done
@@ -69,6 +70,8 @@ jobs:
           echo "----------------------------------------------------"
           echo -e "INSTANCE_ID\tNAME\tSTATUS\tCREATED"
           cat /tmp/elastic.txt || true
+          echo "----- ALL instances (id/name/status/product) -----"
+          cat /tmp/all.txt || true
           echo "===================================================="
           {
             echo "## ca-cleanup-orphans ($MODE)"
