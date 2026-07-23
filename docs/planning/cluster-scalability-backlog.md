@@ -82,3 +82,9 @@ Autoscaler LIVE; scale-up proven (auth + real VPS create); 9 live bugs fixed. Re
 Phase 1 (#364 naming + WireGuard/LTS cloud-init) + Phase 2 (#365 reaper + Helm), then a clean spike
 proving create → tag → **join** → schedule, and cancel orphan 203458548 via `/cancel`.
 **AC:** a full autoscaling cycle validated live.
+
+## Private-VLAN rollout (decision 2026-07-23)
+Moving the pod-network underlay onto a Contabo private VLAN (network `60932`, CIDR `10.0.0.0/22`, DC "European Union 2", created live).
+- **Attach requires the per-instance "Virtual Private Cloud" add-on (~€2.73/mo/node)** + a **reinstall** (wipe) of the node — Contabo's assign API 402s without the add-on; the add-on can be ordered via the create/reinstall `addOns` field (API-driven), and it's codified in Terraform.
+- **Now:** put the **3 baseline workers + 6 elastics** on the VLAN (all re-provisionable) — per node: reinstall with `addOns:[private-networking]` + private-net cloud-init (`eth1`, `flannel-iface=eth1`, `node-ip=private`, `node-external-ip=public`) → assign to `60932` → verify private InternalIP + DNS/Postgres reachable. The **autoscaler's create call gets `addOns`** so every future elastic node comes up on the VLAN.
+- **Control-plane `vmi3383846` deferred** — it hosts Postgres/Redis on `local-path`, so a reinstall would wipe the data. It is the **dependency gate on A (Longhorn networked block storage) + B (control-plane HA)**: once the DBs are on replicated storage and the control-plane is HA (≥3 servers/embedded etcd), `vmi3383846` becomes disposable and can be reinstalled onto the VLAN with zero downtime. **A + B are the enablers for the control-plane's private-VLAN migration** (not just standalone hardening).
