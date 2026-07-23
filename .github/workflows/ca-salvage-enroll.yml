@@ -1,0 +1,122 @@
+name: ca-salvage-enroll
+
+# Salvage already-paid Contabo instances into the elastic pool: reinstall each
+# with the elastic cloud-init (userData sent PLAIN — Contabo does NOT want it
+# base64-encoded; that double-encoding was the "provisioned-but-never-joined"
+# bug) and assign the fuzeinfra-elastic tag so the autoscaler adopts them.
+#
+# Also serves as the LIVE validation of the plain-userData fix: dry-run first,
+# then reinstall ONE running orphan and confirm it joins `kubectl get nodes`.
+on:
+  workflow_dispatch:
+    inputs:
+      instance_ids:
+        description: 'Comma-separated Contabo instance IDs to reinstall + enroll as elastic nodes.'
+        default: '203459381'
+        required: true
+      mode:
+        description: 'dry-run = render + show planned calls (safe); reinstall = PUT reinstall (plain userData) + tag'
+        type: choice
+        options: [dry-run, reinstall]
+        default: dry-run
+        required: true
+      confirm:
+        description: 'For mode=reinstall ONLY: type SALVAGE to proceed.'
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  salvage:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4
+      - name: Reinstall + enroll elastic instances
+        env:
+          CID: ${{ secrets.CONTABO_CLIENT_ID }}
+          CSEC: ${{ secrets.CONTABO_CLIENT_SECRET }}
+          CUSER: ${{ secrets.CONTABO_API_USER }}
+          CPASS: ${{ secrets.CONTABO_API_PASSWORD }}
+          IMAGE_ID: ${{ secrets.CONTABO_IMAGE_ID }}
+          K3S_SERVER_URL: ${{ secrets.K3S_SERVER_URL }}
+          K3S_NODE_TOKEN: ${{ secrets.K3S_NODE_TOKEN }}
+          NODE_SSH_PUBLIC_KEY: ${{ secrets.NODE_SSH_PUBLIC_KEY }}
+          IDS: ${{ inputs.instance_ids }}
+          MODE: ${{ inputs.mode }}
+          CONFIRM: ${{ inputs.confirm }}
+        run: |
+          set -euo pipefail
+          TMPL="cluster-autoscaler/contabo-externalgrpc/deploy/elastic-userdata.template"
+          [ -f "$TMPL" ] || { echo "::error::template not found: $TMPL"; exit 1; }
+          for v in CID CSEC CUSER CPASS IMAGE_ID K3S_SERVER_URL K3S_NODE_TOKEN NODE_SSH_PUBLIC_KEY; do
+            eval "val=\${$v}"; [ -n "$val" ] || { echo "::error::secret/env $v is empty"; exit 1; }
+          done
+          if [ "$MODE" = "reinstall" ] && [ "$CONFIRM" != "SALVAGE" ]; then
+            echo "::error::mode=reinstall requires confirm=SALVAGE"; exit 1
+          fi
+
+          TOK=$(curl -sS -X POST -H "Content-Type: application/x-www-form-urlencoded" \
+            "https://auth.contabo.com/auth/realms/contabo/protocol/openid-connect/token" \
+            --data-urlencode "client_id=${CID}" --data-urlencode "client_secret=${CSEC}" \
+            --data-urlencode "username=${CUSER}" --data-urlencode "password=${CPASS}" \
+            --data-urlencode "grant_type=password" | jq -r .access_token)
+          [ -n "$TOK" ] && [ "$TOK" != "null" ] || { echo "::error::Contabo auth failed"; exit 1; }
+
+          # resolve fuzeinfra-elastic tag id (create if missing)
+          TAGID=$(curl -sS -H "Authorization: Bearer $TOK" -H "x-request-id: $(cat /proc/sys/kernel/random/uuid)" \
+            "https://api.contabo.com/v1/tags?name=fuzeinfra-elastic" | jq -r '.data[0].tagId // empty')
+          if [ -z "$TAGID" ]; then
+            TAGID=$(curl -sS -X POST -H "Authorization: Bearer $TOK" -H "Content-Type: application/json" \
+              -H "x-request-id: $(cat /proc/sys/kernel/random/uuid)" \
+              -d '{"name":"fuzeinfra-elastic","color":"#0aa"}' \
+              "https://api.contabo.com/v1/tags" | jq -r '.data[0].tagId')
+          fi
+          echo "fuzeinfra-elastic tagId=$TAGID"
+
+          IFS=',' read -ra ARR <<< "$IDS"
+          for ID in "${ARR[@]}"; do
+            ID=$(echo "$ID" | tr -d ' ')
+            [ -n "$ID" ] || continue
+            INST=$(curl -sS -H "Authorization: Bearer $TOK" -H "x-request-id: $(cat /proc/sys/kernel/random/uuid)" \
+              "https://api.contabo.com/v1/compute/instances/${ID}")
+            NAME=$(echo "$INST" | jq -r '.data[0].displayName')
+            STATUS=$(echo "$INST" | jq -r '.data[0].status')
+            [ -n "$NAME" ] && [ "$NAME" != "null" ] || { echo "::warning::instance $ID not found, skipping"; continue; }
+            echo "==== $ID name=$NAME status=$STATUS ===="
+
+            # render the cloud-init template (Go-template vars + ssh placeholder), PLAIN
+            RENDERED=$(python3 - "$TMPL" "$NAME" "$K3S_SERVER_URL" "$K3S_NODE_TOKEN" "$NODE_SSH_PUBLIC_KEY" <<'PY'
+import sys
+tmpl,name,url,token,key=sys.argv[1],sys.argv[2],sys.argv[3],sys.argv[4],sys.argv[5]
+s=open(tmpl).read()
+s=s.replace("{{.NodeName}}",name).replace("{{.K3SServerURL}}",url).replace("{{.K3SNodeToken}}",token).replace("__SSH_PUBLIC_KEY__",key)
+sys.stdout.write(s)
+PY
+)
+            if echo "$RENDERED" | grep -q '{{'; then echo "::error::unrendered template action remains for $ID"; exit 1; fi
+            if ! printf '%s' "$RENDERED" | head -1 | grep -q '^#cloud-config'; then echo "::error::rendered userData must start with #cloud-config"; exit 1; fi
+
+            if [ "$MODE" = "dry-run" ]; then
+              echo "--- rendered userData (token/key redacted) ---"
+              printf '%s\n' "$RENDERED" | sed -E "s#$K3S_NODE_TOKEN#<TOKEN>#g; s#(ssh-ed25519 )\S+#\1<KEY>#g" | head -60
+              echo "--- WOULD PUT reinstall imageId=$IMAGE_ID (userData PLAIN) + assign tag $TAGID ---"
+              continue
+            fi
+
+            # reinstall (PUT) with PLAIN userData — the fix
+            BODY=$(jq -n --arg img "$IMAGE_ID" --arg ud "$RENDERED" '{imageId:$img, userData:$ud, defaultUser:"root"}')
+            RC=$(curl -sS -o /tmp/reinstall.json -w '%{http_code}' -X PUT \
+              -H "Authorization: Bearer $TOK" -H "Content-Type: application/json" \
+              -H "x-request-id: $(cat /proc/sys/kernel/random/uuid)" \
+              -d "$BODY" "https://api.contabo.com/v1/compute/instances/${ID}")
+            echo "reinstall $ID -> HTTP $RC"
+            if [ "$RC" != "200" ] && [ "$RC" != "201" ]; then echo "  body: $(cat /tmp/reinstall.json)"; echo "::warning::reinstall $ID failed"; continue; fi
+            # assign elastic tag
+            TC=$(curl -sS -o /dev/null -w '%{http_code}' -X POST \
+              -H "Authorization: Bearer $TOK" -H "x-request-id: $(cat /proc/sys/kernel/random/uuid)" \
+              "https://api.contabo.com/v1/tags/${TAGID}/assignments/instance/${ID}")
+            echo "tag $ID -> HTTP $TC"
+            echo "instance $ID ($NAME) reinstalling with plain userData; it should run cloud-init + join as node '$NAME' within a few minutes."
+          done
+          echo "===== done (mode=$MODE) ====="
