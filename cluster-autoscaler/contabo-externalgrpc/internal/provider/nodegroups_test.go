@@ -71,12 +71,17 @@ func TestNodeGroupForNode_ListErrorPropagates(t *testing.T) {
 	}
 }
 
-// fakeCloudWithError is a test double that allows error injection in ListByTag.
+// fakeCloudWithError is a test double that allows error injection in
+// ListByTag/ListByNamePrefix.
 type fakeCloudWithError struct {
 	listErr error
 }
 
 func (f *fakeCloudWithError) ListByTag(_ context.Context, _ string) ([]contabo.Instance, error) {
+	return nil, f.listErr
+}
+
+func (f *fakeCloudWithError) ListByNamePrefix(_ context.Context, _ string) ([]contabo.Instance, error) {
 	return nil, f.listErr
 }
 

@@ -21,7 +21,7 @@ const (
 
 func TestDecide_UnknownCreatedDateAlwaysKeeps(t *testing.T) {
 	now := time.Date(2026, 7, 22, 12, 0, 0, 0, time.UTC)
-	d, reason := Decide(time.Time{}, now, testReleaseWindow, testBillingPeriod, true /* idle */)
+	d, reason := Decide(time.Time{}, time.Time{}, now, testReleaseWindow, testBillingPeriod, true /* idle */)
 	if d != DecisionKeep {
 		t.Fatalf("Decide() = %v, want DecisionKeep for a zero/unknown CreatedDate", d)
 	}
@@ -35,7 +35,7 @@ func TestDecide_WellWithinBillingPeriodKeepsRegardlessOfIdle(t *testing.T) {
 	// nowhere near the 24h release window. Must keep even if idle.
 	created := time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)
 	now := created.Add(24 * time.Hour)
-	d, _ := Decide(created, now, testReleaseWindow, testBillingPeriod, true)
+	d, _ := Decide(created, time.Time{}, now, testReleaseWindow, testBillingPeriod, true)
 	if d != DecisionKeep {
 		t.Fatalf("Decide() = %v, want DecisionKeep well before the release window opens", d)
 	}
@@ -45,7 +45,7 @@ func TestDecide_InWindowButBusyKeeps(t *testing.T) {
 	created := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
 	renewal := created.Add(testBillingPeriod)
 	now := renewal.Add(-1 * time.Hour) // 1h before renewal, inside the 24h window
-	d, reason := Decide(created, now, testReleaseWindow, testBillingPeriod, false /* idle */)
+	d, reason := Decide(created, time.Time{}, now, testReleaseWindow, testBillingPeriod, false /* idle */)
 	if d != DecisionKeep {
 		t.Fatalf("Decide() = %v, want DecisionKeep for a busy node inside the release window", d)
 	}
@@ -58,7 +58,7 @@ func TestDecide_InWindowAndIdleReleases(t *testing.T) {
 	created := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
 	renewal := created.Add(testBillingPeriod)
 	now := renewal.Add(-1 * time.Hour)
-	d, _ := Decide(created, now, testReleaseWindow, testBillingPeriod, true)
+	d, _ := Decide(created, time.Time{}, now, testReleaseWindow, testBillingPeriod, true)
 	if d != DecisionRelease {
 		t.Fatalf("Decide() = %v, want DecisionRelease for an idle node inside the release window", d)
 	}
@@ -70,7 +70,7 @@ func TestDecide_ExactlyAtWindowBoundaryReleases(t *testing.T) {
 	created := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
 	renewal := created.Add(testBillingPeriod)
 	now := renewal.Add(-testReleaseWindow)
-	d, _ := Decide(created, now, testReleaseWindow, testBillingPeriod, true)
+	d, _ := Decide(created, time.Time{}, now, testReleaseWindow, testBillingPeriod, true)
 	if d != DecisionRelease {
 		t.Fatalf("Decide() = %v, want DecisionRelease exactly at the window boundary", d)
 	}
@@ -80,7 +80,7 @@ func TestDecide_JustBeforeWindowBoundaryKeeps(t *testing.T) {
 	created := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
 	renewal := created.Add(testBillingPeriod)
 	now := renewal.Add(-testReleaseWindow).Add(-time.Second)
-	d, _ := Decide(created, now, testReleaseWindow, testBillingPeriod, true)
+	d, _ := Decide(created, time.Time{}, now, testReleaseWindow, testBillingPeriod, true)
 	if d != DecisionKeep {
 		t.Fatalf("Decide() = %v, want DecisionKeep one second before the window opens", d)
 	}
@@ -93,9 +93,47 @@ func TestDecide_PastRenewalStillIdleReleases(t *testing.T) {
 	created := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
 	renewal := created.Add(testBillingPeriod)
 	now := renewal.Add(2 * time.Hour)
-	d, _ := Decide(created, now, testReleaseWindow, testBillingPeriod, true)
+	d, _ := Decide(created, time.Time{}, now, testReleaseWindow, testBillingPeriod, true)
 	if d != DecisionRelease {
 		t.Fatalf("Decide() = %v, want DecisionRelease when now is already past renewal", d)
+	}
+}
+
+// --- cancelDate-aware decision tests ---------------------------------------
+
+// TestDecide_CancelDateSetAlwaysKeeps_EvenInWindowAndIdle verifies the core
+// cancelDate rule: once Contabo has scheduled a real cancellation, Decide
+// must return DecisionKeep — and must NOT fall through to the renewal/idle
+// logic at all — even when createdDate/now/idle would otherwise scream
+// DecisionRelease. Re-releasing (re-cancelling) an already-cancelled
+// instance is exactly what must never happen.
+func TestDecide_CancelDateSetAlwaysKeeps_EvenInWindowAndIdle(t *testing.T) {
+	created := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
+	renewal := created.Add(testBillingPeriod)
+	now := renewal.Add(-1 * time.Hour) // in-window
+	cancelDate := time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)
+
+	d, reason := Decide(created, cancelDate, now, testReleaseWindow, testBillingPeriod, true /* idle */)
+	if d != DecisionKeep {
+		t.Fatalf("Decide() = %v, want DecisionKeep for an already-cancelled instance", d)
+	}
+	if reason == "" {
+		t.Fatal("expected a non-empty reason")
+	}
+}
+
+// TestDecide_CancelDateInPastStillKeeps verifies the rule holds even once
+// cancelDate itself has already passed (e.g. the reaper's view is stale, or
+// Contabo hasn't yet removed the instance from listings) — the reaper must
+// still never act on it; Contabo, not the reaper, owns what happens next.
+func TestDecide_CancelDateInPastStillKeeps(t *testing.T) {
+	created := time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC)
+	cancelDate := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
+	now := time.Date(2026, 7, 22, 0, 0, 0, 0, time.UTC) // well after cancelDate
+
+	d, _ := Decide(created, cancelDate, now, testReleaseWindow, testBillingPeriod, true)
+	if d != DecisionKeep {
+		t.Fatalf("Decide() = %v, want DecisionKeep for an instance whose cancelDate has already passed", d)
 	}
 }
 
@@ -194,6 +232,10 @@ type fakeContabo struct {
 }
 
 func (f *fakeContabo) ListByTag(_ context.Context, _ string) ([]contabo.Instance, error) {
+	return f.instances, f.listErr
+}
+
+func (f *fakeContabo) ListByNamePrefix(_ context.Context, _ string) ([]contabo.Instance, error) {
 	return f.instances, f.listErr
 }
 
@@ -425,5 +467,51 @@ func TestRun_ListByTagErrorPropagates(t *testing.T) {
 	}
 	if _, err := r.Run(context.Background()); err == nil {
 		t.Fatal("expected Run to propagate a ListByTag error")
+	}
+}
+
+// TestRun_CancelledInstanceIsKeptAndNeverReCancelled is the Run-level
+// counterpart to TestDecide_CancelDateSetAlwaysKeeps_EvenInWindowAndIdle: an
+// instance that already carries a Contabo CancelDate must be counted Kept
+// and must NEVER have Contabo.Delete called on it again, even though its
+// matching node is Ready and idle and it's deep inside the release window —
+// every condition that would otherwise trigger a release.
+func TestRun_CancelledInstanceIsKeptAndNeverReCancelled(t *testing.T) {
+	created := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
+	renewal := created.Add(testBillingPeriod)
+	now := renewal.Add(-1 * time.Hour) // in-window
+	cancelDate := time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)
+
+	inst := contabo.Instance{ID: 48, Name: "fuzeinfra-elastic-6", Status: "running", CreatedDate: created, CancelDate: cancelDate}
+	node := readyElasticNode("fuzeinfra-elastic-6")
+	ds := daemonSetPod("kube-proxy-def")
+
+	fc := &fakeContabo{instances: []contabo.Instance{inst}}
+	k8s := k8sfake.NewSimpleClientset(node, &ds)
+
+	r := &Reaper{
+		Contabo: fc,
+		K8s:     k8s,
+		Cfg:     Config{ReleaseWindow: testReleaseWindow, BillingPeriod: testBillingPeriod, ElasticTag: "fuzeinfra-elastic", EvictionTimeout: 5 * time.Second},
+		Now:     func() time.Time { return now },
+	}
+
+	summary, err := r.Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	if summary.Released != 0 || summary.Kept != 1 || summary.Errors != 0 {
+		t.Fatalf("summary = %+v, want Released=0 Kept=1 Errors=0 for an already-cancelled instance", summary)
+	}
+	if len(fc.deleted) != 0 {
+		t.Fatalf("expected Contabo.Delete to NEVER be called on an already-cancelled instance, deleted=%v", fc.deleted)
+	}
+
+	gotNode, err := k8s.CoreV1().Nodes().Get(context.Background(), "fuzeinfra-elastic-6", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get node: %v", err)
+	}
+	if gotNode.Spec.Unschedulable {
+		t.Fatal("expected the node NOT to be cordoned — an already-cancelled instance is never touched")
 	}
 }

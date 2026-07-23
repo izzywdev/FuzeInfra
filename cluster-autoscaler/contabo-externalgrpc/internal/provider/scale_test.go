@@ -45,6 +45,108 @@ func TestIncreaseSize_CapEnforced(t *testing.T) {
 	}
 }
 
+// TestIncreaseSize_PrefixCountCapRefusesAtOrOverMax is a regression test for
+// the prod runaway incident: a Contabo tag-assignment race left a
+// just-created instance untagged, so ListByTag reported 0 elastic instances
+// forever and the old ListByTag-based cap never bound. Here, an untagged
+// orphan (Tags: nil) whose Name still matches NamePrefix is preloaded.
+// ListByTag would report 0 for it; ListByNamePrefix (the new authority) must
+// still count it, so a cap of 1 must refuse to create ANYTHING.
+func TestIncreaseSize_PrefixCountCapRefusesAtOrOverMax(t *testing.T) {
+	fc := &fakeCloudCapTest{
+		instances: []contabo.Instance{
+			// Untagged orphan: matches the name prefix but carries no tag at
+			// all, mirroring the tag-assignment race.
+			{ID: 1, Name: "fuzeinfra-elastic-orphan1", Tags: nil},
+		},
+	}
+	cfg := provider.Config{
+		ElasticTag: "fuzeinfra-elastic",
+		NamePrefix: "fuzeinfra-elastic",
+		MaxSize:    1,
+	}
+	s := provider.New(cfg, fc)
+
+	_, err := s.NodeGroupIncreaseSize(context.Background(), &protos.NodeGroupIncreaseSizeRequest{
+		Id:    "elastic",
+		Delta: 1,
+	})
+
+	if status.Code(err) != codes.OutOfRange {
+		t.Fatalf("want OutOfRange (name-prefix count already at MaxSize), got %v", err)
+	}
+	if fc.createCalls != 0 {
+		t.Fatalf("must create NOTHING when name-prefix count is already >= MaxSize, got %d create calls", fc.createCalls)
+	}
+}
+
+// TestIncreaseSize_DeltaUsesPrefixCount verifies the delta math itself (not
+// just the outright-refusal branch) is computed from the name-prefix count:
+// one tagged instance + one untagged orphan (both matching the prefix) means
+// the authoritative current count is 2, so requesting Delta=2 against
+// MaxSize=3 must be refused (2+2=4 > 3) even though a ListByTag-based count
+// (1 tagged instance) would have permitted it (1+2=3 <= 3).
+func TestIncreaseSize_DeltaUsesPrefixCount(t *testing.T) {
+	fc := &fakeCloudCapTest{
+		instances: []contabo.Instance{
+			{ID: 1, Name: "fuzeinfra-elastic-tagged", Tags: []string{"fuzeinfra-elastic"}},
+			{ID: 2, Name: "fuzeinfra-elastic-orphan", Tags: nil},
+		},
+	}
+	cfg := provider.Config{
+		ElasticTag: "fuzeinfra-elastic",
+		NamePrefix: "fuzeinfra-elastic",
+		MaxSize:    3,
+	}
+	s := provider.New(cfg, fc)
+
+	_, err := s.NodeGroupIncreaseSize(context.Background(), &protos.NodeGroupIncreaseSizeRequest{
+		Id:    "elastic",
+		Delta: 2,
+	})
+
+	if status.Code(err) != codes.OutOfRange {
+		t.Fatalf("want OutOfRange (delta computed off the name-prefix count of 2, not the tag count of 1), got %v", err)
+	}
+	if fc.createCalls != 0 {
+		t.Fatalf("must create NOTHING when the name-prefix-count-based delta would exceed MaxSize, got %d create calls", fc.createCalls)
+	}
+}
+
+// TestIncreaseSize_PrefixCountUnderCapAllowsCreate is the inverse sanity
+// check: with the name-prefix count safely under MaxSize, scale-up proceeds
+// normally (the new cap authority isn't just permanently refusing).
+func TestIncreaseSize_PrefixCountUnderCapAllowsCreate(t *testing.T) {
+	fc := &fakeCloudCapTest{
+		instances: []contabo.Instance{
+			{ID: 1, Name: "fuzeinfra-elastic-orphan", Tags: nil},
+		},
+	}
+	cfg := provider.Config{
+		ElasticTag: "fuzeinfra-elastic",
+		NamePrefix: "fuzeinfra-elastic",
+		ProductID:  "prod-123",
+		ImageID:    "img-456",
+		Region:     "us-central",
+		MaxSize:    3,
+	}
+	s := provider.New(cfg, fc)
+
+	resp, err := s.NodeGroupIncreaseSize(context.Background(), &protos.NodeGroupIncreaseSizeRequest{
+		Id:    "elastic",
+		Delta: 1,
+	})
+	if err != nil {
+		t.Fatalf("NodeGroupIncreaseSize error: %v", err)
+	}
+	if resp == nil {
+		t.Fatal("want non-nil response on success")
+	}
+	if fc.createCalls != 1 {
+		t.Fatalf("want 1 create call, got %d", fc.createCalls)
+	}
+}
+
 func TestIncreaseSize_HappyPath(t *testing.T) {
 	// Start with 0 instances, MaxSize=2
 	fc := &fakeCloudCapTest{instances: []contabo.Instance{}}
@@ -240,8 +342,33 @@ type fakeCloudCapTest struct {
 	deletedIDs  []int64
 }
 
-func (f *fakeCloudCapTest) ListByTag(_ context.Context, _ string) ([]contabo.Instance, error) {
-	return f.instances, nil
+func (f *fakeCloudCapTest) ListByTag(_ context.Context, tag string) ([]contabo.Instance, error) {
+	// Filter by actual tag membership (rather than returning everything
+	// unconditionally) so tests can model an untagged orphan: an instance
+	// present in f.instances but whose Tags does NOT include the elastic
+	// tag is invisible to ListByTag while still visible to
+	// ListByNamePrefix — exactly the eventual-consistency failure mode the
+	// name-prefix cap exists to survive.
+	var matches []contabo.Instance
+	for _, inst := range f.instances {
+		for _, t := range inst.Tags {
+			if t == tag {
+				matches = append(matches, inst)
+				break
+			}
+		}
+	}
+	return matches, nil
+}
+
+func (f *fakeCloudCapTest) ListByNamePrefix(_ context.Context, prefix string) ([]contabo.Instance, error) {
+	var matches []contabo.Instance
+	for _, inst := range f.instances {
+		if strings.HasPrefix(inst.Name, prefix) {
+			matches = append(matches, inst)
+		}
+	}
+	return matches, nil
 }
 
 func (f *fakeCloudCapTest) Create(_ context.Context, req contabo.CreateReq) (contabo.Instance, error) {

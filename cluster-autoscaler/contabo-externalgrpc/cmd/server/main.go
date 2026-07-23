@@ -19,6 +19,7 @@ import (
 	"syscall"
 
 	"github.com/izzywdev/fuzeinfra/contabo-externalgrpc/internal/contabo"
+	"github.com/izzywdev/fuzeinfra/contabo-externalgrpc/internal/notify"
 	"github.com/izzywdev/fuzeinfra/contabo-externalgrpc/internal/protos"
 	"github.com/izzywdev/fuzeinfra/contabo-externalgrpc/internal/provider"
 	"google.golang.org/grpc"
@@ -68,6 +69,29 @@ import (
 //     therefore reference the k3s join target directly instead of the operator
 //     hand-duplicating the literal values into the template text. If
 //     USER_DATA_TEMPLATE_B64 is empty, an empty UserData is used.
+//   - NOTIFY_EMAIL_ENABLED    (optional) When "1" or "true", NodeGroupIncreaseSize
+//     sends a best-effort email immediately before every Create call (see
+//     internal/notify and internal/provider/scale.go). Default: false (disabled) —
+//     this is a purely informational early-warning, never the authoritative
+//     safeguard (that's the MaxSize name-prefix cap enforced regardless).
+//   - NOTIFY_SMTP_HOST        (required if NOTIFY_EMAIL_ENABLED) SMTP relay host.
+//   - NOTIFY_SMTP_PORT        (optional) SMTP relay port. Default: 587.
+//   - NOTIFY_SMTP_USER        (optional) SMTP auth username; if empty, no SMTP
+//     AUTH is attempted (some relays accept unauthenticated mail).
+//   - NOTIFY_SMTP_PASS        (optional) SMTP auth password. Source via the
+//     provider's existingSecret SealedSecret, never a plain Helm value.
+//   - NOTIFY_EMAIL_FROM       (required if NOTIFY_EMAIL_ENABLED) envelope/header From address.
+//   - NOTIFY_EMAIL_TO         (required if NOTIFY_EMAIL_ENABLED) comma-separated recipient list.
+//   - NOTIFY_TELEGRAM_ENABLED    (optional) When "1" or "true", NodeGroupIncreaseSize
+//     sends the same best-effort before-provision warning via the Telegram Bot API
+//     instead of email (see internal/notify.Telegram). Default: false. When both
+//     NOTIFY_TELEGRAM_ENABLED and NOTIFY_EMAIL_ENABLED are set, Telegram takes
+//     precedence — only one notifier is ever wired up.
+//   - NOTIFY_TELEGRAM_BOT_TOKEN  (required if NOTIFY_TELEGRAM_ENABLED) Telegram bot
+//     token issued by @BotFather. Source via the provider's existingSecret
+//     SealedSecret, never a plain Helm value.
+//   - NOTIFY_TELEGRAM_CHAT_ID    (required if NOTIFY_TELEGRAM_ENABLED) destination
+//     chat id the warning is posted to.
 //   - FAKE_CLOUD              (optional) When "1" or "true", the server backs
 //     the provider with an in-memory fake (internal/contabo.MemClient)
 //     instead of the real Contabo HTTP API, and CONTABO_*/K3S_* credentials
@@ -86,14 +110,23 @@ const (
 	defaultMinSize        = 0
 	defaultMaxSize        = 2
 	defaultGRPCListen     = ":8086"
+	defaultNotifySMTPPort = "587"
 )
 
-// isFakeCloud reports whether FAKE_CLOUD selects the in-memory fake provider
-// backend. Accepts "1" or "true" (case-insensitive), matching the convention
-// documented on the FAKE_CLOUD env var above. Any other value (including
-// unset/empty) means real Contabo mode.
-func isFakeCloud(v string) bool {
+// envFlagTrue parses a boolean-flag-shaped env var value: "1" or "true"
+// (case-insensitive) is true; anything else (including unset/empty) is
+// false. Shared by every "1"/"true" boolean env var in this binary
+// (FAKE_CLOUD, NOTIFY_EMAIL_ENABLED, NOTIFY_TELEGRAM_ENABLED) so they all
+// accept the same convention.
+func envFlagTrue(v string) bool {
 	return v == "1" || strings.EqualFold(v, "true")
+}
+
+// isFakeCloud reports whether FAKE_CLOUD selects the in-memory fake provider
+// backend — see envFlagTrue for the accepted value convention. Any other
+// value (including unset/empty) means real Contabo mode.
+func isFakeCloud(v string) bool {
+	return envFlagTrue(v)
 }
 
 // loadConfig builds the provider and contabo configs from environment
@@ -213,6 +246,63 @@ func loadConfig(getenv func(string) string) (provider.Config, contabo.Config, st
 		userDataTmpl = string(decoded)
 	}
 
+	// NOTIFY_*: optional best-effort before-provision warning, off by default.
+	// Two delivery mechanisms are supported — email (NOTIFY_EMAIL_ENABLED)
+	// and Telegram (NOTIFY_TELEGRAM_ENABLED) — and at most one notifier is
+	// ever wired onto provCfg.Notifier; Telegram takes precedence when both
+	// are enabled. When either is set, its delivery-critical fields must be
+	// present too — a misconfigured notifier should fail fast at startup
+	// rather than silently never send anything (Notify itself is already
+	// failure-tolerant per-call; this is a separate, one-time startup check).
+	notifyEnabled := envFlagTrue(get("NOTIFY_EMAIL_ENABLED"))
+	telegramEnabled := envFlagTrue(get("NOTIFY_TELEGRAM_ENABLED"))
+	notifyCfg := notify.Config{
+		Enabled:  notifyEnabled,
+		SMTPHost: get("NOTIFY_SMTP_HOST"),
+		SMTPPort: getDefault("NOTIFY_SMTP_PORT", defaultNotifySMTPPort),
+		SMTPUser: get("NOTIFY_SMTP_USER"),
+		SMTPPass: get("NOTIFY_SMTP_PASS"),
+		From:     get("NOTIFY_EMAIL_FROM"),
+		To:       get("NOTIFY_EMAIL_TO"),
+
+		TelegramEnabled:  telegramEnabled,
+		TelegramBotToken: get("NOTIFY_TELEGRAM_BOT_TOKEN"),
+		TelegramChatID:   get("NOTIFY_TELEGRAM_CHAT_ID"),
+	}
+	if notifyEnabled {
+		notifyRequired := map[string]string{
+			"NOTIFY_SMTP_HOST":  notifyCfg.SMTPHost,
+			"NOTIFY_EMAIL_FROM": notifyCfg.From,
+			"NOTIFY_EMAIL_TO":   notifyCfg.To,
+		}
+		for name, val := range notifyRequired {
+			if val == "" {
+				return provider.Config{}, contabo.Config{}, "", fmt.Errorf("missing required environment variable %s (required when NOTIFY_EMAIL_ENABLED is set)", name)
+			}
+		}
+	}
+	if telegramEnabled {
+		telegramRequired := map[string]string{
+			"NOTIFY_TELEGRAM_BOT_TOKEN": notifyCfg.TelegramBotToken,
+			"NOTIFY_TELEGRAM_CHAT_ID":   notifyCfg.TelegramChatID,
+		}
+		for name, val := range telegramRequired {
+			if val == "" {
+				return provider.Config{}, contabo.Config{}, "", fmt.Errorf("missing required environment variable %s (required when NOTIFY_TELEGRAM_ENABLED is set)", name)
+			}
+		}
+	}
+
+	// Selection: Telegram takes precedence over email when both are enabled;
+	// otherwise fall back to the (possibly disabled, safe no-op) Emailer so
+	// provCfg.Notifier is always non-nil.
+	var notifier notify.Notifier
+	if telegramEnabled {
+		notifier = notify.NewTelegram(notifyCfg)
+	} else {
+		notifier = notify.New(notifyCfg)
+	}
+
 	provCfg := provider.Config{
 		ElasticTag:   elasticTag,
 		NamePrefix:   elasticNamePrefix,
@@ -225,6 +315,7 @@ func loadConfig(getenv func(string) string) (provider.Config, contabo.Config, st
 		UserDataTmpl: userDataTmpl,
 		K3SServerURL: k3sServerURL,
 		K3SNodeToken: k3sNodeToken,
+		Notifier:     notifier,
 	}
 
 	contaboCfg := contabo.Config{

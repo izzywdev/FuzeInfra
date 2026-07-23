@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -44,6 +43,14 @@ type Instance struct {
 	// CreatedDate as "unknown" and skip any billing-period decision for
 	// that instance rather than guessing.
 	CreatedDate time.Time
+	// CancelDate is set by Contabo once an instance's cancel (Delete) has
+	// been requested; it is the REAL termination date (cancellation is
+	// end-of-billing-period, never immediate — see Delete's doc comment
+	// below). The zero value means the instance has NOT been cancelled.
+	// Callers (the billing-aware reaper, internal/reaper) MUST treat a
+	// non-zero CancelDate as the authoritative termination anchor and MUST
+	// NOT re-cancel an instance that already carries one.
+	CancelDate time.Time
 }
 
 // CreateReq is the request to create a new instance.
@@ -58,6 +65,12 @@ type CreateReq struct {
 	// secret is referenced) — break-glass SSH access is instead provisioned
 	// via cloud-init (UserData), which every node already receives.
 	SSHKeyID int64
+	// UserData is PLAIN cloud-config/cloud-init text (e.g. starting with
+	// "#cloud-config"), NOT base64. Create sends it to Contabo's
+	// POST /v1/compute/instances `userData` field verbatim — Contabo expects
+	// plain text there, never base64 (see Create's doc comment on the
+	// createBody literal for the incident this caused when it was wrongly
+	// base64-encoded).
 	UserData string
 	Tags     []string
 }
@@ -65,6 +78,14 @@ type CreateReq struct {
 // Client defines the Contabo API client interface.
 type Client interface {
 	ListByTag(ctx context.Context, tag string) ([]Instance, error)
+	// ListByNamePrefix lists ALL Contabo instances (regardless of tag state)
+	// whose displayName starts with prefix, fully paginated. This is the
+	// authoritative source for the cluster-autoscaler provider's hard
+	// anti-runaway cap (see internal/provider/scale.go) — unlike ListByTag,
+	// it also catches untagged orphans (e.g. an instance a tag-assignment
+	// bug left untagged), which is exactly the failure mode that let the
+	// provider's MaxSize cap be silently defeated in prod (see PR history).
+	ListByNamePrefix(ctx context.Context, prefix string) ([]Instance, error)
 	Create(ctx context.Context, req CreateReq) (Instance, error)
 	Delete(ctx context.Context, id int64) error
 }
@@ -82,6 +103,34 @@ type HTTPClient struct {
 	// call.
 	tagCacheMu sync.Mutex
 	tagCache   map[string]int64
+
+	// instancePollAttempts/instancePollInterval bound how long Create waits,
+	// after a successful POST /v1/compute/instances, for the new instance to
+	// become visible to GET /v1/compute/instances/{id} before attempting to
+	// tag it. Contabo's API is eventually consistent: a tag-assignment call
+	// issued immediately after create can 404 ("Entry Resource not found by
+	// resourceId") because the instance hasn't propagated to the tag
+	// subsystem yet (observed live in prod, e.g. instance 203459381). Total
+	// wall-clock budget is (instancePollAttempts-1) * instancePollInterval,
+	// i.e. ~36s at the defaults below.
+	instancePollAttempts int
+	instancePollInterval time.Duration
+
+	// tagAssignRetryAttempts/tagAssignRetryInterval bound retries of the tag
+	// assignment call itself when it still 404s (or 5xxs) even after
+	// waitForInstanceVisible already confirmed the plain instance GET
+	// succeeds — the tag subsystem can lag slightly behind the instance
+	// subsystem, so this is a second, independent consistency window.
+	tagAssignRetryAttempts int
+	tagAssignRetryInterval time.Duration
+
+	// cancelRetryAttempts/cancelRetryInterval bound retries of the cancel
+	// (Delete) call on a 404/5xx. Delete is also used as the rollback path
+	// when tagging ultimately fails, so a cancel that itself races Contabo's
+	// eventual consistency must not be treated as a hard failure — otherwise
+	// the rollback leaks the instance exactly like the bug it exists to fix.
+	cancelRetryAttempts int
+	cancelRetryInterval time.Duration
 }
 
 // tagColor is the color assigned to any tag this client creates. Contabo
@@ -90,12 +139,51 @@ type HTTPClient struct {
 // effect on tag-assignment/lookup.
 const tagColor = "#0A78C3"
 
+// errRetryable marks an error returned by a Contabo API call as transient
+// (HTTP 404 from eventual consistency, or 5xx) — i.e. safe to retry with
+// backoff rather than failing immediately. Wrapped via %w so callers use
+// errors.Is(err, errRetryable) to decide whether to retry.
+var errRetryable = errors.New("retryable contabo API error")
+
+// isRetryableStatus reports whether an HTTP status from the Contabo API
+// should be treated as transient/eventual-consistency (404 — the resource
+// hasn't propagated yet — or any 5xx) rather than a hard failure.
+func isRetryableStatus(code int) bool {
+	return code == http.StatusNotFound || code >= 500
+}
+
 // NewClient creates a new Contabo API client.
 func NewClient(cfg Config) *HTTPClient {
 	return &HTTPClient{
 		cfg:      cfg,
 		hc:       &http.Client{Timeout: 30 * time.Second},
 		tagCache: make(map[string]int64),
+
+		instancePollAttempts: 10,
+		instancePollInterval: 4 * time.Second,
+
+		tagAssignRetryAttempts: 6,
+		tagAssignRetryInterval: 5 * time.Second,
+
+		cancelRetryAttempts: 5,
+		cancelRetryInterval: 3 * time.Second,
+	}
+}
+
+// sleepCtx blocks for d, or until ctx is cancelled (whichever comes first),
+// returning ctx.Err() in the cancellation case so a retry loop stops
+// promptly on shutdown instead of sleeping out its full backoff.
+func sleepCtx(ctx context.Context, d time.Duration) error {
+	if d <= 0 {
+		return nil
+	}
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
 	}
 }
 
@@ -247,6 +335,7 @@ func (c *HTTPClient) ListByTag(ctx context.Context, tag string) ([]Instance, err
 			DisplayName string `json:"displayName"`
 			Status      string `json:"status"`
 			CreatedDate string `json:"createdDate"`
+			CancelDate  string `json:"cancelDate"`
 			Addresses   struct {
 				Private []struct {
 					IP string `json:"ip"`
@@ -279,6 +368,11 @@ func (c *HTTPClient) ListByTag(ctx context.Context, tag string) ([]Instance, err
 			log.Printf("contabo: instance %d (%s) has unparsable createdDate %q; leaving CreatedDate zero (billing-period decisions will be skipped for it)", inst.InstanceID, inst.DisplayName, inst.CreatedDate)
 		}
 
+		cancelDate, ok := parseContaboTime(inst.CancelDate)
+		if !ok && inst.CancelDate != "" {
+			log.Printf("contabo: instance %d (%s) has unparsable cancelDate %q; leaving CancelDate zero", inst.InstanceID, inst.DisplayName, inst.CancelDate)
+		}
+
 		instances = append(instances, Instance{
 			ID:          inst.InstanceID,
 			Name:        inst.DisplayName,
@@ -286,10 +380,150 @@ func (c *HTTPClient) ListByTag(ctx context.Context, tag string) ([]Instance, err
 			PrivateIP:   privateIP,
 			Tags:        []string{tag},
 			CreatedDate: createdDate,
+			CancelDate:  cancelDate,
 		})
 	}
 
 	return instances, nil
+}
+
+// listComputeInstancesPageSize/listComputeInstancesMaxPages bound
+// listAllComputeInstances' page walk. 100 is Contabo's max page size; the
+// 50-page cap (5000 instances) is far beyond any realistic FuzeInfra fleet
+// and exists only so a pagination bug (e.g. a page that never comes back
+// short) can't loop forever — hitting it is logged loudly since it means the
+// result is a silent undercount, which matters a lot to a caller using it as
+// a safety-cap authority (ListByNamePrefix).
+const (
+	listComputeInstancesPageSize = 100
+	listComputeInstancesMaxPages = 50
+)
+
+// listAllComputeInstances fetches EVERY Contabo compute instance across all
+// pages of GET /v1/compute/instances, decoding each into an Instance
+// (Tags left nil — this is a global, not tag-scoped, listing; ListByTag sets
+// Tags itself from the tag-assignments lookup it already did).
+//
+// Contabo's pagination is 1-based (page=1 is the first page, NOT page=0) —
+// confirmed live via the ca-cleanup-orphans workflow
+// (.github/workflows/ca-cleanup-orphans.yml) after page=0 silently returned
+// the same first page forever.
+func (c *HTTPClient) listAllComputeInstances(ctx context.Context, tok string) ([]Instance, error) {
+	var all []Instance
+	for page := 1; page <= listComputeInstancesMaxPages; page++ {
+		items, err := c.fetchComputeInstancesPage(ctx, tok, page, listComputeInstancesPageSize)
+		if err != nil {
+			return nil, err
+		}
+		if len(items) == 0 {
+			return all, nil
+		}
+		all = append(all, items...)
+		if len(items) < listComputeInstancesPageSize {
+			// A short page means this was the last one.
+			return all, nil
+		}
+	}
+	log.Printf("contabo: WARNING listAllComputeInstances hit the %d-page cap (%d instances collected) — the walk stopped early and the result may be an undercount", listComputeInstancesMaxPages, len(all))
+	return all, nil
+}
+
+// fetchComputeInstancesPage fetches a single (1-based) page of GET
+// /v1/compute/instances and decodes each entry into an Instance, including
+// CreatedDate/CancelDate/PrivateIP (Tags is left nil; see
+// listAllComputeInstances).
+func (c *HTTPClient) fetchComputeInstancesPage(ctx context.Context, tok string, page, size int) ([]Instance, error) {
+	u := fmt.Sprintf("%s/v1/compute/instances?page=%d&size=%d", c.cfg.BaseURL, page, size)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	if err != nil {
+		return nil, fmt.Errorf("create instances request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+tok)
+	req.Header.Set("x-request-id", newRequestID())
+
+	resp, err := c.hc.Do(req)
+	if err != nil {
+		log.Printf("contabo: GET %s failed: %v", u, err)
+		return nil, fmt.Errorf("instances request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	log.Printf("contabo: GET /v1/compute/instances?page=%d&size=%d -> %d", page, size, resp.StatusCode)
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("instances request (page=%d) failed with status %d: %s", page, resp.StatusCode, string(body))
+	}
+
+	var result struct {
+		Data []struct {
+			InstanceID  int64  `json:"instanceId"`
+			DisplayName string `json:"displayName"`
+			Status      string `json:"status"`
+			CreatedDate string `json:"createdDate"`
+			CancelDate  string `json:"cancelDate"`
+			Addresses   struct {
+				Private []struct {
+					IP string `json:"ip"`
+				} `json:"private"`
+			} `json:"addresses"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("decode instances response (page=%d): %w", page, err)
+	}
+
+	items := make([]Instance, 0, len(result.Data))
+	for _, inst := range result.Data {
+		privateIP := ""
+		if len(inst.Addresses.Private) > 0 {
+			privateIP = inst.Addresses.Private[0].IP
+		}
+
+		createdDate, ok := parseContaboTime(inst.CreatedDate)
+		if !ok && inst.CreatedDate != "" {
+			log.Printf("contabo: instance %d (%s) has unparsable createdDate %q; leaving CreatedDate zero", inst.InstanceID, inst.DisplayName, inst.CreatedDate)
+		}
+		cancelDate, ok := parseContaboTime(inst.CancelDate)
+		if !ok && inst.CancelDate != "" {
+			log.Printf("contabo: instance %d (%s) has unparsable cancelDate %q; leaving CancelDate zero", inst.InstanceID, inst.DisplayName, inst.CancelDate)
+		}
+
+		items = append(items, Instance{
+			ID:          inst.InstanceID,
+			Name:        inst.DisplayName,
+			Status:      inst.Status,
+			PrivateIP:   privateIP,
+			CreatedDate: createdDate,
+			CancelDate:  cancelDate,
+		})
+	}
+	return items, nil
+}
+
+// ListByNamePrefix implements Client.ListByNamePrefix. It walks every page
+// of GET /v1/compute/instances (see listAllComputeInstances) and filters
+// client-side on prefix, deliberately WITHOUT consulting tag state — see the
+// interface doc comment on why: this is the authoritative count the
+// provider's anti-runaway cap relies on, and must catch untagged orphans
+// that ListByTag structurally cannot see.
+func (c *HTTPClient) ListByNamePrefix(ctx context.Context, prefix string) ([]Instance, error) {
+	tok, err := c.token(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("get token: %w", err)
+	}
+
+	all, err := c.listAllComputeInstances(ctx, tok)
+	if err != nil {
+		return nil, fmt.Errorf("list all compute instances: %w", err)
+	}
+
+	var matched []Instance
+	for _, inst := range all {
+		if strings.HasPrefix(inst.Name, prefix) {
+			matched = append(matched, inst)
+		}
+	}
+	return matched, nil
 }
 
 // parseContaboTime parses a Contabo API timestamp field (e.g. createdDate),
@@ -503,6 +737,10 @@ func (c *HTTPClient) resolveTagID(ctx context.Context, tok, name string) (int64,
 // assignTag assigns tagID to instanceID via
 // POST /v1/tags/{tagId}/assignments/instance/{instanceId} (no request
 // body). See https://api.contabo.com/#tag/Tag-Assignments.
+//
+// A non-2xx response is wrapped with errRetryable when the status is 404 or
+// 5xx (see isRetryableStatus) so assignTagWithRetry can distinguish a
+// transient eventual-consistency failure from a hard one.
 func (c *HTTPClient) assignTag(ctx context.Context, tok string, tagID, instanceID int64) error {
 	path := fmt.Sprintf("/v1/tags/%d/assignments/instance/%d", tagID, instanceID)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.cfg.BaseURL+path, nil)
@@ -524,9 +762,39 @@ func (c *HTTPClient) assignTag(ctx context.Context, tok string, tagID, instanceI
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(resp.Body)
 		log.Printf("contabo: tag assignment (tagId=%d instanceId=%d) failed with status %d: %s", tagID, instanceID, resp.StatusCode, string(body))
+		if isRetryableStatus(resp.StatusCode) {
+			return fmt.Errorf("tag-assignment request failed with status %d: %s: %w", resp.StatusCode, string(body), errRetryable)
+		}
 		return fmt.Errorf("tag-assignment request failed with status %d: %s", resp.StatusCode, string(body))
 	}
 	return nil
+}
+
+// assignTagWithRetry calls assignTag, retrying up to tagAssignRetryAttempts
+// times (fixed backoff of tagAssignRetryInterval between attempts) as long
+// as the failure is retryable (see isRetryableStatus) — this is what closes
+// the eventual-consistency race live prod hit: the tag subsystem can 404 a
+// just-created instance even after waitForInstanceVisible's plain GET
+// already succeeded. A non-retryable error is returned immediately.
+func (c *HTTPClient) assignTagWithRetry(ctx context.Context, tok string, tagID, instanceID int64) error {
+	var lastErr error
+	for attempt := 0; attempt < c.tagAssignRetryAttempts; attempt++ {
+		if attempt > 0 {
+			if err := sleepCtx(ctx, c.tagAssignRetryInterval); err != nil {
+				return err
+			}
+		}
+		err := c.assignTag(ctx, tok, tagID, instanceID)
+		if err == nil {
+			return nil
+		}
+		lastErr = err
+		if !errors.Is(err, errRetryable) {
+			return err
+		}
+		log.Printf("contabo: tag assignment (tagId=%d instanceId=%d) retryable failure (attempt %d/%d): %v", tagID, instanceID, attempt+1, c.tagAssignRetryAttempts, err)
+	}
+	return fmt.Errorf("tag assignment (tagId=%d instanceId=%d) did not succeed after %d attempts: %w", tagID, instanceID, c.tagAssignRetryAttempts, lastErr)
 }
 
 // applyTags resolves (creating if necessary) and assigns every tag name in
@@ -537,11 +805,83 @@ func (c *HTTPClient) applyTags(ctx context.Context, tok string, instanceID int64
 		if err != nil {
 			return fmt.Errorf("resolve tag %q: %w", name, err)
 		}
-		if err := c.assignTag(ctx, tok, tagID, instanceID); err != nil {
+		if err := c.assignTagWithRetry(ctx, tok, tagID, instanceID); err != nil {
 			return fmt.Errorf("assign tag %q (id=%d) to instance %d: %w", name, tagID, instanceID, err)
 		}
 	}
 	return nil
+}
+
+// getInstance retrieves a single instance via GET
+// /v1/compute/instances/{id}. It returns (true, nil) when Contabo reports
+// the instance (HTTP 200), (false, nil) when Contabo returns 404 (not yet
+// visible — the eventual-consistency case waitForInstanceVisible polls
+// for), and a non-nil error for any other failure.
+func (c *HTTPClient) getInstance(ctx context.Context, tok string, id int64) (bool, error) {
+	path := fmt.Sprintf("/v1/compute/instances/%d", id)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.cfg.BaseURL+path, nil)
+	if err != nil {
+		return false, fmt.Errorf("create get-instance request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+tok)
+	req.Header.Set("x-request-id", newRequestID())
+
+	resp, err := c.hc.Do(req)
+	if err != nil {
+		log.Printf("contabo: GET %s failed: %v", path, err)
+		return false, fmt.Errorf("get-instance request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	log.Printf("contabo: GET %s -> %d", path, resp.StatusCode)
+
+	if resp.StatusCode == http.StatusNotFound {
+		return false, nil
+	}
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return false, fmt.Errorf("get-instance request failed with status %d: %s", resp.StatusCode, string(body))
+	}
+	return true, nil
+}
+
+// waitForInstanceVisible polls getInstance until Contabo reports the
+// just-created instance as visible (HTTP 200), or the bounded retry budget
+// (instancePollAttempts attempts, instancePollInterval apart) is exhausted.
+//
+// This closes the eventual-consistency race observed live in prod: Create
+// succeeds (e.g. instance 203459381), but an immediate tag-assignment call
+// 404s ("Entry Resource not found by resourceId") because the instance
+// hasn't propagated to the tag subsystem yet. Waiting for the plain
+// instance GET to succeed first, before ever calling the tag-assignment
+// endpoint, closes most of that window; assignTagWithRetry closes the
+// remainder (the tag subsystem can lag slightly behind the instance
+// subsystem).
+//
+// A non-404 error from getInstance also just counts as a failed attempt
+// (rather than returning immediately) since a transient 5xx during the same
+// propagation window is plausible and no more actionable than a 404 here.
+func (c *HTTPClient) waitForInstanceVisible(ctx context.Context, tok string, id int64) error {
+	var lastErr error
+	for attempt := 0; attempt < c.instancePollAttempts; attempt++ {
+		if attempt > 0 {
+			if err := sleepCtx(ctx, c.instancePollInterval); err != nil {
+				return err
+			}
+		}
+		ready, err := c.getInstance(ctx, tok, id)
+		if err != nil {
+			lastErr = err
+			log.Printf("contabo: instance %d visibility check error (attempt %d/%d): %v", id, attempt+1, c.instancePollAttempts, err)
+			continue
+		}
+		if ready {
+			return nil
+		}
+		lastErr = fmt.Errorf("instance %d not yet visible (404)", id)
+		log.Printf("contabo: instance %d not yet visible (attempt %d/%d)", id, attempt+1, c.instancePollAttempts)
+	}
+	return fmt.Errorf("instance %d did not become visible after %d attempts: %w", id, c.instancePollAttempts, lastErr)
 }
 
 // Create creates a new instance.
@@ -574,7 +914,20 @@ func (c *HTTPClient) Create(ctx context.Context, req CreateReq) (Instance, error
 			ProductID:   req.ProductID,
 			Region:      req.Region,
 			SSHKeys:     sshKeys,
-			UserData:    base64.StdEncoding.EncodeToString([]byte(req.UserData)),
+			// PLAIN text, NOT base64. Contabo's POST /v1/compute/instances
+			// userData field expects the raw cloud-config text as-is — this
+			// was previously (wrongly) base64-encoded here, which made
+			// Contabo deliver base64 gibberish as the instance's user-data;
+			// cloud-init couldn't parse "#cloud-config" and silently skipped
+			// it entirely, so NO created elastic instance ever got its SSH
+			// key or joined k3s (confirmed live: zero join attempts logged
+			// by the k3s server, break-glass SSH key rejected on a live
+			// orphan). The working baseline nodes (Terraform
+			// contabo_instance.user_data = templatefile(...)) always sent
+			// plain text, which is why only the Go-provider-created elastic
+			// nodes were ever affected. See CreateReq.UserData's doc comment
+			// and deploy/elastic-userdata.template.
+			UserData: req.UserData,
 		}
 
 		reqBodyBytes, err := json.Marshal(createBody)
@@ -633,15 +986,30 @@ func (c *HTTPClient) Create(ctx context.Context, req CreateReq) (Instance, error
 		// displayName ("There is already an instance with the same display
 		// name", HTTP 400) without ever showing up in ListByTag for CA to
 		// retry against. So on tag failure we roll the instance back
-		// (best-effort delete) rather than returning it as a success — the
-		// instance must end up either tagged, or gone.
+		// (best-effort delete, itself retried — see Delete) rather than
+		// returning it as a success — the instance must end up either
+		// tagged, or gone.
 		if len(req.Tags) > 0 {
+			// Wait for the instance to become visible to a plain GET before
+			// ever calling the tag-assignment endpoint (see
+			// waitForInstanceVisible for why: Contabo's eventual consistency
+			// means an immediate tag-assignment call can 404 even though
+			// create just succeeded).
+			if visErr := c.waitForInstanceVisible(ctx, tok, inst.InstanceID); visErr != nil {
+				log.Printf("contabo: instance %d (%s) created but never became visible for tagging (%v); rolling back", inst.InstanceID, inst.DisplayName, visErr)
+				if delErr := c.Delete(ctx, inst.InstanceID); delErr != nil {
+					log.Printf("contabo: rollback cancel of instance %d (never became visible) ALSO failed: %v — instance %d may be LEAKED, needs manual cleanup", inst.InstanceID, delErr, inst.InstanceID)
+					return Instance{}, false, fmt.Errorf("instance %d never became visible for tagging: %w (rollback cancel also failed: %v)", inst.InstanceID, visErr, delErr)
+				}
+				return Instance{}, false, fmt.Errorf("instance %d never became visible for tagging: %w (instance rolled back)", inst.InstanceID, visErr)
+			}
+
 			tagErr := c.applyTags(ctx, tok, inst.InstanceID, req.Tags)
 			if tagErr != nil {
 				log.Printf("contabo: instance %d (%s) created but tagging failed (%v); rolling back", inst.InstanceID, inst.DisplayName, tagErr)
 				if delErr := c.Delete(ctx, inst.InstanceID); delErr != nil {
-					log.Printf("contabo: rollback delete of untagged instance %d also failed: %v — instance may be LEAKED, needs manual cleanup", inst.InstanceID, delErr)
-					return Instance{}, false, fmt.Errorf("tag instance %d: %w (rollback delete also failed: %v)", inst.InstanceID, tagErr, delErr)
+					log.Printf("contabo: rollback cancel of untagged instance %d ALSO failed: %v — instance %d may be LEAKED, needs manual cleanup", inst.InstanceID, delErr, inst.InstanceID)
+					return Instance{}, false, fmt.Errorf("tag instance %d: %w (rollback cancel also failed: %v)", inst.InstanceID, tagErr, delErr)
 				}
 				return Instance{}, false, fmt.Errorf("tag instance %d: %w (instance rolled back)", inst.InstanceID, tagErr)
 			}
@@ -707,7 +1075,44 @@ func (c *HTTPClient) Create(ctx context.Context, req CreateReq) (Instance, error
 // needs Delete to know the tag name, which the Client interface
 // deliberately doesn't expose today — left as a flagged follow-up rather
 // than widening the interface here.
+//
+// Delete itself retries a 404/5xx cancel response up to cancelRetryAttempts
+// times (fixed backoff of cancelRetryInterval between attempts) before
+// giving up. This matters most on the rollback path — Create calls Delete
+// to clean up an instance whose tag assignment ultimately failed, and a
+// cancel call can race the exact same Contabo eventual-consistency window
+// that made the tag assignment fail in the first place (404 "resource not
+// found") or hit a transient 5xx. A non-retrying cancel there would leak the
+// instance exactly like the bug this whole retry chain exists to fix. Any
+// give-up after exhausting the retry budget logs the instance id prominently
+// so an orphan is traceable (see ca-delete-instance.yml for manual cleanup).
 func (c *HTTPClient) Delete(ctx context.Context, id int64) error {
+	var lastErr error
+	for attempt := 0; attempt < c.cancelRetryAttempts; attempt++ {
+		if attempt > 0 {
+			if err := sleepCtx(ctx, c.cancelRetryInterval); err != nil {
+				return err
+			}
+		}
+		err := c.cancelOnce(ctx, id)
+		if err == nil {
+			return nil
+		}
+		lastErr = err
+		if !errors.Is(err, errRetryable) {
+			return err
+		}
+		log.Printf("contabo: cancel of instance %d retryable failure (attempt %d/%d): %v", id, attempt+1, c.cancelRetryAttempts, err)
+	}
+	log.Printf("contabo: cancel of instance %d did NOT succeed after %d attempts — instance %d may be LEAKED/orphaned and needs manual cleanup (see ca-delete-instance.yml): %v", id, c.cancelRetryAttempts, id, lastErr)
+	return fmt.Errorf("cancel instance %d: exhausted %d retry attempts: %w", id, c.cancelRetryAttempts, lastErr)
+}
+
+// cancelOnce performs a single logical cancel of instance id, including the
+// existing transparent 401-token-refresh retry. Any 404/5xx failure is
+// wrapped with errRetryable (via isRetryableStatus) so Delete's outer retry
+// loop can distinguish it from a hard failure.
+func (c *HTTPClient) cancelOnce(ctx context.Context, id int64) error {
 	path := fmt.Sprintf("/v1/compute/instances/%d/cancel", id)
 
 	// Helper to perform the actual cancel request
@@ -738,6 +1143,9 @@ func (c *HTTPClient) Delete(ctx context.Context, id int64) error {
 		// Accept 200/201/204 as success (docs specify 201; tolerate the
 		// others in case Contabo's actual behavior differs slightly).
 		if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusNoContent {
+			if isRetryableStatus(resp.StatusCode) {
+				return false, fmt.Errorf("cancel request failed with status %d: %s: %w", resp.StatusCode, string(body), errRetryable)
+			}
 			return false, fmt.Errorf("cancel request failed with status %d: %s", resp.StatusCode, string(body))
 		}
 

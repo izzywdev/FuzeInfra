@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"strings"
 	"sync"
 	"time"
 )
@@ -48,6 +49,25 @@ func (m *MemClient) ListByTag(_ context.Context, tag string) ([]Instance, error)
 	}
 
 	log.Printf("[fake-cloud] ListByTag tag=%q matched=%d", tag, len(matches))
+	return matches, nil
+}
+
+// ListByNamePrefix returns all in-memory instances whose Name starts with
+// prefix, regardless of tag state — mirrors HTTPClient.ListByNamePrefix
+// (see internal/contabo/client.go), which is the authoritative source for
+// the provider's anti-runaway cap.
+func (m *MemClient) ListByNamePrefix(_ context.Context, prefix string) ([]Instance, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	var matches []Instance
+	for _, inst := range m.instances {
+		if strings.HasPrefix(inst.Name, prefix) {
+			matches = append(matches, inst)
+		}
+	}
+
+	log.Printf("[fake-cloud] ListByNamePrefix prefix=%q matched=%d", prefix, len(matches))
 	return matches, nil
 }
 
