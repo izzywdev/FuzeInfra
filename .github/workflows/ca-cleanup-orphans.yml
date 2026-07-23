@@ -72,8 +72,10 @@ jobs:
           cat /tmp/elastic.txt || true
           echo "----- ALL instances (id/name/status/product) -----"
           cat /tmp/all.txt || true
-          echo "----- FULL object: 203408869 (mendys-prod) -----"
-          curl -sS -H "Authorization: Bearer $TOK" -H "x-request-id: $(cat /proc/sys/kernel/random/uuid)"             "https://api.contabo.com/v1/compute/instances/203408869"             | jq '.data[0] | {instanceId,displayName,name,status,cancelDate,createdDate,productId,ipConfig:(.ipConfig.v4.ip)}' || true
+          echo "----- IPs (id name status ip) -----"
+          for IID in 203458548 203459381 203459441 203459485 203459537 203408869; do
+            curl -sS -H "Authorization: Bearer $TOK" -H "x-request-id: $(cat /proc/sys/kernel/random/uuid)"               "https://api.contabo.com/v1/compute/instances/$IID"               | jq -r '.data[0] | "\(.instanceId)	\(.displayName)	\(.status)	\(.ipConfig.v4.ip)"' || true
+          done
           echo "===================================================="
           {
             echo "## ca-cleanup-orphans ($MODE)"
