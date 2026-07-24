@@ -567,7 +567,30 @@ cloudflareTunnel:
   enabled: false
   image: cloudflare/cloudflared:latest
   metricsPort: 2000
+  # ALL app ingress (every product family) multiplexes through this tunnel, so a
+  # single replica is a shared-fate bottleneck: a broken backend's long-polling /
+  # canceled socket.io streams congest the one pod's edge legs and add head-of-line
+  # latency for everyone (see #389). Run ≥2 in prod. Each replica opens its own set
+  # of HA edge connections, so replicas spread load across independent legs.
   replicas: 1
+  # Per-replica resource envelope for the cloudflared process. Cloudflared is light;
+  # requests keep it schedulable, the CPU limit caps a congestion/retry storm.
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: "1"
+      memory: 256Mi
+  # PodDisruptionBudget — only rendered when replicas > 1 (a PDB with minAvailable:1
+  # on a single replica would block node drains). Keeps ≥1 tunnel leg up during
+  # voluntary disruptions (drains, rollouts).
+  pdb:
+    minAvailable: 1
+  # Soft anti-affinity: prefer scheduling replicas onto different nodes so one node
+  # going down doesn't take the whole tunnel with it. Soft (preferred) so it never
+  # blocks scheduling on a single-node cluster.
+  spreadAcrossNodes: true
   # Named Tunnel UUID (from `cloudflared tunnel list` or Terraform output).
   # When set, switches to local-config mode with inline ingress rules.
   tunnelId: ""

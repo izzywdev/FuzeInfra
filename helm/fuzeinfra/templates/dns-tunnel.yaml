@@ -136,6 +136,13 @@ metadata:
     {{- include "fuzeinfra.labels" . | nindent 4 }}
 spec:
   replicas: {{ .Values.cloudflareTunnel.replicas }}
+  # Never drop below the desired replica count during a rollout — keep every tunnel
+  # leg up while a new image/config rolls out (surge new pods before retiring old).
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
   selector:
     matchLabels:
       {{- include "fuzeinfra.selectorLabels" (dict "component" "cloudflare-tunnel" "root" $) | nindent 6 }}
@@ -147,6 +154,17 @@ spec:
       annotations:
         checksum/tunnel-id: {{ .Values.cloudflareTunnel.tunnelId | sha256sum }}
     spec:
+      {{- if .Values.cloudflareTunnel.spreadAcrossNodes }}
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    {{- include "fuzeinfra.selectorLabels" (dict "component" "cloudflare-tunnel" "root" $) | nindent 20 }}
+                topologyKey: kubernetes.io/hostname
+      {{- end }}
       containers:
         - name: cloudflared
           image: {{ .Values.cloudflareTunnel.image }}
@@ -174,6 +192,10 @@ spec:
                   name: fuzeinfra-tunnel-secrets
                   key: CLOUDFLARE_TUNNEL_TOKEN
                   optional: true
+          {{- end }}
+          {{- with .Values.cloudflareTunnel.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
           {{- end }}
           ports:
             - containerPort: {{ .Values.cloudflareTunnel.metricsPort }}
@@ -211,4 +233,18 @@ spec:
               - key: CLOUDFLARE_TUNNEL_CREDENTIALS
                 path: creds.json
       {{- end }}
+{{- if gt (int .Values.cloudflareTunnel.replicas) 1 }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: fuzeinfra-cloudflare-tunnel
+  labels:
+    {{- include "fuzeinfra.labels" . | nindent 4 }}
+spec:
+  minAvailable: {{ .Values.cloudflareTunnel.pdb.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "fuzeinfra.selectorLabels" (dict "component" "cloudflare-tunnel" "root" $) | nindent 6 }}
+{{- end }}
 {{- end }}
