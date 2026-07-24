@@ -27,6 +27,16 @@ spec:
   destination:
     server: https://kubernetes.default.svc
     namespace: fuzeinfra
+  # PROTECT AGAINST DATA LOSS (2026-07-24 incident): the live DB StatefulSets carry
+  # volumeClaimTemplates.storageClassName=local-path (from global.storageClass) but
+  # their PVCs were migrated to Longhorn. Without this, an Argo recreate of the STS
+  # (immutable VCT) can drop a fresh blank local-path PVC + prune the Longhorn one,
+  # destroying the DB data. Ignoring the VCT keeps Argo from ever touching storage.
+  ignoreDifferences:
+    - group: apps
+      kind: StatefulSet
+      jqPathExpressions:
+        - .spec.volumeClaimTemplates
   syncPolicy:
     automated:
       prune: true
