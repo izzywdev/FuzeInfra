@@ -51,6 +51,11 @@ mongodb:
   resources:
     requests: {cpu: 100m, memory: 256Mi}
     limits: {cpu: "1", memory: 512Mi}
+neo4j:
+  # Pin to durable Longhorn-disk nodes (same as postgres) so Neo4j never runs
+  # on an ephemeral autoscaled node once products start seeding it.
+  nodeSelector:
+    node.longhorn.io/create-default-disk: "true"
 redis:
   storage: 2Gi
   resources:

@@ -243,6 +243,9 @@ neo4j:
   httpPort: 7474
   boltPort: 7687
   storage: 5Gi
+  # Optional durable-node pin (empty by default; set on overlays with a durable
+  # node pool). See postgres.nodeSelector.
+  nodeSelector: {}
   resources:
     requests: { cpu: 200m, memory: 512Mi }
     limits:   { cpu: "1",  memory: 2Gi }

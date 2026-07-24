@@ -315,6 +315,11 @@ spec:
         {{- include "fuzeinfra.labels" . | nindent 8 }}
         {{- include "fuzeinfra.selectorLabels" (dict "component" "neo4j" "root" $) | nindent 8 }}
     spec:
+      {{- with .Values.neo4j.nodeSelector }}
+      # Pin Neo4j to durable (Longhorn-disk) nodes — same rationale as Postgres.
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       containers:
         - name: neo4j
           image: {{ .Values.neo4j.image }}
