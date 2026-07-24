@@ -1,1 +1,101 @@
-fatal: path 'cluster-autoscaler/contabo-externalgrpc/deploy/elastic-userdata-eth1.template' does not exist in 'origin/main'
+#cloud-config
+# Canonical cloud-init UserData template for Contabo elastic (autoscaler-managed)
+# nodes. This file is NOT read directly by the provider — it is a source
+# artifact that an operator base64-encodes into the Helm value
+# clusterAutoscaler.provider.userDataTemplateB64 (see helm/fuzeinfra/values-contabo.yaml),
+# which the contabo-externalgrpc server decodes into USER_DATA_TEMPLATE_B64 /
+# provider.Config.UserDataTmpl and renders once per new instance via
+# internal/provider/scale.go's renderUserData.
+#
+# Template variables available (Go text/template, exec'd per node at create
+# time — see renderUserData in internal/provider/scale.go):
+#   {{.NodeName}}     - the elastic instance name, e.g. fuzeinfra-elastic-3
+#   {{.K3SServerURL}} - the k3s server URL to join (from K3S_SERVER_URL env)
+#   {{.K3SNodeToken}} - the k3s agent join token (from K3S_NODE_TOKEN env)
+#
+# IMPORTANT: --kubelet-arg 'provider-id=contabo://{{.NodeName}}' is what makes
+# Cluster Autoscaler's scale-down correlation work. CA identifies which k8s
+# Node to delete via Node.Spec.ProviderID, which NodeGroupNodes (size.go)
+# reports as "contabo://<name>" — a name-based scheme, NOT the numeric Contabo
+# instance id, because the numeric id is not known to the node at boot/join
+# time. If this flag is dropped or the name doesn't match, scale-down breaks:
+# CA will never find a matching node to delete.
+#
+# SSH ACCESS: the FuzeInfra Contabo account has zero registered SSH-key
+# secrets (only a type=password secret exists), so instance creation does NOT
+# reference Contabo's sshKeys mechanism (internal/contabo/client.go omits
+# "sshKeys" from the create request when SSHKeyID is unset — see
+# ca-cutover.yml GATE B, which now warns rather than fails when no matching
+# ssh secret is found). Instead, break-glass SSH access is granted the same
+# way the existing baseline nodes get it (modules/contabo-k3s-node/cloud-init.tftpl):
+# authorizing a public key directly via cloud-init's `users:` block below. The
+# literal token __SSH_PUBLIC_KEY__ is substituted with the real
+# NODE_SSH_PUBLIC_KEY secret at base64-encode time (ca-cutover.yml) — it is
+# NEVER committed as a real key and never echoed to a log.
+
+users:
+  - name: root
+    ssh_authorized_keys:
+      - __SSH_PUBLIC_KEY__
+
+package_update: true
+
+write_files:
+  # Private VPC NIC (eth1). Surfaced only after the instance is reinstalled while
+  # attached to the Contabo private network (id 60932). optional:true so boot never
+  # hangs if the NIC is absent (add-on not purchased / not attached).
+  - path: /etc/netplan/60-eth1-private.yaml
+    permissions: "0600"
+    owner: root:root
+    content: |
+      network:
+        version: 2
+        ethernets:
+          eth1:
+            dhcp4: true
+            optional: true
+  # k3s join secrets land in a root-only env file rather than the process
+  # table, so the token never shows up in `ps`/cloud-init logs as a CLI arg.
+  # INSTALL_K3S_CHANNEL is pinned to "v1.36" to mirror
+  # modules/contabo-k3s-node's k3s_channel default (see its variables.tf,
+  # updated by FuzeInfra#318/#366) — same minor as the fleet, which is live
+  # on v1.36.2+k3s1 across all 4 nodes including the control-plane. An agent
+  # more than one minor ahead/behind the server is unsupported, so this must
+  # track whatever channel the baseline module pins.
+  - path: /etc/k3s-agent.env
+    permissions: "0600"
+    owner: root:root
+    content: |
+      K3S_URL={{.K3SServerURL}}
+      K3S_TOKEN={{.K3SNodeToken}}
+      INSTALL_K3S_CHANNEL=v1.36
+
+runcmd:
+  # Host firewall: agent needs to reach the API (6443) outbound and accept
+  # kubelet (10250) from the server, plus whichever flannel backend the
+  # cluster is actually running. The live prod cluster runs flannel
+  # wireguard-native on ALL nodes (FuzeInfra#366), so an elastic agent MUST
+  # allow 51820/udp or it can register with the API server but never pass
+  # WireGuard pod-overlay traffic — the likely reason a prior elastic
+  # instance never truly joined. 8472/udp (VXLAN) is kept too since it's
+  # harmless and mirrors the baseline module's firewall rules.
+  - [ sh, -c, "ufw allow 22/tcp || true" ]
+  - [ sh, -c, "ufw allow 10250/tcp || true" ]
+  - [ sh, -c, "ufw allow 8472/udp || true" ]
+  - [ sh, -c, "ufw allow 51820/udp || true" ]
+  - [ sh, -c, "ufw allow from 10.0.0.0/22 || true" ]
+  - [ sh, -c, "ufw --force enable || true" ]
+  # Join as a k3s agent using the join secrets written above. --node-name and
+  # --kubelet-arg=provider-id are what let NodeGroupNodes/NodeGroupDeleteNodes
+  # correlate this k8s Node back to this exact Contabo VPS by name (see the
+  # IMPORTANT note above). The pool label + PreferNoSchedule taint mirror
+  # NodeGroupTemplateNodeInfo's scale-from-zero simulation (internal/provider/template.go)
+  # exactly — keep them in sync if either side changes.
+  # Bring up the private NIC before joining so k3s binds its overlay + node-ip to it.
+  # Longhorn prerequisites for a DURABLE (replica-hosting) node.
+  - [ sh, -c, "export DEBIAN_FRONTEND=noninteractive; apt-get update -qq || true; apt-get install -y -qq open-iscsi nfs-common || true" ]
+  - [ sh, -c, "systemctl enable --now iscsid || true; modprobe iscsi_tcp || true; mkdir -p /var/lib/longhorn" ]
+  - [ sh, -c, "netplan apply || true; sleep 3" ]
+  # STAGE 1: eth1 is brought up (netplan above) but k3s joins normally —
+  # flannel stays on the current backend. The flannel flip to eth1 is Stage 2.
+  - [ sh, -c, "set -a; . /etc/k3s-agent.env; set +a; curl -sfL https://get.k3s.io | sh -s - agent --node-name '{{.NodeName}}' --kubelet-arg 'provider-id=contabo://{{.NodeName}}' --node-label 'fuzeinfra.io/pool=durable'" ]
