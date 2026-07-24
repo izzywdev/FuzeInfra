@@ -144,6 +144,13 @@ airflow:
 # Routing rules (hostname → service) are managed via terraform/cloudflare.
 cloudflareTunnel:
   enabled: true
+  # ≥2 replicas so ALL product-family ingress isn't multiplexed through one pod's
+  # edge legs. A single replica let a broken backend's long-polling / canceled
+  # socket.io storm congest the shared tunnel and add 5–20x head-of-line latency
+  # for other apps' browser traffic (#389). Each replica opens its own HA edge
+  # connections; a PDB (minAvailable:1) + soft node anti-affinity keep a leg up
+  # through drains/rollouts.
+  replicas: 2
   # Token mode: cloudflared connects via CLOUDFLARE_TUNNEL_TOKEN in fuzeinfra-secrets.
   # Ingress rules are managed by Terraform in cloudflare_zero_trust_tunnel_cloudflared_config.
   # (tunnelId would switch to local-config mode requiring CLOUDFLARE_TUNNEL_CREDENTIALS JSON
