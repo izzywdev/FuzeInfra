@@ -18,7 +18,7 @@ on:
       action:
         description: 'create-network | list | describe | upgrade | assign | unassign | enroll-elastics'
         type: choice
-        options: [list, describe, create-network, upgrade, assign, unassign, enroll-elastics]
+        options: [list, describe, create-network, upgrade, assign, unassign, enroll-elastics, list-instances]
         default: list
         required: true
       name:
@@ -98,6 +98,9 @@ jobs:
                 -H "x-request-id: $(cat /proc/sys/kernel/random/uuid)" \
                 "${BASE}/${NETWORK_ID}/instances/${INSTANCE_ID}")
               echo "assign -> HTTP $RC"; cat /tmp/a.json | jq . 2>/dev/null || cat /tmp/a.json ;;
+            list-instances)
+              echo "=== all Contabo compute instances (id | name | ipv4) ==="
+              req "https://api.contabo.com/v1/compute/instances?size=200&page=1" | jq -r '.data[]? | "  \(.instanceId) | \(.displayName) | \(.ipConfig.v4.ip)"' ;;
             enroll-elastics)
               # Batch: put EVERY elastic node (displayName prefix fuzeinfra-elastic)
               # onto the private network — order the add-on (idempotent) then assign.
