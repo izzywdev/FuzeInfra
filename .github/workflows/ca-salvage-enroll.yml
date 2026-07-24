@@ -25,6 +25,9 @@ on:
       template:
         description: 'cloud-init template path (default public; use the -privnet variant to reinstall onto the VLAN)'
         default: 'cluster-autoscaler/contabo-externalgrpc/deploy/elastic-userdata.template'
+      node_name:
+        description: 'Override the k8s --node-name (default = Contabo displayName). Use when displayName != k8s node name (e.g. vmi3396106). Single-instance only.'
+        default: ''
 
 permissions:
   contents: read
@@ -48,6 +51,7 @@ jobs:
           MODE: ${{ inputs.mode }}
           CONFIRM: ${{ inputs.confirm }}
           TEMPLATE_IN: ${{ inputs.template }}
+          NODE_NAME_OVERRIDE: ${{ inputs.node_name }}
         run: |
           set -euo pipefail
           TMPL="${TEMPLATE_IN:-cluster-autoscaler/contabo-externalgrpc/deploy/elastic-userdata.template}"
@@ -83,6 +87,7 @@ jobs:
             INST=$(curl -sS -H "Authorization: Bearer $TOK" -H "x-request-id: $(cat /proc/sys/kernel/random/uuid)" \
               "https://api.contabo.com/v1/compute/instances/${ID}")
             NAME=$(echo "$INST" | jq -r '.data[0].displayName')
+            [ -n "$NODE_NAME_OVERRIDE" ] && NAME="$NODE_NAME_OVERRIDE"
             STATUS=$(echo "$INST" | jq -r '.data[0].status')
             [ -n "$NAME" ] && [ "$NAME" != "null" ] || { echo "::warning::instance $ID not found, skipping"; continue; }
             echo "==== instance $ID  name=$NAME  status=$STATUS ===="
