@@ -18,7 +18,7 @@ on:
       action:
         description: 'create-network | list | describe | upgrade | assign | unassign | enroll-elastics'
         type: choice
-        options: [list, describe, create-network, upgrade, assign, unassign, enroll-elastics, list-instances]
+        options: [list, describe, create-network, upgrade, assign, unassign, enroll-elastics, list-instances, snapshots]
         default: list
         required: true
       name:
@@ -98,6 +98,13 @@ jobs:
                 -H "x-request-id: $(cat /proc/sys/kernel/random/uuid)" \
                 "${BASE}/${NETWORK_ID}/instances/${INSTANCE_ID}")
               echo "assign -> HTTP $RC"; cat /tmp/a.json | jq . 2>/dev/null || cat /tmp/a.json ;;
+            snapshots)
+              [ -n "$INSTANCE_ID" ] || { echo "::error::instance_id required"; exit 1; }
+              echo "=== manual snapshots for instance $INSTANCE_ID ==="
+              req "https://api.contabo.com/v1/compute/instances/${INSTANCE_ID}/snapshots?size=100&page=1" | jq -r ".data[]? | \"  snap \(.snapshotId) name=\(.name) created=\(.createdDate)\"" || echo "  (none / not supported)"
+              echo "=== auto-backup add-on / images ==="
+              req "https://api.contabo.com/v1/compute/instances/${INSTANCE_ID}" | jq -r ".data[0].addOns" 2>/dev/null | sed "s/^/  addons: /"
+              ;;
             list-instances)
               echo "=== all Contabo compute instances (id | name | ipv4) ==="
               req "https://api.contabo.com/v1/compute/instances?size=200&page=1" | jq -r '.data[]? | "  \(.instanceId) | \(.displayName) | \(.ipConfig.v4.ip)"' ;;
