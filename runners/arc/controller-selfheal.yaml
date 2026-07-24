@@ -1,0 +1,62 @@
+# ARC controller self-heal — restarts the gha-rs-controller when ephemeral
+# runners are stuck Pending with zero Running (the failure mode seen 2026-07-24:
+# controller wedged after transient generatejitconfig TLS timeouts, stopped
+# creating runner pods → staging jobs queued 30h). Applied live to arc-systems;
+# committed here for GitOps persistence (wire into the arc Argo app to sync).
+apiVersion: v1
+kind: ServiceAccount
+metadata: {name: arc-selfheal, namespace: arc-systems}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata: {name: arc-selfheal}
+rules:
+  - {apiGroups: ["actions.github.com"], resources: ["ephemeralrunners"], verbs: ["get","list"]}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata: {name: arc-selfheal}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: arc-selfheal}
+subjects: [{kind: ServiceAccount, name: arc-selfheal, namespace: arc-systems}]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: {name: arc-selfheal, namespace: arc-systems}
+rules:
+  - {apiGroups: ["apps"], resources: ["deployments"], verbs: ["get","patch"]}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: arc-selfheal, namespace: arc-systems}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: arc-selfheal}
+subjects: [{kind: ServiceAccount, name: arc-selfheal, namespace: arc-systems}]
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata: {name: arc-controller-selfheal, namespace: arc-systems}
+spec:
+  schedule: "*/15 * * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 2
+  failedJobsHistoryLimit: 2
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      template:
+        spec:
+          serviceAccountName: arc-selfheal
+          restartPolicy: Never
+          containers:
+            - name: selfheal
+              image: rancher/kubectl:v1.29.5
+              command: ["sh","-c"]
+              args:
+                - |
+                  ph=$(kubectl get ephemeralrunner -A -o jsonpath='{range .items[*]}{.status.phase}{"\n"}{end}')
+                  pend=$(printf '%s\n' "$ph" | grep -cvE 'Running|Succeeded|Failed|^$')
+                  run=$(printf '%s\n' "$ph" | grep -c 'Running')
+                  echo "non-running-pending=$pend running=$run"
+                  if [ "$pend" -gt 0 ] && [ "$run" -eq 0 ]; then
+                    echo "STUCK detected -> restarting ARC controller"
+                    kubectl -n arc-systems rollout restart deployment/arc-controller-gha-rs-controller
+                  else echo "ARC healthy"; fi
