@@ -36,6 +36,12 @@ spec:
         {{- include "fuzeinfra.labels" . | nindent 8 }}
         {{- include "fuzeinfra.selectorLabels" (dict "component" "postgres" "root" $) | nindent 8 }}
     spec:
+      {{- with .Values.postgres.nodeSelector }}
+      # Pin Postgres to durable (Longhorn-disk) nodes so it never runs on an
+      # ephemeral autoscaled node — the elastic taint is only PreferNoSchedule.
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       containers:
         - name: postgres
           image: {{ .Values.postgres.image }}

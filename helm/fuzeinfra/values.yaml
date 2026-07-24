@@ -196,6 +196,10 @@ postgres:
   image: postgres:15
   port: 5432
   storage: 5Gi
+  # Optional node pin. Empty by default (kind/AWS unaffected). On overlays with
+  # a durable node pool, set to a label only durable nodes carry so Postgres
+  # never schedules onto an ephemeral autoscaled node.
+  nodeSelector: {}
   resources:
     requests: { cpu: 100m, memory: 256Mi }
     limits:   { cpu: "1",  memory: 1Gi }
