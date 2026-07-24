@@ -448,6 +448,17 @@ loki:
 # bucket lifecycle policy, NOT by these Jobs — see docs/backups-and-blobs.md.
 backups:
   enabled: false
+  # Where dumps land: "s3" (Contabo Object Storage — the durable off-cluster
+  # target, needs the bucket + backups.s3.existingSecret) or "pvc" (a Longhorn
+  # PVC in-cluster — needs no object storage; the interim tier that works today,
+  # replicated across the durable nodes). See docs/backups-and-blobs.md.
+  sink: s3
+  # PVC-sink settings (used only when sink=pvc).
+  pvc:
+    storageClass: longhorn
+    size: 20Gi
+    image: busybox:1.36     # sh + cp/ls/xargs for copy + in-pod rotation
+    keep: 7                 # keep newest N dumps per DB on the PVC
   # aws-cli image used by the upload sidecar step of every CronJob.
   awsCliImage: amazon/aws-cli:2.17.0
   # Default cron schedule (UTC). Per-DB `schedule` overrides this when set.

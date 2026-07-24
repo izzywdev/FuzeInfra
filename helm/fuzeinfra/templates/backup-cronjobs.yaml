@@ -40,6 +40,37 @@ Everything is gated OFF by default (`backups.enabled=false`).
 {{- end -}}
 
 {{- define "fuzeinfra.backup.uploadContainer" -}}
+{{- if eq .b.sink "pvc" -}}
+{{- /* PVC sink: copy the dump onto a Longhorn PVC (mounted at /remote) and
+       rotate in-pod. Needs no object storage — the interim tier used until the
+       S3 bucket + backups.s3.existingSecret are provisioned (docs/backups-and-blobs.md). */ -}}
+- name: upload
+  image: {{ .b.pvc.image | quote }}
+  imagePullPolicy: {{ include "fuzeinfra.pullPolicy" .root }}
+  command:
+    - /bin/sh
+    - -c
+    - |
+      set -eu
+      key="$(cat /backup/remote-key)"
+      dest="/remote/$key"
+      dir="$(dirname "$dest")"
+      mkdir -p "$dir"
+      cp /backup/dump.bin "$dest.partial"
+      mv "$dest.partial" "$dest"
+      echo "Backup written -> $dest ($(wc -c < "$dest") bytes)"
+      keep={{ .b.pvc.keep }}
+      # Rotate: keep the newest $keep dumps in THIS db's dir (each DB has its own).
+      ls -1t "$dir"/* 2>/dev/null | tail -n +$((keep+1)) | xargs -r rm -f || true
+      echo "Retention: kept newest $keep in $dir."
+  volumeMounts:
+    - name: backup
+      mountPath: /backup
+    - name: remote
+      mountPath: /remote
+  resources:
+    {{- toYaml .b.resources | nindent 4 }}
+{{- else -}}
 - name: upload
   image: {{ .b.awsCliImage | quote }}
   imagePullPolicy: {{ include "fuzeinfra.pullPolicy" .root }}
@@ -60,20 +91,44 @@ Everything is gated OFF by default (`backups.enabled=false`).
   resources:
     {{- toYaml .b.resources | nindent 4 }}
 {{- end -}}
+{{- end -}}
 
 {{- if .Values.backups.enabled }}
 {{- $b := .Values.backups }}
+{{- if eq $b.sink "s3" }}
 {{- if not $b.s3.existingSecret }}
-{{- fail "backups.s3.existingSecret is required when backups.enabled=true (offline-sealed SealedSecret with the S3 key pair)" }}
+{{- fail "backups.s3.existingSecret is required when backups.enabled=true and sink=s3 (offline-sealed SealedSecret with the S3 key pair)" }}
 {{- end }}
 {{- if not $b.s3.endpoint }}
-{{- fail "backups.s3.endpoint is required when backups.enabled=true (e.g. https://eu2.contabostorage.com)" }}
+{{- fail "backups.s3.endpoint is required when backups.enabled=true and sink=s3 (e.g. https://eu2.contabostorage.com)" }}
+{{- end }}
+{{- else if ne $b.sink "pvc" }}
+{{- fail "backups.sink must be either \"s3\" or \"pvc\"" }}
 {{- end }}
 {{- $secretName := include "fuzeinfra.secretName" . }}
 {{- $dbs := list
     (dict "name" "postgres" "cfg" $b.postgres)
     (dict "name" "mongodb"  "cfg" $b.mongodb)
     (dict "name" "neo4j"    "cfg" $b.neo4j) -}}
+{{- if eq $b.sink "pvc" }}
+---
+{{- /* Shared destination volume for the PVC sink (one RWO PVC; per-DB CronJob
+       schedules are staggered so they never mount it at the same time). */}}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: fuzeinfra-db-backups
+  labels:
+    {{- include "fuzeinfra.labels" . | nindent 4 }}
+    app.kubernetes.io/component: backup
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: {{ $b.pvc.storageClass | quote }}
+  resources:
+    requests:
+      storage: {{ $b.pvc.size | quote }}
+{{- end }}
 
 {{- range $dbs }}
 {{- if .cfg.enabled }}
@@ -106,6 +161,11 @@ spec:
           volumes:
             - name: backup
               emptyDir: {}
+            {{- if eq $b.sink "pvc" }}
+            - name: remote
+              persistentVolumeClaim:
+                claimName: fuzeinfra-db-backups
+            {{- end }}
           initContainers:
             - name: dump
               image: {{ .cfg.image | quote }}
