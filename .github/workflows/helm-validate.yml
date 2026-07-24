@@ -12,11 +12,12 @@ on:
 jobs:
   validate:
     name: Lint & schema-validate chart
-    # ubuntu-latest, NOT the `staging` ARC scaleset: that scaleset registers but
-    # never fetches jobs (broker/MTU), so this gate queued forever ("pending")
-    # on every PR. This job is static (helm lint + kubeconform), no cluster
-    # needed — GitHub-hosted runs it fine.
-    runs-on: ubuntu-latest
+    # runs-on the shared Contabo ARC 'staging' runner (verified fetching+running
+    # jobs 2026-07-24 via staging-runner-smoke). Use the scale-set NAME, not
+    # [self-hosted, staging]. The controller self-heal CronJob (arc-systems)
+    # auto-recovers the stuck-controller failure mode. Self-hosted = no GitHub
+    # Actions minutes consumed.
+    runs-on: staging
     steps:
       - uses: actions/checkout@v7
 
