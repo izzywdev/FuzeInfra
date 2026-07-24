@@ -14,7 +14,8 @@
     "docs-maintainer",
     "security",
     "platform-governance",
-    "fuzeinfra-expert"
+    "fuzeinfra-expert",
+    "a2a-maintainer"
   ],
   "roles": {
     "source": "agent-templates/",
