@@ -1,0 +1,186 @@
+{{- if .Values.backup.enabled }}
+{{- /*
+  Nightly logical backups for the two stateful data stores that hold
+  irreplaceable data: Postgres (authentik + app schemas) and MongoDB.
+  Dumps land on a dedicated Longhorn PVC (replicated across the durable
+  nodes) with local rotation. This is the recover-from-logical-dump tier;
+  the Longhorn volume-snapshot/S3 target is the separate infra tier.
+  Instituted after the 2026-07-24 data-loss incident — there were no
+  backups when Argo reverted the DB StatefulSets off Longhorn.
+*/}}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: fuzeinfra-db-backups
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "fuzeinfra.labels" . | nindent 4 }}
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: {{ .Values.backup.storageClass | quote }}
+  resources:
+    requests:
+      storage: {{ .Values.backup.size | quote }}
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: fuzeinfra-postgres-backup
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "fuzeinfra.labels" . | nindent 4 }}
+spec:
+  schedule: {{ .Values.backup.postgres.schedule | quote }}
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      activeDeadlineSeconds: 3600
+      template:
+        spec:
+          restartPolicy: Never
+          {{- with .Values.backup.nodeSelector }}
+          nodeSelector:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.backup.tolerations }}
+          tolerations:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          containers:
+            - name: pg-dump
+              image: {{ .Values.backup.postgres.image | quote }}
+              imagePullPolicy: {{ include "fuzeinfra.pullPolicy" . }}
+              command: ["/bin/sh", "-c"]
+              args:
+                - |
+                  set -euo pipefail
+                  KEEP={{ .Values.backup.postgres.keep }}
+                  DIR=/backup/postgres
+                  mkdir -p "$DIR"
+                  TS=$(date +%Y%m%d-%H%M%S)
+                  OUT="$DIR/pg_dumpall-$TS.sql.gz"
+                  echo "[pg-backup] dumping all databases + globals to $OUT"
+                  export PGPASSWORD="$POSTGRES_PASSWORD"
+                  pg_dumpall -h fuzeinfra-postgres -U "$POSTGRES_USER" \
+                    | gzip -c > "$OUT.partial"
+                  mv "$OUT.partial" "$OUT"
+                  SIZE=$(wc -c < "$OUT")
+                  echo "[pg-backup] wrote $OUT ($SIZE bytes)"
+                  if [ "$SIZE" -lt 1000 ]; then
+                    echo "[pg-backup] FATAL: dump suspiciously small ($SIZE bytes)"; exit 1
+                  fi
+                  echo "[pg-backup] rotating, keeping newest $KEEP"
+                  ls -1t "$DIR"/pg_dumpall-*.sql.gz | tail -n +$((KEEP+1)) | xargs -r rm -f
+                  echo "[pg-backup] done; current backups:"
+                  ls -lh "$DIR"
+              env:
+                - name: POSTGRES_USER
+                  valueFrom:
+                    secretKeyRef:
+                      name: fuzeinfra-secrets
+                      key: POSTGRES_USER
+                - name: POSTGRES_PASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: fuzeinfra-secrets
+                      key: POSTGRES_PASSWORD
+              volumeMounts:
+                - name: backup
+                  mountPath: /backup
+              resources:
+                requests:
+                  cpu: 50m
+                  memory: 128Mi
+                limits:
+                  cpu: 500m
+                  memory: 512Mi
+          volumes:
+            - name: backup
+              persistentVolumeClaim:
+                claimName: fuzeinfra-db-backups
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: fuzeinfra-mongodb-backup
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "fuzeinfra.labels" . | nindent 4 }}
+spec:
+  schedule: {{ .Values.backup.mongodb.schedule | quote }}
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      activeDeadlineSeconds: 3600
+      template:
+        spec:
+          restartPolicy: Never
+          {{- with .Values.backup.nodeSelector }}
+          nodeSelector:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.backup.tolerations }}
+          tolerations:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          containers:
+            - name: mongodump
+              image: {{ .Values.backup.mongodb.image | quote }}
+              imagePullPolicy: {{ include "fuzeinfra.pullPolicy" . }}
+              command: ["/bin/sh", "-c"]
+              args:
+                - |
+                  set -euo pipefail
+                  KEEP={{ .Values.backup.mongodb.keep }}
+                  DIR=/backup/mongodb
+                  mkdir -p "$DIR"
+                  TS=$(date +%Y%m%d-%H%M%S)
+                  OUT="$DIR/mongodump-$TS.archive.gz"
+                  echo "[mongo-backup] dumping all databases to $OUT"
+                  mongodump --host fuzeinfra-mongodb \
+                    --username "$MONGODB_USER" --password "$MONGODB_PASSWORD" \
+                    --authenticationDatabase admin \
+                    --archive="$OUT.partial" --gzip
+                  mv "$OUT.partial" "$OUT"
+                  SIZE=$(wc -c < "$OUT")
+                  echo "[mongo-backup] wrote $OUT ($SIZE bytes)"
+                  if [ "$SIZE" -lt 1000 ]; then
+                    echo "[mongo-backup] FATAL: dump suspiciously small ($SIZE bytes)"; exit 1
+                  fi
+                  echo "[mongo-backup] rotating, keeping newest $KEEP"
+                  ls -1t "$DIR"/mongodump-*.archive.gz | tail -n +$((KEEP+1)) | xargs -r rm -f
+                  echo "[mongo-backup] done; current backups:"
+                  ls -lh "$DIR"
+              env:
+                - name: MONGODB_USER
+                  valueFrom:
+                    secretKeyRef:
+                      name: fuzeinfra-secrets
+                      key: MONGODB_USER
+                - name: MONGODB_PASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: fuzeinfra-secrets
+                      key: MONGODB_PASSWORD
+              volumeMounts:
+                - name: backup
+                  mountPath: /backup
+              resources:
+                requests:
+                  cpu: 50m
+                  memory: 128Mi
+                limits:
+                  cpu: 500m
+                  memory: 512Mi
+          volumes:
+            - name: backup
+              persistentVolumeClaim:
+                claimName: fuzeinfra-db-backups
+{{- end }}

@@ -24,6 +24,12 @@ ingress:
   tls:
     enabled: false   # enable once cert-manager is wired up
 
+# Nightly Postgres + MongoDB logical dumps to a Longhorn PVC (rotated).
+# No nodeSelector/tolerations needed: with no elastic/ci tolerations the Jobs
+# only schedule on durable/control-plane nodes, which is what we want.
+backup:
+  enabled: true
+
 # Sizing for 4 vCPU / 8 GB RAM single node.
 # Leave headroom for k3s, ArgoCD, and system processes (~2 GB).
 postgres:

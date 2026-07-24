@@ -458,6 +458,32 @@ overprovisioning:
 # CONTABO_API_USER, CONTABO_API_PASSWORD, K3S_NODE_TOKEN, SSH_KEY_ID.
 # (Non-secret values are templated from the provider block below.)
 # -----------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
+# Nightly logical backups (Postgres pg_dumpall + MongoDB mongodump) to a
+# dedicated Longhorn PVC with local rotation. Disabled by default; enabled on
+# prod (values-contabo.yaml). Instituted after the 2026-07-24 data-loss
+# incident. This is the logical-dump recovery tier; Longhorn volume snapshots /
+# an S3 backup target are a separate infra tier.
+# -----------------------------------------------------------------------------
+backup:
+  enabled: false
+  # Backups must be durable — pin to a replicated class regardless of
+  # global.storageClass (which may still be local-path on some overlays).
+  storageClass: longhorn
+  size: 20Gi
+  # Land backup Jobs on durable nodes only (they hold the Longhorn replicas),
+  # and tolerate any control-plane / durable taints. Overridden per-overlay.
+  nodeSelector: {}
+  tolerations: []
+  postgres:
+    image: postgres:16-alpine
+    schedule: "0 2 * * *"   # 02:00 UTC daily
+    keep: 7
+  mongodb:
+    image: mongo:7
+    schedule: "30 2 * * *"  # 02:30 UTC daily (staggered — shared RWO PVC)
+    keep: 7
+
 clusterAutoscaler:
   enabled: false
   image: registry.k8s.io/autoscaling/cluster-autoscaler:v1.30.3
