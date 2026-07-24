@@ -121,7 +121,23 @@ loki:
 # prod; kept OFF until the `fuzeinfra-backups-s3` SealedSecret is committed.
 # See docs/backups-and-blobs.md for the enable + retention-policy steps.
 backups:
-  enabled: false             # human-gated flip (needs the fuzeinfra-backups-s3 SealedSecret)
+  # ENABLED via the PVC sink (Longhorn) — the interim tier instituted after the
+  # 2026-07-24 data-loss incident. Works today with no object storage. When the
+  # fuzeinfra-backups bucket + fuzeinfra-backups-s3 SealedSecret are provisioned,
+  # flip `sink: s3` for durable off-cluster backups (the S3 block below is ready).
+  enabled: true
+  sink: pvc
+  pvc:
+    storageClass: longhorn
+    size: 20Gi
+    keep: 7
+  # Stagger per-DB schedules: they share one RWO PVC, so they must not overlap.
+  postgres:
+    schedule: "0 2 * * *"    # 02:00 UTC
+  mongodb:
+    schedule: "20 2 * * *"   # 02:20 UTC
+  neo4j:
+    schedule: "40 2 * * *"   # 02:40 UTC
   s3:
     endpoint: "https://eu2.contabostorage.com"
     region: "default"
