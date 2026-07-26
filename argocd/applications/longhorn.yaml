@@ -60,6 +60,11 @@ spec:
           # Do not let a node self-select all disks blindly; operator tags durable
           # nodes for replica placement (design §4.1 / O-6).
           createDefaultDiskLabeledNodes: true
+          # How long Longhorn waits before rebuilding a replica whose node went
+          # away. The 600s default makes a node reinstall/reboot look like a
+          # 10-minute "stuck degraded" volume during a rolling cutover; 30s
+          # rebuilds promptly while still absorbing a quick restart.
+          replicaReplenishmentWaitInterval: 30
           # Guard against replicas landing on autoscaled/reaped elastic nodes.
           allowVolumeCreationWithDegradedAvailability: false
         # Keep local-path the cluster default: do NOT create a default-marked
