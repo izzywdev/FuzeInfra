@@ -12,9 +12,13 @@
 # Replace with a real domain once you have DNS pointing at the server.
 # =============================================================================
 global:
-  # local-path stays the cluster DEFAULT StorageClass. Longhorn is added as an
-  # OPT-IN `longhorn` class (see `longhorn:` below), never as the default.
-  storageClass: "local-path"
+  # DB StatefulSet PVCs default to durable Longhorn. This is the systemic cure
+  # for the 2026-07-24 local-path reversion class: whenever a StatefulSet is
+  # (re)created, its volume lands on Longhorn (reclaimPolicy: Retain) instead of
+  # a fresh, empty local-path PVC. Existing STSs are unaffected — Argo's
+  # ignoreDifferences on .spec.volumeClaimTemplates ignores the immutable VCT.
+  # local-path remains the cluster's default class for anything not using this.
+  storageClass: "longhorn"
   # Cloudflare tunnel routes *.prod.fuzefront.com → Traefik → these Ingress rules.
   # Change back to <ip>.nip.io if the tunnel is disabled for debugging.
   domain: "prod.fuzefront.com"
