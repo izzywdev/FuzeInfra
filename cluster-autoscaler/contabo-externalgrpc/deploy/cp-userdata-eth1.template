@@ -1,0 +1,69 @@
+#cloud-config
+# Cloud-init for reinstalling a CONTROL-PLANE (k3s server) node onto the private
+# VLAN (eth1). Used for the final leg of the private-VLAN cutover, where the
+# original control-plane must be reinstalled to surface the Contabo private NIC
+# (a reboot is NOT enough — confirmed twice: the NIC only appears on reinstall).
+#
+# DELIBERATELY DOES NOT JOIN k3s. Unlike the agent templates
+# (elastic-userdata-eth1 / durable-userdata-eth1), this one only prepares the
+# host: SSH access, eth1, firewall (incl. the etcd peer/client ports a server
+# needs), and the Longhorn prerequisites. The k3s SERVER join is then performed
+# by the operator via /etc/rancher/k3s/config.yaml + `install ... server`.
+#
+# WHY: a server join needs `--server https://<A PEER>:6443` (never its own URL)
+# plus the SERVER token, and passing those as cloud-init CLI args proved
+# fragile — arg-mangling once made a node bootstrap its OWN etcd cluster
+# (split-brain, recovered by `etcdctl member remove`). Writing config.yaml on
+# the host and letting the installer read it is the proven, unambiguous path.
+#
+# PRECONDITION: remove this node from the etcd cluster BEFORE reinstalling
+# (`etcdctl member remove <id>`) and delete its Node + node-password secret, so
+# it can rejoin cleanly. Requires >=2 surviving etcd members to keep quorum.
+#
+# Template variables (rendered by ca-salvage-enroll):
+#   {{.NodeName}}     - k8s node name (pass node_name to keep it stable)
+#   {{.K3SServerURL}} / {{.K3SNodeToken}} - intentionally UNUSED here.
+
+users:
+  - name: root
+    ssh_authorized_keys:
+      - __SSH_PUBLIC_KEY__
+
+package_update: true
+
+write_files:
+  # Private VLAN NIC (net 60932). optional:true so boot never hangs if absent.
+  - path: /etc/netplan/60-eth1-private.yaml
+    permissions: "0600"
+    owner: root:root
+    content: |
+      network:
+        version: 2
+        ethernets:
+          eth1:
+            dhcp4: true
+            optional: true
+  # Marker so the operator can confirm the reinstall used THIS template.
+  - path: /etc/fuzeinfra-cp-eth1-ready
+    permissions: "0644"
+    content: |
+      node={{.NodeName}} role=control-plane stage=prepared-not-joined
+
+runcmd:
+  # Firewall. A k3s SERVER additionally needs etcd client(2379)+peer(2380) and
+  # the API (6443) reachable from the other servers; 51820/udp is the live
+  # flannel wireguard-native backend; 8472/udp kept for VXLAN parity.
+  - [ sh, -c, "ufw allow 22/tcp || true" ]
+  - [ sh, -c, "ufw allow 6443/tcp || true" ]
+  - [ sh, -c, "ufw allow 10250/tcp || true" ]
+  - [ sh, -c, "ufw allow 2379:2380/tcp || true" ]
+  - [ sh, -c, "ufw allow 8472/udp || true" ]
+  - [ sh, -c, "ufw allow 51820/udp || true" ]
+  - [ sh, -c, "ufw allow from 10.0.0.0/22 || true" ]
+  - [ sh, -c, "ufw --force enable || true" ]
+  # Longhorn prerequisites (this node hosts replicas).
+  - [ sh, -c, "export DEBIAN_FRONTEND=noninteractive; apt-get update -qq || true; apt-get install -y -qq open-iscsi nfs-common || true" ]
+  - [ sh, -c, "systemctl enable --now iscsid || true; modprobe iscsi_tcp || true; mkdir -p /var/lib/longhorn" ]
+  # Bring up eth1 so the private IP exists before the operator joins k3s.
+  - [ sh, -c, "netplan apply || true; sleep 3" ]
+  - [ sh, -c, "ip -4 addr show eth1 > /etc/fuzeinfra-eth1.log 2>&1 || true" ]
