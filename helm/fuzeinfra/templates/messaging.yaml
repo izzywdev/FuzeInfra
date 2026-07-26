@@ -45,6 +45,19 @@ spec:
       securityContext:
         fsGroup: 1000
       {{- include "fuzeinfra.dbSpread" $ | nindent 6 }}
+      initContainers:
+        # Fresh Longhorn (ext4) volumes are root-owned and carry a root:root
+        # lost+found; Confluent Kafka runs as uid 1000 and fails its "is
+        # /var/lib/kafka/data writable" preflight. Chown the data dir and drop
+        # lost+found so the broker starts. fsGroup alone is insufficient here.
+        - name: init-chown-data
+          image: busybox:1.36
+          command: ["sh","-c","rm -rf /var/lib/kafka/data/lost+found; chown -R 1000:1000 /var/lib/kafka/data; chmod -R u+rwX /var/lib/kafka/data"]
+          securityContext:
+            runAsUser: 0
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/kafka/data
       containers:
         - name: kafka
           image: {{ .Values.kafka.image }}
