@@ -23,6 +23,26 @@
 # Template variables (rendered by ca-salvage-enroll):
 #   {{.NodeName}}     - k8s node name (pass node_name to keep it stable)
 #   {{.K3SServerURL}} / {{.K3SNodeToken}} - intentionally UNUSED here.
+#
+# OPERATOR STEP AFTER THIS RUNS — write config.yaml then install the server:
+#
+#   cat > /etc/rancher/k3s/config.yaml <<CFG
+#   server: https://<A PEER SERVER>:6443     # never this node's own URL
+#   token: <contents of /var/lib/rancher/k3s/server/token on a peer>
+#   flannel-backend: wireguard-native        # must match the fleet
+#   flannel-iface: eth1                      # pod overlay rides the private VLAN
+#   node-name: <this node>
+#   tls-san: [ <public ip>, <vlan ip> ]
+#   node-taint: [ "node-role.kubernetes.io/control-plane=:PreferNoSchedule" ]
+#   CFG
+#   curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION=<fleet version> sh -s - server
+#
+# DO NOT set `node-ip` on a SERVER: it changes the node's expected etcd peer URL
+# and k3s then refuses to start ("this server is not a member of the etcd
+# cluster ... expect: <name>=https://<ip>:2380"). If a server's peer address
+# must move to the VLAN, update it in etcd FIRST from a peer:
+#   etcdctl member update <id> --peer-urls=https://<vlan-ip>:2380
+# (agents may set node-ip/node-external-ip freely — they have no etcd identity).
 
 users:
   - name: root

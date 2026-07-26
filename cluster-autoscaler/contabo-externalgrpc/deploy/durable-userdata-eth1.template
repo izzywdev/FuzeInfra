@@ -62,6 +62,17 @@ write_files:
   # on v1.36.2+k3s1 across all 4 nodes including the control-plane. An agent
   # more than one minor ahead/behind the server is unsupported, so this must
   # track whatever channel the baseline module pins.
+  # k3s config: put the pod overlay on the private VLAN (eth1). Written BEFORE
+  # the join so the node comes up on the VLAN directly — no Stage-2 flip needed.
+  # NOTE: node-ip is set for AGENTS only. Never set node-ip on an etcd SERVER:
+  # it changes the expected etcd peer URL and the server refuses to start
+  # ("this server is not a member of the etcd cluster ... expect: <ip>:2380").
+  - path: /etc/rancher/k3s/config.yaml
+    permissions: "0600"
+    owner: root:root
+    content: |
+      flannel-iface: eth1
+
   - path: /etc/k3s-agent.env
     permissions: "0600"
     owner: root:root
