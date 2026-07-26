@@ -39,6 +39,12 @@ spec:
         {{- include "fuzeinfra.labels" . | nindent 8 }}
         {{- include "fuzeinfra.selectorLabels" (dict "component" "kafka" "root" $) | nindent 8 }}
     spec:
+      # Confluent Kafka runs as uid 1000; fsGroup makes k8s chown the fresh
+      # Longhorn data volume to gid 1000 on mount (else the ext4 PV is root-owned
+      # and Kafka fails its writable preflight and CrashLoops).
+      securityContext:
+        fsGroup: 1000
+      {{- include "fuzeinfra.dbSpread" $ | nindent 6 }}
       containers:
         - name: kafka
           image: {{ .Values.kafka.image }}

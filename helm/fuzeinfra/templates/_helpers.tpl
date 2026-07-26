@@ -61,3 +61,22 @@ Usage: {{ include "fuzeinfra.host" (dict "root" $ "sub" "grafana") }}
 {{- define "fuzeinfra.host" -}}
 {{ .sub }}.{{ .root.Values.global.domain }}
 {{- end -}}
+
+{{/*
+Soft anti-affinity: spread heavy stateful DBs across nodes (avoid piling all onto
+one node — root cause of the 2026-07-24 OOM). Preferred (never blocks scheduling).
+Usage in a pod spec: {{- include "fuzeinfra.dbSpread" $ | nindent 6 }}
+*/}}
+{{- define "fuzeinfra.dbSpread" -}}
+affinity:
+  podAntiAffinity:
+    preferredDuringSchedulingIgnoredDuringExecution:
+      - weight: 100
+        podAffinityTerm:
+          topologyKey: kubernetes.io/hostname
+          labelSelector:
+            matchExpressions:
+              - key: app.kubernetes.io/instance
+                operator: In
+                values: ["{{ .Release.Name }}"]
+{{- end -}}
