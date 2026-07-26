@@ -42,6 +42,7 @@ spec:
       nodeSelector:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+      {{- include "fuzeinfra.dbSpread" $ | nindent 6 }}
       containers:
         - name: postgres
           image: {{ .Values.postgres.image }}
@@ -126,6 +127,7 @@ spec:
         {{- include "fuzeinfra.labels" . | nindent 8 }}
         {{- include "fuzeinfra.selectorLabels" (dict "component" "mongodb" "root" $) | nindent 8 }}
     spec:
+      {{- include "fuzeinfra.dbSpread" $ | nindent 6 }}
       containers:
         - name: mongodb
           image: {{ .Values.mongodb.image }}
@@ -320,6 +322,7 @@ spec:
       nodeSelector:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+      {{- include "fuzeinfra.dbSpread" $ | nindent 6 }}
       containers:
         - name: neo4j
           image: {{ .Values.neo4j.image }}
