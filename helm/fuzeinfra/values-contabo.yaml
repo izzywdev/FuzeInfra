@@ -212,7 +212,7 @@ handoffMcp:
 # before (2) issues certificates for domains that resolve nowhere.
 # -----------------------------------------------------------------------------
 customHostnameApi:
-  enabled: false
+  enabled: true
   provider: cloudflare
   managedZone: fuzefront.com
   # Hosts under prod.fuzefront.com sit behind the CF Access OTP wall and are
@@ -231,7 +231,7 @@ customHostnameApi:
     limits:   { cpu: "300m", memory: "256Mi" }
   routeProfiles:
     - name: fuzefront
-      enabled: false
+      enabled: true
       namespace: fuzefront
       service: fuzefront-frontend
       port: 80
