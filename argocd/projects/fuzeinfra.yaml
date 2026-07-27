@@ -8,10 +8,21 @@ spec:
   description: FuzeInfra shared infrastructure platform
   sourceRepos:
     - https://github.com/izzywdev/FuzeInfra.git
+    # OCI Helm registry for the ARC runner scale-set chart. Required by the
+    # arc-runner-scale-sets ApplicationSet (multi-source: OCI chart + git values).
+    # Without this entry Argo rejects those Applications with
+    #   InvalidSpecError: repo ... is not permitted in project 'fuzeinfra'
+    - ghcr.io/actions/actions-runner-controller-charts
   destinations:
     - namespace: fuzeinfra
       server: https://kubernetes.default.svc
     - namespace: argocd
+      server: https://kubernetes.default.svc
+    # ARC runner scale sets live here (controller watchSingleNamespace=arc-runners).
+    # Without this entry Argo rejects them with
+    #   InvalidSpecError: destination ... namespace 'arc-runners' do not match
+    #   any of the allowed destinations in project 'fuzeinfra'
+    - namespace: arc-runners
       server: https://kubernetes.default.svc
   # The chart creates cluster-scoped objects (monitoring ClusterRole/Binding),
   # so cluster resources must be allowed for this project.

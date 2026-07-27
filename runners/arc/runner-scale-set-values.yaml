@@ -3,10 +3,22 @@
 # Chart: oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set
 # Namespace: arc-runners  |  Release name: staging
 #
-# Registers a repo-level ephemeral runner with labels [self-hosted, staging].
-# izzywdev is a personal GitHub account (not an org) — repo-scoped runners only.
-# Consumers target it with:
-#   runs-on: [self-hosted, staging]
+# Shared BASE values for every ARC scale set. The arc-runner-scale-sets
+# ApplicationSet (argocd/applications/arc-runners.yaml) layers per-set overrides
+# (githubConfigUrl / runnerScaleSetName / maxRunners) on top via helm parameters,
+# so common settings are edited here ONCE and Argo rolls them to all sets.
+#
+# TARGETING — READ THIS BEFORE EDITING A CONSUMER WORKFLOW:
+#   gha-runner-scale-set runners register with NO labels at all (verified:
+#   `gh api repos/<owner>/<repo>/actions/runners` returns "labels": []).
+#   Jobs are matched by the SCALE SET NAME, not by labels. Therefore:
+#       runs-on: staging            # ✅ correct — bare string == runnerScaleSetName
+#       runs-on: [self-hosted, staging]   # ❌ never matches; queues forever
+#       runs-on: self-hosted              # ❌ never matches; queues forever
+#       runs-on: ["a", "staging", "b"]    # ❌ arrays never match a scale set
+#   `[self-hosted, <label>]` belongs to the LEGACY RunnerDeployment mode, which
+#   this chart is not. izzywdev is a personal account (not an org), so runners
+#   are repo-scoped and there is no org runner-group to target either.
 # =============================================================================
 
 # ---- GitHub target ----------------------------------------------------------
@@ -17,18 +29,23 @@ githubConfigUrl: "https://github.com/izzywdev/FuzeInfra"
 # Create it from runners/arc/github-secret.yaml before installing.
 githubConfigSecret: arc-runner-github-app
 
-# ---- Scale set label --------------------------------------------------------
-# This value becomes the runner's primary label.  Combined with the automatic
-# "self-hosted" label, workflows can target: runs-on: [self-hosted, staging]
+# ---- Scale set name ---------------------------------------------------------
+# This is the job-matching key: workflows target it with `runs-on: staging`
+# (bare string, exactly this value). It is NOT a label — see the targeting note
+# in the header. Overridden per set by the ApplicationSet.
 runnerScaleSetName: staging
 
 # ---- Scaling ----------------------------------------------------------------
 # minRunners=0  → idle costs nothing; runners spin up on demand.
-# maxRunners    → hard cap; tune based on cluster capacity. DinD sidecars are
-#                 unbounded and share the CI node (~7.75 GB) — keep this low so
-#                 parallel build/compose stacks don't OOM the node.
+# maxRunners    → hard cap; tune based on cluster capacity. All sets share ONE
+#                 4-vCPU/8GB CI node (fuzeinfra-ci-runner-1), so the sum across
+#                 sets is what matters, not the per-set number.
+#                 NOTE: drop this to 3 in the same change that re-enables
+#                 containerMode.dind — dind sidecars are unbounded and 5 per set
+#                 across 8 sets will OOM the node.
+# Overridden per set by argocd/applications/arc-runners.yaml.
 minRunners: 0
-maxRunners: 3
+maxRunners: 5
 
 # ---- Runner pod spec --------------------------------------------------------
 template:
@@ -39,9 +56,13 @@ template:
 
     containers:
       - name: runner
-        # Stock actions-runner has the docker CLI + buildx but NOT compose-v2.
-        # For `docker compose`, publish runners/arc/Dockerfile and set the image
-        # here (e.g. ghcr.io/izzywdev/fuzeinfra-arc-runner:<tag>).
+        # Stock image, matching live state. The CI-capable image
+        # (ghcr.io/izzywdev/fuzeinfra-arc-runner, built from runners/arc/
+        # Dockerfile) adds compose-v2 + buildx + a warm toolcache, and IS
+        # published and publicly pullable — but it buys nothing while
+        # containerMode.dind is disabled below, because without a Docker daemon
+        # neither `docker build` nor `docker compose` can run at all. Switch to
+        # it in the SAME change that re-enables dind, not before.
         image: ghcr.io/actions/actions-runner:latest
         # NOTE: do NOT override command/args here. (A debug JITCONFIG wrapper
         # used to live here — removed now that the runner is stable. It exec'd
@@ -70,14 +91,41 @@ template:
         operator: Exists
         effect: NoSchedule
 
-# ---- Docker-in-Docker -------------------------------------------------------
-# Enables the ARC-native DinD sidecar so runner pods have a real Docker daemon.
-# The chart injects a `dind` sidecar container and sets DOCKER_HOST automatically;
-# `docker build` / `docker buildx build --push` / `docker run` work without any
-# extra setup. `docker compose` needs the compose-v2 plugin, which the stock
-# runner image lacks — set a compose-enabled `image:` above to get it.
-containerMode:
-  type: dind
+# ---- Docker-in-Docker — DISABLED, DO NOT RE-ENABLE WITHOUT READING THIS -----
+# containerMode.type=dind is what you want for `docker build`, and it is
+# currently OFF because it BREAKS RUNNER CONNECTIVITY on this cluster.
+#
+# Measured 2026-07-27 on Contabo k3s (v1.36.2), all 8 scale sets:
+#   * enabling dind → runners REGISTER with GitHub (a runnerId is issued) but
+#     NEVER come online: `gh api repos/<o>/<r>/actions/runners` showed
+#     total=3, online=0, and every job stayed queued.
+#   * pods churned continuously — created, dind sidecar starts fine ("Docker
+#     daemon ... API listen on /var/run/docker.sock"), the runner container
+#     reaches ready=true but emits ZERO logs, then the pod is torn down after
+#     a few seconds. Controller reported pending=3 running=0 finished=0 failed=0.
+#   * NOT the runner image: `staging` ran the stock actions-runner image and
+#     churned identically. NOT the ARC controller: restarting it did not help.
+#     NOT PodSecurity: the arc-runners namespace has no PSA labels and the dind
+#     sidecar does get privileged=true.
+#   * `helm rollback` to the pre-dind revision brought runners online within
+#     ~48s (3 online, 5 pods Running) — reverting it is what fixes it.
+#
+# Leading hypothesis (UNCONFIRMED): dockerd manipulates iptables/nftables inside
+# the SHARED pod network namespace — its own logs show it deleting nftables
+# rules and falling back ("Failed to find nft tool") — which appears to break
+# the runner's outbound long-poll to broker.actions.githubusercontent.com.
+#
+# Before re-enabling: reproduce on ONE non-critical scale set, and verify
+# `online>0` via the runners API — pods reaching Running is NOT sufficient
+# evidence, they reach Running and still never connect.
+#
+# CONSEQUENCE while this is off: there is no Docker daemon in runner pods, so
+# `docker build` / `docker compose` jobs fail with
+#   "failed to connect to the docker API at unix:///var/run/docker.sock".
+# Such jobs must use ubuntu-latest until dind is fixed.
+#
+# containerMode:
+#   type: dind
 
 # ---- ARC controller reference -----------------------------------------------
 controllerServiceAccount:
