@@ -112,6 +112,104 @@ resource "cloudflare_record" "vanity" {
 }
 
 # ---------------------------------------------------------------------------
+# Multi-tenant portal DNS + TLS (FuzeFront EPIC-16)
+#
+# Three addressing modes are served here:
+#   (a) tenant subdomain  corpabc.fuzefront.com   -> the wildcard below
+#   (b) path prefix       app.fuzefront.com/p/... -> no infra change (the `app`
+#                                                    vanity host already exists)
+#   (c) customer domain   app.corpabc.com         -> Cloudflare for SaaS, driven
+#                                                    at runtime by the in-cluster
+#                                                    custom-hostname API
+#
+# (a) WILDCARD DNS + TLS.
+# `*.fuzefront.com` is a proxied CNAME to the same tunnel as everything else, so
+# a tenant subdomain reaches cloudflared -> the catch-all ingress_rule -> Traefik
+# -> whichever Ingress claims the host. Reserved hosts need no exclusion list:
+# DNS resolves the most specific match first, so the explicit `app`, `auth`,
+# `plan`, `prod` records and the `*.prod` wildcard all take precedence over `*`
+# automatically. Adding a reserved host later means adding a record, not editing
+# an exclusion.
+#
+# TLS is Cloudflare-terminated. Universal SSL already covers the apex and the
+# first-level wildcard `*.fuzefront.com` on every plan, so tenant subdomains get
+# a valid certificate with no cert-manager, no DNS-01 solver, and no new secret.
+# That is also the only option that preserves the tunnel-only invariant: an ACME
+# HTTP-01/TLS-ALPN solver needs a publicly reachable origin on :80/:443, which is
+# exactly what pinning Traefik to ClusterIP exists to prevent. Note the one-level
+# limit — `a.b.fuzefront.com` is NOT covered by Universal SSL and would need
+# Advanced Certificate Manager.
+# ---------------------------------------------------------------------------
+resource "cloudflare_record" "tenant_wildcard" {
+  count   = local.cloudflare_enabled && var.tenant_wildcard_enabled ? 1 : 0
+  zone_id = var.cloudflare_zone_id
+  name    = "*"
+  value   = cloudflare_zero_trust_tunnel_cloudflared.fuzeinfra[0].cname
+  type    = "CNAME"
+  proxied = true
+  ttl     = 1
+  comment = "Multi-tenant portal subdomains (*.fuzefront.com). More-specific records win."
+}
+
+# ---------------------------------------------------------------------------
+# (c) CUSTOM CUSTOMER DOMAINS — Cloudflare for SaaS
+#
+# Two records and one zone-level setting are all the STATIC infrastructure this
+# needs. Individual customer domains are never enumerated here: they are created
+# at runtime by the custom-hostname API (helm/fuzeinfra/templates/
+# custom-hostname-api.yaml), which is the whole point — a Helm release per
+# customer domain is not a thing we are willing to have.
+#
+#   connect.<zone>     the hostname customers CNAME their domain to. This is a
+#                      published, customer-facing contract, so it is deliberately
+#                      separate from the origin below — the origin can be
+#                      repointed during a migration without asking every
+#                      customer to change their DNS.
+#   saas-origin.<zone> the Cloudflare for SaaS fallback origin: where the edge
+#                      sends custom-hostname traffic once TLS is terminated.
+#                      Proxied, so it resolves through Cloudflare to the tunnel.
+#
+# Traffic path once a hostname is active:
+#   browser --TLS(app.corpabc.com)--> CF edge (custom hostname cert, Host kept)
+#     --> saas-origin.<zone> --> cloudflared --> traefik.kube-system:80
+#     --> the Ingress the custom-hostname API materialized --> consumer Service
+#
+# COST/QUOTA: Free/Pro/Business include 100 custom hostnames; each additional one
+# is $0.10/month, to a ceiling of 50,000. The API enforces its own soft cap
+# (customHostnameApi.maxCustomHostnames) so nobody walks into overage by accident.
+# ---------------------------------------------------------------------------
+resource "cloudflare_record" "saas_connect" {
+  count   = local.cloudflare_enabled && var.saas_custom_hostnames_enabled ? 1 : 0
+  zone_id = var.cloudflare_zone_id
+  name    = "connect"
+  value   = cloudflare_zero_trust_tunnel_cloudflared.fuzeinfra[0].cname
+  type    = "CNAME"
+  proxied = true
+  ttl     = 1
+  comment = "Published CNAME target for customer-owned domains (Cloudflare for SaaS)."
+}
+
+resource "cloudflare_record" "saas_origin" {
+  count   = local.cloudflare_enabled && var.saas_custom_hostnames_enabled ? 1 : 0
+  zone_id = var.cloudflare_zone_id
+  name    = "saas-origin"
+  value   = cloudflare_zero_trust_tunnel_cloudflared.fuzeinfra[0].cname
+  type    = "CNAME"
+  proxied = true
+  ttl     = 1
+  comment = "Cloudflare for SaaS fallback origin -> tunnel -> Traefik."
+}
+
+# Enabling the fallback origin is what turns Cloudflare for SaaS on for the zone.
+# It must point at a record that already exists and is proxied, hence depends_on.
+resource "cloudflare_custom_hostname_fallback_origin" "saas" {
+  count      = local.cloudflare_enabled && var.saas_custom_hostnames_enabled ? 1 : 0
+  zone_id    = var.cloudflare_zone_id
+  origin     = "saas-origin.${var.zone_name}"
+  depends_on = [cloudflare_record.saas_origin]
+}
+
+# ---------------------------------------------------------------------------
 # Public consumer-app host registry (labels under ${var.prod_subdomain}).
 #
 # GOVERNANCE (docs/CONSUMER_ONBOARDING_SHARED_CLUSTER.md §1): FuzeInfra never

@@ -17,6 +17,12 @@ data:
     server=8.8.4.4
     # Wildcard: *.{{ .Values.global.domain }} -> configured target
     address=/{{ .Values.global.domain }}/{{ .Values.dnsmasq.wildcardTarget }}
+    {{- /* Additional wildcard zones — e.g. a consumer's local mirror of its
+           production tenant-subdomain zone (*.fuzefront.local), so multi-tenant
+           host resolution can be developed without touching /etc/hosts. */ -}}
+    {{- range .Values.dnsmasq.extraWildcards | default list }}
+    address=/{{ .domain }}/{{ .target | default $.Values.dnsmasq.wildcardTarget }}
+    {{- end }}
     cache-size=1000
     no-hosts
     bind-interfaces
@@ -63,7 +69,7 @@ spec:
     metadata:
       annotations:
         # Roll the pod when the config changes.
-        checksum/config: {{ .Values.global.domain | printf "%s-%s" .Values.dnsmasq.wildcardTarget | sha256sum }}
+        checksum/config: {{ printf "%s-%s-%s" .Values.dnsmasq.wildcardTarget .Values.global.domain (toYaml (.Values.dnsmasq.extraWildcards | default list)) | sha256sum }}
       labels:
         {{- include "fuzeinfra.labels" . | nindent 8 }}
         {{- include "fuzeinfra.selectorLabels" (dict "component" "dnsmasq" "root" $) | nindent 8 }}

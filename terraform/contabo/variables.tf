@@ -154,6 +154,38 @@ variable "zone_name" {
   default     = "fuzefront.com"
 }
 
+# ---------------------------------------------------------------------------
+# Multi-tenant portal DNS/TLS (FuzeFront EPIC-16). Both default OFF so a bare
+# `terraform apply` stays byte-identical to today's cluster; flip them in the
+# same change that enables helm/fuzeinfra customHostnameApi.
+# ---------------------------------------------------------------------------
+variable "tenant_wildcard_enabled" {
+  description = <<-EOT
+    Create the proxied wildcard CNAME *.<zone_name> pointing at the tunnel, so
+    tenant subdomains (corpabc.fuzefront.com) reach Traefik. Reserved hosts need
+    no exclusion list — explicit records and the *.<prod_subdomain> wildcard are
+    more specific and win automatically. TLS comes from Cloudflare Universal SSL,
+    which covers the apex and the FIRST wildcard level only.
+  EOT
+  type        = bool
+  default     = false
+}
+
+variable "saas_custom_hostnames_enabled" {
+  description = <<-EOT
+    Enable Cloudflare for SaaS on the zone: creates connect.<zone_name> (the
+    CNAME target published to customers) and saas-origin.<zone_name> (the
+    fallback origin), and points the zone's fallback origin at the latter.
+    Individual customer domains are NOT managed here — they are created at
+    runtime by the in-cluster custom-hostname API.
+
+    Cost: 100 custom hostnames included on Free/Pro/Business, $0.10/month each
+    beyond that (ceiling 50,000).
+  EOT
+  type        = bool
+  default     = false
+}
+
 variable "allowed_admin_emails" {
   description = "Email addresses allowed through Cloudflare Access (receives email OTP)"
   type        = list(string)

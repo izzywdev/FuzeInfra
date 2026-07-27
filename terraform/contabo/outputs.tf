@@ -78,3 +78,25 @@ output "object_storage_buckets" {
     contabo_object_storage_bucket.blobs[0].name,
   ] : []
 }
+
+# ---------------------------------------------------------------------------
+# Multi-tenant portal DNS/TLS (FuzeFront EPIC-16)
+# ---------------------------------------------------------------------------
+output "tenant_wildcard_host" {
+  description = "Wildcard host serving tenant subdomains, or empty when disabled."
+  value       = var.tenant_wildcard_enabled ? "*.${var.zone_name}" : ""
+}
+
+output "custom_hostname_cname_target" {
+  description = <<-EOT
+    The hostname customers CNAME their own domain to. This is the value to set as
+    helm/fuzeinfra customHostnameApi.cnameTarget, and the value to publish in the
+    consumer's self-service UI. Empty when Cloudflare for SaaS is disabled.
+  EOT
+  value       = var.saas_custom_hostnames_enabled ? "connect.${var.zone_name}" : ""
+}
+
+output "custom_hostname_fallback_origin" {
+  description = "Cloudflare for SaaS fallback origin (where the edge sends custom-hostname traffic). Empty when disabled."
+  value       = var.saas_custom_hostnames_enabled ? "saas-origin.${var.zone_name}" : ""
+}

@@ -1,0 +1,290 @@
+{{- if .Values.customHostnameApi.enabled }}
+{{- $root := . -}}
+{{- $chapi := .Values.customHostnameApi -}}
+{{- /*
+============================ Custom Hostname API ============================
+Runtime provisioning of customer-owned domains (app.corpabc.com) onto the shared
+cluster, WITHOUT a Helm release per domain. Backs FuzeFront EPIC-16
+(self-service custom domains); see docs/consuming-repos/CUSTOM_DOMAINS.md.
+
+Two halves, both required:
+  1. Cloudflare for SaaS (Custom Hostnames) — ownership validation + DV
+     certificate issued and deployed at the CF edge, where TLS is already
+     terminated. The origin stays HTTP-only, so the tunnel-only invariant
+     (Traefik pinned to ClusterIP) is untouched.
+  2. A per-domain Ingress the service materializes at runtime in the consumer's
+     namespace, so Traefik host-routes the domain. Written WITHOUT Argo CD
+     tracking metadata, so selfHeal never reverts it and prune never deletes it.
+
+SECURITY MODEL
+  - NO Ingress and no tunnel route: this service is reachable only at
+    custom-hostname-api.fuzeinfra.svc.cluster.local:8080. It is never public.
+  - It holds the Cloudflare API token (SealedSecret, fuzeinfra namespace) so
+    consumers never do. Scope the token to exactly:
+        Zone / SSL and Certificates / Edit  (the fuzefront.com zone only)
+        Zone / Zone / Read                  (the fuzefront.com zone only)
+  - Consumers authenticate with a per-profile bearer token; the token IS the
+    authorization boundary, pinning which namespace/Service a caller may route
+    customer domains at.
+  - RBAC is namespace-scoped per route profile and limited to Ingress objects.
+  - A NetworkPolicy restricts ingress to the namespaces that own a profile.
+
+GITOPS: enable in the SAME change that lands
+  deploy/sealed-secrets/custom-hostname-api-secret.yaml.
+*/ -}}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: custom-hostname-api
+  labels:
+    {{- include "fuzeinfra.labels" . | nindent 4 }}
+{{- range $index, $profile := $chapi.routeProfiles }}
+{{- if $profile.enabled }}
+---
+# Ingress-only, namespace-scoped write access — one Role per route profile, in
+# that profile's namespace. The service can never touch any other resource kind
+# or any namespace a profile does not name.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: custom-hostname-api-ingress
+  namespace: {{ required (printf "customHostnameApi.routeProfiles[%d].namespace is required" $index) $profile.namespace }}
+  labels:
+    {{- include "fuzeinfra.labels" $root | nindent 4 }}
+rules:
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["ingresses"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: custom-hostname-api-ingress
+  namespace: {{ $profile.namespace }}
+  labels:
+    {{- include "fuzeinfra.labels" $root | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: custom-hostname-api-ingress
+subjects:
+  - kind: ServiceAccount
+    name: custom-hostname-api
+    namespace: {{ $root.Release.Namespace }}
+{{- end }}
+{{- end }}
+---
+# Route profile registry. Non-secret: it names namespaces and Services, never
+# tokens — each profile's bearer token arrives via secretKeyRef below.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: custom-hostname-api-profiles
+  labels:
+    {{- include "fuzeinfra.labels" . | nindent 4 }}
+data:
+  profiles.yaml: |
+    {{- range $index, $profile := $chapi.routeProfiles }}
+    {{- if $profile.enabled }}
+    - name: {{ $profile.name }}
+      namespace: {{ $profile.namespace }}
+      service: {{ required (printf "customHostnameApi.routeProfiles[%d].service is required" $index) $profile.service }}
+      port: {{ $profile.port | default 80 }}
+      ingressClass: {{ $profile.ingressClass | default $root.Values.ingress.className }}
+      paths:
+      {{- range ($profile.paths | default (list "/")) }}
+        - {{ . | quote }}
+      {{- end }}
+      tokenEnv: CONSUMER_TOKEN_{{ $profile.name | upper | replace "-" "_" }}
+    {{- end }}
+    {{- end }}
+{{- if $chapi.devSecret.enabled }}
+{{- if eq $chapi.provider "cloudflare" }}
+{{- fail "customHostnameApi.devSecret must never be enabled with provider=cloudflare — real deployments take their tokens from a SealedSecret." }}
+{{- end }}
+---
+# LOCAL DEVELOPMENT ONLY. Renders a well-known consumer token so kind clusters
+# work with no SealedSecret ceremony. Guarded above so it can never render
+# against the real Cloudflare provider; prod/AWS take this Secret from
+# deploy/sealed-secrets/custom-hostname-api-secret.yaml instead.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ $chapi.secretName }}
+  labels:
+    {{- include "fuzeinfra.labels" . | nindent 4 }}
+type: Opaque
+stringData:
+  {{- range $chapi.routeProfiles }}
+  {{- if .enabled }}
+  CONSUMER_TOKEN_{{ .name | upper | replace "-" "_" }}: {{ $chapi.devSecret.token | quote }}
+  {{- end }}
+  {{- end }}
+{{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: custom-hostname-api
+  labels:
+    {{- include "fuzeinfra.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "fuzeinfra.selectorLabels" (dict "component" "custom-hostname-api" "root" $) | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ $chapi.port | default 8080 }}
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: custom-hostname-api
+  labels:
+    {{- include "fuzeinfra.labels" . | nindent 4 }}
+spec:
+  replicas: {{ $chapi.replicas | default 1 }}
+  selector:
+    matchLabels:
+      {{- include "fuzeinfra.selectorLabels" (dict "component" "custom-hostname-api" "root" $) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "fuzeinfra.selectorLabels" (dict "component" "custom-hostname-api" "root" $) | nindent 8 }}
+      annotations:
+        # Roll the pod when the profile registry changes — Argo syncs the
+        # ConfigMap but will not restart the Deployment on its own.
+        checksum/profiles: {{ toYaml $chapi.routeProfiles | sha256sum }}
+    spec:
+      serviceAccountName: custom-hostname-api
+      {{- with $chapi.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        fsGroup: 10001
+      containers:
+        - name: custom-hostname-api
+          image: "{{ $chapi.image }}:{{ $chapi.tag }}"
+          imagePullPolicy: {{ include "fuzeinfra.pullPolicy" . }}
+          ports:
+            - name: http
+              containerPort: {{ $chapi.port | default 8080 }}
+          env:
+            - name: PORT
+              value: {{ $chapi.port | default 8080 | quote }}
+            - name: PROVIDER
+              value: {{ $chapi.provider | quote }}
+            - name: MANAGED_ZONE
+              value: {{ $chapi.managedZone | quote }}
+            - name: RESERVED_ZONES
+              value: {{ join "," ($chapi.reservedZones | default list) | quote }}
+            - name: CNAME_TARGET
+              value: {{ $chapi.cnameTarget | quote }}
+            - name: MAX_CUSTOM_HOSTNAMES
+              value: {{ $chapi.maxCustomHostnames | default 100 | quote }}
+            - name: ROUTING_ENABLED
+              value: {{ $chapi.routingEnabled | default false | quote }}
+            - name: STUB_ACTIVATE_AFTER_SECONDS
+              value: {{ $chapi.stubActivateAfterSeconds | default 20 | quote }}
+            - name: STUB_STATE_PATH
+              value: /state/custom-hostnames-stub.json
+            - name: ROUTE_PROFILES_FILE
+              value: /config/profiles.yaml
+            {{- if eq $chapi.provider "cloudflare" }}
+            - name: CLOUDFLARE_API_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $chapi.secretName }}
+                  key: CLOUDFLARE_API_TOKEN
+            - name: CLOUDFLARE_ZONE_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $chapi.secretName }}
+                  key: CLOUDFLARE_ZONE_ID
+            {{- end }}
+            {{- /* One consumer bearer token per enabled profile. */ -}}
+            {{- range $chapi.routeProfiles }}
+            {{- if .enabled }}
+            - name: CONSUMER_TOKEN_{{ .name | upper | replace "-" "_" }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $chapi.secretName }}
+                  key: CONSUMER_TOKEN_{{ .name | upper | replace "-" "_" }}
+            {{- end }}
+            {{- end }}
+          volumeMounts:
+            - name: profiles
+              mountPath: /config
+              readOnly: true
+            - name: state
+              mountPath: /state
+          livenessProbe:
+            httpGet: { path: /healthz, port: http }
+            initialDelaySeconds: 10
+            periodSeconds: 20
+          readinessProbe:
+            # /readyz checks the provider AND that at least one consumer token
+            # is present, so a half-applied SealedSecret shows up as NotReady
+            # instead of as a silent 401 storm.
+            httpGet: { path: /readyz, port: http }
+            initialDelaySeconds: 5
+            periodSeconds: 15
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            {{- toYaml ($chapi.resources | default dict) | nindent 12 }}
+      volumes:
+        - name: profiles
+          configMap:
+            name: custom-hostname-api-profiles
+        # emptyDir, not a PVC: only the stub provider writes here, and its state
+        # is disposable local-development scaffolding. Cloudflare is the system
+        # of record in every environment that matters.
+        - name: state
+          emptyDir: {}
+{{- if $chapi.networkPolicy.enabled }}
+{{- $allowed := list -}}
+{{- range $chapi.routeProfiles }}{{- if .enabled }}{{- $allowed = append $allowed .namespace }}{{- end }}{{- end }}
+{{- range $chapi.networkPolicy.extraAllowedNamespaces | default list }}{{- $allowed = append $allowed . }}{{- end }}
+---
+# Defence in depth: even without an Ingress, only the namespaces that own a
+# route profile may open a connection to this service.
+#
+# `ingress` is omitted entirely when nothing is allowed, which denies all
+# traffic. Emitting a rule with an empty `from` would do the opposite —
+# Kubernetes reads that as "from anywhere" — so the empty case must never
+# render a rule.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: custom-hostname-api
+  labels:
+    {{- include "fuzeinfra.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "fuzeinfra.selectorLabels" (dict "component" "custom-hostname-api" "root" $) | nindent 6 }}
+  policyTypes:
+    - Ingress
+{{- if $allowed }}
+  ingress:
+    - from:
+        {{- range ($allowed | uniq) }}
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ . }}
+        {{- end }}
+      ports:
+        - protocol: TCP
+          port: {{ $chapi.port | default 8080 }}
+{{- end }}
+{{- end }}
+{{- end }}

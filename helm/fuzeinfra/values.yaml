@@ -568,6 +568,11 @@ dnsmasq:
   # Where *.<global.domain> resolves to. For host-side resolution keep 127.0.0.1;
   # set to the ingress controller address to route into the cluster.
   wildcardTarget: "127.0.0.1"
+  # Additional wildcard zones beyond global.domain. Each entry:
+  #   - domain: fuzefront.local
+  #     target: "127.0.0.1"   # optional; defaults to wildcardTarget
+  # Used for local parity with a consumer's production tenant-subdomain zone.
+  extraWildcards: []
   adminPassword: admin123
   # ClusterIP | NodePort | LoadBalancer. Use LoadBalancer/NodePort to use this as
   # an actual DNS server from outside the cluster.
@@ -718,6 +723,88 @@ handoffMcp:
   resources:
     requests: { cpu: "100m", memory: "256Mi" }
     limits:   { cpu: "500m", memory: "512Mi" }
+
+# -----------------------------------------------------------------------------
+# Custom Hostname API — runtime provisioning of customer-owned domains.
+#
+# Lets a consumer attach an arbitrary customer domain (app.corpabc.com) at
+# runtime, with NO Helm release per domain. Two halves: Cloudflare for SaaS
+# issues + deploys the edge certificate, and the service materializes a
+# per-domain Ingress so Traefik host-routes it. Cluster-internal only — no
+# Ingress, no tunnel route. See docs/consuming-repos/CUSTOM_DOMAINS.md.
+#
+# OFF by default. Enable per-overlay in the SAME change that lands
+# deploy/sealed-secrets/custom-hostname-api-secret.yaml.
+# -----------------------------------------------------------------------------
+customHostnameApi:
+  enabled: false
+  image: ghcr.io/izzywdev/fuzeinfra/custom-hostname-api
+  tag: latest
+  replicas: 1
+  port: 8080
+  imagePullSecrets: []
+
+  # "cloudflare" (real Cloudflare for SaaS) or "stub" (kind/local — emulates the
+  # validation + issuance state machine so consumers can develop offline).
+  provider: stub
+
+  # Secret holding CLOUDFLARE_API_TOKEN, CLOUDFLARE_ZONE_ID, and one
+  # CONSUMER_TOKEN_<PROFILE> per enabled route profile. Never committed —
+  # delivered as a SealedSecret to the fuzeinfra namespace.
+  secretName: custom-hostname-api-secret
+
+  # Zones this platform already serves via wildcard DNS + certificate. Domains
+  # inside them are rejected (422): they need no per-domain provisioning and
+  # would silently consume Cloudflare custom-hostname quota.
+  managedZone: fuzefront.com
+  reservedZones: []
+
+  # The hostname customers CNAME their domain to. Must be a proxied record in
+  # the managed zone that resolves to the tunnel (terraform/contabo/cloudflare.tf,
+  # var saas_custom_hostnames_enabled).
+  cnameTarget: connect.fuzefront.com
+
+  # Soft cap, checked before calling Cloudflare, so a runaway consumer cannot
+  # walk the account into overage billing. Cloudflare includes 100 custom
+  # hostnames on Free/Pro/Business; each one beyond that is $0.10/month.
+  # 0 disables the check.
+  maxCustomHostnames: 100
+
+  # Materialize the per-domain Ingress. Off in the base values so a chart
+  # rendered without route profiles cannot try to write to the cluster.
+  routingEnabled: false
+
+  # Stub only: seconds before a pending hostname auto-advances to active.
+  stubActivateAfterSeconds: 20
+
+  networkPolicy:
+    enabled: false
+    extraAllowedNamespaces: []
+
+  # LOCAL DEVELOPMENT ONLY — renders a plaintext Secret with a well-known
+  # consumer token so a kind cluster needs no SealedSecret. The chart FAILS to
+  # render if this is enabled alongside provider=cloudflare.
+  devSecret:
+    enabled: false
+    token: local-dev-token
+
+  # Route profiles: which workload a consumer's domains are routed to. A
+  # consumer's bearer token maps to exactly ONE profile, which is what stops it
+  # pointing a customer domain at another consumer's Service.
+  #   name:      logical consumer name; also derives CONSUMER_TOKEN_<NAME>
+  #   namespace: consumer namespace the Ingress is created in
+  #   service:   Service the Ingress backends to
+  #   port:      Service port
+  #   paths:     path prefixes to route (the consumer's full fan-out)
+  # Defaults are OFF; the prod overlay flips `enabled: true` once the
+  # SealedSecret carrying that profile's token is in the fuzeinfra namespace.
+  routeProfiles:
+    - name: fuzefront
+      enabled: false
+      namespace: fuzefront
+      service: fuzefront-frontend
+      port: 80
+      paths: ["/"]
 
 # -----------------------------------------------------------------------------
 # Longhorn replicated block storage (OPT-IN, default OFF).

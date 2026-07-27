@@ -30,6 +30,11 @@ dnsmasq:
   enabled: true
   wildcardTarget: "127.0.0.1"
   serviceType: ClusterIP
+  # Local mirror of the production tenant-subdomain zone: *.fuzefront.com in
+  # prod becomes *.fuzefront.local on kind, so multi-tenant Host-header
+  # resolution can be developed without editing /etc/hosts per tenant.
+  extraWildcards:
+    - domain: fuzefront.local
 
 # cloudflare-tunnel stays off locally (needs a real tunnel token). To enable:
 #   cloudflareTunnel.enabled=true and set credentials.cloudflare.tunnelToken
@@ -45,3 +50,39 @@ clusterAutoscaler:
 
 overprovisioning:
   enabled: false
+
+# Custom Hostname API — ON locally in stub mode so consumers can develop the
+# self-service custom-domain flow with no Cloudflare account and no real DNS.
+# The stub emulates the full validation -> issuance -> deployment -> active
+# state machine on a 5s timer, returns the same TXT/CNAME record shapes as
+# Cloudflare, and still materializes a real Ingress in the consumer namespace,
+# so a locally-resolved host actually routes.
+#
+# Reach it from another pod:
+#   curl -H "Authorization: Bearer local-dev-token" \
+#     http://custom-hostname-api.fuzeinfra.svc.cluster.local:8080/custom-hostnames
+#
+# Pair with a wildcard *.fuzefront.local in dnsmasq (below) for the tenant-
+# subdomain half of the story.
+customHostnameApi:
+  enabled: true
+  provider: stub
+  managedZone: fuzefront.local
+  cnameTarget: connect.fuzefront.local
+  routingEnabled: true
+  stubActivateAfterSeconds: 5
+  # Plaintext token, kind only. Guarded: the chart refuses to render this
+  # alongside provider=cloudflare.
+  devSecret:
+    enabled: true
+    token: local-dev-token
+  networkPolicy:
+    enabled: false
+  routeProfiles:
+    - name: fuzefront
+      enabled: true
+      namespace: fuzefront
+      service: fuzefront-frontend
+      port: 80
+      paths: ["/", "/api", "/socket.io"]
+      ingressClass: nginx

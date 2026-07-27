@@ -57,6 +57,13 @@ cloudflareTunnel:
   enabled: false
   # replicas: 2   # run multiple replicas for HA once enabled
 
+# Custom Hostname API — OFF on EKS. The mechanism is Cloudflare-for-SaaS-backed
+# and its fallback origin points at the Contabo tunnel, so enabling it here
+# would issue certificates whose traffic lands in the other cluster. If EKS ever
+# needs it, give it its own fallback origin + cnameTarget first.
+customHostnameApi:
+  enabled: false
+
 # NOTE: The "managed services later" path - when you are ready to move
 # stateful services to RDS/ElastiCache/MSK/OpenSearch, disable them here
 # (e.g. postgres.enabled: false) and point apps/airflow at the managed
