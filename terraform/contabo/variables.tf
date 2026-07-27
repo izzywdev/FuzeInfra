@@ -168,7 +168,7 @@ variable "tenant_wildcard_enabled" {
     which covers the apex and the FIRST wildcard level only.
   EOT
   type        = bool
-  default     = false
+  default     = true
 }
 
 variable "saas_custom_hostnames_enabled" {
@@ -183,7 +183,7 @@ variable "saas_custom_hostnames_enabled" {
     beyond that (ceiling 50,000).
   EOT
   type        = bool
-  default     = false
+  default     = true
 }
 
 variable "allowed_admin_emails" {
