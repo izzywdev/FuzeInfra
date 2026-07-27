@@ -252,6 +252,26 @@ serviceDatabases:
     passwordSecret:
       name: fuzequality-db-credentials
       key: password
+  # Backing store for the MendysRobotics Authentik instance (FuzeFront chart,
+  # instance "mendys"). See the base values.yaml entry for why MendysRobotics
+  # gets its own Authentik instance + database rather than a brand on the
+  # shared FuzeFront directory.
+  #
+  # STILL GATED OFF: per governance/datastore-provisioning.md the gate flips
+  # only in the same PR that lands the strict-scoped SealedSecret
+  # `authentik-mendys-db-credentials` (key `password`) sealed FOR the
+  # `fuzeinfra` namespace. FuzeFront owns that password (its Authentik pods
+  # connect with it), so FuzeFront seals it into BOTH namespaces:
+  #   - fuzefront  → the authentik-mendys server/worker DATABASE_URL
+  #   - fuzeinfra  → read by this provisioning Job via secretKeyRef
+  # Flipping this to `true` before that Secret exists fails the PostSync Job.
+  - name: authentik-mendys
+    enabled: false
+    role: authentik_mendys_user
+    database: authentik_mendys
+    passwordSecret:
+      name: authentik-mendys-db-credentials
+      key: password
 # Per-service MongoDB provisioning (Helm REPLACES lists, so the full set must be
 # declared here — the base values default every entry to enabled: false).
 #
