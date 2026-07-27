@@ -13,6 +13,15 @@ spec:
       server: https://kubernetes.default.svc
     - namespace: argocd
       server: https://kubernetes.default.svc
+    # The ARC self-heal watchdog (argocd/applications/arc-selfheal.yaml) manages
+    # a CronJob + RBAC in the ARC controller's namespace. Without this entry Argo
+    # rejects the Application with InvalidSpecError and never syncs it.
+    # NOTE: `arc-runners` is deliberately NOT listed. arc-runners-staging is
+    # currently InvalidSpec for exactly that reason; adding it would activate a
+    # dormant prune+selfHeal Application against the live scale sets. That is a
+    # separate, deliberate change — see runners/README.md.
+    - namespace: arc-systems
+      server: https://kubernetes.default.svc
   # The chart creates cluster-scoped objects (monitoring ClusterRole/Binding),
   # so cluster resources must be allowed for this project.
   clusterResourceWhitelist:

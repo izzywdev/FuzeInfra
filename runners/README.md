@@ -367,16 +367,59 @@ The PR gate is simply the automated version of these commands.
 
 ## Cluster-level bootstrap note (ArgoCD project)
 
-The `arc-runners` and `arc-systems` namespaces are created by `install.sh`.  If you want
-ArgoCD to manage them, add them to the `fuzeinfra` AppProject destinations:
+The `arc-runners` and `arc-systems` namespaces are created by `install.sh`.
 
-```yaml
-# argocd/projects/fuzeinfra.yaml  — add to spec.destinations:
-- namespace: arc-runners
-  server: https://kubernetes.default.svc
-- namespace: arc-systems
-  server: https://kubernetes.default.svc
+`arc-systems` **is** GitOps-managed: `argocd/projects/fuzeinfra.yaml` lists it as an
+allowed destination and `argocd/applications/arc-selfheal.yaml` syncs
+`runners/arc/gitops/` into it (registered on every prod deploy by
+`deploy-prod.yml`). Only the watchdog is managed there — the ARC controller and
+the scale sets are still bootstrapped by `install.sh`.
+
+`arc-runners` is **not** an allowed destination, so `arc-runners-staging` sits at
+`InvalidSpecError` and has never synced:
+
 ```
+application destination ... namespace 'arc-runners' do not match any of the
+allowed destinations in project 'fuzeinfra'
+application repo ghcr.io/actions/actions-runner-controller-charts is not permitted
+```
+
+Fixing it needs **both** `- namespace: arc-runners` under `spec.destinations` and
+`- ghcr.io/actions/actions-runner-controller-charts` under `spec.sourceRepos`.
+Do that as a deliberate change: the Application carries `prune: true` +
+`selfHeal: true`, so making it valid immediately hands the live scale sets to
+Argo and can disrupt in-flight jobs.
+
+---
+
+## The self-heal / CI-capacity watchdog
+
+`runners/arc/gitops/controller-selfheal.yaml` runs a CronJob every 15 min in
+`arc-systems` covering the two ways CI goes quiet:
+
+| Failure | Detection | Action |
+|---|---|---|
+| Controller wedged, stops creating runner pods (2026-07-24) | ephemeral runners Pending with zero Running | `rollout restart deployment/arc-controller-gha-rs-controller` |
+| CI node lost `fuzeinfra.io/pool=ci` or is cordoned (2026-07-27) | no schedulable node carries the label | logs `CRIT`, exits non-zero, and **skips** the controller restart |
+
+The second case is not self-healable from inside the cluster: k3s applies
+`--node-label` only at agent registration
+(`modules/contabo-k3s-node/cloud-init.tftpl`), so a manual `kubectl label` is
+permanent and Terraform never reconciles it. Fix it by hand:
+
+```bash
+kubectl label node <ci-node> fuzeinfra.io/pool=ci --overwrite
+```
+
+Two independent alarms cover it: the `CRIT` line routes to a GitHub issue via
+the Loki bridge (`docs/crit-log-autofix.md`, keyed off the
+`fuzeinfra.io/owner-repo` annotation the Argo Application stamps on
+`arc-systems`), and `CiNodePoolLabelMissing` / `CiNodePoolUnschedulable` in
+`helm/fuzeinfra/rules/nodes.yml` fire from Prometheus.
+
+> The watchdog image **must contain a shell**. It shipped as `rancher/kubectl`
+> with `command: ["sh","-c"]`, which has no `/bin/sh`, and StartError'd on every
+> single run from creation until 2026-07-27.
 
 ---
 

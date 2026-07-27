@@ -1,0 +1,57 @@
+# =============================================================================
+# ArgoCD Application — ARC self-heal / CI-capacity watchdog (arc-systems)
+#
+# Puts runners/arc/gitops/ under GitOps ownership. Before this Application the
+# CronJob + its RBAC existed ONLY as an imperative `kubectl apply` (the manifest
+# was committed but never wired to Argo), so prod drift was invisible — it
+# StartError'd on every run for 3d17h without anything noticing.
+#
+# The `runners/arc/` directory itself is NOT usable as an Argo source: it holds
+# Helm values files and a placeholder Secret. Only runners/arc/gitops/ is
+# applyable, and recurse is off so it stays that way.
+#
+# The ARC *controller* and the runner scale sets are still bootstrapped out of
+# band (runners/arc/install.sh); this Application deliberately covers only the
+# watchdog, so a sync here can never disturb a running job.
+#
+# REGISTRATION: applied idempotently on every prod deploy by
+# .github/workflows/deploy-prod.yml. Requires argocd/projects/fuzeinfra.yaml to
+# list `arc-systems` as an allowed destination (it does).
+# =============================================================================
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: arc-selfheal
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: fuzeinfra
+  source:
+    repoURL: https://github.com/izzywdev/FuzeInfra.git
+    targetRevision: main
+    path: runners/arc/gitops
+    directory:
+      recurse: false
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: arc-systems
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    # arc-systems already exists (created by runners/arc/install.sh). Argo adopts
+    # it and stamps the owner-repo annotation so the watchdog's CRIT lines route
+    # to this repo rather than falling back — see docs/crit-log-autofix.md.
+    managedNamespaceMetadata:
+      annotations:
+        fuzeinfra.io/owner-repo: izzywdev/FuzeInfra
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 15s
+        factor: 2
+        maxDuration: 5m

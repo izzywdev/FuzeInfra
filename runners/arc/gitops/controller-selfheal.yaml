@@ -1,0 +1,148 @@
+# =============================================================================
+# ARC self-heal / CI-capacity watchdog  (namespace: arc-systems)
+#
+# GitOps-managed by argocd/applications/arc-selfheal.yaml. This directory is an
+# Argo *directory* source, so it must contain ONLY applyable manifests — never
+# Helm values files (that is why this lives in runners/arc/gitops/ and not
+# alongside runner-scale-set-values.yaml).
+#
+# It watches two independent failure modes that both end with "runner pods
+# Pending forever, CI queues silently":
+#
+#   1. CONTROLLER WEDGED (2026-07-24) — the gha-rs-controller stopped creating
+#      runner pods after transient generatejitconfig TLS timeouts; staging jobs
+#      queued 30h. A rollout restart clears it.
+#
+#   2. CI NODE LOST ITS POOL LABEL (2026-07-27) — runner pods hard-select
+#      `fuzeinfra.io/pool: ci` (runners/arc/runner-scale-set-values.yaml), and
+#      the node label is set by k3s `--node-label` at AGENT REGISTRATION ONLY
+#      (modules/contabo-k3s-node/cloud-init.tftpl). A manual `kubectl label`
+#      therefore sticks permanently and Terraform never reconciles it — all 8
+#      scale sets sat Pending for 11h. A controller restart CANNOT fix this, so
+#      the script detects it, emits CRIT (routed to this repo by the
+#      fuzeinfra.io/owner-repo namespace annotation — docs/crit-log-autofix.md)
+#      and deliberately SKIPS the restart.
+#
+# NOTE ON THE IMAGE: this ran with `rancher/kubectl` + `command: ["sh","-c"]`
+# from creation until 2026-07-27 and StartError'd on EVERY run — that image
+# ships no shell. Any replacement image MUST contain /bin/sh.
+# =============================================================================
+apiVersion: v1
+kind: ServiceAccount
+metadata: {name: arc-selfheal, namespace: arc-systems}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata: {name: arc-selfheal}
+rules:
+  - {apiGroups: ["actions.github.com"], resources: ["ephemeralrunners"], verbs: ["get","list"]}
+  # Read-only node access for the pool-label check (check 1).
+  - {apiGroups: [""], resources: ["nodes"], verbs: ["get","list"]}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata: {name: arc-selfheal}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: arc-selfheal}
+subjects: [{kind: ServiceAccount, name: arc-selfheal, namespace: arc-systems}]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: {name: arc-selfheal, namespace: arc-systems}
+rules:
+  - {apiGroups: ["apps"], resources: ["deployments"], verbs: ["get","patch"]}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: arc-selfheal, namespace: arc-systems}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: arc-selfheal}
+subjects: [{kind: ServiceAccount, name: arc-selfheal, namespace: arc-systems}]
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: arc-controller-selfheal
+  namespace: arc-systems
+  labels:
+    app.kubernetes.io/name: arc-selfheal
+    app.kubernetes.io/component: ci-watchdog
+    app.kubernetes.io/part-of: arc
+spec:
+  schedule: "*/15 * * * *"
+  concurrencyPolicy: Forbid
+  # Do not fire a backlog of missed runs after an apiserver/node outage.
+  startingDeadlineSeconds: 300
+  successfulJobsHistoryLimit: 2
+  failedJobsHistoryLimit: 2
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      activeDeadlineSeconds: 120
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: arc-selfheal
+            app.kubernetes.io/component: ci-watchdog
+        spec:
+          serviceAccountName: arc-selfheal
+          restartPolicy: Never
+          # Must be able to run when the CI pool itself is unschedulable — that
+          # is precisely the condition check 1 exists to report.
+          tolerations:
+            - key: node-role.kubernetes.io/control-plane
+              operator: Exists
+              effect: NoSchedule
+          containers:
+            - name: selfheal
+              # alpine/k8s = kubectl + busybox sh. Tag tracks the k3s server
+              # version (v1.36.2+k3s1) to stay inside the kubectl skew policy.
+              image: alpine/k8s:1.36.2
+              imagePullPolicy: IfNotPresent
+              resources:
+                requests: {cpu: 10m, memory: 32Mi}
+                limits:   {cpu: 200m, memory: 128Mi}
+              command: ["/bin/sh", "-c"]
+              args:
+                - |
+                  set -u
+                  crit=0
+
+                  # ---- check 1: a schedulable node carries fuzeinfra.io/pool=ci ----
+                  nodes=$(kubectl get nodes -l fuzeinfra.io/pool=ci \
+                    -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.spec.unschedulable}{"\n"}{end}' 2>/dev/null)
+                  total=$(printf '%s\n' "$nodes" | awk 'NF' | wc -l | tr -d ' ')
+                  sched=$(printf '%s\n' "$nodes" | awk 'NF && $2!="true"' | wc -l | tr -d ' ')
+
+                  if [ "$total" -eq 0 ]; then
+                    echo "CRIT ARC ci-pool: no node carries the label fuzeinfra.io/pool=ci, so every runner pod will stay Pending forever. k3s applies --node-label only at agent registration, so Terraform will NOT reconcile this - relabel by hand: kubectl label node <ci-node> fuzeinfra.io/pool=ci --overwrite"
+                    crit=1
+                  elif [ "$sched" -eq 0 ]; then
+                    echo "CRIT ARC ci-pool: all $total node(s) labelled fuzeinfra.io/pool=ci are cordoned; runner pods cannot schedule. Uncordon one or add CI capacity."
+                    crit=1
+                  else
+                    echo "ok ci-pool: $sched/$total schedulable node(s) with fuzeinfra.io/pool=ci"
+                  fi
+
+                  # ---- check 2: controller still creating runner pods ----
+                  ph=$(kubectl get ephemeralrunner -A \
+                    -o jsonpath='{range .items[*]}{.status.phase}{"\n"}{end}' 2>/dev/null)
+                  pend=$(printf '%s\n' "$ph" | grep -cvE 'Running|Succeeded|Failed|^$' || true)
+                  run=$(printf '%s\n' "$ph" | grep -c 'Running' || true)
+                  echo "ephemeralrunners: non-running=$pend running=$run"
+
+                  if [ "$pend" -gt 0 ] && [ "$run" -eq 0 ]; then
+                    if [ "$crit" -eq 1 ]; then
+                      # Restarting the controller cannot schedule a pod onto a pool
+                      # with no schedulable node; doing it anyway would mask the real
+                      # cause behind 15-minutely controller churn.
+                      echo "runners stuck, but the CI pool above is the cause - NOT restarting the controller"
+                    else
+                      echo "STUCK detected -> restarting ARC controller"
+                      kubectl -n arc-systems rollout restart deployment/arc-controller-gha-rs-controller
+                    fi
+                  else
+                    echo "ok controller: creating runners normally"
+                  fi
+
+                  # Fail the Job on CRIT so PodFailed alerting and
+                  # failedJobsHistoryLimit retain the evidence.
+                  exit "$crit"

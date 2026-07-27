@@ -139,6 +139,12 @@ spec:
           args:
             - --port=8080
             - --telemetry-port=8081
+            {{- with .Values.kubeStateMetrics.nodeLabelsAllowlist }}
+            # kube-state-metrics v2 emits kube_node_labels with NO label_*
+            # dimensions unless the label is allow-listed here. Without this the
+            # CiNodePoolLabelMissing rule in rules/nodes.yml can never fire.
+            - --metric-labels-allowlist=nodes=[{{ join "," . }}]
+            {{- end }}
           ports:
             - name: http-metrics
               containerPort: 8080

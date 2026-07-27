@@ -32,6 +32,21 @@ jobs:
           helm lint helm/fuzeinfra -f helm/fuzeinfra/values-local.yaml
           helm lint helm/fuzeinfra -f helm/fuzeinfra/values-aws.yaml
 
+      # Alert rules are shipped as raw files via .Files.Get, so helm lint never
+      # looks inside them. promtool parses the PromQL and — via the unit tests —
+      # proves the rules actually FIRE on the condition they claim to catch.
+      # (CiNodePoolLabelMissing originally used `count(...) == 0`, which parses
+      # fine and can never fire, because an empty selector yields no samples.)
+      - name: Validate + unit-test Prometheus alert rules
+        run: |
+          set -euo pipefail
+          curl -sSLo /tmp/prom.tar.gz \
+            https://github.com/prometheus/prometheus/releases/download/v2.53.0/prometheus-2.53.0.linux-amd64.tar.gz
+          tar -xzf /tmp/prom.tar.gz -C /tmp
+          sudo install /tmp/prometheus-2.53.0.linux-amd64/promtool /usr/local/bin/promtool
+          promtool check rules helm/fuzeinfra/rules/*.yml
+          promtool test rules helm/fuzeinfra/rules/tests/*_test.yml
+
       - name: Install kubeconform
         run: |
           curl -sSLo /tmp/kubeconform.tar.gz \

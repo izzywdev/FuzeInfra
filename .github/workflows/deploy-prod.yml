@@ -14,7 +14,10 @@ on:
       - 'argocd/applications/fuzeinfra-sealed-secrets.yaml'
       - 'argocd/applications/sealed-secrets.yaml'
       - 'argocd/applications/fuzequality.yaml'
+      - 'argocd/applications/arc-selfheal.yaml'
       - 'argocd/projects/fuzefront.yaml'
+      - 'argocd/projects/fuzeinfra.yaml'
+      - 'runners/arc/gitops/**'
       - '.github/workflows/deploy-prod.yml'
   workflow_dispatch:
 
@@ -77,11 +80,18 @@ jobs:
           kubectl apply -f argocd/projects/fuzefront.yaml
           echo "registered fuzefront AppProject"
 
+          # The fuzeinfra AppProject gates which namespaces its Applications may
+          # target. arc-selfheal lives in arc-systems, so the project must be
+          # applied from Git BEFORE that Application is registered — otherwise
+          # Argo rejects it with InvalidSpecError.
+          kubectl apply -f argocd/projects/fuzeinfra.yaml
+          echo "registered fuzeinfra AppProject"
+
           # Register the standalone Application manifests idempotently on every prod
           # deploy. Terraform only applies them on first-provision, so on a VPS
           # rebuild (or if one was never registered — e.g. sealed-secrets, #88) they
           # would silently go missing. apply -f makes the repo the source of truth.
-          for app in fuzeinfra-prod sealed-secrets fuzeinfra-sealed-secrets fuzequality; do
+          for app in fuzeinfra-prod sealed-secrets fuzeinfra-sealed-secrets fuzequality arc-selfheal; do
             kubectl apply -f "argocd/applications/$app.yaml"
             echo "registered $app"
           done
@@ -109,7 +119,7 @@ jobs:
             fi
           fi
           # Kick an immediate sync so the rollout starts seconds after merge.
-          for app in fuzeinfra-prod sealed-secrets fuzeinfra-sealed-secrets fuzequality; do
+          for app in fuzeinfra-prod sealed-secrets fuzeinfra-sealed-secrets fuzequality arc-selfheal; do
             # Ensure the sync renders this Git revision instead of reusing a
             # cached Helm result whose reported revision has already advanced.
             kubectl -n argocd annotate application "$app" \
