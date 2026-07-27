@@ -39,8 +39,17 @@ PR (or provisioning run) that creates an allocation. See
 | App | ACL user | Key prefix | DB index | Consumer repo | Status |
 |---|---|---|---|---|---|
 | fuzekeys | `fuzekeys` | `fuzekeys:` | 1 | izzywdev/FuzeKeys | active (FuzeInfra#136) |
+| authentik-mendys | (shared password) | authentik-internal | 2 | izzywdev/FuzeFront (MendysRobotics IdP silo) | declared |
 
 DB index 0 is reserved for FuzeInfra platform services.
+
+> `authentik-mendys` takes an **index, not an ACL user**: authentik owns its own
+> key layout and does not prefix keys, so a prefix-scoped ACL cannot be applied
+> to it. The index matters for correctness rather than security — authentik
+> keeps cache and sessions in Redis under non-namespaced key names, so the
+> Mendys instance must not share index 0 with the FuzeFront authentik (which
+> uses authentik's default of 0) or the two would collide and leak session
+> state across the very boundary the separate instance creates.
 
 ## ChromaDB (shared `fuzeinfra-chromadb`)
 
