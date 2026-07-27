@@ -503,6 +503,16 @@ locals {
     "neo4j"         = { name = "Neo4j", logo = "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/neo4j.png", path = "" }
     "elasticsearch" = { name = "Elasticsearch", logo = "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/elasticsearch.png", path = "" }
     "chromadb"      = { name = "ChromaDB", logo = "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/chroma.png", path = "/api/v2/heartbeat" }
+    # FuzeFront admin UIs (izzywdev/FuzeFront). Both land UNDER the *.prod
+    # wildcard, so the catch-all tunnel rule → Traefik, the *.prod CNAME, and the
+    # *.prod email-OTP Access app already cover routing/DNS/gating — no per-host
+    # tunnel rule, CNAME, or Access app is needed. These bookmarks just add the
+    # launcher tiles. Traefik host-routes each to the FuzeFront-owned Ingress:
+    #   unleash   → svc fuzefront-unleash:4242   (Ingress live, commit a2d0af5)
+    #   authentik → svc authentik-server:9000    (FuzeFront still to add the
+    #               authentik.prod.fuzefront.com Ingress; tile lands on /if/admin/)
+    "unleash"   = { name = "Unleash", logo = "https://avatars.githubusercontent.com/u/23053233?s=200&v=4", path = "" }
+    "authentik" = { name = "Authentik", logo = "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/authentik.png", path = "/if/admin/" }
   }
 }
 
