@@ -331,69 +331,34 @@ resource "cloudflare_zero_trust_access_policy" "app_launcher" {
   }
 }
 
-# Neo4j Browser static UI bypass
+# ---------------------------------------------------------------------------
+# REMOVED (deliberate, do not re-add): public CF Access bypasses for
+# neo4j.<prod>/browser and grafana.<prod>/public/build.
 #
-# Neo4j Browser's index.html loads JS modules with <script type="module" crossorigin>,
-# which forces all dynamic imports to run with credentials:omit (no cookies).
-# CF Access redirects cookie-less requests to cloudflareaccess.com, which causes
-# a CORS failure in the browser — breaking the entire SPA before it mounts.
+# Both were `decision = bypass` + `everyone = true`, i.e. genuinely unauthenticated
+# public access to those paths, punched through the *.prod OTP wall. They were
+# deleted out-of-band in Cloudflare; removing them from config here makes the
+# config match that reality so `terraform apply` stops recreating them. This is a
+# config-only change — it does not alter prod, which already has no such bypass.
 #
-# Fix: bypass CF Access for neo4j.*/browser so the UI assets load freely.
-# The database itself still requires Neo4j username/password over Bolt.
-resource "cloudflare_zero_trust_access_application" "neo4j_browser_ui" {
-  count                = local.cloudflare_enabled ? 1 : 0
-  account_id           = var.cloudflare_account_id
-  name                 = "Neo4j Browser (public UI)"
-  domain               = "neo4j.${local.prod_domain}/browser"
-  type                 = "self_hosted"
-  session_duration     = "0s"
-  app_launcher_visible = false
-}
-
-resource "cloudflare_zero_trust_access_policy" "neo4j_browser_ui_bypass" {
-  count          = local.cloudflare_enabled ? 1 : 0
-  account_id     = var.cloudflare_account_id
-  application_id = cloudflare_zero_trust_access_application.neo4j_browser_ui[0].id
-  name           = "Bypass — Neo4j Browser static UI"
-  precedence     = 1
-  decision       = "bypass"
-
-  include {
-    everyone = true
-  }
-}
-
-# Grafana build asset bypass — allows CF to cache /public/build/* at the edge.
+# The problems they originally solved, and where they stand now:
 #
-# CF Access injects the CF_Authorization cookie on all authenticated requests.
-# A request bearing any cookie gets CF-Cache-Status: BYPASS, meaning CF always
-# forwards to the origin tunnel and never serves from cache. Grafana's content-
-# hashed build files (/public/build/*.js, /public/build/*.css) are identical for
-# every user; they need no authentication. Bypassing CF Access for this path lets
-# CF cache them and serve subsequent requests from the edge, eliminating the burst
-# of concurrent tunnel connections that causes 503 on the tablePanel CSS load.
-resource "cloudflare_zero_trust_access_application" "grafana_build_assets" {
-  count                = local.cloudflare_enabled ? 1 : 0
-  account_id           = var.cloudflare_account_id
-  name                 = "Grafana Build Assets (public)"
-  domain               = "grafana.${local.prod_domain}/public/build"
-  type                 = "self_hosted"
-  session_duration     = "0s"
-  app_launcher_visible = false
-}
-
-resource "cloudflare_zero_trust_access_policy" "grafana_build_assets_bypass" {
-  count          = local.cloudflare_enabled ? 1 : 0
-  account_id     = var.cloudflare_account_id
-  application_id = cloudflare_zero_trust_access_application.grafana_build_assets[0].id
-  name           = "Bypass — Grafana static build assets"
-  precedence     = 1
-  decision       = "bypass"
-
-  include {
-    everyone = true
-  }
-}
+#   Grafana /public/build/* cache misses — SOLVED WITHOUT A BYPASS by the
+#   `grafana_asset_serve` Worker below, which strips the CF_Authorization cookie
+#   pre-cache so authenticated users share one warm edge cache entry. Access stays
+#   enforced. No regression from removing the bypass.
+#
+#   Neo4j Browser blank page — NOT solved by removing this. The failure is a CORS
+#   error: the SPA's `<script type="module" crossorigin>` imports send no cookies,
+#   so CF Access 302s them to cloudflareaccess.com. `neo4j_browser_cache` below is
+#   a cache rule and does not address it. Accept that the public Browser UI is
+#   unavailable and reach it via `kubectl port-forward` / WARP, which is the
+#   security-correct answer — do NOT restore a public bypass to fix it.
+#
+# The sealed-secrets cert bypass below is intentionally KEPT: it serves only the
+# Sealed Secrets *public* encryption certificate, which is safe to expose and must
+# be fetchable offline by `scripts/seal-secret.sh` without cluster access.
+# ---------------------------------------------------------------------------
 
 # Sealed Secrets public cert bypass.
 #
