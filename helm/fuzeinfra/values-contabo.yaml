@@ -191,6 +191,54 @@ cloudflareTunnel:
 # Enabling before the secret exists CrashLoops the pod (CreateContainerConfigError).
 handoffMcp:
   enabled: false
+# -----------------------------------------------------------------------------
+# Custom Hostname API (prod) — runtime provisioning of customer-owned domains
+# for FuzeFront's multi-tenant portals (EPIC-16). Cloudflare for SaaS issues and
+# deploys the edge certificate; the service materializes a per-domain Ingress so
+# Traefik host-routes it. Cluster-internal only: no Ingress, no tunnel route, no
+# CF Access app — it is unreachable from outside the cluster by construction.
+#
+# GITOPS GATE: keep enabled:false (and routeProfiles[].enabled:false) until ALL
+# of these land in the SAME change —
+#   1. deploy/sealed-secrets/custom-hostname-api-secret.yaml, sealed via
+#      scripts/seal-secret.sh, carrying CLOUDFLARE_API_TOKEN (scoped to
+#      SSL and Certificates:Edit + Zone:Read on the fuzefront.com zone ONLY),
+#      CLOUDFLARE_ZONE_ID, and CONSUMER_TOKEN_FUZEFRONT;
+#   2. `terraform apply` with saas_custom_hostnames_enabled=true, so
+#      connect.fuzefront.com and the Cloudflare for SaaS fallback origin exist;
+#   3. the fuzefront namespace with a fuzefront-frontend Service to back the
+#      materialized Ingresses.
+# Enabling before (1) CrashLoops the pod (CreateContainerConfigError); enabling
+# before (2) issues certificates for domains that resolve nowhere.
+# -----------------------------------------------------------------------------
+customHostnameApi:
+  enabled: false
+  provider: cloudflare
+  managedZone: fuzefront.com
+  # Hosts under prod.fuzefront.com sit behind the CF Access OTP wall and are
+  # served by the *.prod wildcard — never provision them as custom hostnames.
+  reservedZones:
+    - prod.fuzefront.com
+  cnameTarget: connect.fuzefront.com
+  routingEnabled: true
+  # Cloudflare includes 100 custom hostnames on Free/Pro/Business; each one
+  # beyond that bills at $0.10/month. Raise deliberately, not by accident.
+  maxCustomHostnames: 100
+  networkPolicy:
+    enabled: true
+  resources:
+    requests: { cpu: "50m", memory: "128Mi" }
+    limits:   { cpu: "300m", memory: "256Mi" }
+  routeProfiles:
+    - name: fuzefront
+      enabled: false
+      namespace: fuzefront
+      service: fuzefront-frontend
+      port: 80
+      # Mirrors the fan-out on FuzeFront's own app.fuzefront.com Ingress so a
+      # custom domain behaves identically to the canonical host.
+      paths: ["/", "/api", "/socket.io"]
+      ingressClass: traefik
 # dnsmasq not needed on a remote server (use real DNS / nip.io)
 dnsmasq:
   enabled: false
