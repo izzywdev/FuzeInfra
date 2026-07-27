@@ -3,10 +3,22 @@
 # Chart: oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set
 # Namespace: arc-runners  |  Release name: staging
 #
-# Registers a repo-level ephemeral runner with labels [self-hosted, staging].
-# izzywdev is a personal GitHub account (not an org) — repo-scoped runners only.
-# Consumers target it with:
-#   runs-on: [self-hosted, staging]
+# Shared BASE values for every ARC scale set. The arc-runner-scale-sets
+# ApplicationSet (argocd/applications/arc-runners.yaml) layers per-set overrides
+# (githubConfigUrl / runnerScaleSetName / maxRunners) on top via helm parameters,
+# so common settings are edited here ONCE and Argo rolls them to all sets.
+#
+# TARGETING — READ THIS BEFORE EDITING A CONSUMER WORKFLOW:
+#   gha-runner-scale-set runners register with NO labels at all (verified:
+#   `gh api repos/<owner>/<repo>/actions/runners` returns "labels": []).
+#   Jobs are matched by the SCALE SET NAME, not by labels. Therefore:
+#       runs-on: staging            # ✅ correct — bare string == runnerScaleSetName
+#       runs-on: [self-hosted, staging]   # ❌ never matches; queues forever
+#       runs-on: self-hosted              # ❌ never matches; queues forever
+#       runs-on: ["a", "staging", "b"]    # ❌ arrays never match a scale set
+#   `[self-hosted, <label>]` belongs to the LEGACY RunnerDeployment mode, which
+#   this chart is not. izzywdev is a personal account (not an org), so runners
+#   are repo-scoped and there is no org runner-group to target either.
 # =============================================================================
 
 # ---- GitHub target ----------------------------------------------------------
@@ -17,9 +29,10 @@ githubConfigUrl: "https://github.com/izzywdev/FuzeInfra"
 # Create it from runners/arc/github-secret.yaml before installing.
 githubConfigSecret: arc-runner-github-app
 
-# ---- Scale set label --------------------------------------------------------
-# This value becomes the runner's primary label.  Combined with the automatic
-# "self-hosted" label, workflows can target: runs-on: [self-hosted, staging]
+# ---- Scale set name ---------------------------------------------------------
+# This is the job-matching key: workflows target it with `runs-on: staging`
+# (bare string, exactly this value). It is NOT a label — see the targeting note
+# in the header. Overridden per set by the ApplicationSet.
 runnerScaleSetName: staging
 
 # ---- Scaling ----------------------------------------------------------------
@@ -39,10 +52,15 @@ template:
 
     containers:
       - name: runner
-        # Stock actions-runner has the docker CLI + buildx but NOT compose-v2.
-        # For `docker compose`, publish runners/arc/Dockerfile and set the image
-        # here (e.g. ghcr.io/izzywdev/fuzeinfra-arc-runner:<tag>).
-        image: ghcr.io/actions/actions-runner:latest
+        # CI-capable image (runners/arc/Dockerfile): stock actions-runner +
+        # compose-v2 & buildx plugins + jq/curl + warm toolcache. The STOCK
+        # ghcr.io/actions/actions-runner has the docker CLI + buildx but NOT
+        # compose-v2, so `docker compose -f ...` fails on it with
+        # "unknown shorthand flag: 'f' in -f". Matches register-repo.sh's
+        # RUNNER_IMAGE default so ALL scale sets run one image.
+        # PREREQUISITE: must stay published + PUBLIC (no imagePullSecret exists
+        # in arc-runners) or every runner pod ImagePullBackOffs.
+        image: ghcr.io/izzywdev/fuzeinfra-arc-runner:latest
         # NOTE: do NOT override command/args here. (A debug JITCONFIG wrapper
         # used to live here — removed now that the runner is stable. It exec'd
         # run.sh directly and added connectivity-curl noise.)
