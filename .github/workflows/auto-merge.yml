@@ -16,6 +16,19 @@ name: Auto-merge
 # rollup it read was momentarily stale). The schedule guarantees eventual merge;
 # evaluating all open PRs removes any dependence on an event's PR linkage.
 #
+# SAFETY - the merge is PINNED to the commit whose checks were verified.
+# `gh pr view` reads statusCheckRollup for the head at that instant; the merge then
+# passes --match-head-commit with that same OID. Previously the two were unbound, so
+# a push landing in between meant the job merged a commit NO check had run against,
+# and silently discarded the newer commits. That happened twice (#415, #418): each
+# PR reported "merged" while the author's latest commit never reached main, and the
+# lost work had to be re-applied in a follow-up PR. If head has moved, the merge is
+# refused and the next sweep re-evaluates the new head - eventual, never wrong.
+#
+# HOLDING A GREEN PR: label it `hold`, `wip`, or `no-automerge`. `isDraft` is the
+# other opt-out. Without one of those, a non-draft PR IS a merge request and will be
+# merged the moment required checks pass - do not leave work-in-progress non-draft.
+#
 # Requires: secrets.GH_TOKEN = an admin / bypass-actor PAT (the default
 # GITHUB_TOKEN is not admin and cannot --admin merge).
 
@@ -61,7 +74,7 @@ jobs:
           for PR in "${PRS[@]}"; do
             echo "::group::Evaluate PR #$PR"
             meta=$(gh pr view "$PR" --repo "$REPO" \
-              --json number,state,isDraft,baseRefName,headRefName,isCrossRepository,mergeable,statusCheckRollup 2>/dev/null || echo '')
+              --json number,state,isDraft,baseRefName,headRefName,headRefOid,labels,isCrossRepository,mergeable,statusCheckRollup 2>/dev/null || echo '')
             if [ -z "$meta" ]; then echo "  gone — skip"; echo "::endgroup::"; continue; fi
 
             state=$(jq -r '.state' <<<"$meta")
@@ -70,6 +83,10 @@ jobs:
             head=$(jq -r '.headRefName' <<<"$meta")
             fork=$(jq -r '.isCrossRepository' <<<"$meta")
             mergeable=$(jq -r '.mergeable' <<<"$meta")
+            # The EXACT commit whose statusCheckRollup we are about to read. The merge
+            # below is pinned to it, so we can never merge a commit we did not verify.
+            oid=$(jq -r '.headRefOid' <<<"$meta")
+            labels=$(jq -r '[.labels[]?.name] | join(",")' <<<"$meta")
 
             [ "$state" != "OPEN" ] && { echo "  state=$state — skip"; echo "::endgroup::"; continue; }
             [ "$draft" = "true" ] && { echo "  draft — skip"; echo "::endgroup::"; continue; }
@@ -77,6 +94,13 @@ jobs:
             [ "$fork" = "true" ] && { echo "  fork PR — skip (gated)"; echo "::endgroup::"; continue; }
             case "$head" in infra-request/*) echo "  infra-request/* — skip (human-gated)"; echo "::endgroup::"; continue;; esac
             [ "$mergeable" = "CONFLICTING" ] && { echo "  conflicts — skip"; echo "::endgroup::"; continue; }
+            # Opt-out for a PR that is green but NOT finished. `isDraft` is the other
+            # signal; this exists because a PR can be legitimately non-draft (so CI and
+            # reviewers engage) while the author still has commits to push.
+            case ",$labels," in
+              *,no-automerge,*|*,wip,*|*,hold,*)
+                echo "  labelled hold/wip/no-automerge — skip"; echo "::endgroup::"; continue;;
+            esac
 
             # every REQUIRED context must be present AND SUCCESS (treat null/empty
             # — i.e. still-running — as not ready)
@@ -91,9 +115,15 @@ jobs:
             done
             [ "$green" -ne 1 ] && { echo "::endgroup::"; continue; }
 
-            echo "  all required checks green — admin squash-merge"
-            gh pr merge --squash --admin "$PR" --repo "$REPO" \
-              && echo "  merged #$PR" \
-              || echo "  merge failed for #$PR (will retry next run)"
+            echo "  all required checks green at $oid - admin squash-merge (pinned)"
+            # --match-head-commit makes GitHub REFUSE the merge if head moved since the
+            # rollup above was read. Without it this merged whatever head happened to be at
+            # merge time, which (a) could merge a commit no check ever ran against and
+            # (b) silently dropped commits pushed after the rollup was read - observed twice,
+            # on #415 and #418. A refusal is CORRECT: the next sweep re-reads the new head
+            # and merges it once ITS checks are green.
+            gh pr merge --squash --admin "$PR" --repo "$REPO" --match-head-commit "$oid" \
+              && echo "  merged #$PR at $oid" \
+              || echo "  merge refused/failed for #$PR at $oid (head moved) - re-evaluating next run"
             echo "::endgroup::"
           done
