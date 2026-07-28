@@ -50,6 +50,18 @@ spec:
     syncOptions:
       - CreateNamespace=true
       - ServerSideApply=true
+      # Makes ignoreDifferences apply to the SYNC, not just the diff. Without it
+      # Argo hides .spec.volumeClaimTemplates from the diff (so the app reports
+      # Synced) but STILL sends it in the server-side apply, and the API server
+      # rejects every StatefulSet with:
+      #   updates to statefulset spec for fields other than 'replicas',
+      #   'ordinals', 'template', ... are forbidden
+      # That failed the sync for all 10 stateful services (postgres, mongodb,
+      # neo4j, kafka, elasticsearch, redis, rabbitmq, loki, alertmanager,
+      # chromadb) and left the app permanently Degraded while claiming Synced.
+      # volumeClaimTemplates is immutable, so changing a StatefulSet's
+      # storageClass still requires recreating it deliberately.
+      - RespectIgnoreDifferences=true
     retry:
       limit: 5
       backoff:
