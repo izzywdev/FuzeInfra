@@ -526,6 +526,13 @@ nodeExporter:
 kubeStateMetrics:
   enabled: true
   image: registry.k8s.io/kube-state-metrics/kube-state-metrics:v2.10.1
+  # Node labels to expose as label_* dimensions on kube_node_labels. KSM v2
+  # drops every node label by default, so anything alerted on must be listed.
+  # fuzeinfra.io/pool backs the CiNodePoolLabelMissing rule (rules/nodes.yml):
+  # k3s sets --node-label only at agent registration, so a manual relabel is
+  # never reconciled by Terraform and silently strands all CI runner pods.
+  nodeLabelsAllowlist:
+    - fuzeinfra.io/pool
   resources:
     requests: { cpu: 10m, memory: 32Mi }
     limits:   { cpu: 250m, memory: 128Mi }

@@ -1,0 +1,90 @@
+rule_files:
+  - ../nodes.yml
+
+evaluation_interval: 1m
+
+tests:
+  # --- 2026-07-27: CI node relabelled to pool=durable -> no pool=ci at all ---
+  - interval: 1m
+    name: ci node relabelled away from pool=ci
+    input_series:
+      - series: 'kube_node_labels{node="fuzeinfra-ci-runner-1",label_fuzeinfra_io_pool="durable"}'
+        values: '1+0x30'
+      - series: 'kube_node_spec_unschedulable{node="fuzeinfra-ci-runner-1"}'
+        values: '0+0x30'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: CiNodePoolLabelMissing
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              label_fuzeinfra_io_pool: ci
+            exp_annotations:
+              summary: "No node labelled fuzeinfra.io/pool=ci"
+              description: >-
+                Every ARC runner pod hard-selects fuzeinfra.io/pool=ci and will stay Pending until a node carries it. Terraform will NOT fix this (k3s sets node labels only at agent registration) — relabel by hand: kubectl label node <ci-node> fuzeinfra.io/pool=ci --overwrite
+      # must NOT also claim "all cordoned"
+      - eval_time: 20m
+        alertname: CiNodePoolUnschedulable
+        exp_alerts: []
+
+  # --- healthy: a schedulable pool=ci node exists -> total silence ---
+  - interval: 1m
+    name: healthy ci pool
+    input_series:
+      - series: 'kube_node_labels{node="fuzeinfra-ci-runner-1",label_fuzeinfra_io_pool="ci"}'
+        values: '1+0x30'
+      - series: 'kube_node_spec_unschedulable{node="fuzeinfra-ci-runner-1"}'
+        values: '0+0x30'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: CiNodePoolLabelMissing
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: CiNodePoolUnschedulable
+        exp_alerts: []
+
+  # --- every ci node cordoned ---
+  - interval: 1m
+    name: all ci nodes cordoned
+    input_series:
+      - series: 'kube_node_labels{node="ci-a",label_fuzeinfra_io_pool="ci"}'
+        values: '1+0x40'
+      - series: 'kube_node_labels{node="ci-b",label_fuzeinfra_io_pool="ci"}'
+        values: '1+0x40'
+      - series: 'kube_node_spec_unschedulable{node="ci-a"}'
+        values: '1+0x40'
+      - series: 'kube_node_spec_unschedulable{node="ci-b"}'
+        values: '1+0x40'
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: CiNodePoolUnschedulable
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: "All fuzeinfra.io/pool=ci nodes are cordoned"
+              description: "CI runner pods cannot schedule until a pool=ci node is uncordoned or added."
+      - eval_time: 25m
+        alertname: CiNodePoolLabelMissing
+        exp_alerts: []
+
+  # --- partial cordon: one of two still schedulable -> must stay silent ---
+  - interval: 1m
+    name: one ci node cordoned one healthy
+    input_series:
+      - series: 'kube_node_labels{node="ci-a",label_fuzeinfra_io_pool="ci"}'
+        values: '1+0x40'
+      - series: 'kube_node_labels{node="ci-b",label_fuzeinfra_io_pool="ci"}'
+        values: '1+0x40'
+      - series: 'kube_node_spec_unschedulable{node="ci-a"}'
+        values: '1+0x40'
+      - series: 'kube_node_spec_unschedulable{node="ci-b"}'
+        values: '0+0x40'
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: CiNodePoolUnschedulable
+        exp_alerts: []
+      - eval_time: 25m
+        alertname: CiNodePoolLabelMissing
+        exp_alerts: []

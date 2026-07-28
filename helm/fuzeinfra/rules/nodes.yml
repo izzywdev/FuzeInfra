@@ -64,6 +64,45 @@ groups:
           summary: "Critical disk space on {{ $labels.instance }}:{{ $labels.mountpoint }}"
           description: "Less than 5% disk space — writes may fail."
 
+      # ARC runner pods hard-select fuzeinfra.io/pool=ci. k3s applies
+      # --node-label only at agent registration, so a manual `kubectl label`
+      # is never reconciled by Terraform — on 2026-07-27 the CI node was
+      # relabelled to pool=durable and all 8 scale sets sat Pending for 11h
+      # with no alert. Requires kubeStateMetrics.nodeLabelsAllowlist to include
+      # fuzeinfra.io/pool, otherwise the label_* dimension does not exist.
+      # absent(), NOT count(...) == 0: when no node carries the label the
+      # selector returns an EMPTY vector, count() over it yields no samples, and
+      # `== 0` can never match. absent() is the only form that fires on absence.
+      - alert: CiNodePoolLabelMissing
+        expr: absent(kube_node_labels{label_fuzeinfra_io_pool="ci"})
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: "No node labelled fuzeinfra.io/pool=ci"
+          description: >-
+            Every ARC runner pod hard-selects fuzeinfra.io/pool=ci and will stay
+            Pending until a node carries it. Terraform will NOT fix this (k3s
+            sets node labels only at agent registration) — relabel by hand:
+            kubectl label node <ci-node> fuzeinfra.io/pool=ci --overwrite
+
+      # "every ci node is cordoned" == "the cordoned count equals the total".
+      # Comparing two counts avoids the empty-vector trap above: the right-hand
+      # side only produces samples when at least one ci node is cordoned, so
+      # the rule is silent (rather than wrong) when none are.
+      - alert: CiNodePoolUnschedulable
+        expr: >-
+          count(kube_node_labels{label_fuzeinfra_io_pool="ci"})
+          ==
+          count(kube_node_labels{label_fuzeinfra_io_pool="ci"}
+                * on(node) group_left() (kube_node_spec_unschedulable == 1))
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "All fuzeinfra.io/pool=ci nodes are cordoned"
+          description: "CI runner pods cannot schedule until a pool=ci node is uncordoned or added."
+
       - alert: NodeClockSkew
         expr: abs(node_timex_offset_seconds) > 0.05
         for: 10m

@@ -24,6 +24,11 @@ spec:
     #   any of the allowed destinations in project 'fuzeinfra'
     - namespace: arc-runners
       server: https://kubernetes.default.svc
+    # The ARC self-heal watchdog (argocd/applications/arc-selfheal.yaml) manages
+    # a CronJob + RBAC in the ARC controller's namespace. Without this entry Argo
+    # rejects that Application with InvalidSpecError and never syncs it.
+    - namespace: arc-systems
+      server: https://kubernetes.default.svc
   # The chart creates cluster-scoped objects (monitoring ClusterRole/Binding),
   # so cluster resources must be allowed for this project.
   clusterResourceWhitelist:
