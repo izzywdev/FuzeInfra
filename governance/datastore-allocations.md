@@ -14,6 +14,17 @@ PR (or provisioning run) that creates an allocation. See
 | fuzeservice | `fuzeservice_svc` | `fuzeservice` | izzywdev/FuzeService | declared (FuzeInfra#153) |
 | fuzesocial | `fuzesocial_app` | `fuzesocial` | izzywdev/FuzeSocial | active (FuzeInfra#150) — owner+grants verified; consumer-authoritative credential in `fuzesocial/fuzesocial-secrets:DB_PASSWORD` |
 | fuzequality | `fuzequality_user` | `fuzequality` | izzywdev/FuzeFront (`FuzeQuality`) | declared (FuzeInfra#316) |
+| authentik-mendys | `authentik_mendys_user` | `authentik_mendys` | izzywdev/FuzeFront (MendysRobotics IdP silo) | declared — gated off until FuzeFront seals `authentik-mendys-db-credentials` for the `fuzeinfra` namespace |
+
+> `authentik_mendys` backs a **second Authentik instance** deployed by the
+> FuzeFront chart, serving MendysRobotics as an isolated identity silo
+> (`live.mendysrobotics.com` + `marketplace.mendysrobotics.com`). It is a
+> separate database — not a schema and not a brand — because Authentik has no
+> realm: one instance is one user directory, brands are branding-only, and
+> schema-per-tenant is Enterprise/alpha/API-managed and therefore incompatible
+> with this platform's blueprint-GitOps model. FuzeFront accounts and
+> MendysRobotics accounts are unrelated in both directions; the same email may
+> exist independently in each.
 
 > `fuzesales` / `fuzecontact` / `fuzeservice` are provisioned **declaratively**
 > by the `fuzeinfra-service-db-provision` hook Job (chart values
@@ -28,8 +39,17 @@ PR (or provisioning run) that creates an allocation. See
 | App | ACL user | Key prefix | DB index | Consumer repo | Status |
 |---|---|---|---|---|---|
 | fuzekeys | `fuzekeys` | `fuzekeys:` | 1 | izzywdev/FuzeKeys | active (FuzeInfra#136) |
+| authentik-mendys | (shared password) | authentik-internal | 2 | izzywdev/FuzeFront (MendysRobotics IdP silo) | declared |
 
 DB index 0 is reserved for FuzeInfra platform services.
+
+> `authentik-mendys` takes an **index, not an ACL user**: authentik owns its own
+> key layout and does not prefix keys, so a prefix-scoped ACL cannot be applied
+> to it. The index matters for correctness rather than security — authentik
+> keeps cache and sessions in Redis under non-namespaced key names, so the
+> Mendys instance must not share index 0 with the FuzeFront authentik (which
+> uses authentik's default of 0) or the two would collide and leak session
+> state across the very boundary the separate instance creates.
 
 ## ChromaDB (shared `fuzeinfra-chromadb`)
 

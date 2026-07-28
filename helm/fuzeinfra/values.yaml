@@ -131,6 +131,30 @@ serviceDatabases:
     passwordSecret:
       name: fuzequality-db-credentials
       key: password
+  # Backing store for the MendysRobotics Authentik instance — a SECOND, fully
+  # separate Authentik deployment in the FuzeFront chart (see FuzeFront
+  # deploy/helm/fuzefront/templates/authentik.yaml, instance "mendys").
+  #
+  # WHY A SEPARATE DATABASE: Authentik has no realm concept. One Authentik
+  # instance = one user directory, and brands (authentik_brands.brand) are
+  # branding + default flows only — "all objects like applications and
+  # providers are still global". Hard tenancy (one Postgres SCHEMA per tenant)
+  # exists from 2024.2 but is Enterprise-only, alpha, requires a license per
+  # tenant, and is API-managed — i.e. unusable from the blueprint/GitOps model
+  # this platform is built on. A second instance on its own DATABASE gives the
+  # same isolation property (separate user table, separate sessions) for free
+  # and stays fully declarative.
+  #
+  # Isolation contract: MendysRobotics accounts live ONLY here; a FuzeFront
+  # account is not recognised by the Mendys apps and vice versa, and the same
+  # email address may exist independently on both sides.
+  - name: authentik-mendys
+    enabled: false
+    role: authentik_mendys_user
+    database: authentik_mendys
+    passwordSecret:
+      name: authentik-mendys-db-credentials
+      key: password
 
 # MongoDB admin connection config for serviceMongoProvisioning Jobs.
 serviceMongoProvisioning:
