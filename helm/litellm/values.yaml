@@ -1,0 +1,127 @@
+# =============================================================================
+# LiteLLM gateway — base values.
+#
+# WHY A STANDALONE CHART (not folded into helm/fuzeinfra):
+#   The umbrella chart is one Argo Application covering the whole platform; a
+#   model-routing change would force a full-platform resync. LiteLLM's config
+#   changes on a different cadence than Postgres/Kafka/Grafana — every time a
+#   consumer wants a new model — so it gets its own chart + its own Argo
+#   Application (argocd/applications/litellm.yaml), the same way Longhorn and
+#   sealed-secrets are split out. helm/litellm is also the exact path FuzeFront's
+#   deploy/argocd/applications/litellm.yaml pointed at before it was deleted in
+#   f7c2ad56 for referencing a chart that did not exist.
+#
+# GITOPS GATE: `enabled` stays false until deploy/sealed-secrets/litellm-secret.yaml
+# is present in the fuzeinfra namespace. Enabling first CrashLoops the pod with
+# CreateContainerConfigError (secretKeyRef, Optional:false) — the same failure
+# that wedged the service-DB provisioning Job for ~3.7 days.
+# =============================================================================
+enabled: false
+
+# ghcr.io/berriai/litellm — the image FuzeFront's orphaned values block already
+# assumed. `main-stable` is BerriAI's tested release stream (never `latest`).
+image: ghcr.io/berriai/litellm
+tag: main-stable
+imagePullPolicy: IfNotPresent
+imagePullSecrets: []
+
+replicas: 1
+
+# Service DNS contract consumers depend on:
+#   litellm.fuzeinfra.svc.cluster.local:4000
+# Changing either of these is a BREAKING change for every consumer — see
+# docs/consuming-repos/LITELLM_GATEWAY.md before touching them.
+port: 4000
+
+resources:
+  requests: { cpu: "250m", memory: "512Mi" }
+  limits:   { cpu: "1", memory: "1Gi" }
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+# -----------------------------------------------------------------------------
+# Credentials. Never inline here — delivered as a SealedSecret to the fuzeinfra
+# namespace (deploy/sealed-secrets/litellm-secret.yaml, sealed via
+# scripts/seal-secret.sh; see litellm-secret.yaml.template for the exact command).
+#
+#   LITELLM_MASTER_KEY  required. The bearer token consumers send. MUST start
+#                       with the literal prefix `sk-` — LiteLLM rejects a master
+#                       key without it at startup.
+#   ANTHROPIC_API_KEY   required for the Claude chat models below.
+#   OPENAI_API_KEY      required for /embeddings — Anthropic has no embeddings
+#                       API, so text-embedding-3-small necessarily routes to
+#                       OpenAI. Optional: omit it and chat still works, but the
+#                       doc indexer's /embeddings calls will 401.
+# -----------------------------------------------------------------------------
+secretName: litellm-secret
+
+# Provider keys wired into the pod as env. `required: false` renders the env var
+# with optional=true, so a missing key leaves the var unset (and only the models
+# that need it fail) instead of blocking pod start.
+providerKeys:
+  - name: ANTHROPIC_API_KEY
+    required: true
+  - name: OPENAI_API_KEY
+    required: false
+
+# -----------------------------------------------------------------------------
+# Model routing. `name` is what consumers ask for over the wire; `provider` is
+# the real upstream model LiteLLM calls. Adding a model here is a PR against
+# this file — that indirection is the whole point of running a gateway.
+#
+# Anthropic model IDs are exact strings — never append a date suffix to an
+# alias, and never invent one. claude-opus-4-5 resolves to the dated snapshot
+# because that alias predates the current no-suffix scheme.
+# -----------------------------------------------------------------------------
+models:
+  # --- chat -------------------------------------------------------------------
+  # FuzeFront's LITELLM_DEFAULT_MODEL default (services/chat-service/src/index.ts).
+  # Kept verbatim so their chat-service works with zero config change.
+  - name: claude-opus-4-5
+    provider: anthropic/claude-opus-4-5-20251101
+    keyEnv: ANTHROPIC_API_KEY
+  # Current-generation Claude. Consumers should migrate to these; claude-opus-4-5
+  # is a legacy alias that will eventually be retired upstream.
+  - name: claude-opus-5
+    provider: anthropic/claude-opus-5
+    keyEnv: ANTHROPIC_API_KEY
+  - name: claude-sonnet-5
+    provider: anthropic/claude-sonnet-5
+    keyEnv: ANTHROPIC_API_KEY
+  - name: claude-haiku-4-5
+    provider: anthropic/claude-haiku-4-5
+    keyEnv: ANTHROPIC_API_KEY
+  # --- embeddings -------------------------------------------------------------
+  # FuzeFront's LITELLM_EMBEDDING_MODEL default. OpenAI, not Anthropic —
+  # Anthropic ships no embeddings endpoint, so /embeddings cannot be served by
+  # an Anthropic key alone.
+  - name: text-embedding-3-small
+    provider: openai/text-embedding-3-small
+    keyEnv: OPENAI_API_KEY
+
+# Extra litellm_settings merged into the rendered proxy config.
+#   drop_params  — silently drop provider-unsupported sampling params instead of
+#                  400ing. Load-bearing: Claude Opus 5 / 4.8 / 4.7 REJECT
+#                  temperature/top_p/top_k, which OpenAI-shaped clients send by
+#                  default. Without this every such call fails.
+litellmSettings:
+  drop_params: true
+  num_retries: 2
+  request_timeout: 600
+
+# Free-form general_settings passthrough (master_key is injected by the template).
+generalSettings: {}
+
+# -----------------------------------------------------------------------------
+# Defence in depth: only the namespaces listed here may open a connection to the
+# gateway. It holds live provider credentials, so it is never exposed through an
+# Ingress or the Cloudflare tunnel — cluster-internal only, by construction.
+#
+# Egress is deliberately unrestricted (no Egress policyType): the gateway must
+# reach api.anthropic.com and api.openai.com.
+# -----------------------------------------------------------------------------
+networkPolicy:
+  enabled: false
+  allowedNamespaces: []

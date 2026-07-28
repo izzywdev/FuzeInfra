@@ -1,0 +1,38 @@
+{{- if and .Values.enabled .Values.networkPolicy.enabled }}
+{{- /*
+Only the namespaces that own a consumer may reach the gateway.
+
+`ingress` is omitted entirely when nothing is allowed, which denies all traffic.
+Emitting a rule with an empty `from` would do the OPPOSITE — Kubernetes reads
+that as "from anywhere" — so the empty case must never render a rule. Same
+construction as the custom-hostname API's policy, for the same reason.
+
+policyTypes is Ingress-only on purpose: the gateway must egress to
+api.anthropic.com / api.openai.com, and adding Egress here would silently break
+every completion.
+*/ -}}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: litellm
+  labels:
+    {{- include "litellm.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "litellm.selectorLabels" . | nindent 6 }}
+  policyTypes:
+    - Ingress
+{{- if .Values.networkPolicy.allowedNamespaces }}
+  ingress:
+    - from:
+        {{- range (.Values.networkPolicy.allowedNamespaces | uniq) }}
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ . }}
+        {{- end }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.port }}
+{{- end }}
+{{- end }}

@@ -1,0 +1,99 @@
+{{- if .Values.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: litellm
+  labels:
+    {{- include "litellm.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicas | default 1 }}
+  selector:
+    matchLabels:
+      {{- include "litellm.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "litellm.selectorLabels" . | nindent 8 }}
+      annotations:
+        # Roll the pod when model routing changes. Argo syncs the ConfigMap but
+        # will not restart the Deployment on its own, and LiteLLM reads its
+        # config once at startup — without this a merged model change appears
+        # applied (ConfigMap updated, app Synced) while the running pod still
+        # serves the old model list.
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: litellm
+          image: "{{ .Values.image }}:{{ .Values.tag }}"
+          imagePullPolicy: {{ .Values.imagePullPolicy | default "IfNotPresent" }}
+          # The image's ENTRYPOINT is `litellm`; these are its flags. Do NOT set
+          # `command` — overriding the entrypoint drops the proxy launcher and
+          # the container exits immediately.
+          args:
+            - --config
+            - /etc/litellm/proxy_config.yaml
+            - --port
+            - {{ .Values.port | quote }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.port }}
+          env:
+            # The bearer token consumers present. Required — LiteLLM refuses to
+            # start without it, which is the behaviour we want: no master key
+            # must never degrade into an open gateway holding provider keys.
+            - name: LITELLM_MASTER_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secretName }}
+                  key: LITELLM_MASTER_KEY
+            {{- range .Values.providerKeys }}
+            - name: {{ .name }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $.Values.secretName }}
+                  key: {{ .name }}
+                  optional: {{ not .required }}
+            {{- end }}
+          volumeMounts:
+            - name: config
+              mountPath: /etc/litellm
+              readOnly: true
+          # Both probe paths are unauthenticated in LiteLLM. Do NOT use bare
+          # /health — that one requires the master key AND round-trips every
+          # configured model to the provider, so it bills real tokens on every
+          # kubelet probe.
+          livenessProbe:
+            httpGet: { path: /health/liveliness, port: http }
+            initialDelaySeconds: 20
+            periodSeconds: 20
+          readinessProbe:
+            httpGet: { path: /health/readiness, port: http }
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            {{- toYaml (.Values.resources | default dict) | nindent 12 }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      volumes:
+        - name: config
+          configMap:
+            name: litellm-config
+{{- end }}

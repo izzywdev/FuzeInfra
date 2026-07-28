@@ -1,0 +1,36 @@
+{{- if .Values.enabled }}
+{{- /*
+LiteLLM proxy config, rendered from .Values.models.
+
+`os.environ/NAME` is LiteLLM's own indirection syntax — the literal string is
+written into the ConfigMap and LiteLLM resolves it from the pod's environment at
+startup. No secret value is ever templated into this ConfigMap.
+*/ -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: litellm-config
+  labels:
+    {{- include "litellm.labels" . | nindent 4 }}
+data:
+  proxy_config.yaml: |
+    model_list:
+    {{- range .Values.models }}
+      - model_name: {{ .name }}
+        litellm_params:
+          model: {{ .provider }}
+          api_key: os.environ/{{ required (printf "models[%s].keyEnv is required" .name) .keyEnv }}
+          {{- with .extraParams }}
+          {{- toYaml . | nindent 10 }}
+          {{- end }}
+    {{- end }}
+
+    general_settings:
+      master_key: os.environ/LITELLM_MASTER_KEY
+      {{- with .Values.generalSettings }}
+      {{- toYaml . | nindent 6 }}
+      {{- end }}
+
+    litellm_settings:
+      {{- toYaml .Values.litellmSettings | nindent 6 }}
+{{- end }}
