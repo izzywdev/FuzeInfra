@@ -10,11 +10,9 @@ on:
     paths:
       - 'helm/**'
       - 'deploy/sealed-secrets/**'
-      - 'argocd/applications/fuzeinfra-prod.yaml'
-      - 'argocd/applications/fuzeinfra-sealed-secrets.yaml'
-      - 'argocd/applications/sealed-secrets.yaml'
-      - 'argocd/applications/fuzequality.yaml'
-      - 'argocd/applications/arc-selfheal.yaml'
+      # Any Application manifest — the registration step below globs the whole
+      # directory, so listing files individually here only risks going stale.
+      - 'argocd/applications/**'
       - 'argocd/projects/fuzefront.yaml'
       - 'argocd/projects/fuzeinfra.yaml'
       - 'runners/arc/gitops/**'
@@ -91,8 +89,24 @@ jobs:
           # deploy. Terraform only applies them on first-provision, so on a VPS
           # rebuild (or if one was never registered — e.g. sealed-secrets, #88) they
           # would silently go missing. apply -f makes the repo the source of truth.
-          for app in fuzeinfra-prod sealed-secrets fuzeinfra-sealed-secrets fuzequality arc-selfheal; do
-            kubectl apply -f "argocd/applications/$app.yaml"
+          # Register EVERY Application manifest in argocd/applications/, except the
+          # ones scoped to another environment. This was a hand-maintained list and
+          # it went stale: argocd/applications/arc-runners.yaml (8 ARC scale-set
+          # Applications) was never added, so those Applications existed in Git but
+          # NOT in the cluster — the GitOps wiring was declared and inert, and the
+          # live scale sets drifted from runner-scale-set-values.yaml indefinitely.
+          # A glob cannot go stale the same way.
+          #
+          # NOTE: file basename != Application name for some manifests
+          # (fuzeagent.yaml -> fuzeagent-apps, arc-runners.yaml -> 8 apps), which is
+          # why this iterates FILES while the sync loop below iterates NAMES.
+          SKIP_APPS="fuzeinfra-local fuzeinfra-aws"   # kind / EKS overlays — never prod
+          for f in argocd/applications/*.yaml; do
+            app=$(basename "$f" .yaml)
+            case " $SKIP_APPS " in
+              *" $app "*) echo "skipped $app (other environment)"; continue;;
+            esac
+            kubectl apply -f "$f"
             echo "registered $app"
           done
 
@@ -119,6 +133,10 @@ jobs:
             fi
           fi
           # Kick an immediate sync so the rollout starts seconds after merge.
+          # Deliberately an explicit list, NOT every registered app: forcing a hard
+          # refresh + sync on the ARC scale sets would restart listeners and can
+          # disrupt in-flight CI jobs. Those Applications carry selfHeal, so Argo
+          # converges them on its own without being kicked.
           for app in fuzeinfra-prod sealed-secrets fuzeinfra-sealed-secrets fuzequality arc-selfheal; do
             # Ensure the sync renders this Git revision instead of reusing a
             # cached Helm result whose reported revision has already advanced.
