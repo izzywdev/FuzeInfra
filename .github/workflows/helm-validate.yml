@@ -153,10 +153,18 @@ jobs:
           grep -qF "PLAINTEXT://${fqdn}" /tmp/kafka-no-ns.yaml \
             || { echo "::error::namespace-less render of the prod overlay does not advertise ${fqdn}"; exit 1; }
 
-          # And a namespace-less render WITHOUT that pin must fail loudly rather
-          # than emit a broker that no consumer can reach. Match the guard's own
+          # And rendering into "default" WITHOUT that pin must fail loudly rather
+          # than emit a broker no consumer can reach. Match the guard's own
           # message so an unrelated template error cannot pass this check.
+          #
+          # `--namespace default` explicitly, NOT an omitted flag: helm resolves a
+          # missing --namespace from the ambient kube context, and on this
+          # self-hosted ARC runner that is the runner's own in-cluster namespace
+          # (arc-runners), not "default" — so an omitted flag does not exercise the
+          # guard here even though it does on a workstation. Which is precisely why
+          # the advertised address must never be left ambient.
           guard_out=$(helm template fuzeinfra helm/fuzeinfra -f helm/fuzeinfra/values-local.yaml \
+                        --namespace default \
                         -s templates/messaging.yaml 2>&1) && guard_rc=0 || guard_rc=$?
           if [ "$guard_rc" -eq 0 ]; then
             echo "::error::a namespace-less render should have failed but did not — the serviceNamespace guard is gone"
