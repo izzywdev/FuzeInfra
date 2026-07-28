@@ -45,9 +45,21 @@ for c in docker-desktop kind-fuzeinfra; do
 done
 
 if [ -n "$CTX" ]; then
+  # NOTE: no `-n "$NS"` on the apply below. The chart legitimately renders objects
+  # into OTHER namespaces (e.g. the custom-hostname Role/RoleBinding in `fuzefront`),
+  # and forcing one makes kubectl reject them with "the namespace from the provided
+  # object ... does not match", which failed this gate for EVERY chart change.
+  # `helm template --namespace` already stamps the default, so each object keeps its own.
   echo "pre-push: server-side dry-run against '$CTX'..."
+  # A server-side dry-run 404s if a target namespace is absent locally. The chart
+  # spans namespaces, so ensure each rendered one exists on the LOCAL dev cluster
+  # (never prod — $CTX is docker-desktop/kind only).
+  helm template "$NS" "$CHART" --namespace "$NS" -f "$VALUES" 2>/dev/null     | awk '/^[[:space:]]*namespace:[[:space:]]/ {print $2}' | tr -d '"' | sort -u     | while read -r ns; do
+        [ -n "$ns" ] || continue
+        kubectl --context "$CTX" get ns "$ns" >/dev/null 2>&1           || kubectl --context "$CTX" create ns "$ns" >/dev/null 2>&1 || true
+      done
   helm template "$NS" "$CHART" --namespace "$NS" -f "$VALUES" \
-    | kubectl --context "$CTX" apply --dry-run=server -n "$NS" -f - >/dev/null
+    | kubectl --context "$CTX" apply --dry-run=server -f - >/dev/null
   echo "pre-push: deployability OK ($CTX). ✅"
 else
   echo "pre-push: no local cluster reachable — ran lint only."
