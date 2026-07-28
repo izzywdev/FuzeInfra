@@ -29,6 +29,15 @@ spec:
     # rejects that Application with InvalidSpecError and never syncs it.
     - namespace: arc-systems
       server: https://kubernetes.default.svc
+    # The custom-hostname API manages a CONSUMER's Ingress, so the chart renders a
+    # scoped Role + RoleBinding into that consumer's namespace (see
+    # global.routeProfiles in values.yaml). Without this entry the whole
+    # fuzeinfra-prod sync fails with
+    #   Role/custom-hostname-api-ingress: namespace fuzefront is not permitted
+    #   in project 'fuzeinfra'
+    # which blocks EVERY other resource in the app, not just these two.
+    - namespace: fuzefront
+      server: https://kubernetes.default.svc
   # The chart creates cluster-scoped objects (monitoring ClusterRole/Binding),
   # so cluster resources must be allowed for this project.
   clusterResourceWhitelist:
