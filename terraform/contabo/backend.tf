@@ -25,4 +25,25 @@ terraform {
   }
 }
 
-# CD plan verification trigger — no infra change (see PR). Safe to remove.
+# ---------------------------------------------------------------------------
+# STALE-PLAN RECOVERY (why a comment-only commit sometimes lands here)
+#
+# terraform-plan-apply is merge-to-apply: the plan is computed on the PR, saved
+# as an artifact keyed by the PR head SHA, and the merge applies THAT EXACT plan.
+# Terraform refuses a saved plan whose state serial moved since it was created.
+#
+# That refusal is correct and deliberate — it is what stops an unreviewed change
+# from applying. But it means any terraform PR whose plan predates ANOTHER
+# terraform apply becomes permanently un-appliable: merging two terraform PRs
+# close together guarantees the second fails, re-running the job re-downloads the
+# same stale artifact, and there is no workflow_dispatch. The config sits merged
+# on main and never applies, which is easy to miss because the PR reads as done.
+#
+# Recovery: land a trivial change under terraform/** (this comment). That runs a
+# FRESH plan against current state — which necessarily includes every accumulated
+# unapplied change — so one review reconciles the whole backlog. Prior art:
+# "chore(tf): replan CI runner node (stale plan refresh)", 2026-07-08.
+#
+# Review that plan as the apply approval, exactly as normal: it is not a no-op,
+# it is the entire pending delta. Safe to rewrite this block on the next refresh.
+# ---------------------------------------------------------------------------
