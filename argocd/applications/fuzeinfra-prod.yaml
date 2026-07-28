@@ -35,8 +35,14 @@ spec:
   ignoreDifferences:
     - group: apps
       kind: StatefulSet
-      jqPathExpressions:
-        - .spec.volumeClaimTemplates
+      # jsonPointers, NOT jqPathExpressions: RespectIgnoreDifferences reliably
+      # honours jsonPointers, but does not consistently apply jq expressions —
+      # with the jq form the field was still sent in the apply and every
+      # StatefulSet was rejected as immutable, even with
+      # RespectIgnoreDifferences=true enabled. The arc-runners Applications
+      # already use the jsonPointers form for the same reason.
+      jsonPointers:
+        - /spec/volumeClaimTemplates
   syncPolicy:
     automated:
       prune: true
