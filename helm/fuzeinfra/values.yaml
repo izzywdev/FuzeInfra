@@ -7,6 +7,19 @@
 
 global:
   # Namespace is taken from the Helm release namespace (`helm -n fuzeinfra`).
+  #
+  # serviceNamespace overrides ONLY the namespace segment of the in-cluster
+  # service addresses this chart publishes to consumers (Kafka's
+  # advertised.listeners, NOTES.txt) — not where resources are installed.
+  # Leave empty to use the release namespace, which is correct whenever the
+  # caller passes `--namespace`. Set it when you cannot guarantee that.
+  #
+  # It exists because Helm silently substitutes "default" for a missing
+  # `--namespace`, and a broker advertising fuzeinfra-kafka.default.svc.cluster.local
+  # accepts bootstrap connections and then fails every produce/consume on an
+  # address no consumer can resolve. The chart now refuses to render "default"
+  # rather than ship that; see `fuzeinfra.serviceNamespace` in _helpers.tpl.
+  serviceNamespace: ""
   # Storage class for PersistentVolumeClaims:
   #   - kind:  "standard" (default kind storage class)
   #   - EKS:   "gp3" (provided by the aws-ebs-csi-driver / values-aws.yaml)
