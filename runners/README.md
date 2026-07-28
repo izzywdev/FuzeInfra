@@ -375,8 +375,11 @@ allowed destination and `argocd/applications/arc-selfheal.yaml` syncs
 `deploy-prod.yml`). Only the watchdog is managed there — the ARC controller and
 the scale sets are still bootstrapped by `install.sh`.
 
-`arc-runners` is **not** an allowed destination, so `arc-runners-staging` sits at
-`InvalidSpecError` and has never synced:
+`arc-runners` **is** now an allowed destination as of PR #415, which also added
+`- ghcr.io/actions/actions-runner-controller-charts` to `spec.sourceRepos`. Before
+that, `arc-runners-staging` had sat at `InvalidSpecError` since 2026-07-08 and had
+never synced once — which is why the live scale sets drifted from
+`runner-scale-set-values.yaml` indefinitely (nothing was reading it):
 
 ```
 application destination ... namespace 'arc-runners' do not match any of the
@@ -384,11 +387,17 @@ allowed destinations in project 'fuzeinfra'
 application repo ghcr.io/actions/actions-runner-controller-charts is not permitted
 ```
 
-Fixing it needs **both** `- namespace: arc-runners` under `spec.destinations` and
-`- ghcr.io/actions/actions-runner-controller-charts` under `spec.sourceRepos`.
-Do that as a deliberate change: the Application carries `prune: true` +
-`selfHeal: true`, so making it valid immediately hands the live scale sets to
-Argo and can disrupt in-flight jobs.
+That single Application has been replaced by one per scale set in
+`argocd/applications/arc-runners.yaml`. They carry `selfHeal: true` but
+**`prune: false`**, deliberately: the sets already exist as imperative
+`helm install` releases, and Argo adopts the live objects via ServerSideApply —
+pruning on that first reconcile could delete every runner set at once. Flip to
+`prune: true` only after a clean sync has been observed for all 8.
+
+Note those Applications are **not applied automatically**: `argocd/applications/`
+is applied by hand (`kubectl apply -f ...`), so merging that PR changed Git
+without changing the cluster. The self-heal Application below is different — it
+is registered on every prod deploy by `deploy-prod.yml`.
 
 ---
 

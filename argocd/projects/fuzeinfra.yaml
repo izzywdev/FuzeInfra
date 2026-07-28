@@ -8,18 +8,25 @@ spec:
   description: FuzeInfra shared infrastructure platform
   sourceRepos:
     - https://github.com/izzywdev/FuzeInfra.git
+    # OCI Helm registry for the ARC runner scale-set chart. Required by the
+    # arc-runner-scale-sets ApplicationSet (multi-source: OCI chart + git values).
+    # Without this entry Argo rejects those Applications with
+    #   InvalidSpecError: repo ... is not permitted in project 'fuzeinfra'
+    - ghcr.io/actions/actions-runner-controller-charts
   destinations:
     - namespace: fuzeinfra
       server: https://kubernetes.default.svc
     - namespace: argocd
       server: https://kubernetes.default.svc
+    # ARC runner scale sets live here (controller watchSingleNamespace=arc-runners).
+    # Without this entry Argo rejects them with
+    #   InvalidSpecError: destination ... namespace 'arc-runners' do not match
+    #   any of the allowed destinations in project 'fuzeinfra'
+    - namespace: arc-runners
+      server: https://kubernetes.default.svc
     # The ARC self-heal watchdog (argocd/applications/arc-selfheal.yaml) manages
     # a CronJob + RBAC in the ARC controller's namespace. Without this entry Argo
-    # rejects the Application with InvalidSpecError and never syncs it.
-    # NOTE: `arc-runners` is deliberately NOT listed. arc-runners-staging is
-    # currently InvalidSpec for exactly that reason; adding it would activate a
-    # dormant prune+selfHeal Application against the live scale sets. That is a
-    # separate, deliberate change — see runners/README.md.
+    # rejects that Application with InvalidSpecError and never syncs it.
     - namespace: arc-systems
       server: https://kubernetes.default.svc
   # The chart creates cluster-scoped objects (monitoring ClusterRole/Binding),

@@ -1,29 +1,67 @@
 # =============================================================================
-# Optional: ArgoCD Application for the ARC runner scale set (GitOps management).
+# ARC runner scale sets — GitOps
 #
-# IMPORTANT: The ARC *controller* must be bootstrapped first via install.sh
-# (Helm + CRD install).  Only the runner scale set is managed here by ArgoCD.
+# WHY THIS EXISTS
+# ---------------
+# Scale sets are CLUSTER objects in the shared `arc-runners` namespace, NOT
+# per-repo config. Previously each consumer repo ran its own `arc-register.yml`
+# workflow, which imperatively `helm upgrade`d this cluster. With no single
+# source of truth the live sets silently drifted from Git, and fixing them had
+# to be done 8 times by hand against prod.
 #
-# Apply after bootstrap:
-#   kubectl apply -f argocd/applications/arc-runners.yaml
+# Now every set is an Argo Application over ONE shared values file
+# (runners/arc/runner-scale-set-values.yaml). Common settings — runner image,
+# resources, node pinning, containerMode — are edited THERE ONCE and Argo rolls
+# them to all sets. Only 4 per-set parameters differ below. Onboarding repo #21
+# is a new block here, not a workflow run against prod.
+#
+# ⚠ BECAUSE Argo will now ACTUALLY apply that file, anything set in it reaches
+# all 8 sets at once. containerMode.dind is deliberately DISABLED there — it
+# was measured on 2026-07-27 to leave runners registered-but-never-online and
+# every job queued. Read the block in that file before re-enabling it.
+#
+# PREREQUISITE (this is the bug that made the previous single Application a
+# silent no-op since 2026-07-08):
+#   The `fuzeinfra` AppProject must allow BOTH the arc-runners namespace and the
+#   OCI chart repo, or Argo rejects these with InvalidSpecError and NEVER syncs.
+#   See argocd/projects/fuzeinfra.yaml. Verify with:
+#     kubectl -n argocd get application -l app.kubernetes.io/part-of=arc-runners
+#   and check the SYNC column (add -o wide for detail).
+#   `sync=Unknown` with an empty revision means the project still rejects it.
+#
+# WHY NOT AN ApplicationSet:
+#   An ApplicationSet list-generator would remove the repetition below, but the
+#   `applicationsets.argoproj.io` CRD is NOT installed on this cluster (the
+#   argocd-applicationset-controller Deployment is running with nothing to
+#   watch). Install that CRD and this file collapses to a single generator.
+#
+# WHY minRunners IS PASSED EXPLICITLY:
+#   The chart does `gt .Values.minRunners .Values.maxRunners`. A helm --set
+#   value is a different numeric type than one parsed from the values YAML, so
+#   overriding ONLY maxRunners fails to render with
+#   "error calling gt: incompatible types for comparison". Passing BOTH through
+#   parameters keeps them the same type. Verified by helm template.
+#
+# The ARC *controller* is bootstrapped separately (runners/arc/install.sh);
+# only the runner scale sets are managed here.
 # =============================================================================
+---
+# -----------------------------------------------------------------------------
+# staging  ->  workflows target it with `runs-on: staging`
+# -----------------------------------------------------------------------------
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
   name: arc-runners-staging
   namespace: argocd
+  labels:
+    app.kubernetes.io/part-of: arc-runners
   finalizers:
     - resources-finalizer.argocd.argoproj.io
-  annotations:
-    # Remind operators not to register against GitHub from CI without approval.
-    platform.izzywdev/registration-note: >
-      GitHub runner registration is triggered automatically when the
-      arc-runner-github-app Secret exists in arc-runners.  Do not apply this
-      Application in a new environment without first creating that Secret.
 spec:
   project: fuzeinfra
-  # Multi-source: OCI chart + git values file (ArgoCD >= 2.6).
-  # The $values ref variable lets valueFiles reference the git source by alias.
+  # Multi-source: OCI chart + git values file (ArgoCD >= 2.6). The $values ref
+  # lets valueFiles reference the git source by alias.
   sources:
     - repoURL: ghcr.io/actions/actions-runner-controller-charts
       chart: gha-runner-scale-set
@@ -32,15 +70,24 @@ spec:
         releaseName: staging
         valueFiles:
           - $values/runners/arc/runner-scale-set-values.yaml
+        parameters:
+          - name: githubConfigUrl
+            value: "https://github.com/izzywdev/FuzeInfra"
+          - name: runnerScaleSetName
+            value: "staging"
+          - name: maxRunners
+            value: "5"
+          - name: minRunners
+            value: "0"
     - repoURL: https://github.com/izzywdev/FuzeInfra.git
       targetRevision: main
       ref: values
   destination:
     server: https://kubernetes.default.svc
     namespace: arc-runners
-  # Argo CD must not revert EphemeralRunnerSet replicas/patchID — the ARC listener
-  # owns those fields and patches them at runtime.  selfHeal reverting them causes
-  # the listener to loop indefinitely without runners ever completing a job.
+  # Argo must not revert EphemeralRunnerSet replicas/patchID — the ARC listener
+  # owns those and patches them at runtime. selfHeal reverting them makes the
+  # listener loop forever without runners ever completing a job.
   ignoreDifferences:
     - group: actions.github.com
       kind: EphemeralRunnerSet
@@ -49,8 +96,484 @@ spec:
         - /spec/patchID
   syncPolicy:
     automated:
-      prune: true
       selfHeal: true
+      # prune INTENTIONALLY false for the initial adoption: these sets already
+      # exist as imperative `helm install` releases, and Argo adopts the live
+      # objects via ServerSideApply. Pruning during that first reconcile could
+      # delete every runner set at once and take all repos' CI down. Flip to
+      # true once a clean sync has been observed for all 8.
+      prune: false
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 3m
+---
+# -----------------------------------------------------------------------------
+# mendysrobotics  ->  workflows target it with `runs-on: mendysrobotics`
+# -----------------------------------------------------------------------------
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: arc-runners-mendysrobotics
+  namespace: argocd
+  labels:
+    app.kubernetes.io/part-of: arc-runners
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: fuzeinfra
+  # Multi-source: OCI chart + git values file (ArgoCD >= 2.6). The $values ref
+  # lets valueFiles reference the git source by alias.
+  sources:
+    - repoURL: ghcr.io/actions/actions-runner-controller-charts
+      chart: gha-runner-scale-set
+      targetRevision: "0.14.2"
+      helm:
+        releaseName: mendysrobotics
+        valueFiles:
+          - $values/runners/arc/runner-scale-set-values.yaml
+        parameters:
+          - name: githubConfigUrl
+            value: "https://github.com/izzywdev/MendysRobotics"
+          - name: runnerScaleSetName
+            value: "mendysrobotics"
+          - name: maxRunners
+            value: "5"
+          - name: minRunners
+            value: "0"
+    - repoURL: https://github.com/izzywdev/FuzeInfra.git
+      targetRevision: main
+      ref: values
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: arc-runners
+  # Argo must not revert EphemeralRunnerSet replicas/patchID — the ARC listener
+  # owns those and patches them at runtime. selfHeal reverting them makes the
+  # listener loop forever without runners ever completing a job.
+  ignoreDifferences:
+    - group: actions.github.com
+      kind: EphemeralRunnerSet
+      jsonPointers:
+        - /spec/replicas
+        - /spec/patchID
+  syncPolicy:
+    automated:
+      selfHeal: true
+      # prune INTENTIONALLY false for the initial adoption: these sets already
+      # exist as imperative `helm install` releases, and Argo adopts the live
+      # objects via ServerSideApply. Pruning during that first reconcile could
+      # delete every runner set at once and take all repos' CI down. Flip to
+      # true once a clean sync has been observed for all 8.
+      prune: false
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 3m
+---
+# -----------------------------------------------------------------------------
+# fuzehub  ->  workflows target it with `runs-on: fuzehub`
+# -----------------------------------------------------------------------------
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: arc-runners-fuzehub
+  namespace: argocd
+  labels:
+    app.kubernetes.io/part-of: arc-runners
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: fuzeinfra
+  # Multi-source: OCI chart + git values file (ArgoCD >= 2.6). The $values ref
+  # lets valueFiles reference the git source by alias.
+  sources:
+    - repoURL: ghcr.io/actions/actions-runner-controller-charts
+      chart: gha-runner-scale-set
+      targetRevision: "0.14.2"
+      helm:
+        releaseName: fuzehub
+        valueFiles:
+          - $values/runners/arc/runner-scale-set-values.yaml
+        parameters:
+          - name: githubConfigUrl
+            value: "https://github.com/izzywdev/FuzeHub"
+          - name: runnerScaleSetName
+            value: "fuzehub"
+          - name: maxRunners
+            value: "5"
+          - name: minRunners
+            value: "0"
+    - repoURL: https://github.com/izzywdev/FuzeInfra.git
+      targetRevision: main
+      ref: values
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: arc-runners
+  # Argo must not revert EphemeralRunnerSet replicas/patchID — the ARC listener
+  # owns those and patches them at runtime. selfHeal reverting them makes the
+  # listener loop forever without runners ever completing a job.
+  ignoreDifferences:
+    - group: actions.github.com
+      kind: EphemeralRunnerSet
+      jsonPointers:
+        - /spec/replicas
+        - /spec/patchID
+  syncPolicy:
+    automated:
+      selfHeal: true
+      # prune INTENTIONALLY false for the initial adoption: these sets already
+      # exist as imperative `helm install` releases, and Argo adopts the live
+      # objects via ServerSideApply. Pruning during that first reconcile could
+      # delete every runner set at once and take all repos' CI down. Flip to
+      # true once a clean sync has been observed for all 8.
+      prune: false
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 3m
+---
+# -----------------------------------------------------------------------------
+# fuzesales  ->  workflows target it with `runs-on: fuzesales`
+# -----------------------------------------------------------------------------
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: arc-runners-fuzesales
+  namespace: argocd
+  labels:
+    app.kubernetes.io/part-of: arc-runners
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: fuzeinfra
+  # Multi-source: OCI chart + git values file (ArgoCD >= 2.6). The $values ref
+  # lets valueFiles reference the git source by alias.
+  sources:
+    - repoURL: ghcr.io/actions/actions-runner-controller-charts
+      chart: gha-runner-scale-set
+      targetRevision: "0.14.2"
+      helm:
+        releaseName: fuzesales
+        valueFiles:
+          - $values/runners/arc/runner-scale-set-values.yaml
+        parameters:
+          - name: githubConfigUrl
+            value: "https://github.com/izzywdev/FuzeSales"
+          - name: runnerScaleSetName
+            value: "fuzesales"
+          - name: maxRunners
+            value: "5"
+          - name: minRunners
+            value: "0"
+    - repoURL: https://github.com/izzywdev/FuzeInfra.git
+      targetRevision: main
+      ref: values
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: arc-runners
+  # Argo must not revert EphemeralRunnerSet replicas/patchID — the ARC listener
+  # owns those and patches them at runtime. selfHeal reverting them makes the
+  # listener loop forever without runners ever completing a job.
+  ignoreDifferences:
+    - group: actions.github.com
+      kind: EphemeralRunnerSet
+      jsonPointers:
+        - /spec/replicas
+        - /spec/patchID
+  syncPolicy:
+    automated:
+      selfHeal: true
+      # prune INTENTIONALLY false for the initial adoption: these sets already
+      # exist as imperative `helm install` releases, and Argo adopts the live
+      # objects via ServerSideApply. Pruning during that first reconcile could
+      # delete every runner set at once and take all repos' CI down. Flip to
+      # true once a clean sync has been observed for all 8.
+      prune: false
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 3m
+---
+# -----------------------------------------------------------------------------
+# fuzesocial  ->  workflows target it with `runs-on: fuzesocial`
+# -----------------------------------------------------------------------------
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: arc-runners-fuzesocial
+  namespace: argocd
+  labels:
+    app.kubernetes.io/part-of: arc-runners
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: fuzeinfra
+  # Multi-source: OCI chart + git values file (ArgoCD >= 2.6). The $values ref
+  # lets valueFiles reference the git source by alias.
+  sources:
+    - repoURL: ghcr.io/actions/actions-runner-controller-charts
+      chart: gha-runner-scale-set
+      targetRevision: "0.14.2"
+      helm:
+        releaseName: fuzesocial
+        valueFiles:
+          - $values/runners/arc/runner-scale-set-values.yaml
+        parameters:
+          - name: githubConfigUrl
+            value: "https://github.com/izzywdev/FuzeSocial"
+          - name: runnerScaleSetName
+            value: "fuzesocial"
+          - name: maxRunners
+            value: "5"
+          - name: minRunners
+            value: "0"
+    - repoURL: https://github.com/izzywdev/FuzeInfra.git
+      targetRevision: main
+      ref: values
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: arc-runners
+  # Argo must not revert EphemeralRunnerSet replicas/patchID — the ARC listener
+  # owns those and patches them at runtime. selfHeal reverting them makes the
+  # listener loop forever without runners ever completing a job.
+  ignoreDifferences:
+    - group: actions.github.com
+      kind: EphemeralRunnerSet
+      jsonPointers:
+        - /spec/replicas
+        - /spec/patchID
+  syncPolicy:
+    automated:
+      selfHeal: true
+      # prune INTENTIONALLY false for the initial adoption: these sets already
+      # exist as imperative `helm install` releases, and Argo adopts the live
+      # objects via ServerSideApply. Pruning during that first reconcile could
+      # delete every runner set at once and take all repos' CI down. Flip to
+      # true once a clean sync has been observed for all 8.
+      prune: false
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 3m
+---
+# -----------------------------------------------------------------------------
+# fuzecontact  ->  workflows target it with `runs-on: fuzecontact`
+# -----------------------------------------------------------------------------
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: arc-runners-fuzecontact
+  namespace: argocd
+  labels:
+    app.kubernetes.io/part-of: arc-runners
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: fuzeinfra
+  # Multi-source: OCI chart + git values file (ArgoCD >= 2.6). The $values ref
+  # lets valueFiles reference the git source by alias.
+  sources:
+    - repoURL: ghcr.io/actions/actions-runner-controller-charts
+      chart: gha-runner-scale-set
+      targetRevision: "0.14.2"
+      helm:
+        releaseName: fuzecontact
+        valueFiles:
+          - $values/runners/arc/runner-scale-set-values.yaml
+        parameters:
+          - name: githubConfigUrl
+            value: "https://github.com/izzywdev/FuzeContact"
+          - name: runnerScaleSetName
+            value: "fuzecontact"
+          - name: maxRunners
+            value: "5"
+          - name: minRunners
+            value: "0"
+    - repoURL: https://github.com/izzywdev/FuzeInfra.git
+      targetRevision: main
+      ref: values
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: arc-runners
+  # Argo must not revert EphemeralRunnerSet replicas/patchID — the ARC listener
+  # owns those and patches them at runtime. selfHeal reverting them makes the
+  # listener loop forever without runners ever completing a job.
+  ignoreDifferences:
+    - group: actions.github.com
+      kind: EphemeralRunnerSet
+      jsonPointers:
+        - /spec/replicas
+        - /spec/patchID
+  syncPolicy:
+    automated:
+      selfHeal: true
+      # prune INTENTIONALLY false for the initial adoption: these sets already
+      # exist as imperative `helm install` releases, and Argo adopts the live
+      # objects via ServerSideApply. Pruning during that first reconcile could
+      # delete every runner set at once and take all repos' CI down. Flip to
+      # true once a clean sync has been observed for all 8.
+      prune: false
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 3m
+---
+# -----------------------------------------------------------------------------
+# fuzeservice  ->  workflows target it with `runs-on: fuzeservice`
+# -----------------------------------------------------------------------------
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: arc-runners-fuzeservice
+  namespace: argocd
+  labels:
+    app.kubernetes.io/part-of: arc-runners
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: fuzeinfra
+  # Multi-source: OCI chart + git values file (ArgoCD >= 2.6). The $values ref
+  # lets valueFiles reference the git source by alias.
+  sources:
+    - repoURL: ghcr.io/actions/actions-runner-controller-charts
+      chart: gha-runner-scale-set
+      targetRevision: "0.14.2"
+      helm:
+        releaseName: fuzeservice
+        valueFiles:
+          - $values/runners/arc/runner-scale-set-values.yaml
+        parameters:
+          - name: githubConfigUrl
+            value: "https://github.com/izzywdev/FuzeService"
+          - name: runnerScaleSetName
+            value: "fuzeservice"
+          - name: maxRunners
+            value: "5"
+          - name: minRunners
+            value: "0"
+    - repoURL: https://github.com/izzywdev/FuzeInfra.git
+      targetRevision: main
+      ref: values
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: arc-runners
+  # Argo must not revert EphemeralRunnerSet replicas/patchID — the ARC listener
+  # owns those and patches them at runtime. selfHeal reverting them makes the
+  # listener loop forever without runners ever completing a job.
+  ignoreDifferences:
+    - group: actions.github.com
+      kind: EphemeralRunnerSet
+      jsonPointers:
+        - /spec/replicas
+        - /spec/patchID
+  syncPolicy:
+    automated:
+      selfHeal: true
+      # prune INTENTIONALLY false for the initial adoption: these sets already
+      # exist as imperative `helm install` releases, and Argo adopts the live
+      # objects via ServerSideApply. Pruning during that first reconcile could
+      # delete every runner set at once and take all repos' CI down. Flip to
+      # true once a clean sync has been observed for all 8.
+      prune: false
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 3m
+---
+# -----------------------------------------------------------------------------
+# fuzepicker  ->  workflows target it with `runs-on: fuzepicker`
+# PARKED at 0 on purpose: the set stays defined and in sync but spawns no
+# runners. Set to "3" to re-enable.
+# -----------------------------------------------------------------------------
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: arc-runners-fuzepicker
+  namespace: argocd
+  labels:
+    app.kubernetes.io/part-of: arc-runners
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: fuzeinfra
+  # Multi-source: OCI chart + git values file (ArgoCD >= 2.6). The $values ref
+  # lets valueFiles reference the git source by alias.
+  sources:
+    - repoURL: ghcr.io/actions/actions-runner-controller-charts
+      chart: gha-runner-scale-set
+      targetRevision: "0.14.2"
+      helm:
+        releaseName: fuzepicker
+        valueFiles:
+          - $values/runners/arc/runner-scale-set-values.yaml
+        parameters:
+          - name: githubConfigUrl
+            value: "https://github.com/izzywdev/FuzePicker"
+          - name: runnerScaleSetName
+            value: "fuzepicker"
+          - name: maxRunners
+            value: "0"
+          - name: minRunners
+            value: "0"
+    - repoURL: https://github.com/izzywdev/FuzeInfra.git
+      targetRevision: main
+      ref: values
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: arc-runners
+  # Argo must not revert EphemeralRunnerSet replicas/patchID — the ARC listener
+  # owns those and patches them at runtime. selfHeal reverting them makes the
+  # listener loop forever without runners ever completing a job.
+  ignoreDifferences:
+    - group: actions.github.com
+      kind: EphemeralRunnerSet
+      jsonPointers:
+        - /spec/replicas
+        - /spec/patchID
+  syncPolicy:
+    automated:
+      selfHeal: true
+      # prune INTENTIONALLY false for the initial adoption: these sets already
+      # exist as imperative `helm install` releases, and Argo adopts the live
+      # objects via ServerSideApply. Pruning during that first reconcile could
+      # delete every runner set at once and take all repos' CI down. Flip to
+      # true once a clean sync has been observed for all 8.
+      prune: false
     syncOptions:
       - CreateNamespace=true
       - ServerSideApply=true
