@@ -146,23 +146,26 @@ jobs:
           done
 
           # The prod overlay pins global.serviceNamespace, so it must render the
-          # correct address even when the caller forgets --namespace entirely —
-          # that is the whole point of pinning it.
+          # correct address even when the ambient namespace is wrong — that is the
+          # whole point of pinning it. `--namespace default` is the worst case, and
+          # using it explicitly keeps this deterministic: with no flag the ambient
+          # namespace could happen to BE fuzeinfra, and then this passes whether or
+          # not the pin exists, proving nothing.
           helm template fuzeinfra helm/fuzeinfra -f helm/fuzeinfra/values-contabo.yaml \
-            -s templates/messaging.yaml > /tmp/kafka-no-ns.yaml
-          grep -qF "PLAINTEXT://${fqdn}" /tmp/kafka-no-ns.yaml \
-            || { echo "::error::namespace-less render of the prod overlay does not advertise ${fqdn}"; exit 1; }
+            --namespace default -s templates/messaging.yaml > /tmp/kafka-wrong-ns.yaml
+          grep -qF "PLAINTEXT://${fqdn}" /tmp/kafka-wrong-ns.yaml \
+            || { echo "::error::prod overlay does not advertise ${fqdn} when rendered into the wrong namespace — is global.serviceNamespace still pinned?"; exit 1; }
 
           # And rendering into "default" WITHOUT that pin must fail loudly rather
           # than emit a broker no consumer can reach. Match the guard's own
           # message so an unrelated template error cannot pass this check.
           #
           # `--namespace default` explicitly, NOT an omitted flag: helm resolves a
-          # missing --namespace from the ambient kube context, and on this
-          # self-hosted ARC runner that is the runner's own in-cluster namespace
-          # (arc-runners), not "default" — so an omitted flag does not exercise the
-          # guard here even though it does on a workstation. Which is precisely why
-          # the advertised address must never be left ambient.
+          # missing --namespace from the ambient kube context, and this self-hosted
+          # ARC runner is cluster-connected, so the fallback is a real namespace,
+          # not "default" — an omitted flag does not exercise the guard here even
+          # though it does on a workstation. Which is precisely why the advertised
+          # address must never be left ambient.
           guard_out=$(helm template fuzeinfra helm/fuzeinfra -f helm/fuzeinfra/values-local.yaml \
                         --namespace default \
                         -s templates/messaging.yaml 2>&1) && guard_rc=0 || guard_rc=$?
