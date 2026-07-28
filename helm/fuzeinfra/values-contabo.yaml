@@ -12,6 +12,13 @@
 # Replace with a real domain once you have DNS pointing at the server.
 # =============================================================================
 global:
+  # Pin the namespace segment of every published service address. Prod consumers
+  # (fuzefront, mendys-prod, fuzequality, ...) live in other namespaces and can
+  # only reach the shared services by FQDN, so this value is part of the
+  # cross-namespace contract in CONTRACT.md — not an install detail. Pinning it
+  # makes the rendered addresses identical no matter how the chart is invoked,
+  # including an out-of-band `helm upgrade` that forgets `--namespace`.
+  serviceNamespace: "fuzeinfra"
   # DB StatefulSet PVCs default to durable Longhorn. This is the systemic cure
   # for the 2026-07-24 local-path reversion class: whenever a StatefulSet is
   # (re)created, its volume lands on Longhorn (reclaimPolicy: Retain) instead of

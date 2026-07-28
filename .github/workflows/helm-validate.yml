@@ -26,11 +26,16 @@ jobs:
         with:
           version: v3.16.4
 
+      # --namespace is NOT cosmetic here: Helm substitutes "default" when it is
+      # omitted, and the chart publishes namespace-qualified service FQDNs to
+      # cross-namespace consumers. Linting/rendering without it validated an
+      # artifact that could never be prod's. The chart now fails the render on
+      # namespace "default" (fuzeinfra.serviceNamespace), so these flags are load-bearing.
       - name: Helm lint (all overlays)
         run: |
-          helm lint helm/fuzeinfra
-          helm lint helm/fuzeinfra -f helm/fuzeinfra/values-local.yaml
-          helm lint helm/fuzeinfra -f helm/fuzeinfra/values-aws.yaml
+          helm lint helm/fuzeinfra --namespace fuzeinfra
+          helm lint helm/fuzeinfra --namespace fuzeinfra -f helm/fuzeinfra/values-local.yaml
+          helm lint helm/fuzeinfra --namespace fuzeinfra -f helm/fuzeinfra/values-aws.yaml
           helm lint helm/litellm
           helm lint helm/litellm -f helm/litellm/values-local.yaml
           helm lint helm/litellm -f helm/litellm/values-contabo.yaml
@@ -62,6 +67,7 @@ jobs:
           for overlay in values-local.yaml values-aws.yaml; do
             echo "::group::$overlay"
             helm template fuzeinfra helm/fuzeinfra -f "helm/fuzeinfra/$overlay" \
+              --namespace fuzeinfra \
               | kubeconform -strict -summary -kubernetes-version 1.29.0 -ignore-missing-schemas
             echo "::endgroup::"
           done
@@ -110,3 +116,64 @@ jobs:
           done
 
           echo "LiteLLM consumer contract OK (litellm:4000, claude-opus-4-5, text-embedding-3-small)"
+
+      # Kafka hands its advertised address to clients in the metadata response
+      # that FOLLOWS a successful bootstrap. If that address is not resolvable
+      # from other namespaces, bootstrap still succeeds and every produce/consume
+      # then fails — a failure mode that looks like a client bug and is not.
+      # It has now broken cross-namespace consumers twice (#104: bare service
+      # name; the `.default.` regression: namespace-less render), so assert the
+      # exact string rather than trusting review.
+      - name: Assert the Kafka advertised-listener contract
+        run: |
+          set -euo pipefail
+          fqdn='fuzeinfra-kafka.fuzeinfra.svc.cluster.local:9092'
+
+          for overlay in values-contabo.yaml values-local.yaml values-aws.yaml; do
+            helm template fuzeinfra helm/fuzeinfra -f "helm/fuzeinfra/$overlay" \
+              --namespace fuzeinfra -s templates/messaging.yaml > /tmp/kafka-$overlay.yaml
+            grep -qF "PLAINTEXT://${fqdn}" "/tmp/kafka-$overlay.yaml" \
+              || { echo "::error::$overlay: KAFKA_ADVERTISED_LISTENERS must advertise ${fqdn} — anything else breaks every consumer outside ns fuzeinfra"; exit 1; }
+            # Match the listener VALUE, not the bare hostname: the template's
+            # explanatory comment names the broken address on purpose, and
+            # `helm template` emits comments into the rendered output.
+            # `if !`, not `&&` — under `set -e` a failing grep in an AND-list
+            # would abort the job on the SUCCESS path.
+            if grep -qF 'PLAINTEXT://fuzeinfra-kafka.default.svc.cluster.local' "/tmp/kafka-$overlay.yaml"; then
+              echo "::error::$overlay: broker advertises the unresolvable .default. address"; exit 1
+            fi
+            echo "  $overlay OK"
+          done
+
+          # The prod overlay pins global.serviceNamespace, so it must render the
+          # correct address even when the ambient namespace is wrong — that is the
+          # whole point of pinning it. `--namespace default` is the worst case, and
+          # using it explicitly keeps this deterministic: with no flag the ambient
+          # namespace could happen to BE fuzeinfra, and then this passes whether or
+          # not the pin exists, proving nothing.
+          helm template fuzeinfra helm/fuzeinfra -f helm/fuzeinfra/values-contabo.yaml \
+            --namespace default -s templates/messaging.yaml > /tmp/kafka-wrong-ns.yaml
+          grep -qF "PLAINTEXT://${fqdn}" /tmp/kafka-wrong-ns.yaml \
+            || { echo "::error::prod overlay does not advertise ${fqdn} when rendered into the wrong namespace — is global.serviceNamespace still pinned?"; exit 1; }
+
+          # And rendering into "default" WITHOUT that pin must fail loudly rather
+          # than emit a broker no consumer can reach. Match the guard's own
+          # message so an unrelated template error cannot pass this check.
+          #
+          # `--namespace default` explicitly, NOT an omitted flag: helm resolves a
+          # missing --namespace from the ambient kube context, and this self-hosted
+          # ARC runner is cluster-connected, so the fallback is a real namespace,
+          # not "default" — an omitted flag does not exercise the guard here even
+          # though it does on a workstation. Which is precisely why the advertised
+          # address must never be left ambient.
+          guard_out=$(helm template fuzeinfra helm/fuzeinfra -f helm/fuzeinfra/values-local.yaml \
+                        --namespace default \
+                        -s templates/messaging.yaml 2>&1) && guard_rc=0 || guard_rc=$?
+          if [ "$guard_rc" -eq 0 ]; then
+            echo "::error::a namespace-less render should have failed but did not — the serviceNamespace guard is gone"
+            exit 1
+          fi
+          grep -qF 'refusing to render service addresses in namespace' <<<"$guard_out" || {
+            echo "::error::namespace-less render failed for the wrong reason:"; echo "$guard_out"; exit 1; }
+
+          echo "Kafka advertised-listener contract OK (${fqdn}; guard active)"
