@@ -585,3 +585,70 @@ spec:
         duration: 10s
         factor: 2
         maxDuration: 3m
+---
+# -----------------------------------------------------------------------------
+# fuzemarket  ->  workflows target it with `runs-on: fuzemarket`
+# -----------------------------------------------------------------------------
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: arc-runners-fuzemarket
+  namespace: argocd
+  labels:
+    app.kubernetes.io/part-of: arc-runners
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: fuzeinfra
+  # Multi-source: OCI chart + git values file (ArgoCD >= 2.6). The $values ref
+  # lets valueFiles reference the git source by alias.
+  sources:
+    - repoURL: ghcr.io/actions/actions-runner-controller-charts
+      chart: gha-runner-scale-set
+      targetRevision: "0.14.2"
+      helm:
+        releaseName: fuzemarket
+        valueFiles:
+          - $values/runners/arc/runner-scale-set-values.yaml
+        parameters:
+          - name: githubConfigUrl
+            value: "https://github.com/izzywdev/FuzeMarket"
+          - name: runnerScaleSetName
+            value: "fuzemarket"
+          - name: maxRunners
+            value: "3"
+          - name: minRunners
+            value: "0"
+    - repoURL: https://github.com/izzywdev/FuzeInfra.git
+      targetRevision: main
+      ref: values
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: arc-runners
+  # Argo must not revert EphemeralRunnerSet replicas/patchID — the ARC listener
+  # owns those and patches them at runtime. selfHeal reverting them makes the
+  # listener loop forever without runners ever completing a job.
+  ignoreDifferences:
+    - group: actions.github.com
+      kind: EphemeralRunnerSet
+      jsonPointers:
+        - /spec/replicas
+        - /spec/patchID
+  syncPolicy:
+    automated:
+      selfHeal: true
+      # prune INTENTIONALLY false for the initial adoption: these sets already
+      # exist as imperative `helm install` releases, and Argo adopts the live
+      # objects via ServerSideApply. Pruning during that first reconcile could
+      # delete every runner set at once and take all repos' CI down. Flip to
+      # true once a clean sync has been observed for all 8.
+      prune: false
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 3m
