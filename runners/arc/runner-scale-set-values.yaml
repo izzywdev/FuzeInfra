@@ -55,14 +55,19 @@ template:
 
     containers:
       - name: runner
-        # Stock image. Has the docker CLI + buildx (enough for `docker build`
-        # and `docker buildx build --push`) but NOT compose-v2, so
-        # `docker compose -f ...` fails with "unknown shorthand flag: 'f'".
-        # For compose, switch to the CI-capable image built from
-        # runners/arc/Dockerfile (ghcr.io/izzywdev/fuzeinfra-arc-runner:latest,
-        # published and publicly pullable — there is NO imagePullSecret in
-        # arc-runners, so it must stay public).
-        image: ghcr.io/actions/actions-runner:latest
+        # CI-capable image (built from runners/arc/Dockerfile), NOT the stock
+        # actions-runner. A self-hosted runner is not ubuntu-latest: the stock
+        # image ships almost no toolchain, so workflows written for hosted
+        # runners fail with exit 127. Observed on FuzeMarket the moment its jobs
+        # first ran: `gh: command not found`, and `pip install semgrep` -> 127.
+        # This image bakes in gh, jq, curl, docker compose-v2 + buildx, node,
+        # and pre-warms /opt/hostedtoolcache so actions/setup-python|node
+        # resolve locally instead of fetching.
+        # It is also register-repo.sh's RUNNER_IMAGE default, so this makes the
+        # Argo-managed sets match how new sets are registered.
+        # PREREQUISITE: must stay published + PUBLIC — there is NO
+        # imagePullSecret in arc-runners, so a private image ImagePullBackOffs.
+        image: ghcr.io/izzywdev/fuzeinfra-arc-runner:latest
         # REQUIRED WHENEVER containerMode.dind IS ON — see the dind block below.
         # The ARC controller injects this itself on the non-dind path, but not
         # when dind rewrites this container; without it the container runs the
