@@ -1,0 +1,12 @@
+apiVersion: v2
+name: litellm
+description: |
+  LiteLLM gateway — the shared, OpenAI-compatible LLM proxy for the FuzeOne
+  fleet. Consumers talk OpenAI protocol to litellm.fuzeinfra.svc.cluster.local:4000
+  and never hold provider credentials themselves; model routing, key custody and
+  cost caps live here.
+type: application
+# Chart version — bump on chart changes. appVersion tracks the upstream LiteLLM
+# image stream (the concrete tag is pinned in values.yaml, not here).
+version: 0.1.0
+appVersion: "main-stable"

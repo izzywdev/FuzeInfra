@@ -1,0 +1,30 @@
+# =============================================================================
+# LiteLLM gateway — local kind cluster.
+#
+# There is no SealedSecret controller story worth the ceremony locally, so the
+# expectation is that you create the `litellm-secret` Secret by hand with your
+# own throwaway provider keys before enabling:
+#
+#   kubectl -n fuzeinfra create secret generic litellm-secret \
+#     --from-literal=LITELLM_MASTER_KEY=sk-local-dev \
+#     --from-literal=ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY" \
+#     --from-literal=OPENAI_API_KEY="$OPENAI_API_KEY"
+#
+#   helm upgrade --install litellm helm/litellm -n fuzeinfra \
+#     -f helm/litellm/values-local.yaml --set enabled=true
+#
+# Then reach it from your machine with:
+#   kubectl -n fuzeinfra port-forward svc/litellm 4000:4000
+# =============================================================================
+enabled: false
+
+replicas: 1
+
+resources:
+  requests: { cpu: "100m", memory: "256Mi" }
+  limits:   { cpu: "500m", memory: "768Mi" }
+
+# Off locally: kind ships no NetworkPolicy enforcer by default, so a policy here
+# is a no-op that only makes local behaviour diverge from prod.
+networkPolicy:
+  enabled: false

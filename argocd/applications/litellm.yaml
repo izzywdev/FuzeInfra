@@ -1,0 +1,66 @@
+# ArgoCD Application — LiteLLM gateway (Contabo production, namespace `fuzeinfra`).
+#
+# WHY THIS EXISTS
+#   FuzeFront's chat-service speaks OpenAI protocol to
+#   litellm.fuzeinfra.svc.cluster.local:4000 and holds no provider credentials of
+#   its own. This Application is what makes that endpoint exist, GitOps-managed.
+#
+# WHY IT IS SEPARATE FROM fuzeinfra-prod
+#   fuzeinfra-prod syncs the whole umbrella chart. LiteLLM's model routing
+#   changes every time a consumer wants a new model — a far faster cadence than
+#   Postgres/Kafka/Grafana — and folding it in would make each of those a
+#   full-platform resync. Same rationale as argocd/applications/longhorn.yaml and
+#   fuzeinfra-sealed-secrets.yaml. There is no overlap: Argo tracks resources by
+#   `argocd.argoproj.io/instance` (argocd/argocd-server-config.yaml,
+#   application.instanceLabelKey), so fuzeinfra-prod's prune never touches
+#   objects this app owns, and vice versa.
+#
+# HISTORY
+#   FuzeFront carried deploy/argocd/applications/litellm.yaml until f7c2ad56
+#   (2026-06-25), when it was deleted for pointing at FuzeInfra/helm/litellm —
+#   a path that existed at no SHA, so the app could never sync. helm/litellm now
+#   exists and renders; this Application lands second, deliberately.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: litellm
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: fuzeinfra
+  source:
+    repoURL: https://github.com/izzywdev/FuzeInfra.git
+    targetRevision: main
+    path: helm/litellm
+    helm:
+      # Pin the release name to "litellm" rather than defaulting to the app name.
+      # The chart's selectorLabels derive instance from {{ .Release.Name }}, and a
+      # Deployment's selector is IMMUTABLE — if this ever renders a different
+      # value, the sync fails with "field is immutable" until the Deployment is
+      # deleted by hand.
+      releaseName: litellm
+      valueFiles:
+        - values-contabo.yaml
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: fuzeinfra
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    # Mirrors fuzeinfra-prod so CRIT-log alerts from this namespace resolve to
+    # this repo (grafana-crit-fix.yml reads fuzeinfra.io/owner-repo off the
+    # emitting namespace to pick the issue repo).
+    managedNamespaceMetadata:
+      annotations:
+        fuzeinfra.io/owner-repo: izzywdev/FuzeInfra
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 15s
+        factor: 2
+        maxDuration: 5m

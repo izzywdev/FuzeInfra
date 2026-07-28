@@ -1,0 +1,23 @@
+{{- if .Values.enabled }}
+{{- /*
+The consumer contract. `litellm` + port 4000 in the `fuzeinfra` namespace
+resolves to litellm.fuzeinfra.svc.cluster.local:4000, which is FuzeFront's
+chat-service LITELLM_URL default (services/chat-service/src/config.ts).
+ClusterIP only — never a NodePort/LoadBalancer, never an Ingress.
+*/ -}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: litellm
+  labels:
+    {{- include "litellm.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "litellm.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ .Values.port }}
+      targetPort: http
+      protocol: TCP
+{{- end }}

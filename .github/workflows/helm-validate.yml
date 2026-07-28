@@ -31,6 +31,9 @@ jobs:
           helm lint helm/fuzeinfra
           helm lint helm/fuzeinfra -f helm/fuzeinfra/values-local.yaml
           helm lint helm/fuzeinfra -f helm/fuzeinfra/values-aws.yaml
+          helm lint helm/litellm
+          helm lint helm/litellm -f helm/litellm/values-local.yaml
+          helm lint helm/litellm -f helm/litellm/values-contabo.yaml
 
       # Alert rules are shipped as raw files via .Files.Get, so helm lint never
       # looks inside them. promtool parses the PromQL and — via the unit tests —
@@ -62,3 +65,48 @@ jobs:
               | kubeconform -strict -summary -kubernetes-version 1.29.0 -ignore-missing-schemas
             echo "::endgroup::"
           done
+
+      # The LiteLLM gateway is a separate chart with its own Argo Application
+      # (argocd/applications/litellm.yaml). Its `enabled` gate defaults to false
+      # so the chart renders NOTHING by default — validating it as-is would be a
+      # no-op that always passes. Force the gate on so the templates are actually
+      # exercised, independent of whether prod has flipped it yet.
+      - name: Render & validate LiteLLM (gate forced on)
+        run: |
+          for overlay in values-local.yaml values-contabo.yaml; do
+            echo "::group::litellm/$overlay"
+            helm template litellm helm/litellm -f "helm/litellm/$overlay" --set enabled=true \
+              | kubeconform -strict -summary -kubernetes-version 1.29.0 -ignore-missing-schemas
+            echo "::endgroup::"
+          done
+
+      # The gateway's whole purpose is the DNS + port + model-name contract that
+      # FuzeFront's chat-service compiles against. Assert it here so a careless
+      # rename fails CI instead of 500ing every chat turn in prod.
+      #
+      # Pure grep against per-template renders (`-s`) on purpose: no python/pip,
+      # no yq. The self-hosted ARC runner is not guaranteed to have either, and a
+      # contract check that can fail on a missing interpreter is worse than none.
+      - name: Assert the LiteLLM consumer contract
+        run: |
+          set -euo pipefail
+          render() {
+            helm template litellm helm/litellm \
+              -f helm/litellm/values-contabo.yaml --set enabled=true -s "$1"
+          }
+
+          # Service DNS + port: litellm.fuzeinfra.svc.cluster.local:4000
+          render templates/service.yaml > /tmp/litellm-svc.yaml
+          grep -qE '^  name: litellm$' /tmp/litellm-svc.yaml \
+            || { echo "::error::Service renamed — breaks litellm.fuzeinfra.svc.cluster.local"; exit 1; }
+          grep -qE '^      port: 4000$' /tmp/litellm-svc.yaml \
+            || { echo "::error::Service port must stay 4000"; exit 1; }
+
+          # Model names consumers resolve by string.
+          render templates/configmap.yaml > /tmp/litellm-cm.yaml
+          for model in claude-opus-4-5 text-embedding-3-small; do
+            grep -qE "model_name: ${model}$" /tmp/litellm-cm.yaml \
+              || { echo "::error::model '${model}' removed; consumers resolve it by name"; exit 1; }
+          done
+
+          echo "LiteLLM consumer contract OK (litellm:4000, claude-opus-4-5, text-embedding-3-small)"

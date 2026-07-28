@@ -1,0 +1,43 @@
+# =============================================================================
+# LiteLLM gateway — Contabo production (k3s, namespace `fuzeinfra`).
+# Synced by argocd/applications/litellm.yaml from main.
+#
+# ┌───────────────────────────────────────────────────────────────────────────┐
+# │ GITOPS GATE — this is the ONE change needed to turn the gateway on.       │
+# │                                                                           │
+# │ `enabled` stays false until deploy/sealed-secrets/litellm-secret.yaml     │
+# │ exists. Producing it needs the real provider keys, so it is a human,      │
+# │ one-time, offline step — see deploy/sealed-secrets/litellm-secret.yaml    │
+# │ .template for the exact scripts/seal-secret.sh invocation.                │
+# │                                                                           │
+# │ Then flip `enabled: true` HERE, in the SAME commit that adds the sealed   │
+# │ secret. Flipping first CrashLoops the pod with CreateContainerConfigError │
+# │ (LITELLM_MASTER_KEY is a required secretKeyRef).                          │
+# └───────────────────────────────────────────────────────────────────────────┘
+# =============================================================================
+enabled: false
+
+replicas: 1
+
+# 4 vCPU / 8 GB nodes: the gateway is I/O-bound (it proxies, it does not infer),
+# so keep it small. Raise limits only if you see throttling under real load.
+resources:
+  requests: { cpu: "250m", memory: "512Mi" }
+  limits:   { cpu: "1", memory: "1Gi" }
+
+# Cluster-internal only. No Ingress, no Cloudflare tunnel route, no CF Access
+# app — the gateway holds live provider keys and must stay unreachable from
+# outside the cluster by construction.
+networkPolicy:
+  enabled: true
+  allowedNamespaces:
+    # FuzeFront chat-service + doc indexer (LITELLM_URL, and the indexer's
+    # /embeddings calls).
+    - fuzefront
+
+# NOTE ON NODE PINNING: FuzeFront's own values-prod.yaml pins a `litellm`
+# affinity to node `fuzefront-node-2`. That node does not exist in this cluster
+# (Contabo nodes are vmi* / fuzeinfra-elastic-*), and that block belonged to the
+# never-templated litellm stanza in their chart. Deliberately NOT carried over —
+# pinning to a nonexistent node leaves the pod Pending forever. The gateway is
+# stateless; let the scheduler place it.
