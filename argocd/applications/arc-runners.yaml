@@ -519,9 +519,6 @@ spec:
 ---
 # -----------------------------------------------------------------------------
 # fuzepicker  ->  workflows target it with `runs-on: fuzepicker`
-# PARKED at 0 on purpose: the set stays defined and in sync but spawns no
-# runners. Set to "3" to re-enable.
-# -----------------------------------------------------------------------------
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
@@ -549,7 +546,7 @@ spec:
           - name: runnerScaleSetName
             value: "fuzepicker"
           - name: maxRunners
-            value: "0"
+            value: "3"
           - name: minRunners
             value: "0"
     - repoURL: https://github.com/izzywdev/FuzeInfra.git
