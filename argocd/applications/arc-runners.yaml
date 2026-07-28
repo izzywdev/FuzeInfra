@@ -549,7 +549,7 @@ spec:
           - name: runnerScaleSetName
             value: "fuzepicker"
           - name: maxRunners
-            value: "0"
+            value: "3"
           - name: minRunners
             value: "0"
     - repoURL: https://github.com/izzywdev/FuzeInfra.git
