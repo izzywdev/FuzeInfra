@@ -212,20 +212,14 @@ def render_domains(basename, spec, doc):
 
 def render_env(basename, spec, doc):
     """The Environment variables field (.env format). Non-secret values only."""
+    # Kept deliberately short: this block is pasted into the dialog, so the header has
+    # to be the warning the next editor needs and nothing more. The full rationale
+    # (why GITHUB_TOKEN/ANTHROPIC_API_KEY are absent, why MCP is per-session) is in
+    # this directory's README.md.
     L = [
-        f"# {spec['picker_name']} — Environment variables for the cloud environment dialog.",
-        f"# GENERATED from {basename}.json by render.py — do not edit by hand.",
-        "#",
-        "# NO SECRETS. Cloud environments have no secrets store and every value here is",
-        "# readable by anyone who uses the environment.",
-        "#",
-        "# GITHUB_TOKEN / GH_TOKEN are intentionally ABSENT: left unset, the GitHub proxy",
-        "# substitutes real credentials on outbound requests and they read as the placeholder",
-        '# "proxy-injected" in-session. Setting a PAT here would be strictly less safe.',
-        "#",
-        "# ANTHROPIC_API_KEY is likewise absent — the hosting environment manages the",
-        "# session's API connection. Cloudflare / GitHub MCP are per-session connectors,",
-        "# whose traffic goes through Anthropic's servers, not this environment's config.",
+        f"# {spec['picker_name']} — generated from {basename}.json (agent-templates/environments).",
+        "# NO SECRETS: every value here is readable by anyone who uses this environment.",
+        "# GITHUB_TOKEN is deliberately unset so the GitHub proxy injects credentials instead.",
         "",
     ]
     for key, val, why in spec["env"]:
