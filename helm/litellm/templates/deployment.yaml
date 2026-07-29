@@ -66,14 +66,32 @@ spec:
           # /health — that one requires the master key AND round-trips every
           # configured model to the provider, so it bills real tokens on every
           # kubelet probe.
+          #
+          # The startupProbe is load-bearing, not boilerplate. LiteLLM imports
+          # its whole provider SDK surface before binding the port, and a cold
+          # start measured MINUTES on a 4 vCPU node. Without this, liveness
+          # (initialDelay 20s + 3x20s) fired at ~80s and the kubelet killed the
+          # container mid-boot — "failed liveness probe, will be restarted",
+          # exit 137 reason=Error — an infinite restart loop that looks like a
+          # crash but is self-inflicted. Liveness/readiness stay disabled until
+          # this succeeds, so 60 x 10s allows a 10-minute cold start (which also
+          # covers a slow first image pull on a fresh node) while still catching
+          # a genuinely wedged process.
+          startupProbe:
+            httpGet: { path: /health/liveliness, port: http }
+            periodSeconds: 10
+            failureThreshold: 60
+          # No initialDelaySeconds on either of these: the startupProbe already
+          # gates them, and adding a delay on top would only slow recovery from
+          # a real hang after the app is up.
           livenessProbe:
             httpGet: { path: /health/liveliness, port: http }
-            initialDelaySeconds: 20
             periodSeconds: 20
+            failureThreshold: 3
           readinessProbe:
             httpGet: { path: /health/readiness, port: http }
-            initialDelaySeconds: 10
             periodSeconds: 15
+            failureThreshold: 3
           securityContext:
             allowPrivilegeEscalation: false
             capabilities:
