@@ -24,7 +24,9 @@ Most infra workflows are **already** `runs-on: staging`: `helm-validate`,
 `nightly-integration`, `governance-nightly`, `tf-elastic-drift-check`,
 `infra-request-handler`, `infra-request-apply-on-approve`,
 `argo-outofsync-autofix`, `apply-cluster-config`, `arc-smoke-test`.
-`kind-validate` runs on the host runner `[self-hosted, kind-host]`.
+`kind-validate` runs on **`ubuntu-latest`** — it was moved off the
+`[self-hosted, kind-host]` host runner after that runner went offline on
+2026-07-24 and silently stopped the gate for days (see runners/README.md).
 
 ## MUST stay on `ubuntu-latest` (chicken-and-egg — they rebuild the runners)
 

@@ -313,38 +313,35 @@ share the same environment.
 
 ---
 
-## Host-level kind runner (for the `kind-validate` gate)
+## Host-level kind runner — RETIRED, no longer required
 
-The `kind-validate.yml` workflow stands the **full FuzeInfra stack up on a kind
-cluster** on every PR. That needs Docker + privilege and several GB of RAM —
-which the hardened in-pod ARC `staging` runners above **cannot** provide (they
-drop all capabilities, run non-root, and are capped at 1Gi). Running kind inside
-those pods is out of scope by design.
+> **`kind-validate.yml` no longer uses a self-hosted runner.** It runs on
+> `ubuntu-latest`. Nothing below is needed; the `kind-host` runner can be
+> deregistered. This section is kept only so the history is legible.
 
-Instead, register a **classic Actions runner as a process on a host** that already
-has `docker`, `kind`, `kubectl`, and `helm` — e.g. the developer / Docker-Desktop
-machine. kind then creates its cluster as a sibling container on that host's
-Docker, with the host's full resources.
+**Why it was retired.** The `kind-host` runner was a classic Actions runner
+process on a developer's machine. It stopped picking up jobs on 2026-07-24, and
+every `kind-validate` run afterwards either timed out in the queue (`cancelled`)
+or failed — so the gate did not run *for days* while merely looking "pending" on
+PRs. A gate whose liveness depends on somebody's laptop being switched on is a
+gate that will keep going quiet, and a quiet gate is worse than no gate because
+it still shows up in the checks list.
 
-```bash
-# On the host (Linux / macOS / WSL / Git-Bash):
-mkdir actions-runner && cd actions-runner
-curl -O -L https://github.com/actions/runner/releases/latest/download/actions-runner-<os>-<arch>.tar.gz
-tar xzf actions-runner-*.tar.gz
+GitHub-hosted `ubuntu-latest` has docker, 4 vCPU / 16 GB RAM, and enough free
+disk after the workflow's cleanup step to run a 3-node kind cluster with the full
+stack. Two things also got *better* in the move:
 
-# Register against the org (or a single repo). Give it the kind-host label.
-./config.sh --url https://github.com/izzywdev \
-  --token <RUNNER_REGISTRATION_TOKEN> \
-  --labels self-hosted,kind-host \
-  --name kind-host-$(hostname) --unattended
+- **Ephemeral.** The old job executed PR-supplied scripts on a persistent host,
+  which is RCE-on-a-developer-machine if a fork PR ever slipped through — hence
+  the fork-PR exclusion it had to carry. A throwaway hosted VM removes both the
+  risk and the exclusion.
+- **Same command as a developer.** The job now runs
+  `python3 scripts-tools/devenv.py up --fresh --profile full`, which is exactly
+  `make dev-fresh`. The gate and the local experience cannot drift.
 
-# Run it (or install as a service: ./svc.sh install && ./svc.sh start)
-./run.sh
-```
-
-Add the repo to the runner group's allowlist (same gate as the staging runners).
-`kind-validate.yml` uses `runs-on: [self-hosted, kind-host]`, so it only ever
-schedules onto this host runner — the hardened `staging` pods are untouched.
+The ARC `staging` pods still cannot run kind (they drop all capabilities, run
+non-root, and are capped at 1Gi) — that remains true and out of scope by design.
+It simply no longer matters, because kind runs on hosted infrastructure instead.
 
 **Don't want to host a runner?** The same gate runs locally as a pre-push hook —
 zero runner infrastructure:

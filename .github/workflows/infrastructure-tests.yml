@@ -65,9 +65,11 @@ jobs:
     # below, which are continue-on-error.
     #
     # These files were previously only reachable via kind-validate.yml, which
-    # runs on the self-hosted `kind-host` runner; when that runner is down the
-    # suites silently never execute. Running them here, on a hosted runner,
-    # makes them a real gate.
+    # then ran on the self-hosted `kind-host` runner; while that runner was down
+    # the suites silently never executed. kind-validate has since moved to a
+    # hosted runner too, but these stay here deliberately: they need no cluster,
+    # so gating them behind a full stack bring-up would cost ~20 minutes to learn
+    # something a 3-second run already proves.
     # ---------------------------------------------------------------------
     - name: Run offline unit tests (no services required)
       run: |

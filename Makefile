@@ -24,7 +24,15 @@ endif
 .PHONY: help
 help:
 	@echo "FuzeInfra make targets:"
-	@echo "  Local Kubernetes (kind):"
+	@echo "  Local dev environment (START HERE — one command, up + verified):"
+	@echo "    make dev                         Stand the stack up and prove it works"
+	@echo "    make dev PROFILE=minimal         Same, but a subset (minimal|data-stores|full)"
+	@echo "    make dev-fresh                   From-scratch rebuild (deletes the cluster first)"
+	@echo "    make dev-dd                      Use Docker Desktop Kubernetes instead of kind"
+	@echo "    make dev-verify                  Re-check whatever is already running"
+	@echo "    make dev-status                  Show what is deployed"
+	@echo "    make dev-down                    Tear it down"
+	@echo "  Local Kubernetes (kind, lower-level):"
 	@echo "    make kind-up                     Create kind cluster + ingress + deploy full stack"
 	@echo "    make kind-profile PROFILE=<name> Deploy a subset (minimal, data-stores, full)"
 	@echo "    make kind-validate               Assert every enabled service is ready + reachable"
@@ -46,7 +54,44 @@ help:
 	@echo "    make eks-apply       terraform apply"
 
 # ----------------------------------------------------------------------------
-# Local kind
+# Local dev environment — the supported front door.
+#
+# `make dev` is the promise: one command, and the local environment is up AND
+# verified (every enabled service Ready + reachable, then the pytest smoke suite).
+# The per-merge CI gate (.github/workflows/kind-validate.yml) runs the SAME
+# script on a hosted runner, so the promise cannot quietly rot.
+#
+# The kind-* / dd-* targets below remain as the lower-level building blocks.
+# ----------------------------------------------------------------------------
+DEVENV := $(PY) scripts-tools/devenv.py
+PROFILE_ARG := $(if $(PROFILE),--profile $(PROFILE),)
+
+.PHONY: dev
+dev:
+	$(DEVENV) up $(PROFILE_ARG)
+
+.PHONY: dev-fresh
+dev-fresh:
+	$(DEVENV) up --fresh $(PROFILE_ARG)
+
+.PHONY: dev-dd
+dev-dd:
+	$(DEVENV) up --backend docker-desktop $(PROFILE_ARG)
+
+.PHONY: dev-verify
+dev-verify:
+	$(DEVENV) verify
+
+.PHONY: dev-status
+dev-status:
+	$(DEVENV) status
+
+.PHONY: dev-down
+dev-down:
+	$(DEVENV) down
+
+# ----------------------------------------------------------------------------
+# Local kind (lower-level building blocks — `make dev` wraps these)
 # ----------------------------------------------------------------------------
 .PHONY: kind-up
 kind-up:
