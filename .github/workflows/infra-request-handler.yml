@@ -222,7 +222,14 @@ jobs:
       - name: Open gated PR for manual approval
         if: steps.validate.outputs.decision == 'gate'
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Real-user PAT, same reason as claude-auto-pr.yml: a PR opened with
+          # GITHUB_TOKEN is authored by github-actions[bot], and GitHub creates
+          # every check on a bot-authored PR as `action_required` — un-run until
+          # someone clicks Approve. That matters most HERE, because merging this
+          # PR *is* the approval to provision real infrastructure, and the human
+          # doing it should be looking at real check results rather than a column
+          # of grey "waiting for approval" marks.
+          GH_TOKEN: ${{ secrets.GH_TOKEN || secrets.GITHUB_TOKEN }}
         run: |
           cd fuzeinfra
           REPO="${{ github.event.client_payload.repo }}"
