@@ -1,0 +1,35 @@
+{{- if and .Values.enabled .Values.ingress.enabled }}
+{{- $domain := required "ingress.domain is required when ingress.enabled=true" .Values.ingress.domain -}}
+{{- /*
+Traefik-only Ingress for the LiteLLM admin UI.
+
+No TLS block on purpose: Cloudflare terminates edge TLS and the tunnel delivers
+plain HTTP to Traefik, exactly like every other admin UI in this platform.
+Adding a tls: section here would not add encryption, it would just make Traefik
+try to serve a certificate it does not have.
+
+Path "/" rather than "/ui": LiteLLM's console loads its bundle from
+/litellm-asset-prefix/... and calls back to the API routes on the same origin,
+so scoping the Ingress to /ui would serve an HTML shell whose every asset and
+XHR 404s — a blank page, which is exactly how the Neo4j Browser issue presented.
+*/ -}}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: litellm
+  labels:
+    {{- include "litellm.labels" . | nindent 4 }}
+spec:
+  ingressClassName: {{ .Values.ingress.className }}
+  rules:
+    - host: {{ printf "%s.%s" .Values.ingress.subdomain $domain }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: litellm
+                port:
+                  number: {{ .Values.port }}
+{{- end }}
