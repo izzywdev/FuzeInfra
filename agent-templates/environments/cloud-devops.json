@@ -1,0 +1,21 @@
+{
+  "$schema": "../schema/environment.schema.json",
+  "name": "fuzeinfra-cloud-devops",
+  "config": {
+    "type": "cloud",
+    "packages": {
+      "apt": ["gh"],
+      "go": [
+        "github.com/yannh/kubeconform/cmd/kubeconform@latest",
+        "github.com/bitnami-labs/sealed-secrets/cmd/kubeseal@latest"
+      ],
+      "pip": ["yamllint", "check-jsonschema", "pyyaml"]
+    },
+    "networking": {
+      "type": "limited",
+      "allowed_hosts": ["get.helm.sh"],
+      "allow_mcp_servers": true,
+      "allow_package_managers": true
+    }
+  }
+}
