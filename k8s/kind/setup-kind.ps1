@@ -18,14 +18,27 @@
   Reuse an existing cluster instead of failing if one is present (default
   behaviour already reuses; this switch is accepted for parity with CI flags).
 
+.PARAMETER NoCluster
+  Skip kind cluster creation and deploy into the CURRENT kube-context instead.
+  This is how the Docker Desktop backend reuses this script: the addon install
+  (ingress-nginx, cert-manager, the local-CA ClusterIssuer) and the chart deploy
+  are identical on every backend, so they must not be reimplemented per backend
+  and allowed to drift. Does not require the `kind` binary.
+
 .EXAMPLE
   .\k8s\kind\setup-kind.ps1
   .\k8s\kind\setup-kind.ps1 -Profile minimal
+  .\k8s\kind\setup-kind.ps1 -NoCluster        # deploy to Docker Desktop k8s
+
+.NOTES
+  Prefer `python scripts-tools\devenv.py up` — it wraps this script, picks the
+  backend, and then verifies the result. This script only brings things up.
 #>
 [CmdletBinding()]
 param(
   [string]$Profile = "",
-  [switch]$Reuse
+  [switch]$Reuse,
+  [switch]$NoCluster
 )
 
 $ErrorActionPreference = "Stop"
@@ -36,32 +49,48 @@ $ClusterName = "fuzeinfra"
 $Namespace   = "fuzeinfra"
 $CertManagerVersion = "v1.16.2"   # bump deliberately
 
-foreach ($tool in @("kind", "kubectl", "helm")) {
+$requiredTools = if ($NoCluster) { @("kubectl", "helm") } else { @("kind", "kubectl", "helm") }
+foreach ($tool in $requiredTools) {
   if (-not (Get-Command $tool -ErrorAction SilentlyContinue)) {
     throw "$tool not found in PATH. Install it before running this script (see docs/LOCAL_KUBERNETES.md)."
   }
 }
 
-Write-Host "==> Creating kind cluster '$ClusterName' (if missing)" -ForegroundColor Cyan
-$existing = (& kind get clusters) 2>$null
-if ($existing -notcontains $ClusterName) {
-  & kind create cluster --config (Join-Path $ScriptDir "kind-cluster.yaml")
-} else {
-  & kubectl cluster-info --context "kind-$ClusterName" *> $null
-  if ($LASTEXITCODE -eq 0) {
-    Write-Host "    cluster already exists and is reachable, reusing"
-  } else {
-    # A leftover-but-dead cluster (e.g. after a Docker restart) would wedge every
-    # kubectl/helm call below — recreate it instead of reusing.
-    Write-Host "    existing cluster is unreachable - recreating" -ForegroundColor Yellow
-    & kind delete cluster --name $ClusterName 2>$null
-    & kind create cluster --config (Join-Path $ScriptDir "kind-cluster.yaml")
+if ($NoCluster) {
+  $ctx = (& kubectl config current-context)
+  Write-Host "==> Using the current kube-context (-NoCluster): $ctx" -ForegroundColor Cyan
+  & kubectl cluster-info *> $null
+  if ($LASTEXITCODE -ne 0) {
+    throw "current kube-context is not reachable - is the cluster running?"
   }
+} else {
+  Write-Host "==> Creating kind cluster '$ClusterName' (if missing)" -ForegroundColor Cyan
+  $existing = (& kind get clusters) 2>$null
+  if ($existing -notcontains $ClusterName) {
+    & kind create cluster --config (Join-Path $ScriptDir "kind-cluster.yaml")
+  } else {
+    & kubectl cluster-info --context "kind-$ClusterName" *> $null
+    if ($LASTEXITCODE -eq 0) {
+      Write-Host "    cluster already exists and is reachable, reusing"
+    } else {
+      # A leftover-but-dead cluster (e.g. after a Docker restart) would wedge every
+      # kubectl/helm call below — recreate it instead of reusing.
+      Write-Host "    existing cluster is unreachable - recreating" -ForegroundColor Yellow
+      & kind delete cluster --name $ClusterName 2>$null
+      & kind create cluster --config (Join-Path $ScriptDir "kind-cluster.yaml")
+    }
+  }
+  & kubectl cluster-info --context "kind-$ClusterName"
 }
-& kubectl cluster-info --context "kind-$ClusterName"
 
-Write-Host "==> Installing ingress-nginx (kind provider)" -ForegroundColor Cyan
-& kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/main/deploy/static/provider/kind/deploy.yaml
+# Provider variant matters. The `kind` manifest pins the controller to a node
+# labelled ingress-ready=true (kind-cluster.yaml sets that label) and publishes
+# via hostPort. Docker Desktop's node carries no such label, so the kind manifest
+# would leave the controller Pending forever; its `cloud` manifest uses a
+# LoadBalancer Service, which Docker Desktop resolves to localhost.
+$ingressProvider = if ($NoCluster) { "cloud" } else { "kind" }
+Write-Host "==> Installing ingress-nginx ($ingressProvider provider)" -ForegroundColor Cyan
+& kubectl apply -f "https://raw.githubusercontent.com/kubernetes/ingress-nginx/main/deploy/static/provider/$ingressProvider/deploy.yaml"
 
 Write-Host "==> Waiting for ingress-nginx controller to be ready" -ForegroundColor Cyan
 & kubectl wait --namespace ingress-nginx `

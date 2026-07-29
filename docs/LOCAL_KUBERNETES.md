@@ -6,8 +6,18 @@ mirroring EKS/Contabo prod). This guide is the Kubernetes path — the one that
 matches production. If you just want services on localhost ports fast, the
 compose path in the main README is fine; use this when you want prod parity.
 
-> One command once set up: **`make kind-up`** (full stack) → **`make kind-validate`**
-> (prove it's healthy) → **`make kind-test`** (functional smoke) → **`make kind-down`**.
+> **One command: `make dev`.** It stands the stack up *and* verifies it —
+> cluster + addons + chart, then "every enabled service is Ready and reachable",
+> then the functional smoke suite. Tear down with `make dev-down`.
+>
+> The per-merge CI gate runs the *identical* command
+> (`python3 scripts-tools/devenv.py up --fresh --profile full`), so if `make dev`
+> would break on your machine, the gate goes red on the PR that broke it rather
+> than on you.
+>
+> The lower-level `make kind-up` / `kind-validate` / `kind-test` / `kind-down`
+> targets still exist and still work — `make dev` is the three of them, in order,
+> with preflight checks and failure diagnostics.
 
 ---
 
@@ -35,15 +45,45 @@ machine, deploy a [profile](#3-turn-services-on--off-profiles) instead.
 
 ```bash
 # macOS / Linux / WSL / Git-Bash
-make kind-up
-#   └─ creates the kind cluster, installs ingress-nginx + cert-manager + the
-#      local-CA issuer, and `helm upgrade --install`s the chart (values-local.yaml)
+make dev
 ```
 
 ```powershell
 # Windows PowerShell (no make needed)
-.\k8s\kind\setup-kind.ps1
+python scripts-tools\devenv.py up
 ```
+
+That single command runs four phases and stops at the first one that fails:
+
+| Phase | What it does | Failure looks like |
+|---|---|---|
+| **preflight** | tools on PATH, docker daemon up, host ports 80/443 free | a named missing tool with its install URL, or the process holding the port |
+| **deploy** | kind cluster + ingress-nginx + cert-manager + local-CA issuer + `helm upgrade --install` | the underlying command's own error |
+| **verify** | every *enabled* service has a Ready workload and answers a probe | a service × {ready, reachable} matrix |
+| **smoke** | the pytest suite against the live cluster via port-forward | the failing test |
+
+On any failure it dumps the non-Ready pods with their events and logs, and
+**leaves the environment running** so you can poke at it. A bare "timed out" is
+not an actionable error, so it does not produce one.
+
+Useful variants:
+
+```bash
+make dev PROFILE=minimal   # postgres + redis only — fast, small machines
+make dev-fresh             # delete the cluster first: proves a from-scratch build
+make dev-dd                # use Docker Desktop's Kubernetes instead of kind
+make dev-verify            # re-check what's already running (no redeploy)
+make dev-status            # what's deployed right now
+make dev-down              # tear down
+```
+
+**Docker Desktop's built-in Kubernetes** is a first-class backend, not a
+second implementation: `--backend docker-desktop` runs the same
+`setup-kind.sh` with `--no-cluster`, so the addons and the chart deploy are
+byte-identical to the kind path. The one difference is forced by the platform —
+ingress-nginx's `cloud` manifest instead of its `kind` one, because the `kind`
+manifest pins the controller to a node label Docker Desktop's node does not have
+and would otherwise sit Pending forever.
 
 When it finishes, check it:
 
@@ -140,10 +180,22 @@ make kind-down
 smoke on **every PR** that touches the chart, kind scripts, profiles, tests, or
 the validators — so the local deployment can never silently rot.
 
-It runs on a **host-level self-hosted runner** (`runs-on: [self-hosted, kind-host]`)
-because kind needs Docker + real RAM, which the hardened in-pod ARC `staging`
-runners can't provide. Register that runner once — see
-[runners/README.md → Host-level kind runner](../runners/README.md#host-level-kind-runner-for-the-kind-validate-gate).
+It runs on **GitHub-hosted `ubuntu-latest`** — no runner to register, nothing to
+keep switched on. And it runs the *same command you do*:
+
+```bash
+python3 scripts-tools/devenv.py up --fresh --profile full   # == make dev-fresh
+```
+
+That identity is deliberate. The gate is not a separate CI-shaped approximation
+of the local experience; it *is* the local experience, executed on a clean
+machine every time.
+
+> It used to require a self-hosted `kind-host` runner on a developer's machine.
+> That runner went offline on 2026-07-24 and the gate silently stopped running
+> for days while still showing as "pending" on PRs. A gate whose liveness depends
+> on somebody's laptop is a gate that will keep going quiet — see
+> [runners/README.md](../runners/README.md#host-level-kind-runner--retired-no-longer-required).
 
 ### Local pre-push gate (recommended on this machine)
 
@@ -162,8 +214,8 @@ git config core.hooksPath .githooks
 ```
 
 - Skip for one push: `git push --no-verify`
-- Want the full gate locally? `make dd-up && make kind-validate && make kind-test`
-  (or `make kind-up …` where kind works).
+- Want the full gate locally? `make dev-fresh` (or `make dev-dd` to run it on
+  Docker Desktop's Kubernetes) — that is exactly what CI runs.
 
 ---
 

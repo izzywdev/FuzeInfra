@@ -1,18 +1,33 @@
 # =============================================================================
-# kind-validate — per-merge "the local Kubernetes deployment still works" gate.
+# kind-validate — the "one command and the local devenv is up" gate.
 #
-# Stands the FULL FuzeInfra stack up on a fresh kind cluster and proves every
-# enabled service is Ready + reachable, then runs the pytest smoke suite against
-# it. This is the stand-up + smoke half of gate-localup (helm-validate.yml covers
-# the static lint + kubeconform half).
+# Stands the FULL FuzeInfra stack up on a fresh kind cluster, proves every
+# enabled service is Ready + reachable, and runs the pytest smoke suite. This is
+# the stand-up + smoke half of gate-localup (helm-validate.yml covers the static
+# lint + kubeconform half).
 #
-# Runs on a HOST-LEVEL self-hosted runner (label `kind-host`) — NOT the hardened
-# in-pod ARC `staging` runners, which drop all caps / run non-root / are capped at
-# 1Gi and cannot run kind. Register a classic Actions runner as a process on a
-# machine that has docker + kind + kubectl + helm (see runners/README.md →
-# "Host-level kind runner"). If no such runner is online, this job simply stays
-# queued — it never blocks on GitHub-hosted infra.
-# =============================================================================
+# It runs the SAME entrypoint a developer runs:
+#
+#     python3 scripts-tools/devenv.py up --fresh --profile full     # == make dev-fresh
+#
+# That identity is the point. If a developer's `make dev` would fail, this gate
+# fails first, on the PR that broke it — rather than the next person to try
+# discovering it by hand.
+#
+# ---------------------------------------------------------------------------
+# Runner: GITHUB-HOSTED (ubuntu-latest), NOT self-hosted.
+#
+# This previously required a host-level self-hosted runner labelled `kind-host`.
+# That runner stopped picking up jobs on 2026-07-24 and every run since either
+# timed out in the queue (`cancelled`) or failed — so the gate silently did not
+# run for days while merely looking "pending". A gate that depends on a machine
+# somebody has to keep alive is a gate that will keep going quiet.
+#
+# ubuntu-latest has docker, 4 vCPU / 16 GB RAM, and (after the cleanup step
+# below) ample free disk for a 3-node kind cluster running the full stack. It is
+# also ephemeral, which removes the RCE-on-a-persistent-host risk that forced the
+# old fork-PR exclusion.
+# ---------------------------------------------------------------------------
 name: kind-validate
 
 on:
@@ -20,78 +35,102 @@ on:
     branches: [main]
     paths:
       - 'helm/**'
-      - 'k8s/kind/**'
+      - 'k8s/**'
       - 'tests/**'
+      - 'scripts-tools/devenv.py'
       - 'scripts-tools/validate_kind_deployment.py'
       - 'scripts-tools/kind_port_forward.py'
-      - 'helm/fuzeinfra/profiles/**'
       - 'Makefile'
       - '.github/workflows/kind-validate.yml'
   push:
     branches: [main]
     paths:
       - 'helm/**'
-      - 'k8s/kind/**'
+      - 'k8s/**'
+      - 'scripts-tools/devenv.py'
       - 'scripts-tools/validate_kind_deployment.py'
       - 'scripts-tools/kind_port_forward.py'
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: 'Chart profile to deploy'
+        type: choice
+        default: full
+        options: [full, data-stores, minimal]
 
-# kind is a host singleton (one cluster named "fuzeinfra"); never run two at once.
 concurrency:
-  group: kind-validate-host
+  group: kind-validate-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:
   contents: read
 
 jobs:
-  kind-up-validate:
-    # SECURITY: this job executes PR-supplied scripts (setup-kind.sh, tests/,
-    # tests/requirements.txt, the validators) on a self-hosted HOST runner. A fork
-    # PR running here would be RCE on the host. Gate to same-repo branches + pushes
-    # to main only — fork PRs are skipped. (Mirrors terraform-plan-apply.yml; also
-    # keep the org setting "Require approval for all outside collaborators" on.)
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork != true
-    runs-on: [self-hosted, kind-host]
-    timeout-minutes: 40
+  devenv-up:
+    name: devenv up (${{ github.event.inputs.profile || 'full' }})
+    runs-on: ubuntu-latest
+    # A cold full-stack bring-up pulls elasticsearch/kafka/airflow images; 45m is
+    # deliberately generous so a slow image pull reads as slow, not as a failure.
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
 
-      - name: Tool check (docker / kind / kubectl / helm / python)
-        shell: bash
+      # ubuntu-latest ships tens of GB of preinstalled toolchains we never use,
+      # and the full stack's images do not comfortably fit in what is left.
+      - name: Free up disk space
         run: |
-          for t in docker kind kubectl helm python3; do
-            command -v "$t" >/dev/null || { echo "::error::$t not found on the kind-host runner"; exit 1; }
-          done
-          docker info >/dev/null || { echo "::error::docker daemon not reachable"; exit 1; }
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc \
+                      /usr/local/share/boost "${AGENT_TOOLSDIRECTORY:-}" || true
+          df -h /
 
-      # Clean any leftover cluster from a cancelled run, then a FRESH full-stack
-      # bring-up — proving the env is deployable from scratch (the consumer promise).
-      - name: Fresh cluster + full stack
-        shell: bash
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+
+      - uses: azure/setup-helm@v5
+        with:
+          version: v3.16.4
+
+      - name: Install kind + kubectl
         run: |
-          ./k8s/kind/teardown-kind.sh 2>/dev/null || true
-          ./k8s/kind/setup-kind.sh
+          set -euo pipefail
+          curl -sSLo /tmp/kind https://kind.sigs.k8s.io/dl/v0.27.0/kind-linux-amd64
+          sudo install -m 0755 /tmp/kind /usr/local/bin/kind
+          curl -sSLo /tmp/kubectl https://dl.k8s.io/release/v1.31.4/bin/linux/amd64/kubectl
+          sudo install -m 0755 /tmp/kubectl /usr/local/bin/kubectl
+          kind --version
+          kubectl version --client
 
-      - name: Deployability gate (every enabled service Ready + reachable)
-        shell: bash
-        run: python3 scripts-tools/validate_kind_deployment.py --reuse
-
-      - name: Install pytest smoke deps
-        shell: bash
+      - name: Install test dependencies
         run: |
-          python3 -m pip install --quiet --upgrade pip
-          if [ -f tests/requirements.txt ]; then
-            python3 -m pip install --quiet -r tests/requirements.txt
-          else
-            python3 -m pip install --quiet pytest requests psycopg2-binary pymongo redis \
-              neo4j elasticsearch kafka-python pika
-          fi
+          python -m pip install --upgrade pip
+          pip install -r tests/requirements.txt
 
-      - name: Functional smoke (pytest via port-forward)
-        shell: bash
-        run: python3 scripts-tools/kind_port_forward.py -- pytest tests/ -v -m "not integration"
+      # THE GATE. Identical to what a developer runs locally (`make dev-fresh`).
+      # --fresh proves a from-scratch build, which is the actual promise: a new
+      # machine, one command, a working environment.
+      - name: devenv up (fresh full-stack bring-up + verify + smoke)
+        run: |
+          python3 scripts-tools/devenv.py up \
+            --fresh \
+            --backend kind \
+            --profile "${{ github.event.inputs.profile || 'full' }}" \
+            --timeout 1200
+
+      # devenv.py already prints namespace-scoped diagnostics on failure; this
+      # adds the cluster-wide view it deliberately does not — nodes, other
+      # namespaces, disk — which is where image-pull and disk-pressure failures
+      # actually show up.
+      - name: Cluster-wide diagnostics
+        if: failure()
+        run: |
+          kubectl get nodes -o wide || true
+          kubectl get pods -A -o wide || true
+          kubectl describe nodes | grep -A15 -iE "conditions|allocated resources" || true
+          docker system df || true
+          df -h /
 
       - name: Tear down
         if: always()
-        shell: bash
-        run: ./k8s/kind/teardown-kind.sh 2>/dev/null || true
+        run: python3 scripts-tools/devenv.py down --backend kind
