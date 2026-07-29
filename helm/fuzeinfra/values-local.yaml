@@ -82,6 +82,11 @@ customHostnameApi:
     - name: fuzefront
       enabled: true
       namespace: fuzefront
+      # Local only. Nothing else installs FuzeFront on a kind/Docker-Desktop
+      # cluster, so this chart has to create the namespace its Role/RoleBinding
+      # land in — otherwise the install is rejected outright with
+      # `namespaces "fuzefront" not found`. Never set this in a real overlay.
+      createNamespace: true
       service: fuzefront-frontend
       port: 80
       paths: ["/", "/api", "/socket.io"]

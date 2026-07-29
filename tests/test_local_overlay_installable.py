@@ -121,6 +121,86 @@ def test_sealed_secrets_are_prod_only():
     )
 
 
+@pytest.mark.skipif(shutil.which("helm") is None, reason="helm not installed")
+def test_every_referenced_namespace_is_created_or_is_the_release_namespace():
+    """Second way the local overlay turned out to be uninstallable on a bare cluster.
+
+    The CRD guard above passed, and the chart still could not install. The
+    custom-hostname-api route profile puts a Role + RoleBinding in the CONSUMER's
+    namespace (`fuzefront`), which exists in prod because FuzeFront deploys
+    itself there — and does not exist on a fresh kind cluster. Helm applies the
+    rest of the chart, hits those two objects, and rejects the whole install:
+
+        Error: 2 errors occurred:
+            * namespaces "fuzefront" not found
+            * namespaces "fuzefront" not found
+
+    Note the shape of the failure: 25+ pods are already created when it fires, so
+    the cluster *looks* like it is coming up. Only the helm exit code says
+    otherwise.
+
+    A namespace is a precondition, not a schema, so neither `helm lint` nor
+    `kubeconform` can see this. The rule: if the local overlay puts a resource in
+    some namespace, the local overlay must also create that namespace.
+    """
+    rendered = subprocess.run(
+        ["helm", "template", "fuzeinfra", str(CHART),
+         "--namespace", "fuzeinfra", "-f", str(LOCAL_VALUES)],
+        capture_output=True, text=True, check=True,
+    ).stdout
+
+    docs = [d for d in yaml.safe_load_all(rendered) if d and "apiVersion" in d]
+    created = {
+        (d.get("metadata") or {}).get("name")
+        for d in docs if d.get("kind") == "Namespace"
+    }
+    missing: dict[str, set[str]] = {}
+    for doc in docs:
+        ns = (doc.get("metadata") or {}).get("namespace")
+        # No namespace => cluster-scoped, or defaulted to the release namespace.
+        if not ns or ns == "fuzeinfra" or ns in created:
+            continue
+        missing.setdefault(ns, set()).add(
+            f"{doc.get('kind', '?')}/{(doc.get('metadata') or {}).get('name', '?')}"
+        )
+
+    assert not missing, (
+        "values-local.yaml puts resources in namespaces that nothing creates, so "
+        "`helm install` is rejected on a fresh cluster with "
+        '`namespaces \"<name>\" not found`:\n'
+        + "\n".join(f"  {ns}: {sorted(v)}" for ns, v in sorted(missing.items()))
+        + "\n\nEither render the Namespace for local (e.g. a route profile's "
+          "`createNamespace: true`, which must stay false in real overlays where "
+          "the consumer owns its namespace), or gate the resources off locally.\n"
+          "NOTE: helm lint and kubeconform CANNOT catch this — a namespace is an "
+          "install-time precondition, not a schema property."
+    )
+
+
+def test_prod_overlay_does_not_create_consumer_namespaces():
+    """The inverse guard: `createNamespace` must never be on in a real overlay.
+
+    Two releases claiming one Namespace object is an Argo ownership fight, and a
+    `helm uninstall` would take the consumer's running workloads with it. The
+    escape hatch is for standalone clusters only.
+    """
+    import re
+    for overlay in ("values.yaml", "values-contabo.yaml", "values-aws.yaml"):
+        path = CHART / overlay
+        if not path.exists():
+            continue
+        text = path.read_text(encoding="utf-8")
+        enabled = [
+            line for line in text.splitlines()
+            if re.match(r"\s*createNamespace:\s*true\b", line)
+        ]
+        assert not enabled, (
+            f"{overlay} sets createNamespace: true ({enabled}). Only "
+            "values-local.yaml may do this — on a real cluster the consumer owns "
+            "its own namespace."
+        )
+
+
 def test_setup_kind_installs_the_crds_this_test_assumes():
     """Keep the allowlist honest: it must describe what setup-kind.sh really does.
 

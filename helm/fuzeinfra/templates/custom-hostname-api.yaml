@@ -41,10 +41,38 @@ metadata:
     {{- include "fuzeinfra.labels" . | nindent 4 }}
 {{- range $index, $profile := $chapi.routeProfiles }}
 {{- if $profile.enabled }}
+{{- if $profile.createNamespace }}
+---
+# The consumer's namespace, created by US only when the profile opts in.
+#
+# Default OFF, and it must stay that way for every real cluster: in prod the
+# consumer owns its own namespace (its Argo Application creates it), and having
+# two releases claim the same Namespace object is how you get a sync loop — or
+# a `helm uninstall` that deletes somebody else's running workloads.
+#
+# It exists for the standalone case: a fresh kind/Docker-Desktop cluster where
+# nothing but this chart is installed. There the profile's Role/RoleBinding
+# below are the FIRST things to reference the namespace, and Helm fails the
+# whole install with `namespaces "<name>" not found` — the chart is
+# uninstallable on a clean machine, which is exactly what `make dev` is.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ $profile.namespace }}
+  labels:
+    {{- include "fuzeinfra.labels" $root | nindent 4 }}
+    # Let the NetworkPolicy's namespaceSelector match this namespace the same
+    # way it matches a consumer-created one.
+    kubernetes.io/metadata.name: {{ $profile.namespace }}
+{{- end }}
 ---
 # Ingress-only, namespace-scoped write access — one Role per route profile, in
 # that profile's namespace. The service can never touch any other resource kind
 # or any namespace a profile does not name.
+#
+# NOTE: this is the first resource that requires the profile's namespace to
+# exist. If the consumer does not create it and `createNamespace` is false, the
+# install fails here.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
