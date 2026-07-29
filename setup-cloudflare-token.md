@@ -1,15 +1,37 @@
 # Cloudflare API Token Setup Guide
 
-## Step 1: Create Cloudflare API Token
+> **There are TWO tokens, with different scopes.** This guide covers both.
+> The authoritative scope table for the Terraform token lives in
+> [`docs/TERRAFORM_CD.md`](docs/TERRAFORM_CD.md#cloudflare_api_token-scope) —
+> this page links to it rather than repeating it, because the copy that used to
+> live here drifted and produced under-scoped tokens that plan cleanly and then
+> fail at apply. If the two ever disagree again, `docs/TERRAFORM_CD.md` wins.
 
-You need to create a Cloudflare API token with the following permissions:
+| Token | Where it lives | Scope |
+|---|---|---|
+| **`FuzeInfra-Terraform`** | GitHub Actions secret `CLOUDFLARE_API_TOKEN` | zone + account; see Step 1 |
+| **custom-hostname-api runtime** | `deploy/sealed-secrets/custom-hostname-api-secret.yaml` | two zone permissions, no account access; see Step 1b |
 
-### Required Permissions:
-1. **Zone:Read** - fuzefront.com
-2. **Zone:Edit** - fuzefront.com  
-3. **Zone Settings:Edit** - fuzefront.com
-4. **Access:Edit** - Account level
-5. **DNS:Edit** - fuzefront.com
+## Step 1: Create the Terraform token
+
+`terraform/contabo/cloudflare.tf` manages the tunnel, Access apps, Workers **and**
+the Cloudflare for SaaS fallback origin — so this token is **not DNS-only**.
+
+### Required permissions
+
+| Permission | Scope |
+|------------|-------|
+| Zone → DNS → Edit | `fuzefront.com` |
+| Zone → Zone → Read | `fuzefront.com` |
+| Zone → SSL and Certificates → Edit | `fuzefront.com` |
+| Account → Cloudflare Tunnel → Edit | the account |
+| Account → Access: Apps and Policies → Edit | the account |
+| Account → Workers Scripts → Edit | the account |
+
+> **`Zone Settings → Edit` is NOT the same as `SSL and Certificates → Edit`.**
+> They sit next to each other in the permission dropdown and read similarly. Only
+> the latter grants the fallback-origin write, and picking the wrong one is the
+> single most likely reason an apply fails on `cloudflare_*` with error `10000`.
 
 ### Method 1: Via Cloudflare Dashboard (Recommended)
 
@@ -19,15 +41,12 @@ You need to create a Cloudflare API token with the following permissions:
 4. Configure the token:
 
    **Token name:** `FuzeInfra-Terraform`
-   
-   **Permissions:**
-   ```
-   Zone | Zone:Read | Include | Specific zone | fuzefront.com
-   Zone | Zone:Edit | Include | Specific zone | fuzefront.com  
-   Zone | Zone Settings:Edit | Include | Specific zone | fuzefront.com
-   Zone | DNS:Edit | Include | Specific zone | fuzefront.com
-   Account | Cloudflare Access:Edit | Include | All accounts
-   ```
+
+   **Permissions:** exactly the six rows in the table above.
+
+> **Changing an EXISTING token keeps its value.** If you are adding a missing
+> permission, edit the token in place — you will not need to update the GitHub
+> secret or re-seal anything. Creating a replacement means rotating both.
 
    **Zone Resources:**
    ```
@@ -59,11 +78,38 @@ cloudflare login
 # Create API token (this will open browser for authentication)
 cloudflare create-api-token \
   --name "FuzeInfra-Terraform" \
-  --permissions "Zone:Read,Zone:Edit,Zone Settings:Edit,DNS:Edit,Access:Edit" \
+  --permissions "Zone:Read,DNS:Edit,SSL and Certificates:Edit,Cloudflare Tunnel:Edit,Access: Apps and Policies:Edit,Workers Scripts:Edit" \
   --resources "fuzefront.com"
 ```
 
+## Step 1b: The custom-hostname-api runtime token
+
+A **separate**, deliberately minimal token. It is held by the
+`custom-hostname-api` pod, which calls Cloudflare for SaaS at runtime to issue
+certificates for customer-owned domains. It must NOT be the Terraform token —
+that one carries account-level access the pod has no business holding.
+
+| Permission | Scope |
+|------------|-------|
+| Zone → Zone → Read | `fuzefront.com` |
+| Zone → SSL and Certificates → Edit | `fuzefront.com` |
+
+No account permissions, one zone. Seal it with `scripts/seal-secret.sh` into
+`deploy/sealed-secrets/custom-hostname-api-secret.yaml` alongside
+`CLOUDFLARE_ZONE_ID` and `CONSUMER_TOKEN_FUZEFRONT` — see the GITOPS GATE note in
+`helm/fuzeinfra/values-contabo.yaml`.
+
+To tell the two apart in the dashboard: the Terraform token is the only one with
+**account**-level rows. The runtime token has exactly the two zone rows above.
+
 ## Step 2: Update Terraform Configuration
+
+> **Steps 2–5 below describe the retired EC2 deployment** (`terraform/ec2-deployment`,
+> hard-coded Windows paths, `*.infra.fuzefront.com` hostnames). Production now runs
+> on Contabo k3s: the live config is `terraform/contabo/`, applies go through the
+> `terraform-plan-apply.yml` workflow rather than a local `terraform apply`, and
+> admin UIs are served at `*.prod.fuzefront.com`. Treat what follows as historical
+> — only Steps 1 and 1b above are current.
 
 Once you have your API token:
 
@@ -129,9 +175,22 @@ Once deployed, you'll be able to access services at:
 ## Troubleshooting
 
 ### Token Permissions Issues
-If you get permission errors, ensure your token includes:
-- **Access:Edit** permission at the **Account** level (not Zone level)
-- **Zone:Edit** permission for **fuzefront.com**
+
+Cloudflare returns a generic `10000` for "this token may not write that
+resource", so the error names the resource but never the missing scope. **The
+plan cannot catch it** — permission is only evaluated on write, so a token
+missing a permission plans perfectly cleanly and fails at apply.
+
+If an apply fails on a `cloudflare_*` resource with `10000`, check the token's
+permissions before looking anywhere else. The most common instance:
+
+```
+Error: failed to create custom hostname fallback origin: Authentication error (10000)
+  with cloudflare_custom_hostname_fallback_origin.saas[0]
+```
+
+That one is always **Zone → SSL and Certificates → Edit** missing. Note again
+that `Zone Settings → Edit` does not substitute for it.
 
 ### No App Launcher Visible
 The app launcher will appear at: https://team-name.cloudflareaccess.com
