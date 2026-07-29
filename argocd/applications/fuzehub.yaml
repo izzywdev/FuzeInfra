@@ -1,0 +1,34 @@
+# Argo CD Application for the FuzeHub app tier (GitOps — Argo syncs this from git;
+# never hand-deploy to prod). Hybrid-Argo: FuzeHub's core frontend+backend ship in
+# the single `fuzehub` umbrella chart under ONE Application. Independently-
+# lifecycled services (if/when added) would each get their own Application.
+#
+# The release lever is helm/fuzehub/values-prod.yaml image tags: the tag-bump is
+# committed and Argo reconciles it to the cluster.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: fuzehub
+  namespace: argocd
+  # Uncomment for finalizer-based cascade deletion once wired in prod:
+  # finalizers:
+  #   - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/izzywdev/FuzeHub.git
+    targetRevision: main
+    path: helm/fuzehub
+    helm:
+      valueFiles:
+        - values.yaml
+        - values-prod.yaml
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: fuzehub
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
