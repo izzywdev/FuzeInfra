@@ -326,4 +326,16 @@ jobs:
             } >> "$GITHUB_STEP_SUMMARY"
             exit 1
           fi
+          # The action reported success. If it also left no execution log there is no
+          # result record to corroborate that, so say so rather than printing a clean
+          # "completed" the run has not actually earned. Still green — the action's own
+          # outcome is real evidence — but this check exists precisely because a green
+          # that overstates what it verified is how the original outage hid for a day.
+          if [ "${RESULT_IS_ERROR:-}" = "unknown" ]; then
+            echo "::notice::a2a-maintainer reported success, but produced no execution log — completion could not be corroborated from a result record."
+            echo "### ✅ a2a-maintainer completed (unverified)" >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "The action exited successfully but wrote no execution log, so there is no result record to confirm what it did." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
           echo "a2a-maintainer completed."
