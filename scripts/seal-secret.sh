@@ -43,6 +43,10 @@ set -euo pipefail
 # transparently handles controller key rotation. Override with --cert / env var.
 DEFAULT_CERT_URL="https://sealed-secrets.prod.fuzefront.com/v1/cert.pem"
 CERT_REF="${FUZEINFRA_SEALED_CERT_URL:-$DEFAULT_CERT_URL}"
+# Offline fallback: the controller's PUBLIC cert, committed to the repo. Safe to
+# publish — it encrypts only; solely the in-cluster controller holds the private
+# key. Refresh it after a controller key rotation (see the die() message below).
+REPO_CERT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/deploy/sealed-secrets/sealing-cert.pem"
 
 die()  { echo "error: $*" >&2; exit 1; }
 note() { echo "$*" >&2; }   # progress goes to stderr; never plaintext
@@ -94,8 +98,25 @@ if [[ "$CERT_REF" == http://* || "$CERT_REF" == https://* ]]; then
   command -v curl >/dev/null 2>&1 || die "curl needed to fetch the cert URL"
   CERT_FILE="$(mktemp)"; CERT_TMP=1
   note "fetching public cert: $CERT_REF"
-  curl -fsSL "$CERT_REF" -o "$CERT_FILE" || die "could not fetch cert from $CERT_REF"
-  grep -q "BEGIN CERTIFICATE" "$CERT_FILE" || die "fetched file is not a PEM cert"
+  # The published URL sits behind Cloudflare Access, which answers unauthenticated
+  # requests with an HTML login page (HTTP 200), not a PEM. Treat "fetched, but not
+  # a certificate" as a soft failure and fall back to the cert committed in this
+  # repo, so sealing keeps working with ZERO cluster access — the whole point of
+  # this script. Only fail hard if there is no usable cert anywhere.
+  if ! curl -fsSL "$CERT_REF" -o "$CERT_FILE" 2>/dev/null || ! grep -q "BEGIN CERTIFICATE" "$CERT_FILE"; then
+    if [[ -f "$REPO_CERT" ]]; then
+      note "cert URL unusable (Cloudflare Access login page or unreachable) — falling back to $REPO_CERT"
+      cp "$REPO_CERT" "$CERT_FILE"
+    else
+      die "could not obtain a PEM cert: $CERT_REF returned no certificate and $REPO_CERT is missing.
+  Fix one of:
+    * pass --cert <file|url> explicitly, or
+    * refresh the committed cert:
+        kubeseal --controller-namespace kube-system \
+                 --controller-name sealed-secrets-controller --fetch-cert \
+          > deploy/sealed-secrets/sealing-cert.pem"
+    fi
+  fi
 else
   [[ -f "$CERT_REF" ]] || die "cert file not found: $CERT_REF"
   CERT_FILE="$CERT_REF"

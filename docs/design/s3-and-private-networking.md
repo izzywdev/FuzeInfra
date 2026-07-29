@@ -160,31 +160,64 @@ output "object_storage_buckets" {
 }
 ```
 
-### 2.5 S3 access key + secret — a manual panel step, then SealedSecret
+### 2.5 S3 access key + secret — read from the API, then SealedSecret
 
 The S3 access key/secret are **account-level credentials**, NOT produced by any
-Terraform resource. A human fetches them once from the panel
-(**Account → Security & Access → S3 Object Storage Credentials**) — one pair per
-account, shared across all buckets. They then seal them **offline** (no cluster
-access) with the repo's canonical tool and commit the encrypted manifest:
+Terraform resource — one pair per account, shared across every bucket. They are
+delivered to the cluster as a **SealedSecret**, never `kubectl create secret`.
+
+They do **not** require a manual panel visit. The pair is readable from the
+Contabo API with the same OAuth2 account credentials Terraform already uses
+(`terraform/contabo/terraform.tfvars`):
 
 ```bash
-# fetched from the Contabo panel, never echoed into shell history in a shared env
-scripts/seal-secret.sh fuzeinfra/loki-s3 \
-  LOKI_S3_ACCESS_KEY_ID=<key> \
-  LOKI_S3_SECRET_ACCESS_KEY=<secret> \
-  > deploy/sealed-secrets/loki-s3-credentials.yaml
+# 1. OAuth2 token (same grant the contabo provider uses)
+#    POST https://auth.contabo.com/auth/realms/contabo/protocol/openid-connect/token
+#    client_id / client_secret / username / password, grant_type=password
+# 2. Find the account user id
+#    GET https://api.contabo.com/v1/users            -> .data[].userId
+# 3. Read the S3 credentials  (NOTE: no objectStorageId in the path)
+#    GET https://api.contabo.com/v1/users/<userId>/object-storages/credentials
+#        -> .data[].accessKey / .data[].secretKey
 ```
 
-This yields a `deploy/sealed-secrets/loki-s3-credentials.yaml` shaped exactly like
-the existing `deploy/sealed-secrets/fuzesales-db-credentials.yaml` (SealedSecret,
-ns `fuzeinfra`, name `loki-s3`), which Argo reconciles into the `loki-s3` Secret.
-**This replaces the `kubectl create secret` line in the current `values-contabo.yaml`
-comment** — hand-created secrets get orphaned and contradict the no-hand-mutate rule.
+Both calls need an `x-request-id` header containing a valid **UUID**, or the API
+rejects them. The credentials only exist once an Object Storage tenant has been
+purchased, so run this *after* `enable_object_storage = true` is applied.
 
-> The **same account credential pair** covers the backups and blobs buckets. A
-> second SealedSecret (`fuzeinfra/objstore-s3` with generic `S3_ACCESS_KEY_ID` /
-> `S3_SECRET_ACCESS_KEY`) is sealed the same way for the backup CronJobs (§4.2).
+Seal the pair **offline** and commit the encrypted manifest. Prefer `--env-file`
+over `KEY=VALUE`, since argv is visible to other processes on the host:
+
+```bash
+printf 'BACKUP_S3_ACCESS_KEY_ID=%s
+BACKUP_S3_SECRET_ACCESS_KEY=%s
+' "$ak" "$sk" > /tmp/s3.env
+chmod 600 /tmp/s3.env
+scripts/seal-secret.sh fuzeinfra/fuzeinfra-backups-s3 --env-file /tmp/s3.env   > deploy/sealed-secrets/backups-s3-credentials.yaml
+shred -u /tmp/s3.env
+```
+
+This yields a SealedSecret strictly scoped to ns `fuzeinfra` + name
+`fuzeinfra-backups-s3`, which Argo reconciles into the Secret the backup
+CronJobs read via `backups.s3.existingSecret`. The key NAMES must match
+`backups.s3.accessKeyIdKey` / `secretAccessKeyKey`
+(`BACKUP_S3_ACCESS_KEY_ID` / `BACKUP_S3_SECRET_ACCESS_KEY`).
+
+> The **same account credential pair** covers the backups, blobs and loki
+> buckets — seal it again under whatever ns/name each consumer expects (e.g.
+> `fuzeinfra/loki-s3` with `LOKI_S3_ACCESS_KEY_ID` /
+> `LOKI_S3_SECRET_ACCESS_KEY`).
+
+**Sealing works with zero cluster access.** `seal-secret.sh` encrypts against the
+controller's public cert. The published URL
+(`sealed-secrets.prod.fuzefront.com/v1/cert.pem`) sits behind Cloudflare Access
+and returns an HTML login page rather than a PEM, so the script falls back to the
+cert committed at `deploy/sealed-secrets/sealing-cert.pem`. Refresh that file
+after any controller key rotation:
+
+```bash
+kubeseal --controller-namespace kube-system          --controller-name sealed-secrets-controller --fetch-cert   > deploy/sealed-secrets/sealing-cert.pem
+```
 
 ---
 
