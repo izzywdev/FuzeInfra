@@ -1,0 +1,56 @@
+# Argo CD AppProject for the FuzeMarket consumer — OWNED BY FuzeInfra.
+#
+# ISOLATION BOUNDARY (FuzeInfra#99): consumer apps must NOT be able to deploy into
+# FuzeInfra's own `fuzeinfra` namespace. A consumer that grants itself the
+# `fuzeinfra` namespace can redeploy a *duplicate* FuzeInfra (split-brain
+# Postgres/Kafka, control-plane saturation, cluster-wide 502 — see FuzeInfra#93 /
+# FuzeFront#95). This project deliberately does NOT include `fuzeinfra`.
+#
+# GOVERNANCE RULE: FuzeInfra owns AppProjects (the destination/security boundary);
+# consumers only create Applications WITHIN their assigned, restricted project.
+# Consumers consume FuzeInfra services via in-cluster service DNS (cross-namespace
+# networking) — that needs NO Argo destination into `fuzeinfra`.
+#
+# WHY A NEW PROJECT (and not `fuzefront`): FuzeMarket registers itself with the
+# FuzeFront portal at startup, but it is a SEPARATE repo (izzywdev/FuzeMarket) with
+# a SEPARATE workload namespace. The `fuzefront` project pins `sourceRepos` to
+# izzywdev/FuzeFront.git and its destinations to fuzefront/fuzequality, so reusing
+# it would mean widening FuzeFront's boundary to cover an unrelated repo. Talking
+# to FuzeFront over service DNS needs no shared Argo project.
+#
+# REGISTRATION: unlike argocd/projects/fuzepicker.yaml (a one-time manual apply),
+# this project is applied on every prod deploy by .github/workflows/deploy-prod.yml,
+# alongside fuzefront.yaml and fuzeinfra.yaml and BEFORE the Application loop.
+# That ordering is required: the loop globs argocd/applications/*.yaml and would
+# otherwise register `fuzemarket` (project: fuzemarket) before this project exists,
+# which Argo rejects with InvalidSpecError. If you rename or move this file, update
+# both the `paths:` trigger and the apply step in that workflow.
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: fuzemarket
+  namespace: argocd
+spec:
+  description: FuzeMarket product (consumer of FuzeInfra) — may deploy ONLY into its own namespace.
+  sourceRepos:
+    - https://github.com/izzywdev/FuzeMarket.git
+  destinations:
+    # The product's workloads.
+    - namespace: fuzemarket
+      server: https://kubernetes.default.svc
+    # NOTE: `fuzeinfra` is deliberately NOT a destination — that is FuzeInfra's
+    # namespace. A consumer that needs an infra service consumes it via DNS, it
+    # does not deploy into it. `fuzefront` is likewise NOT a destination:
+    # FuzeMarket registers with the portal over service DNS
+    # (fuzefront-applications.fuzefront.svc.cluster.local:3003), it does not
+    # deploy anything into FuzeFront's namespace.
+  # Parity with argocd/projects/fuzepicker.yaml. The chart itself renders only
+  # namespaced objects (Deployment/Service/Ingress/ConfigMap/SealedSecret); the
+  # wildcard is kept so the `CreateNamespace=true` sync option can materialize the
+  # namespace without an InvalidSpecError on first sync.
+  clusterResourceWhitelist:
+    - group: "*"
+      kind: "*"
+  namespaceResourceWhitelist:
+    - group: "*"
+      kind: "*"
