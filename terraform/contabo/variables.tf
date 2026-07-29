@@ -324,9 +324,9 @@ variable "enable_argocd_provisioner" {
 # keys or put them in tfvars.
 # ---------------------------------------------------------------------------
 variable "enable_object_storage" {
-  description = "Provision Contabo Object Storage + buckets (PAID). Default off so a routine apply never buys storage. Flip to true only in an explicit human-reviewed apply."
+  description = "Provision Contabo Object Storage + buckets (PAID). Enabled 2026-07-29 so DB backups can be offloaded OFF-cluster: the in-cluster PVC sink was destroyed when the durable nodes' Longhorn disks were re-initialised, taking every stored dump with it. Backups kept on the same storage they protect against are not backups."
   type        = bool
-  default     = false
+  default     = true
 }
 
 variable "object_storage_region" {
