@@ -33,4 +33,12 @@ data:
 
     litellm_settings:
       {{- toYaml .Values.litellmSettings | nindent 6 }}
+    {{- with .Values.routerSettings }}
+
+    # Cross-provider fallbacks. `fallbacks` is a list of single-key maps —
+    # {primary: [alt1, alt2]} — and EVERY name on both sides must also appear in
+    # model_list above, or the router silently never routes to it.
+    router_settings:
+      {{- toYaml . | nindent 6 }}
+    {{- end }}
 {{- end }}
