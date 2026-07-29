@@ -39,15 +39,34 @@ resources:
   requests: { cpu: "250m", memory: "512Mi" }
   limits:   { cpu: "1", memory: "3Gi" }
 
-# Cluster-internal only. No Ingress, no Cloudflare tunnel route, no CF Access
-# app — the gateway holds live provider keys and must stay unreachable from
-# outside the cluster by construction.
 networkPolicy:
   enabled: true
   allowedNamespaces:
     # FuzeFront chat-service + doc indexer (LITELLM_URL, and the indexer's
     # /embeddings calls).
     - fuzefront
+    # kube-system (Traefik) is appended automatically by the template because
+    # ingress.enabled is true below — do not add it here as well.
+
+# LiteLLM admin UI at https://litellm.prod.fuzefront.com, reached through the
+# Cloudflare tunnel and gated by the *.prod email-OTP Access app. The App
+# Launcher tile is declared in terraform/contabo/cloudflare.tf
+# (local.launcher_services).
+#
+# No per-host tunnel rule, CNAME or Access app is needed: litellm.prod lands
+# under the existing *.prod wildcard, so the catch-all tunnel rule → Traefik,
+# the *.prod CNAME and the *.prod OTP app already cover routing, DNS and gating.
+#
+# Understand what this exposes before changing it: LiteLLM serves the UI and the
+# API from one port, so /chat/completions and /embeddings are reachable at this
+# hostname too. The gates are Cloudflare Access OTP (admin allowlist) plus
+# LITELLM_MASTER_KEY on every API call. Traefik remains ClusterIP; no host port
+# is opened.
+ingress:
+  enabled: true
+  className: traefik
+  subdomain: litellm
+  domain: prod.fuzefront.com
 
 # NOTE ON NODE PINNING: FuzeFront's own values-prod.yaml pins a `litellm`
 # affinity to node `fuzefront-node-2`. That node does not exist in this cluster

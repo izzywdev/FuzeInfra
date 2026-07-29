@@ -115,13 +115,29 @@ models:
   - name: gpt-4.1-mini
     provider: openai/gpt-4.1-mini
     keyEnv: OPENAI_API_KEY
-  # Gemini is the LAST hop and is currently NON-FUNCTIONAL: the key returns
-  # "You exceeded your current quota" (free-tier exhausted). Kept wired so it
-  # starts working the moment billing is fixed, with no chart change. It costs
-  # nothing in the normal path — fallbacks stop at the first success, so this is
-  # only ever reached if BOTH Anthropic and OpenAI have failed.
+  # --- Gemini ------------------------------------------------------------------
+  # ALL of these are currently NON-FUNCTIONAL: the key returns "You exceeded your
+  # current quota" (free tier exhausted). Wired anyway so they start working the
+  # moment billing is fixed, with no chart change. Costs nothing in the normal
+  # path — fallbacks stop at the first success, so gemini is only ever reached if
+  # BOTH Anthropic and OpenAI have failed.
+  #
+  # Model IDs taken from the key's own ListModels response (filtered to those
+  # advertising generateContent), not guessed.
+  - name: gemini-2.5-pro
+    provider: gemini/gemini-2.5-pro
+    keyEnv: GEMINI_API_KEY
+  - name: gemini-2.5-flash
+    provider: gemini/gemini-2.5-flash
+    keyEnv: GEMINI_API_KEY
+  - name: gemini-2.5-flash-lite
+    provider: gemini/gemini-2.5-flash-lite
+    keyEnv: GEMINI_API_KEY
   - name: gemini-2.0-flash
     provider: gemini/gemini-2.0-flash
+    keyEnv: GEMINI_API_KEY
+  - name: gemini-2.0-flash-lite
+    provider: gemini/gemini-2.0-flash-lite
     keyEnv: GEMINI_API_KEY
   # --- embeddings -------------------------------------------------------------
   # FuzeFront's LITELLM_EMBEDDING_MODEL default. OpenAI, not Anthropic —
@@ -161,23 +177,49 @@ generalSettings: {}
 #
 # Every name on BOTH sides of these maps must exist in `models` above.
 # -----------------------------------------------------------------------------
+# Each hop is matched to the primary's TIER, so a provider outage never silently
+# upgrades or downgrades what a caller gets: frontier falls back to frontier,
+# cheap/fast falls back to cheap/fast. Getting this wrong is how an outage
+# quietly multiplies cost per turn (or halves answer quality).
 routerSettings:
   fallbacks:
-    - claude-opus-4-5: ["gpt-4.1", "gemini-2.0-flash"]
-    - claude-opus-5: ["gpt-4.1", "gemini-2.0-flash"]
-    - claude-sonnet-5: ["gpt-4.1", "gemini-2.0-flash"]
-    # Haiku is the cheap/fast tier — fall back to a cheap/fast peer, not to a
-    # frontier model, so a provider outage cannot quietly multiply cost per turn.
-    - claude-haiku-4-5: ["gpt-4.1-mini", "gemini-2.0-flash"]
+    - claude-opus-4-5: ["gpt-4.1", "gemini-2.5-pro"]
+    - claude-opus-5: ["gpt-4.1", "gemini-2.5-pro"]
+    - claude-sonnet-5: ["gpt-4.1", "gemini-2.5-flash"]
+    - claude-haiku-4-5: ["gpt-4.1-mini", "gemini-2.5-flash-lite"]
 
 # -----------------------------------------------------------------------------
 # Defence in depth: only the namespaces listed here may open a connection to the
-# gateway. It holds live provider credentials, so it is never exposed through an
-# Ingress or the Cloudflare tunnel — cluster-internal only, by construction.
+# gateway.
 #
 # Egress is deliberately unrestricted (no Egress policyType): the gateway must
-# reach api.anthropic.com and api.openai.com.
+# reach api.anthropic.com, api.openai.com and generativelanguage.googleapis.com.
+#
+# NOTE: when `ingress.enabled` is true the template ALSO admits the ingress
+# controller's namespace automatically. Leaving that to the operator is how you
+# get a tile that 502s — Traefik runs in kube-system, not in fuzeinfra, so the
+# policy would otherwise drop every request coming through the Ingress.
 # -----------------------------------------------------------------------------
 networkPolicy:
   enabled: false
   allowedNamespaces: []
+
+# -----------------------------------------------------------------------------
+# Ingress — the LiteLLM ADMIN UI (/ui), reachable at
+# litellm.<domain> through the Cloudflare tunnel.
+#
+# SECURITY POSTURE, read before enabling. This service holds live provider API
+# keys, and exposing it publishes the FULL API surface (/chat/completions,
+# /embeddings) at that hostname, not just the UI — LiteLLM serves them from one
+# port and there is no path split here. Two independent gates stand in front:
+#   1. Cloudflare Access email-OTP on *.prod.fuzefront.com (admin allowlist), and
+#   2. LITELLM_MASTER_KEY, still required on every API call.
+# Traefik stays ClusterIP and all traffic arrives via the tunnel, so this opens
+# no host port. Off by default; prod turns it on deliberately.
+# -----------------------------------------------------------------------------
+ingress:
+  enabled: false
+  className: traefik
+  # Rendered host is "<subdomain>.<domain>". domain MUST be set when enabled.
+  subdomain: litellm
+  domain: ""

@@ -552,6 +552,16 @@ locals {
     #               authentik.prod.fuzefront.com Ingress; tile lands on /if/admin/)
     "unleash"   = { name = "Unleash", logo = "https://avatars.githubusercontent.com/u/23053233?s=200&v=4", path = "" }
     "authentik" = { name = "Authentik", logo = "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/authentik.png", path = "/if/admin/" }
+    # LiteLLM gateway admin UI (helm/litellm, Ingress → svc litellm:4000).
+    # Under the *.prod wildcard like the rest, so this bookmark is all that is
+    # needed — no per-host tunnel rule, CNAME or Access app.
+    #
+    # path = "/ui" because "/" redirects to the console anyway and landing
+    # straight on it saves a hop. NOTE the Ingress is deliberately scoped to "/",
+    # not "/ui": the console loads its bundle from /litellm-asset-prefix/... and
+    # calls the API on the same origin, so a /ui-only route would render a blank
+    # page (the Neo4j Browser failure mode).
+    "litellm" = { name = "LiteLLM", logo = "https://avatars.githubusercontent.com/u/121462774?s=200&v=4", path = "/ui" }
   }
 }
 
