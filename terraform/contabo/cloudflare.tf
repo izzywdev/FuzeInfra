@@ -141,14 +141,34 @@ resource "cloudflare_record" "vanity" {
 # `traefik.ingress.kubernetes.io/router.priority: "1"`.
 # See docs/consuming-repos/CUSTOM_DOMAINS.md §3.
 #
-# PRE-EXISTING RECORD: a proxied wildcard CNAME for *.<zone> already exists in
-# the zone, created outside this state. This resource therefore does NOT gate
-# whether tenant hosts resolve — they already do; the consumer's Ingress rule is
-# the only gate on serving. Applying with tenant_wildcard_enabled = true on a
-# zone that already has the record fails on a duplicate rather than adopting it:
-# `terraform import 'cloudflare_record.tenant_wildcard[0]' '<zone_id>/<record_id>'`
-# first, and read the plan for a destroy/create pair before merging — that would
-# replace a record already serving production traffic.
+# PRE-EXISTING RECORDS — verified by resolution on 2026-07-29:
+#
+#     connect.fuzefront.com        -> 104.21.14.243   (Cloudflare)
+#     saas-origin.fuzefront.com    -> 104.21.14.243   (Cloudflare)
+#     tenant-probe.fuzefront.com   -> 172.67.160.205  (served by the wildcard)
+#
+# All three multi-tenant records already resolve, so NONE of these resources
+# gates whether the hostnames work. They already do; the consumer's Ingress rule
+# is the only gate on SERVING (see docs/consuming-repos/CUSTOM_DOMAINS.md §1).
+#
+# Whether Terraform OWNS them is a separate question that only a plan answers.
+# Read this PR's plan output before merging:
+#
+#   * "No changes"        -> state is in sync; nothing to do.
+#   * "N to add"          -> the records exist OUTSIDE state. The apply will FAIL
+#                            on duplicates rather than adopting them. Import each
+#                            one first:
+#         terraform import 'cloudflare_record.tenant_wildcard[0]' '<zone_id>/<record_id>'
+#         terraform import 'cloudflare_record.saas_connect[0]'    '<zone_id>/<record_id>'
+#         terraform import 'cloudflare_record.saas_origin[0]'     '<zone_id>/<record_id>'
+#   * any DESTROY on these -> STOP. That would replace a record currently serving
+#                            production traffic.
+#
+# The zone-level Cloudflare for SaaS fallback origin
+# (cloudflare_custom_hostname_fallback_origin.saas) is NOT a DNS record, so its
+# presence cannot be confirmed by resolution — the plan is the only evidence.
+# Without it, Cloudflare refuses to activate any custom hostname, so a missing
+# fallback origin fails in front of a customer rather than in CI.
 #
 # TLS is Cloudflare-terminated. Universal SSL already covers the apex and the
 # first-level wildcard `*.fuzefront.com` on every plan, so tenant subdomains get
