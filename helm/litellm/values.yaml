@@ -154,12 +154,36 @@ models:
   #
   # Model IDs verified against the live key's own /v1/models listing, not
   # assumed: this key exposes gpt-4.1 / gpt-4o but NOT gpt-5.
+  #
+  # `additional_drop_params` on every NON-Anthropic model below is what makes the
+  # fallback usable by Anthropic-format callers — chiefly Claude Code, which reaches
+  # the gateway via /v1/messages (ANTHROPIC_BASE_URL) rather than /chat/completions.
+  # Such a caller sends Anthropic-only body fields; when the router falls through to
+  # OpenAI or Gemini, LiteLLM bridges the request and the upstream rejects them with
+  # `Extra inputs are not permitted`. Dropping them turns a hard 400 on hop 2 into a
+  # served answer — the difference between a fallback chain that exists and one that
+  # works.
+  #
+  #   thinking            — Claude Code sends {"type":"adaptive"} on 4.6+ models, AND
+  #                         on any model name it does not recognise, which includes
+  #                         every gateway alias here. Not suppressible client-side.
+  #   context_management  — context-editing beta.
+  #   output_config       — effort / structured-output / task-budget settings.
+  #
+  # Deliberately scoped PER MODEL, not global: `litellm_settings` would strip these
+  # from the Anthropic primary too, silently downgrading normal operation to buy
+  # nothing. The primary path keeps full fidelity; only the hops that cannot accept
+  # these fields discard them.
   - name: gpt-4.1
     provider: openai/gpt-4.1
     keyEnv: OPENAI_API_KEY
+    extraParams:
+      additional_drop_params: ["thinking", "context_management", "output_config"]
   - name: gpt-4.1-mini
     provider: openai/gpt-4.1-mini
     keyEnv: OPENAI_API_KEY
+    extraParams:
+      additional_drop_params: ["thinking", "context_management", "output_config"]
   # --- Gemini ------------------------------------------------------------------
   # ALL of these are currently NON-FUNCTIONAL: the key returns "You exceeded your
   # current quota" (free tier exhausted). Wired anyway so they start working the
@@ -172,18 +196,28 @@ models:
   - name: gemini-2.5-pro
     provider: gemini/gemini-2.5-pro
     keyEnv: GEMINI_API_KEY
+    extraParams:
+      additional_drop_params: ["thinking", "context_management", "output_config"]
   - name: gemini-2.5-flash
     provider: gemini/gemini-2.5-flash
     keyEnv: GEMINI_API_KEY
+    extraParams:
+      additional_drop_params: ["thinking", "context_management", "output_config"]
   - name: gemini-2.5-flash-lite
     provider: gemini/gemini-2.5-flash-lite
     keyEnv: GEMINI_API_KEY
+    extraParams:
+      additional_drop_params: ["thinking", "context_management", "output_config"]
   - name: gemini-2.0-flash
     provider: gemini/gemini-2.0-flash
     keyEnv: GEMINI_API_KEY
+    extraParams:
+      additional_drop_params: ["thinking", "context_management", "output_config"]
   - name: gemini-2.0-flash-lite
     provider: gemini/gemini-2.0-flash-lite
     keyEnv: GEMINI_API_KEY
+    extraParams:
+      additional_drop_params: ["thinking", "context_management", "output_config"]
   # --- embeddings -------------------------------------------------------------
   # FuzeFront's LITELLM_EMBEDDING_MODEL default. OpenAI, not Anthropic —
   # Anthropic ships no embeddings endpoint, so /embeddings cannot be served by

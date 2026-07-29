@@ -65,6 +65,13 @@ networkPolicy:
     # FuzeFront chat-service + doc indexer (LITELLM_URL, and the indexer's
     # /embeddings calls).
     - fuzefront
+    # ARC self-hosted runner pods (`runs-on: staging`). CI agents talk to the
+    # gateway instead of holding a provider key: .github/workflows/a2a-maintain.yml
+    # points ANTHROPIC_BASE_URL at this Service. Reaching the gateway from INSIDE
+    # the cluster is what lets it stay ClusterIP-only — the alternative was a
+    # Cloudflare Access service token fronting a service that holds live provider
+    # keys. Remove this and a2a-maintain's preflight times out (and says so).
+    - arc-runners
     # kube-system (Traefik) is appended automatically by the template because
     # ingress.enabled is true below — do not add it here as well.
 
