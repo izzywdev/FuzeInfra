@@ -41,6 +41,22 @@ from .errors import upstream_error
 #: collected — and so a human reading the cluster knows what wrote them.
 MANAGED_BY = "fuzeinfra-custom-hostname-api"
 
+#: Explicit Traefik router priority for a materialized custom-hostname route.
+#:
+#: Traefik sorts routers by RULE LENGTH by default, not by host specificity, so a
+#: wildcard host rule can outrank an exact one purely because its compiled rule
+#: string is longer. That is not theoretical — a `*.fuzefront.com` Ingress rule
+#: captured another product's exact `plan.fuzefront.com` route in production
+#: (FuzeFront#431). A paying customer's custom domain must never be collateral in
+#: that kind of accident, so we pin the priority instead of inheriting whatever
+#: the length arithmetic happens to produce on the current Traefik version.
+#:
+#: 1000 sits far above any length-derived priority (an exact host rule computes to
+#: roughly 26-60) and far below Traefik's ceiling. The annotation is inert on
+#: ingress-nginx, so the local overlay is unaffected.
+#: See docs/consuming-repos/CUSTOM_DOMAINS.md §3.
+ROUTER_PRIORITY = 1000
+
 _UNSAFE = re.compile(r"[^a-z0-9-]")
 
 
@@ -74,6 +90,10 @@ def build_ingress(domain: str, profile: RouteProfile) -> dict[str, Any]:
                 "fuzeinfra.io/custom-hostname-profile": profile.name,
             },
             "annotations": {
+                # Deterministic routing: never inherit Traefik's rule-length
+                # default, which lets a wildcard elsewhere in the cluster outrank
+                # this exact host. See ROUTER_PRIORITY.
+                "traefik.ingress.kubernetes.io/router.priority": str(ROUTER_PRIORITY),
                 # The domain in full: the label value above is truncated/sanitized,
                 # this is the authoritative record of what the object is for.
                 "fuzeinfra.io/custom-hostname": domain,

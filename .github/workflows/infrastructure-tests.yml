@@ -52,6 +52,31 @@ jobs:
         python -m pip install --upgrade pip
         pip install -r tests/requirements.txt
 
+    # Helm is needed by the offline chart-invariant tests below (they render the
+    # chart and assert on the result). Same version helm-validate.yml pins.
+    - name: Set up Helm
+      uses: azure/setup-helm@v5
+      with:
+        version: v3.16.4
+
+    # ---------------------------------------------------------------------
+    # Offline unit + chart-invariant tests. These need NO running services, so
+    # they run first and FAIL THE BUILD — unlike the service-dependent suites
+    # below, which are continue-on-error.
+    #
+    # These files were previously only reachable via kind-validate.yml, which
+    # runs on the self-hosted `kind-host` runner; when that runner is down the
+    # suites silently never execute. Running them here, on a hosted runner,
+    # makes them a real gate.
+    # ---------------------------------------------------------------------
+    - name: Run offline unit tests (no services required)
+      run: |
+        pytest -v --junitxml=unit-test-results.xml \
+          tests/test_custom_hostname_api.py \
+          tests/test_ingress_wildcard_priority.py \
+          tests/test_chroma_helm_security.py \
+          tests/test_fuzequality_provisioning.py
+
     - name: Install Docker Compose
       run: |
         sudo curl -L "https://github.com/docker/compose/releases/download/v2.24.0/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose

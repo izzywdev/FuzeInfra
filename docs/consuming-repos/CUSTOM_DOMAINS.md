@@ -25,7 +25,7 @@ Traefik about the new host**, so the same call also materializes a per-domain
 ## 1. Tenant subdomains — `corpabc.fuzefront.com`
 
 ```hcl
-# terraform/contabo/cloudflare.tf   (var tenant_wildcard_enabled, default false)
+# terraform/contabo/cloudflare.tf   (var tenant_wildcard_enabled)
 resource "cloudflare_record" "tenant_wildcard" {
   name    = "*"
   value   = <the fuzeinfra tunnel CNAME>
@@ -37,13 +37,53 @@ resource "cloudflare_record" "tenant_wildcard" {
 Traffic path: `corpabc.fuzefront.com` → Cloudflare edge → cloudflared → the
 existing catch-all tunnel rule → `traefik.kube-system:80` → your Ingress.
 
-**Reserved hosts need no exclusion list.** DNS resolves the most specific match
-first, so the explicit `app`, `auth`, `plan` and `prod` records — and the
-`*.prod.fuzefront.com` wildcard — all take precedence over `*` automatically.
-Reserving a new host later means *adding a record*, not editing an exclusion.
-Practically: `app.fuzefront.com` keeps hitting the record that exists today, and
-`*.prod.fuzefront.com` keeps its Cloudflare Access email-OTP wall. Nothing about
-the admin surface changes.
+> ### ⚠️ What actually gates `*.fuzefront.com` — it is NOT this Terraform variable
+>
+> `tenant_wildcard_enabled` controls whether **Terraform manages** the wildcard
+> record. It does **not** control whether `*.fuzefront.com` resolves.
+>
+> A proxied wildcard CNAME for `*.fuzefront.com` **already exists in the zone**,
+> created outside this Terraform. So arbitrary tenant hosts have been resolving
+> all along: `tenant-probe.fuzefront.com` and `corpabc.fuzefront.com` both answer
+> the moment something in the cluster claims the host.
+>
+> **Therefore the Ingress rule is the only gate on serving.** Merging the §3
+> Ingress change is a live production change that takes effect on the next Argo
+> sync — there is no DNS staging behind it. An earlier revision of this section
+> implied otherwise, and "enabling the Ingress rule is safe until Terraform is
+> applied" was a reasonable and wrong reading of it.
+>
+> **Terraform collision hazard:** because the record pre-exists outside state,
+> applying `tenant_wildcard_enabled = true` on a zone that already has one will
+> fail on a duplicate record rather than adopt it. Before that apply, check:
+>
+> ```bash
+> # does a wildcard already exist, and is Terraform tracking it?
+> dig +short '*.fuzefront.com'
+> terraform -chdir=terraform/contabo state list | grep tenant_wildcard
+> ```
+>
+> If it resolves but is absent from state, `terraform import` it before applying:
+>
+> ```bash
+> terraform -chdir=terraform/contabo import \
+>   'cloudflare_record.tenant_wildcard[0]' '<zone_id>/<record_id>'
+> ```
+>
+> Read the PR's plan output before merging — a `destroy`/`create` pair on the
+> wildcard means Terraform is about to replace a record that is already serving
+> production traffic.
+
+**Reserved hosts need no exclusion list — at the DNS layer.** DNS resolves the
+most specific match first, so the explicit `app`, `auth`, `plan` and `prod`
+records and the `*.prod.fuzefront.com` wildcard all take precedence over `*`
+automatically. Reserving a new host later means *adding a record*, not editing an
+exclusion.
+
+**This is a DNS-layer statement only, and it does not carry over to Ingress
+routing.** Cloudflare resolves `plan.fuzefront.com` to its own record, but the
+request still arrives at Traefik, where a wildcard Ingress rule can and did
+capture it. Specificity wins in DNS; **rule length** wins in Traefik. See §3.
 
 Tenant subdomains are **public by default** — they sit outside the `*.prod`
 Access application, so Authentik owns their auth, exactly like
@@ -80,32 +120,158 @@ This lives in your chart, not ours. Kubernetes Ingress supports wildcard hosts,
 matching **exactly one label** — the same granularity as Universal SSL, which is
 a convenient coincidence.
 
+> ### ⚠️ Read this before adding a wildcard host on Traefik
+>
+> **On Traefik, a wildcard host rule outranks an exact host rule by default, and
+> it will capture other products' hosts on the shared cluster.**
+>
+> An earlier revision of this section claimed "exact hosts beat wildcards, order
+> does not matter." That is true of the Kubernetes Ingress spec and of
+> ingress-nginx. It is **false for Traefik**, which is what prod uses. Acting on
+> it took `plan.fuzefront.com` — a different product, in its own namespace, with
+> its own exact-host Ingress — down onto the FuzeFront shell within minutes
+> (FuzeFront#431, reverted in #437). The rest of this section is the corrected
+> guidance; §3.1 is the pattern to actually use.
+
+### Why Traefik behaves this way
+
+Traefik sorts routers by **rule length**, not by host specificity. From its own
+[rules and priority docs](https://doc.traefik.io/traefik/reference/routing-configuration/http/routing/rules-and-priority/):
+
+> To avoid path overlap, routes are sorted, by default, in descending order using
+> rules length. The priority is directly equal to the length of the rule, and so
+> the longest length has the highest priority.
+
+Traefik's documentation makes the consequence explicit with the exact case we hit:
+
+| Router | Rule | Priority |
+|---|---|---|
+| Router-1 | ``HostRegexp(`[a-z]+\.traefik\.com`)`` | **34** |
+| Router-2 | ``Host(`foobar.traefik.com`)`` | **26** |
+
+> Router-1 handles requests to `foobar.traefik.com` instead of Router-2, **despite
+> Router-2 being more specific**.
+
+A Kubernetes wildcard host is compiled into a longer rule string than any exact
+host in the same zone, so the wildcard wins. ``Host(`plan.fuzefront.com`)``
+computes to 26 by the same arithmetic — the shorter, losing side.
+
+**Do not reason about which rule happens to be longer.** The generated rule
+string differs between Traefik versions (v2 emits `HostRegexp`, v3 can emit a
+wildcard `Host`), so the default ordering can silently flip under you on a k3s
+upgrade. Set the priority explicitly and the version stops mattering.
+
+To read the priorities your cluster actually computed:
+
+```bash
+kubectl -n kube-system port-forward deploy/traefik 9000:9000
+curl -s localhost:9000/api/http/routers | jq '.[] | {rule, priority, service}'
+```
+
+(The API is on the `traefik` container port 9000. If it 404s, the dashboard/API
+is disabled in the k3s HelmChartConfig — the priority annotation below is still
+the correct fix, you just cannot observe the numbers.)
+
+### 3.1 The pattern to use — wildcard alone, priority low
+
+Put the wildcard rule in its **own Ingress object** with a low
+`traefik.ingress.kubernetes.io/router.priority`, so every exact-host router in
+the cluster outranks it:
+
 ```yaml
-# fuzefront chart — alongside the existing app.fuzefront.com rule
+# fuzefront chart — Ingress #1: canonical host. UNCHANGED, no annotation.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: fuzefront
 spec:
   ingressClassName: traefik
   rules:
-    - host: app.fuzefront.com        # unchanged
+    - host: app.fuzefront.com
       http: &fanout
         paths:
           - { path: /,          pathType: Prefix, backend: { service: { name: fuzefront-frontend, port: { number: 80 } } } }
           - { path: /api,       pathType: Prefix, backend: { service: { name: fuzefront-backend,  port: { number: 3001 } } } }
           - { path: /socket.io, pathType: Prefix, backend: { service: { name: fuzefront-backend,  port: { number: 3001 } } } }
-    - host: "*.fuzefront.com"        # NEW — tenant subdomains
+---
+# fuzefront chart — Ingress #2: tenant subdomains. SEPARATE OBJECT, low priority.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: fuzefront-tenant-wildcard
+  annotations:
+    # Lowest-wins: any exact-host router (priority = its rule length, ~26+)
+    # outranks this, so the wildcard only ever serves hosts nothing else claims.
+    traefik.ingress.kubernetes.io/router.priority: "1"
+spec:
+  ingressClassName: traefik
+  rules:
+    - host: "*.fuzefront.com"
       http: *fanout
 ```
 
-Review notes for your chart PR:
+**The annotation is per-Ingress-object, not per-rule.** That is why the wildcard
+must live in its own object: a wildcard rule sharing an object with the canonical
+host cannot be de-prioritised separately, and annotating the shared object would
+drag `app.fuzefront.com` down with it.
+
+Note also that `priority: 0` is **not** "lowest" — Traefik treats 0 as unset and
+falls back to length sorting. Use `1`.
+
+### 3.2 Shared-cluster warning — this affects other products
+
+A single-label wildcard on `fuzefront.com` matches **every** single-label host in
+that zone, including hosts owned by products that have nothing to do with you.
+`plan.fuzefront.com` belongs to FuzePlan, in the `fuzeplan` namespace, declared
+in a different repository — and the wildcard captured it anyway, because Traefik
+routes by rule, not by namespace or ownership.
+
+Before adding any wildcard host to this cluster, enumerate what you are about to
+shadow:
+
+```bash
+# every single-label host in the zone — these are the hosts a *.fuzefront.com
+# wildcard can capture
+kubectl get ingress -A -o json \
+  | jq -r '.items[] | .metadata.namespace as $ns | .spec.rules[]?.host
+           | select(test("^[^.]+\\.fuzefront\\.com$"))
+           | "\($ns)\t\(.)"'
+```
+
+`*.prod.fuzefront.com` hosts (argocd, grafana, prometheus, kafka-ui, neo4j,
+authentik-admin) are **not** at risk: they carry two labels and a k8s wildcard
+host matches exactly one. The Cloudflare Access OTP wall is likewise unaffected —
+it gates at the edge, before Traefik.
+
+### 3.3 Why the usual checks do not catch this
+
+- **`helm template | kubeconform -strict` passes.** The manifest is valid; the
+  defect is in runtime router ordering, which no schema validator models.
+- **Local kind uses `ingress-nginx`, prod uses Traefik.** ingress-nginx *does*
+  implement exact-beats-wildcard, so the rule behaves correctly locally and only
+  misbehaves in prod. Local validation is structurally incapable of catching it.
+- **A parsed check that both rules carry an identical path fan-out passes** — the
+  fan-out was never the problem.
+- **The canonical host masks it.** `app.fuzefront.com` fans out to the same
+  backends whether it matches its own rule or the wildcard, so it looks healthy
+  either way. The blast radius is only visible on *other* single-label hosts.
+
+The only checks that catch it are the ownership enumeration in §3.2 and a
+regression test asserting an exact-host router outranks the wildcard. FuzeInfra
+ships the latter for its own chart
+(`tests/test_ingress_wildcard_priority.py`); mirror it in your repo, since your
+Ingress lives in your chart and FuzeInfra's tests cannot see it.
+
+### 3.4 Remaining review notes
 
 - **No `tls:` block.** Cloudflare terminates edge TLS and the tunnel delivers
   plain HTTP to Traefik. Every FuzeInfra Ingress works this way; adding a `tls:`
   block here would either do nothing or break the path.
-- **Exact hosts beat wildcards** in Ingress matching, so the explicit
-  `app.fuzefront.com` rule keeps winning. Order does not matter.
 - Keep the `/api` and `/socket.io` fan-out identical between the two rules, or a
   tenant subdomain will silently behave differently from the canonical host. A
   YAML anchor as above makes that structural rather than a review item.
-- `ingressClassName: traefik` in prod. On kind the chart uses `nginx`.
+- `ingressClassName: traefik` in prod. On kind the chart uses `nginx` — see §3.3
+  for why that divergence matters.
 
 ---
 
@@ -469,7 +635,12 @@ FuzeInfra side (this PR, then a follow-up enablement change):
 
 FuzeFront side:
 
-- [ ] Add the `*.fuzefront.com` Ingress rule ([§3](#3-the-ingress-change-fuzefront-makes))
+- [ ] Add the `*.fuzefront.com` Ingress rule — **in its own Ingress object, at
+      `router.priority: "1"`** ([§3.1](#31-the-pattern-to-use--wildcard-alone-priority-low))
+- [ ] Before enabling it, enumerate the single-label hosts it would shadow
+      ([§3.2](#32-shared-cluster-warning--this-affects-other-products))
+- [ ] Mirror `tests/test_ingress_wildcard_priority.py` in the FuzeFront repo —
+      FuzeInfra's tests cannot see your chart ([§3.3](#33-why-the-usual-checks-do-not-catch-this))
 - [ ] Generate the client from `services/custom-hostname-api/openapi.yaml`
 - [ ] Consume the sealed `CUSTOM_HOSTNAME_API_TOKEN` in the `fuzefront` namespace
 - [ ] Drop `_fuzefront-verify` generation; surface `verification.records[]`
@@ -499,7 +670,11 @@ Open questions for FuzeFront:
 - Chart: `helm/fuzeinfra/templates/custom-hostname-api.yaml`, values under `customHostnameApi`
 - Terraform: `terraform/contabo/cloudflare.tf`, vars `tenant_wildcard_enabled` / `saas_custom_hostnames_enabled`
 - Secret: `deploy/sealed-secrets/custom-hostname-api-secret.yaml.template`
-- Tests: `tests/test_custom_hostname_api.py`
+- Tests: `tests/test_custom_hostname_api.py` (contract + provider) ·
+  `tests/test_ingress_wildcard_priority.py` (wildcard-vs-exact router priority guard)
+- Traefik: [rules and priority](https://doc.traefik.io/traefik/reference/routing-configuration/http/routing/rules-and-priority/) ·
+  [Kubernetes Ingress annotations](https://doc.traefik.io/traefik/reference/routing-configuration/kubernetes/ingress/)
+- Incident: FuzeFront#431 (wildcard shadowed `plan.fuzefront.com`), #437 (revert)
 - Cloudflare: [Cloudflare for SaaS plans & pricing](https://developers.cloudflare.com/cloudflare-for-platforms/cloudflare-for-saas/plans/) ·
   [hostname validation](https://developers.cloudflare.com/cloudflare-for-platforms/cloudflare-for-saas/domain-support/hostname-validation/) ·
   [validation status](https://developers.cloudflare.com/cloudflare-for-platforms/cloudflare-for-saas/domain-support/hostname-validation/validation-status/)

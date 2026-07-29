@@ -77,14 +77,18 @@ class VerificationRecord(_Strict):
     method: VerificationMethod
     record: str
     value: str
-    purpose: VerificationPurpose | None = None
+    #: Required, not optional: consumers are asked to render the records grouped
+    #: by purpose, which they cannot do reliably if this can be absent.
+    purpose: VerificationPurpose
 
 
 class Verification(_Strict):
     method: VerificationMethod
     record: str
     value: str
-    records: list[VerificationRecord] = Field(default_factory=list)
+    #: Required, not defaulted: this is the complete record set a consumer UI
+    #: renders. A silently-empty list would show the customer nothing to publish.
+    records: list[VerificationRecord]
 
 
 class Routing(_Strict):
