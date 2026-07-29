@@ -79,6 +79,49 @@ itself was perfectly healthy.
 > If `OPENAI_API_KEY` is absent from the gateway's secret, chat works and
 > `/embeddings` returns an auth error.
 
+## Virtual keys — prefer these over the master key
+
+`LITELLM_MASTER_KEY` is the gateway **admin** key. It can mint keys, read the proxy
+config and see every consumer's spend. Most consumers need none of that, and spend
+booked against it is unattributable — which is why `values-contabo.yaml` notes that
+per-consumer cost attribution "is NOT meaningful" today.
+
+A **virtual key** fixes all three: it carries a budget, a model allowlist and its own
+line in the spend report. `scripts/mint-litellm-ci-key.sh` is the worked example
+(it mints the key `a2a-maintain-ci` that CI uses):
+
+```bash
+kubectl -n fuzeinfra port-forward svc/litellm 4000:4000 &
+export LITELLM_MASTER_KEY=$(kubectl -n fuzeinfra get secret litellm-secret \
+    -o jsonpath='{.data.LITELLM_MASTER_KEY}' | base64 -d)
+scripts/mint-litellm-ci-key.sh | gh secret set LITELLM_CI_KEY --repo izzywdev/FuzeInfra
+```
+
+Three things to know before minting your own:
+
+- **A virtual key is NOT GitOps.** It is runtime state in LiteLLM's Postgres database
+  (the one `database.enabled` provides), created over the API. It cannot be declared
+  in `values.yaml` and Argo will never reconcile it. What *is* version-controlled is
+  the mint payload — budget, allowlist, alias — so the key's properties stay
+  reviewable even though its existence is out-of-band.
+- **Allowlist the fallback targets, not just the model you ask for.** `models` is
+  enforced on the model actually *dispatched*. A key allowed only `claude-opus-5`
+  works perfectly right up until the router fails over to `gpt-4.1`, and is then
+  refused by its own ACL — turning the fallback into an outage on the one day it
+  matters.
+- **Do not set `rpm_limit` / `tpm_limit`.** LiteLLM's `parallel_request_limiter_v3`
+  hook injects `_litellm_rate_limit_descriptors` and friends into the **outbound
+  provider payload** whenever a key carries rate limits. OpenAI answers
+  `Unrecognized request arguments supplied: _litellm_...`; Anthropic answers
+  `_litellm_rate_limit_descriptors: Extra inputs are not permitted`. So a
+  rate-limited key does not throttle — it poisons every request *and every fallback
+  hop*. Upstream [BerriAI/litellm#28146](https://github.com/BerriAI/litellm/issues/28146),
+  open at time of writing. The budget still works; it is enforced on recorded spend,
+  not by that hook.
+
+Rotation is manual: LiteLLM enforces a unique `key_alias`, so delete the old key in
+the admin UI before re-minting under the same alias.
+
 ## Getting `LITELLM_MASTER_KEY`
 
 SealedSecrets are **strictly scoped** — a secret sealed for `fuzeinfra` cannot be
@@ -139,7 +182,7 @@ LiteLLM bridges that to whichever provider the router picks.
 ```yaml
 env:
   ANTHROPIC_BASE_URL: http://litellm.fuzeinfra.svc.cluster.local:4000
-  ANTHROPIC_MODEL: claude-opus-5           # must be a name in `models:` below
+  ANTHROPIC_MODEL: claude-opus-5           # must be a name in `models:` above
   ANTHROPIC_DEFAULT_HAIKU_MODEL: claude-haiku-4-5
   CLAUDE_CODE_DISABLE_1M_CONTEXT: "1"
   CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS: "1"
@@ -147,9 +190,9 @@ env:
 steps:
   - uses: anthropics/claude-code-action@<sha>
     env:
-      ANTHROPIC_AUTH_TOKEN: ${{ secrets.LITELLM_MASTER_KEY }}
+      ANTHROPIC_AUTH_TOKEN: ${{ secrets.LITELLM_CI_KEY }}
     with:
-      anthropic_api_key: ${{ secrets.LITELLM_MASTER_KEY }}
+      anthropic_api_key: ${{ secrets.LITELLM_CI_KEY }}
 ```
 
 Four things that are easy to get wrong:
