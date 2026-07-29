@@ -15,6 +15,7 @@ on:
       - 'argocd/applications/**'
       - 'argocd/projects/fuzefront.yaml'
       - 'argocd/projects/fuzeinfra.yaml'
+      - 'argocd/projects/fuzemarket.yaml'
       - 'runners/arc/gitops/**'
       - '.github/workflows/deploy-prod.yml'
   workflow_dispatch:
@@ -84,6 +85,14 @@ jobs:
           # Argo rejects it with InvalidSpecError.
           kubectl apply -f argocd/projects/fuzeinfra.yaml
           echo "registered fuzeinfra AppProject"
+
+          # FuzeMarket is a separate repo + namespace, so it gets its own project
+          # (argocd/projects/fuzemarket.yaml). The Application loop below globs
+          # argocd/applications/*.yaml and will register `fuzemarket`, which
+          # declares `project: fuzemarket` — without this apply Argo rejects it
+          # with InvalidSpecError, exactly like the arc-selfheal case above.
+          kubectl apply -f argocd/projects/fuzemarket.yaml
+          echo "registered fuzemarket AppProject"
 
           # Register the standalone Application manifests idempotently on every prod
           # deploy. Terraform only applies them on first-provision, so on a VPS

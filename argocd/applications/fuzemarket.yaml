@@ -1,0 +1,79 @@
+# ArgoCD Application — FuzeMarket (marketing & SEO control dashboard).
+#
+# Deploys the Helm chart that lives in the FuzeMarket repo
+# (deploy/helm/fuzemarket, values-prod.yaml) into the `fuzemarket` namespace.
+# Same shape as argocd/applications/fuzequality.yaml.
+#
+# WHY THIS FILE EXISTS: prod is GitOps. `helm upgrade --install` against the live
+# cluster does NOT persist — argocd/applications/fuzeinfra-prod.yaml runs with
+# `selfHeal: true`, so a hand-run release drifts back within seconds and leaves
+# nothing in git for the next operator to read. FuzeMarket goes to prod the same
+# way everything else does: committed here, synced by Argo.
+#
+# The `fuzemarket` AppProject (argocd/projects/fuzemarket.yaml) must exist first —
+# .github/workflows/deploy-prod.yml applies it before the Application loop.
+#
+# REGISTRATION: automatic. On merge to main, deploy-prod.yml globs
+# argocd/applications/*.yaml and `kubectl apply`s each one, so this Application is
+# registered without a manual step. Thereafter ArgoCD reconciles the chart on every
+# push to FuzeMarket's `main`.
+#
+# ── PREREQUISITE: the fuzefront-registration SealedSecret ────────────────────
+# The chart's `register` initContainer reads a Bearer token from
+#   Secret fuzemarket/fuzefront-registration, key `token`
+# (deploy/helm/fuzemarket/templates/deployment.yaml). Without it the pod wedges in
+# CreateContainerConfigError and never starts.
+#
+# That SealedSecret does NOT belong in FuzeInfra's deploy/sealed-secrets/ — that
+# directory is synced by argocd/applications/fuzeinfra-sealed-secrets.yaml with
+# `destination.namespace: fuzeinfra` under the `fuzeinfra` AppProject, which does
+# not permit the `fuzemarket` namespace. It belongs in the FuzeMarket chart, where
+# templates/sealed-secret.yaml is already reserved for it.
+#
+# Seal it OFFLINE (per docs/SECRETS_MANAGEMENT.md — no consumer gets a kubeconfig;
+# sealing needs only the published PUBLIC cert). The plaintext token is read once,
+# by an operator with cluster access, from the FuzeFront namespace:
+#
+#   TOKEN_FILE=$(mktemp)
+#   kubectl -n fuzefront get secret fuzefront-registration \
+#     -o jsonpath='{.data.token}' | base64 -d > "$TOKEN_FILE"
+#   scripts/seal-secret.sh fuzemarket/fuzefront-registration token=@"$TOKEN_FILE" \
+#     --out <FuzeMarket>/deploy/helm/fuzemarket/templates/sealed-fuzefront-registration.yaml
+#   shred -u "$TOKEN_FILE"
+#
+# Commit the ciphertext to FuzeMarket and let Argo sync it — do NOT `kubectl apply`
+# it from /tmp. A hand-applied SealedSecret is invisible to git and gets pruned.
+# Thereafter rotation is the `rotate-sealed-secret.yml` workflow, not a runbook.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: fuzemarket
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: fuzemarket
+  source:
+    repoURL: https://github.com/izzywdev/FuzeMarket.git
+    targetRevision: main
+    path: deploy/helm/fuzemarket
+    helm:
+      releaseName: fuzemarket
+      valueFiles:
+        - values-prod.yaml
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: fuzemarket
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 15s
+        factor: 2
+        maxDuration: 5m
