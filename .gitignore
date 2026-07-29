@@ -8,6 +8,11 @@
 !.env.template
 !environment.template
 *.pem
+# EXCEPTION: the Sealed Secrets controller's PUBLIC cert. It encrypts only — the
+# private key never leaves the cluster — and seal-secret.sh falls back to it when
+# the published cert URL is unreachable (it sits behind Cloudflare Access), so it
+# MUST be committed or offline sealing breaks. Refresh after a key rotation with
+#   kubeseal --controller-namespace kube-system #            --controller-name sealed-secrets-controller --fetch-cert #     > deploy/sealed-secrets/sealing-cert.pem
 *.key
 secrets/
 config/secrets/
@@ -182,3 +187,12 @@ site/
 docker-compose.local.yml
 local-config/
 dev-overrides/ 
+
+# ── Sealed Secrets PUBLIC cert (must be last: last matching pattern wins) ─────
+# There are multiple `*.pem` rules above; this negation has to come after all of
+# them or git keeps ignoring the file. This cert is PUBLIC — it encrypts only,
+# the private key never leaves the cluster. seal-secret.sh falls back to it when
+# the published cert URL is unreachable (Cloudflare Access), so it MUST be
+# committed or offline sealing breaks. Refresh after a controller key rotation:
+#   kubeseal --controller-namespace kube-system #            --controller-name sealed-secrets-controller --fetch-cert #     > deploy/sealed-secrets/sealing-cert.pem
+!deploy/sealed-secrets/sealing-cert.pem
