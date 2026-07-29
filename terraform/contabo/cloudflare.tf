@@ -576,6 +576,82 @@ resource "cloudflare_zero_trust_access_application" "launcher_bookmark" {
   logo_url             = each.value.logo
 }
 
+# ---------------------------------------------------------------------------
+# DUPLICATE-TILE RECONCILER
+#
+# The launcher showed Unleash twice and Authentik twice — once from the bookmark
+# above (correct logo) and once from a `type = "self_hosted"` Access app a
+# consumer repo created out-of-band with `app_launcher_visible: true` and no
+# logo_url. izzywdev/FuzeFront's runbook records doing exactly that for
+# unleash.prod.fuzefront.com (app 514f8a21-3793-4726-858e-819556fbe346).
+#
+# Terraform cannot destroy what it never created and what is not in state, and
+# importing each duplicate by hand needs an app id nobody has until they go
+# looking. So the deletion is expressed as a reconciler that DISCOVERS them:
+# any launcher-visible Access app on a host `local.launcher_services` already
+# publishes a tile for, that Terraform does not own, is a duplicate by
+# definition. The script documents its full safety envelope; the short version
+# is that it only ever considers those exact hostnames, and never an id in
+# `local.terraform_owned_access_app_ids` or var.launcher_tile_prune_keep_ids.
+#
+# Deleting a duplicate does NOT open the host up: it falls back to the wildcard
+# *.prod.fuzefront.com email-OTP app that covered it before, whose allowlist the
+# consumer's policy was written to mirror.
+#
+# The trigger set is deliberately CONTENT-hashed rather than time-based — a
+# timestamp() trigger would make every plan non-empty and permanently trip the
+# drift gate in terraform-plan-apply.yml. It re-runs when the tile set, the
+# owned-id set, the keep-list, or the script itself changes.
+# ---------------------------------------------------------------------------
+variable "launcher_tile_prune_keep_ids" {
+  description = "Cloudflare Access application ids the duplicate-tile reconciler must never delete. Escape hatch for a deliberate per-host self-hosted app that should keep its own launcher tile."
+  type        = list(string)
+  default     = []
+}
+
+locals {
+  # The exact hostnames FuzeInfra publishes a tile for. Nothing outside this set
+  # is ever a deletion candidate.
+  launcher_hosts = [for key in keys(local.launcher_services) : "${key}.${local.prod_domain}"]
+
+  # EVERY Access application this root module owns. The reconciler treats this
+  # as the do-not-touch list, so adding a new Access app resource here is what
+  # keeps it safe from a future prune — remember to extend this list with it.
+  terraform_owned_access_app_ids = concat(
+    [for app in cloudflare_zero_trust_access_application.launcher_bookmark : app.id],
+    [for app in cloudflare_zero_trust_access_application.public_app : app.id],
+    cloudflare_zero_trust_access_application.admin_services[*].id,
+    cloudflare_zero_trust_access_application.app_launcher[*].id,
+    cloudflare_zero_trust_access_application.sealed_secrets_cert[*].id,
+    cloudflare_zero_trust_access_application.crit_alert_bridge[*].id,
+    cloudflare_zero_trust_access_application.handoff_mcp[*].id,
+  )
+}
+
+resource "null_resource" "prune_duplicate_launcher_tiles" {
+  count = local.cloudflare_enabled ? 1 : 0
+
+  triggers = {
+    hosts  = sha256(jsonencode(local.launcher_hosts))
+    owned  = sha256(jsonencode(local.terraform_owned_access_app_ids))
+    keep   = sha256(jsonencode(var.launcher_tile_prune_keep_ids))
+    script = filesha256("${path.module}/prune-duplicate-launcher-tiles.py")
+  }
+
+  provisioner "local-exec" {
+    interpreter = ["bash", "-c"]
+    command     = "python3 '${path.module}/prune-duplicate-launcher-tiles.py'"
+
+    environment = {
+      CF_API_TOKEN    = var.cloudflare_api_token
+      CF_ACCOUNT_ID   = var.cloudflare_account_id
+      LAUNCHER_HOSTS  = join(",", local.launcher_hosts)
+      MANAGED_APP_IDS = join(",", local.terraform_owned_access_app_ids)
+      KEEP_APP_IDS    = join(",", var.launcher_tile_prune_keep_ids)
+    }
+  }
+}
+
 # Construct the cloudflared token from known fields.
 # Format: base64(JSON{ a: account_id, t: tunnel_id, s: base64_secret })
 locals {
