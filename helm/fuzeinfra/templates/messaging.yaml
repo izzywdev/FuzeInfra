@@ -210,6 +210,38 @@ spec:
               value: "fuzeinfra-kafka:9092"
             - name: DYNAMIC_CONFIG_ENABLED
               value: "true"
+            {{- if .Values.kafkaUi.oidc.enabled }}
+            # ---- Authentik SSO -----------------------------------------------
+            # Without AUTH_TYPE, provectus kafka-ui defaults to DISABLED: anyone
+            # who reaches the pod is an unauthenticated admin, and with
+            # DYNAMIC_CONFIG_ENABLED=true that is write-capable. Until this is
+            # on, the Cloudflare Access wall is the ONLY thing gating it.
+            #
+            # NOTE: kafka-ui has no role model configured here, so every user who
+            # authenticates is a full admin. Authentication, not authorization.
+            - name: AUTH_TYPE
+              value: "OAUTH2"
+            - name: AUTH_OAUTH2_CLIENT_AUTHENTIK_CLIENTNAME
+              value: {{ .Values.kafkaUi.oidc.displayName | quote }}
+            - name: AUTH_OAUTH2_CLIENT_AUTHENTIK_PROVIDER
+              value: "oauth"
+            - name: AUTH_OAUTH2_CLIENT_AUTHENTIK_CLIENTID
+              value: {{ .Values.kafkaUi.oidc.clientId | quote }}
+            - name: AUTH_OAUTH2_CLIENT_AUTHENTIK_CLIENTSECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.kafkaUi.oidc.secretName }}
+                  key: {{ .Values.kafkaUi.oidc.secretKey }}
+            - name: AUTH_OAUTH2_CLIENT_AUTHENTIK_ISSUERURI
+              value: {{ .Values.kafkaUi.oidc.issuer | quote }}
+            - name: AUTH_OAUTH2_CLIENT_AUTHENTIK_SCOPE
+              value: "openid,email,profile"
+            # Must match a redirect_uri on the Authentik provider exactly. The
+            # trailing path segment is the registration id ("authentik"), which
+            # is derived from the AUTH_OAUTH2_CLIENT_<ID>_ prefix above.
+            - name: AUTH_OAUTH2_CLIENT_AUTHENTIK_REDIRECTURI
+              value: "https://{{ include "fuzeinfra.host" (dict "root" . "sub" "kafka-ui") }}/login/oauth2/code/authentik"
+            {{- end }}
           ports:
             - containerPort: 8080
               name: http

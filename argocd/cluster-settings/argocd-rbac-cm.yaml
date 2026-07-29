@@ -1,0 +1,37 @@
+# ArgoCD RBAC — map the Authentik `fuzeinfra-admins` group to role:admin.
+#
+# Live argocd-rbac-cm currently has NO `data` block at all, so ArgoCD falls back
+# to its built-in default policy: the local `admin` account is full admin and
+# everyone else has nothing. That is fine while local admin is the only login,
+# but once users arrive via OIDC they authenticate successfully and can then do
+# nothing — SSO that logs you into an empty UI.
+#
+# Applied server-side alongside argocd-cm.yaml, same field-ownership rationale.
+#
+# `policy.default: ''` keeps the fail-closed posture: a user in no mapped group
+# gets no permissions rather than inheriting a readonly role. Widen deliberately
+# (e.g. `role:readonly`) if you ever want non-admins to browse.
+#
+# The group name `fuzeinfra-admins` is a cross-repo contract — it is created by
+# groups-fuzeinfra-admins.yaml in izzywdev/FuzeFront and is also what Grafana's
+# roleAttributePath matches. Renaming it here alone silently removes everyone's
+# access.
+#
+# The local `admin` account is unaffected by this file and remains the
+# break-glass path (see argocd-cm.yaml).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: argocd-rbac-cm
+  namespace: argocd
+  labels:
+    app.kubernetes.io/name: argocd-rbac-cm
+    app.kubernetes.io/part-of: argocd
+data:
+  # Which token claims ArgoCD will match policy subjects against. `groups` is
+  # the Authentik group claim; `email` is included so an individual can be
+  # granted access by address without creating a group for one person.
+  scopes: '[groups, email]'
+  policy.default: ''
+  policy.csv: |
+    g, fuzeinfra-admins, role:admin

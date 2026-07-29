@@ -26,6 +26,7 @@ on:
     branches: [main]
     paths:
       - 'argocd/cluster-config/**'
+      - 'argocd/cluster-settings/**'
       - 'argocd/notifications/**'
   workflow_dispatch: {}
 
@@ -52,6 +53,27 @@ jobs:
           kubectl apply -f argocd/cluster-config/
           echo "Applied argocd/cluster-config/ to the shared cluster."
           echo "SealedSecrets decrypt in-cluster; ArgoCD picks up repo-creds on its next repo access."
+
+      - name: Apply argocd/cluster-settings (server-side)
+        run: |
+          # SERVER-SIDE, deliberately — these patch ArgoCD's OWN ConfigMaps
+          # (argocd-cm, argocd-rbac-cm), which are not owned by git: upstream
+          # install.yaml ships defaults in them and a kubectl patch adds more.
+          # ConfigMap `data` is a granular map under SSA, so ownership is
+          # per-key and the keys we don't declare are left alone. A client-side
+          # `kubectl apply` would three-way-merge against install.yaml's
+          # last-applied and DELETE every key we omit — including the custom
+          # Ingress health check, without which every Application sits
+          # Progressing forever (Traefik is ClusterIP, so Ingresses get no
+          # ADDRESS).
+          #
+          # --force-conflicts takes ownership of the specific keys we declare
+          # from whichever manager set them first. It does not touch other keys.
+          kubectl apply --server-side --force-conflicts \
+            --field-manager=fuzeinfra-cluster-settings \
+            -f argocd/cluster-settings/
+          echo "Applied argocd/cluster-settings/ (server-side)."
+          echo "argocd-server reads oidc.config on demand; RBAC is hot-reloaded."
 
       - name: Apply argocd/notifications
         run: |

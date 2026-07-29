@@ -1,0 +1,69 @@
+# ArgoCD OIDC — log into ArgoCD with Authentik instead of the local admin.
+#
+# ── WHY THIS FILE DECLARES ALMOST NOTHING ────────────────────────────────────
+# argocd-cm is NOT owned by Git. ArgoCD is installed on this cluster from the
+# upstream `stable` install.yaml over SSH (terraform/contabo/provisioning.tf),
+# and that manifest ships real defaults in `data` — notably `resource.exclusions`
+# and the `resource.customizations.ignoreResourceUpdates.*` set. A separate
+# `kubectl patch` then adds `url` and a custom Ingress health check. That health
+# check is load-bearing: Traefik is pinned to ClusterIP behind the Cloudflare
+# tunnel, so Ingresses never get an ADDRESS and without the customization every
+# Application sits Progressing forever.
+#
+# Declaring the full ConfigMap here would mean reproducing all of that by hand
+# and re-reproducing it on every ArgoCD upgrade — one omission silently deletes
+# an upstream default.
+#
+# So this file declares ONLY `oidc.config` and is applied SERVER-SIDE. ConfigMap
+# `data` is a granular map under server-side apply, so field ownership is
+# per-key: keys owned by other managers (install.yaml, the kubectl patch) are
+# left untouched, and this manager owns exactly the one key it sets.
+#
+# Consequences of that choice, deliberately:
+#   * `url` is NOT declared here — it stays owned by the provisioning patch and
+#     is already correct (https://argocd.prod.fuzefront.com). oidc.config needs
+#     it to build the redirect URI, so verify it is set before relying on SSO.
+#   * `accounts.*` / `admin.*` are NOT declared, so the built-in local admin
+#     stays enabled. That is intentional break-glass: a malformed oidc.config can
+#     make the UI refuse every login, and `argocd login --username admin` over a
+#     port-forward is the way back in. Do not disable it.
+#   * `dex.config` is NOT declared. Setting oidc.config bypasses Dex entirely.
+#
+# ── THE CLIENT SECRET ────────────────────────────────────────────────────────
+# `$argocd-oidc:clientSecret` dereferences key `clientSecret` in the Secret
+# `argocd-oidc` in the argocd namespace — sealed from
+# deploy/sealed-secrets/argocd-oidc.yaml. See
+# deploy/sealed-secrets/authentik-oidc-secrets.yaml.template for how to mint it.
+# The same value must be sealed into fuzefront/fuzefront-secrets as
+# ARGOCD_CLIENT_SECRET, which is what Authentik's blueprint reads.
+#
+# The provider/application are defined in izzywdev/FuzeFront at
+# deploy/helm/fuzefront/authentik/blueprints/provider-oidc-fuzeinfra-admin.yaml.
+# The `argocd` application slug there is what makes this issuer URL resolve.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: argocd-cm
+  namespace: argocd
+  labels:
+    app.kubernetes.io/name: argocd-cm
+    app.kubernetes.io/part-of: argocd
+data:
+  oidc.config: |
+    name: Authentik
+    issuer: https://auth.fuzefront.com/application/o/argocd/
+    clientID: argocd
+    clientSecret: $argocd-oidc:clientSecret
+    # `groups` is a dedicated scope on the Authentik provider, not just a claim
+    # inside `profile`. argocd-rbac-cm's policy.csv keys off it, so dropping it
+    # here demotes every SSO user to policy.default (no access) rather than
+    # failing loudly.
+    #
+    # requestedIDTokenClaims is deliberately NOT set: the Authentik provider has
+    # include_claims_in_id_token=true, so the claims arrive without needing the
+    # `claims` request parameter, and asking for them is an extra failure mode.
+    requestedScopes:
+      - openid
+      - profile
+      - email
+      - groups
