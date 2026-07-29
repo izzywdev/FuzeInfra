@@ -24,6 +24,7 @@ import atexit
 import json
 import os
 import signal
+import socket
 import subprocess
 import sys
 import time
@@ -37,6 +38,11 @@ FORWARDS = [
     (7474, 7474, "neo4j"),
     (7687, 7687, "neo4j"),
     (9200, 9200, "elasticsearch"),
+    # Kafka is reached on its EXTERNAL listener, not the in-cluster broker port.
+    # The broker returns the advertised address of whichever listener you connect
+    # on, so bootstrapping via 9092 hands back the cluster FQDN and every
+    # produce/consume then fails on an unresolvable host. Requires
+    # kafka.externalListener.enabled (values-local.yaml).
     (29092, 29092, "kafka"),
     (9090, 9090, "prometheus"),
     (3001, 3000, "grafana"),          # conftest expects grafana on 3001
@@ -44,7 +50,9 @@ FORWARDS = [
     (3100, 3100, "loki"),
     (8081, 8081, "mongo-express"),
     (8080, 8080, "kafka-ui"),
-    (15672, 15672, "rabbitmq"),
+    (5672, 5672, "rabbitmq"),         # AMQP — tests/test_messaging.py
+    (15672, 15672, "rabbitmq"),       # management UI
+    (9100, 9100, "node-exporter"),    # conftest's node_exporter URL
     (8082, 8080, "airflow-webserver"),  # conftest expects airflow on 8082
     (5555, 5555, "airflow-flower"),
 ]
@@ -125,6 +133,34 @@ def main() -> int:
         return 2
 
     time.sleep(args.settle)
+
+    # Verify every forward actually accepts a connection before handing over to
+    # pytest.
+    #
+    # This is not belt-and-braces — it is the whole reason three services were
+    # unreachable for so long without anyone noticing. `kubectl port-forward`
+    # exits non-zero in the background when the remote port does not exist on the
+    # Service, and this script neither waited on it nor probed the socket. It
+    # printed "kafka 29092->29092" and moved on, so the failure surfaced far away
+    # as an ECONNREFUSED inside an unrelated pytest fixture. Probing here names
+    # the broken forward instead.
+    unreachable = []
+    for local, remote, kw in FORWARDS:
+        if not any(f.endswith(f"{local}->{remote}") for f in forwarded):
+            continue
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+            probe.settimeout(2)
+            if probe.connect_ex(("127.0.0.1", local)) != 0:
+                unreachable.append(f"{kw} (localhost:{local} -> svc:{remote})")
+    if unreachable:
+        print("!! these port-forwards never came up:", file=sys.stderr)
+        for u in unreachable:
+            print(f"     {u}", file=sys.stderr)
+        print("   The Service almost certainly does not expose that remote port "
+              "— check the chart's Service ports against FORWARDS above.",
+              file=sys.stderr)
+        cleanup()
+        return 2
 
     # conftest reads POSTGRES_* from env; align to the chart's dev defaults.
     env = dict(os.environ)
