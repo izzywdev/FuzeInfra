@@ -97,8 +97,37 @@ once with `terraform init -migrate-state -backend-config=...`.
 | `TF_STATE_ACCESS_KEY_ID` / `TF_STATE_SECRET_ACCESS_KEY` | backend access (state only) |
 | `CONTABO_CLIENT_ID` / `CONTABO_CLIENT_SECRET` / `CONTABO_API_USER` / `CONTABO_API_PASSWORD` | Contabo provider |
 | `CONTABO_IMAGE_ID` / `CONTABO_PRODUCT_ID` / `NODE_SSH_PUBLIC_KEY` | VPS inputs |
-| `CLOUDFLARE_API_TOKEN` / `CLOUDFLARE_ACCOUNT_ID` / `CLOUDFLARE_ZONE_ID` | Cloudflare (zone-scoped token) |
+| `CLOUDFLARE_API_TOKEN` / `CLOUDFLARE_ACCOUNT_ID` / `CLOUDFLARE_ZONE_ID` | Cloudflare (zone-scoped token — see the scope table below) |
 | `GH_TF_TOKEN` | token Terraform uses to set repo secrets (e.g. `KUBE_CONFIG`) |
+
+#### `CLOUDFLARE_API_TOKEN` scope
+
+This token is not DNS-only. `terraform/contabo/cloudflare.tf` manages the
+tunnel, Access apps, Workers **and** the Cloudflare for SaaS fallback origin, so
+the token needs all of:
+
+| Permission | Scope |
+|------------|-------|
+| Zone → DNS → Edit | `fuzefront.com` |
+| Zone → Zone → Read | `fuzefront.com` |
+| Zone → **SSL and Certificates → Edit** | `fuzefront.com` |
+| Account → Cloudflare Tunnel → Edit | the account |
+| Account → Access: Apps and Policies → Edit | the account |
+| Account → Workers Scripts → Edit | the account |
+
+A token missing **SSL and Certificates → Edit** plans cleanly and then fails at
+apply time with:
+
+```
+Error: failed to create custom hostname fallback origin: Authentication error (10000)
+  with cloudflare_custom_hostname_fallback_origin.saas[0]
+```
+
+Cloudflare returns the generic `10000` for "token lacks this permission", so the
+message names the resource but not the missing scope. If an apply fails on a
+`cloudflare_*` resource with `10000`, check the token's permissions before
+looking anywhere else — the plan cannot catch it, because permission is only
+evaluated on write.
 
 ---
 
