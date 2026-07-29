@@ -2,20 +2,23 @@
 # LiteLLM gateway — Contabo production (k3s, namespace `fuzeinfra`).
 # Synced by argocd/applications/litellm.yaml from main.
 #
-# ┌───────────────────────────────────────────────────────────────────────────┐
-# │ GITOPS GATE — this is the ONE change needed to turn the gateway on.       │
-# │                                                                           │
-# │ `enabled` stays false until deploy/sealed-secrets/litellm-secret.yaml     │
-# │ exists. Producing it needs the real provider keys, so it is a human,      │
-# │ one-time, offline step — see deploy/sealed-secrets/litellm-secret.yaml    │
-# │ .template for the exact scripts/seal-secret.sh invocation.                │
-# │                                                                           │
-# │ Then flip `enabled: true` HERE, in the SAME commit that adds the sealed   │
-# │ secret. Flipping first CrashLoops the pod with CreateContainerConfigError │
-# │ (LITELLM_MASTER_KEY is a required secretKeyRef).                          │
-# └───────────────────────────────────────────────────────────────────────────┘
+# GATE OPEN. deploy/sealed-secrets/litellm-secret.yaml landed in the same commit
+# that flipped this to true, carrying LITELLM_MASTER_KEY, ANTHROPIC_API_KEY and
+# OPENAI_API_KEY. Do NOT flip this back to true/false independently of that file:
+# enabling without the Secret CrashLoops the pod with CreateContainerConfigError
+# (LITELLM_MASTER_KEY is a required secretKeyRef).
+#
+# KEY PROVENANCE — read before rotating anything:
+#   The provider keys are the SAME VALUES as fuzepicker/fuzepicker-backend-secrets,
+#   deliberately reused so the gateway could go live without minting new ones.
+#   Two consequences:
+#     1. All gateway spend bills to that key's provider account — the gateway's
+#        per-consumer cost attribution is NOT meaningful until it has its own key.
+#     2. Rotating fuzepicker's key silently breaks the gateway until this
+#        SealedSecret is re-sealed. They are coupled; treat them as one rotation.
+#   Fix by sealing a dedicated key into this same Secret; nothing else changes.
 # =============================================================================
-enabled: false
+enabled: true
 
 replicas: 1
 
