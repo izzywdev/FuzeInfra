@@ -429,12 +429,22 @@ def test_prod_overlays_do_not_enable_local_only_bootstrap_escapes():
             "credential with a public one. kind only."
         )
 
-        inline = [
+        # NOTE: the inverse of what this used to assert.
+        #
+        # `init.mode: inline` was originally treated as a local-only escape
+        # hatch, on the belief that only local cold-starts. That was wrong:
+        # `hook` cannot cold-start on any cluster, prod included — local was just
+        # the only place that ever exercised it. `inline` is now the default and
+        # a real overlay pinning itself back to `hook` re-introduces the
+        # deadlock, silently, and only discovers it during a rebuild.
+        hooked = [
             where for where, node in walk(doc)
-            if where.endswith("init") and node.get("mode") == "inline"
+            if where.endswith("init") and node.get("mode") == "hook"
         ]
-        assert not inline, (
-            f"{overlay} sets init.mode: inline at {inline}. Only values-local.yaml "
-            "may — prod's metadata database already exists, and the hook ordering "
-            "is what Argo expects."
+        assert not hooked, (
+            f"{overlay} pins init.mode back to 'hook' at {hooked}. That mode "
+            "cannot create the database it is responsible for: Helm and Argo both "
+            "run it only after the release reports healthy, which cannot happen "
+            "while the database is missing. It works only on a cluster that "
+            "already has one — so the failure is invisible until a rebuild."
         )

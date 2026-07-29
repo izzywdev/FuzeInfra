@@ -615,23 +615,36 @@ airflow:
   # How `fuzeinfra-airflow-init` (create the `airflow` database -> db migrate ->
   # create the admin user) is ordered against the Airflow Deployments.
   #
-  #   hook   — a post-install/post-upgrade Helm hook, PostSync under Argo.
-  #            Correct on a cluster whose metadata database ALREADY exists,
-  #            which is every cluster this has ever run on. Default; prod
-  #            renders exactly what it did before this option existed.
-  #
-  #   inline — a plain Job in the main resource wave, plus a
+  #   inline — DEFAULT. A plain Job in the main resource wave, plus a
   #            wait-for-airflow-db init container on every Airflow pod.
   #
-  # `inline` exists because `hook` cannot cold-start. Helm runs post-install
-  # hooks only AFTER `--wait` reports the release ready, and the Airflow pods
-  # can never become ready while the database the hook creates is missing — so
-  # the hook never runs, `--wait` burns its full timeout, and the pods sit in
-  # CrashLoopBackOff on `FATAL: database "airflow" does not exist`. Argo has the
-  # same ordering (PostSync runs after the sync goes healthy). Anything that
-  # must bootstrap from nothing needs `inline`.
+  #   hook   — the historical behaviour: a post-install/post-upgrade Helm hook,
+  #            PostSync under Argo. Retained as an escape hatch; see below for
+  #            why it is no longer the default.
+  #
+  # `hook` CANNOT COLD-START, on any cluster — this was never a local-only
+  # problem. Helm runs post-install hooks only AFTER `--wait` reports the release
+  # ready, and the Airflow pods can never become ready while the database the
+  # hook is responsible for creating does not exist. So `--wait` burns its full
+  # timeout, the hook never runs, and the pods sit in CrashLoopBackOff on
+  # `FATAL: database "airflow" does not exist`. Argo has the identical ordering:
+  # PostSync runs only after the sync goes healthy.
+  #
+  # It appeared to work everywhere only because every cluster it had ever run on
+  # already had the database, created out-of-band years ago. Prod would deadlock
+  # the same way if it were ever rebuilt from nothing — which is exactly the
+  # situation you are in during a disaster recovery, when you can least afford to
+  # be debugging chart ordering.
+  #
+  # `inline` is safe on an already-provisioned cluster: creating the database is
+  # guarded, `airflow db migrate` is a no-op when there is nothing to apply, and
+  # the admin-user step already tolerates existing users.
   init:
-    mode: hook
+    mode: inline
+    # How long the wait-for-airflow-db init container polls before failing the
+    # pod. Bounded on purpose — a pod hung in Init forever is invisible to
+    # restart-count alerting.
+    waitTimeoutSeconds: 600
 
 # -----------------------------------------------------------------------------
 # DNS & external access
