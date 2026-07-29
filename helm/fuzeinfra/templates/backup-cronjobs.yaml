@@ -158,6 +158,29 @@ spec:
             app.kubernetes.io/component: backup
         spec:
           restartPolicy: Never
+          # Pin backup jobs to the DURABLE nodes. The fuzeinfra-db-backups PVC is
+          # a Longhorn volume whose replicas live only on durable nodes (Longhorn
+          # disks are deliberately scoped to them), so a job scheduled onto an
+          # elastic node cannot attach it:
+          #   FailedAttachVolume ... failed to attach to node fuzeinfra-elastic-*
+          # The pod then sits in Init until activeDeadlineSeconds expires and the
+          # Job dies with DeadlineExceeded. That silently broke the postgres,
+          # mongodb and neo4j backups for ~2 days — they were Complete in ~45s
+          # before, then started failing once they happened to land on elastic.
+          # Durable nodes are identified by the ABSENCE of fuzeinfra.io/pool
+          # (elastic nodes have pool=elastic, the CI node pool=ci); the second
+          # term keeps this working if durable nodes are ever labelled explicitly.
+          affinity:
+            nodeAffinity:
+              requiredDuringSchedulingIgnoredDuringExecution:
+                nodeSelectorTerms:
+                  - matchExpressions:
+                      - key: fuzeinfra.io/pool
+                        operator: DoesNotExist
+                  - matchExpressions:
+                      - key: fuzeinfra.io/pool
+                        operator: NotIn
+                        values: ["elastic", "ci"]
           volumes:
             - name: backup
               emptyDir: {}
