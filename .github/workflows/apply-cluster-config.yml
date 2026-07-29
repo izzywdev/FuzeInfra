@@ -43,10 +43,38 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # `runs-on: staging` is a self-hosted runner and does NOT ship kubectl.
+      # It used to be present in the image: this workflow last succeeded
+      # 2026-07-05 and then failed with "kubectl: command not found" on
+      # 2026-07-29, i.e. the runner drifted underneath us. Because every step
+      # here is a kubectl call, the whole workflow became a silent no-op that
+      # only surfaced when someone actually needed it to land a change.
+      #
+      # Install it explicitly rather than trusting the image, so the workflow is
+      # self-contained and survives the next runner rebuild.
+      - name: Install kubectl
+        run: |
+          if command -v kubectl >/dev/null 2>&1; then
+            echo "kubectl already present: $(kubectl version --client -o yaml 2>/dev/null | head -3 | tr '\n' ' ')"
+            exit 0
+          fi
+          # Pin to the cluster's minor version rather than `stable.txt`: kubectl
+          # supports +/-1 minor from the API server, so an unpinned client can
+          # drift out of the support window without warning.
+          KUBECTL_VERSION="v1.31.4"
+          curl -fsSLo /tmp/kubectl "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl"
+          chmod +x /tmp/kubectl
+          mkdir -p "$HOME/.local/bin"
+          mv /tmp/kubectl "$HOME/.local/bin/kubectl"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          echo "installed kubectl ${KUBECTL_VERSION}"
+
       - name: Configure kubectl
         run: |
           mkdir -p "$HOME/.kube"
           echo "${{ secrets.KUBE_CONFIG }}" | base64 -d > "$HOME/.kube/config"
+          kubectl version --client=true -o yaml >/dev/null
+          echo "kubectl configured."
 
       - name: Apply argocd/cluster-config
         run: |
