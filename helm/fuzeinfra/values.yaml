@@ -840,12 +840,22 @@ customHostnameApi:
   #   service:   Service the Ingress backends to
   #   port:      Service port
   #   paths:     path prefixes to route (the consumer's full fan-out)
+  #   createNamespace:
+  #              create `namespace` ourselves. Keep FALSE on any cluster where
+  #              the consumer deploys itself — it owns that namespace, and two
+  #              releases claiming one Namespace object means an Argo sync loop
+  #              or a `helm uninstall` that takes their workloads with it.
+  #              Set true ONLY for a standalone cluster (kind / Docker Desktop)
+  #              where this chart is the only thing installed; without it the
+  #              profile's Role/RoleBinding fail with `namespaces "<x>" not
+  #              found` and the whole install is rejected.
   # Defaults are OFF; the prod overlay flips `enabled: true` once the
   # SealedSecret carrying that profile's token is in the fuzeinfra namespace.
   routeProfiles:
     - name: fuzefront
       enabled: false
       namespace: fuzefront
+      createNamespace: false
       service: fuzefront-frontend
       port: 80
       paths: ["/"]
