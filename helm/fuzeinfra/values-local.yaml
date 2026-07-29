@@ -21,18 +21,20 @@ elasticsearch:
     requests: { cpu: 100m, memory: 512Mi }
     limits:   { cpu: 500m, memory: 1Gi }
 
+# The pytest smoke suite reaches Kafka over a port-forward and expects
+# localhost:29092. Without this listener it bootstraps successfully and is then
+# handed the in-cluster FQDN for every produce/consume, which does not resolve
+# from outside — see kafka.externalListener in values.yaml. Local only.
+kafka:
+  externalListener:
+    enabled: true
+
 airflow:
   workerReplicas: 1
-  # A fresh cluster has no `airflow` database, and the default `hook` mode
-  # cannot create one: Helm runs post-install hooks only after `--wait` reports
-  # the release ready, and the Airflow pods can never be ready until the hook
-  # has run. `--wait` burns its full 10m, the hook never fires, and all four
-  # pods sit in CrashLoopBackOff on
-  #   FATAL:  database "airflow" does not exist
-  # Local is the only place that genuinely cold-starts, so it is the only place
-  # that needs `inline`. See airflow.init.mode in values.yaml.
-  init:
-    mode: inline
+  # NOTE: `init.mode: inline` used to be set here. It is now the chart-wide
+  # default, because `hook` cannot cold-start on ANY cluster — local was simply
+  # the only place that ever actually cold-started and so the only place the
+  # deadlock was visible. See airflow.init.mode in values.yaml.
 
 # The admin token Secret is a SealedSecret in prod and does not exist on kind.
 # Without this the chromadb pod is stuck in Init:CreateContainerConfigError

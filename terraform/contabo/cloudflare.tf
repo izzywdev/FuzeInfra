@@ -239,8 +239,9 @@ resource "cloudflare_record" "saas_origin" {
   comment = "Cloudflare for SaaS fallback origin -> tunnel -> Traefik."
 }
 
-# Enabling the fallback origin is what turns Cloudflare for SaaS on for the zone.
+# Enabling the fallback origin activates Cloudflare for SaaS on the zone (SSL for SaaS must be enabled first).
 # It must point at a record that already exists and is proxied, hence depends_on.
+# Requires "Zone / Custom Hostnames: Edit" on the Cloudflare API token.
 resource "cloudflare_custom_hostname_fallback_origin" "saas" {
   count      = local.cloudflare_enabled && var.saas_custom_hostnames_enabled ? 1 : 0
   zone_id    = var.cloudflare_zone_id
@@ -312,7 +313,45 @@ resource "cloudflare_zero_trust_access_policy" "public_app_bypass" {
   }
 }
 
-# Cloudflare Access: protect *.prod.fuzefront.com with email OTP.
+# ---------------------------------------------------------------------------
+# Authentik as a Cloudflare Access identity provider (OIDC).
+#
+# Authentik is the platform IdP, deployed by izzywdev/FuzeFront into the
+# `fuzefront` namespace and served at auth.fuzefront.com — a PUBLIC vanity host
+# (see local.public_vanity_hosts), deliberately OUTSIDE the *.prod Access wall.
+# That placement is load-bearing: if the IdP sat behind the wall it authenticates,
+# logging in would require already being logged in.
+#
+# The matching OIDC provider (client_id "cloudflare-access") is defined
+# declaratively as an Authentik blueprint in the FuzeFront repo at
+# deploy/helm/fuzefront/authentik/blueprints/provider-oidc-cloudflare-access.yaml.
+# Its redirect URI must be https://fuzefront.cloudflareaccess.com/cdn-cgi/access/callback.
+#
+# TOKEN SCOPE: this resource needs "Access: Organizations, Identity Providers,
+# and Groups > Edit" on the Cloudflare API token, ON TOP of the scopes the rest
+# of this file needs. A missing Access scope plans CLEAN and fails only at apply
+# with a generic "Authentication error (10000)" — see docs/TERRAFORM_CD.md.
+#
+# The `!= ""` guard follows the crit_bridge_token convention: a count-gated
+# resource whose secret is unwired plans a DESTROY, not a no-op. Wire
+# TF_VAR_authentik_access_client_secret in the CD workflow BEFORE merging.
+resource "cloudflare_zero_trust_access_identity_provider" "authentik" {
+  count      = local.cloudflare_enabled && var.authentik_access_client_secret != "" ? 1 : 0
+  account_id = var.cloudflare_account_id
+  name       = "Authentik"
+  type       = "oidc"
+
+  config {
+    client_id     = "cloudflare-access"
+    client_secret = var.authentik_access_client_secret
+    auth_url      = "https://${var.authentik_host}/application/o/authorize/"
+    token_url     = "https://${var.authentik_host}/application/o/token/"
+    certs_url     = "https://${var.authentik_host}/application/o/cloudflare-access/jwks/"
+    scopes        = ["openid", "email", "profile"]
+  }
+}
+
+# Cloudflare Access: protect *.prod.fuzefront.com.
 # The apex prod.fuzefront.com is NOT matched by *.prod — it stays public.
 resource "cloudflare_zero_trust_access_application" "admin_services" {
   count            = local.cloudflare_enabled ? 1 : 0
@@ -325,12 +364,41 @@ resource "cloudflare_zero_trust_access_application" "admin_services" {
   app_launcher_visible = false
 }
 
+# Preferred login path: Authentik (which in turn federates Google/Gmail).
+# `require email` keeps the existing allowlist posture — passing Authentik is
+# necessary but not sufficient, so onboarding a user in Authentik does not by
+# itself grant infra-admin access.
+resource "cloudflare_zero_trust_access_policy" "admin_authentik" {
+  count          = local.cloudflare_enabled && var.authentik_access_client_secret != "" ? 1 : 0
+  account_id     = var.cloudflare_account_id
+  application_id = cloudflare_zero_trust_access_application.admin_services[0].id
+  name           = "Admin via Authentik"
+  precedence     = 1
+  decision       = "allow"
+
+  include {
+    login_method = [cloudflare_zero_trust_access_identity_provider.authentik[0].id]
+  }
+
+  require {
+    email = var.allowed_admin_emails
+  }
+}
+
+# BREAK-GLASS — do not remove.
+#
+# Authentik depends on FuzeInfra's own Postgres and Redis. If those degrade (it
+# has happened: the durable-node OOM and the Longhorn storage-revert incident),
+# an Authentik-only wall locks us out of Grafana, Prometheus and ArgoCD — exactly
+# the tools needed to diagnose the outage. Email OTP is the independent path in.
+# Kept at lower precedence so Authentik is tried first, and `allowed_idps` is
+# deliberately NOT set on the applications so both methods stay selectable.
 resource "cloudflare_zero_trust_access_policy" "admin_email_otp" {
   count          = local.cloudflare_enabled ? 1 : 0
   account_id     = var.cloudflare_account_id
   application_id = cloudflare_zero_trust_access_application.admin_services[0].id
-  name           = "Admin email allowlist (OTP)"
-  precedence     = 1
+  name           = "Admin email allowlist (OTP) — break-glass"
+  precedence     = 2
   decision       = "allow"
 
   include {
@@ -357,12 +425,30 @@ resource "cloudflare_zero_trust_access_application" "app_launcher" {
   }
 }
 
+resource "cloudflare_zero_trust_access_policy" "app_launcher_authentik" {
+  count          = local.cloudflare_enabled && var.authentik_access_client_secret != "" ? 1 : 0
+  account_id     = var.cloudflare_account_id
+  application_id = cloudflare_zero_trust_access_application.app_launcher[0].id
+  name           = "Admin via Authentik"
+  precedence     = 1
+  decision       = "allow"
+
+  include {
+    login_method = [cloudflare_zero_trust_access_identity_provider.authentik[0].id]
+  }
+
+  require {
+    email = var.allowed_admin_emails
+  }
+}
+
+# Break-glass for the portal itself — see admin_email_otp above.
 resource "cloudflare_zero_trust_access_policy" "app_launcher" {
   count          = local.cloudflare_enabled ? 1 : 0
   account_id     = var.cloudflare_account_id
   application_id = cloudflare_zero_trust_access_application.app_launcher[0].id
-  name           = "Admin email allowlist (OTP)"
-  precedence     = 1
+  name           = "Admin email allowlist (OTP) — break-glass"
+  precedence     = 2
   decision       = "allow"
 
   include {
@@ -542,27 +628,135 @@ locals {
     "neo4j"         = { name = "Neo4j", logo = "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/neo4j.png", path = "" }
     "elasticsearch" = { name = "Elasticsearch", logo = "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/elasticsearch.png", path = "" }
     "chromadb"      = { name = "ChromaDB", logo = "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/chroma.png", path = "/api/v2/heartbeat" }
-    # FuzeFront admin UIs (izzywdev/FuzeFront). Both land UNDER the *.prod
+    # FuzeFront admin UIs (izzywdev/FuzeFront). Unleash lands UNDER the *.prod
     # wildcard, so the catch-all tunnel rule → Traefik, the *.prod CNAME, and the
-    # *.prod email-OTP Access app already cover routing/DNS/gating — no per-host
-    # tunnel rule, CNAME, or Access app is needed. These bookmarks just add the
-    # launcher tiles. Traefik host-routes each to the FuzeFront-owned Ingress:
-    #   unleash   → svc fuzefront-unleash:4242   (Ingress live, commit a2d0af5)
-    #   authentik → svc authentik-server:9000    (FuzeFront still to add the
-    #               authentik.prod.fuzefront.com Ingress; tile lands on /if/admin/)
+    # *.prod Access app already cover routing/DNS/gating — no per-host tunnel
+    # rule, CNAME, or Access app is needed. These bookmarks just add the launcher
+    # tiles. Traefik host-routes each to the FuzeFront-owned Ingress:
+    #   unleash   → svc fuzefront-unleash:4242  (Ingress live, commit a2d0af5)
+    #   authentik → svc authentik-server:9000   (Ingress live in ns fuzefront)
+    # Authentik is the exception: its tile is overridden below to the public
+    # auth.<zone> host rather than authentik.<prod>, because it is the IdP that
+    # now backs the *.prod wall. See launcher_url_overrides.
     "unleash"   = { name = "Unleash", logo = "https://avatars.githubusercontent.com/u/23053233?s=200&v=4", path = "" }
-    "authentik" = { name = "Authentik", logo = "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/authentik.png", path = "/if/admin/" }
+    "authentik" = { name = "Authentik", logo = "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/authentik.png", path = "" }
+    # LiteLLM gateway admin UI (helm/litellm, Ingress → svc litellm:4000).
+    # Under the *.prod wildcard like the rest, so this bookmark is all that is
+    # needed — no per-host tunnel rule, CNAME or Access app.
+    #
+    # path = "/ui" because "/" redirects to the console anyway and landing
+    # straight on it saves a hop. NOTE the Ingress is deliberately scoped to "/",
+    # not "/ui": the console loads its bundle from /litellm-asset-prefix/... and
+    # calls the API on the same origin, so a /ui-only route would render a blank
+    # page (the Neo4j Browser failure mode).
+    #
+    # LiteLLM's own console auth is its master key and its SSO is an enterprise
+    # feature, so the Authentik-backed Access wall in front of this host is the
+    # only identity layer it gets. That is the whole reason the wall must keep
+    # working — see the Access policies above.
+    "litellm" = { name = "LiteLLM", logo = "https://avatars.githubusercontent.com/u/121462774?s=200&v=4", path = "/ui" }
+  }
+
+  # Tiles whose target is NOT https://<key>.<prod_domain><path>.
+  #
+  # The Authentik admin UI is ALSO served at authentik.prod.fuzefront.com, but
+  # pointing the tile there is a trap now that Cloudflare Access authenticates
+  # against Authentik: reaching the IdP admin would require an Access session
+  # that only the IdP can issue. auth.fuzefront.com is a public vanity host
+  # outside the wildcard (Authentik owns its own auth), so it always resolves.
+  launcher_url_overrides = {
+    "authentik" = "https://${var.authentik_host}/if/admin/"
   }
 }
 
 resource "cloudflare_zero_trust_access_application" "launcher_bookmark" {
-  for_each             = nonsensitive(local.cloudflare_enabled) ? local.launcher_services : {}
-  account_id           = var.cloudflare_account_id
-  name                 = each.value.name
-  domain               = "https://${each.key}.${local.prod_domain}${each.value.path}"
+  for_each   = nonsensitive(local.cloudflare_enabled) ? local.launcher_services : {}
+  account_id = var.cloudflare_account_id
+  name       = each.value.name
+  domain = lookup(
+    local.launcher_url_overrides,
+    each.key,
+    "https://${each.key}.${local.prod_domain}${each.value.path}"
+  )
   type                 = "bookmark"
   app_launcher_visible = true
   logo_url             = each.value.logo
+}
+
+# ---------------------------------------------------------------------------
+# DUPLICATE-TILE RECONCILER
+#
+# The launcher showed Unleash twice and Authentik twice — once from the bookmark
+# above (correct logo) and once from a `type = "self_hosted"` Access app a
+# consumer repo created out-of-band with `app_launcher_visible: true` and no
+# logo_url. izzywdev/FuzeFront's runbook records doing exactly that for
+# unleash.prod.fuzefront.com (app 514f8a21-3793-4726-858e-819556fbe346).
+#
+# Terraform cannot destroy what it never created and what is not in state, and
+# importing each duplicate by hand needs an app id nobody has until they go
+# looking. So the deletion is expressed as a reconciler that DISCOVERS them:
+# any launcher-visible Access app on a host `local.launcher_services` already
+# publishes a tile for, that Terraform does not own, is a duplicate by
+# definition. The script documents its full safety envelope; the short version
+# is that it only ever considers those exact hostnames, and never an id in
+# `local.terraform_owned_access_app_ids` or var.launcher_tile_prune_keep_ids.
+#
+# Deleting a duplicate does NOT open the host up: it falls back to the wildcard
+# *.prod.fuzefront.com email-OTP app that covered it before, whose allowlist the
+# consumer's policy was written to mirror.
+#
+# The trigger set is deliberately CONTENT-hashed rather than time-based — a
+# timestamp() trigger would make every plan non-empty and permanently trip the
+# drift gate in terraform-plan-apply.yml. It re-runs when the tile set, the
+# owned-id set, the keep-list, or the script itself changes.
+# ---------------------------------------------------------------------------
+variable "launcher_tile_prune_keep_ids" {
+  description = "Cloudflare Access application ids the duplicate-tile reconciler must never delete. Escape hatch for a deliberate per-host self-hosted app that should keep its own launcher tile."
+  type        = list(string)
+  default     = []
+}
+
+locals {
+  # The exact hostnames FuzeInfra publishes a tile for. Nothing outside this set
+  # is ever a deletion candidate.
+  launcher_hosts = [for key in keys(local.launcher_services) : "${key}.${local.prod_domain}"]
+
+  # EVERY Access application this root module owns. The reconciler treats this
+  # as the do-not-touch list, so adding a new Access app resource here is what
+  # keeps it safe from a future prune — remember to extend this list with it.
+  terraform_owned_access_app_ids = concat(
+    [for app in cloudflare_zero_trust_access_application.launcher_bookmark : app.id],
+    [for app in cloudflare_zero_trust_access_application.public_app : app.id],
+    cloudflare_zero_trust_access_application.admin_services[*].id,
+    cloudflare_zero_trust_access_application.app_launcher[*].id,
+    cloudflare_zero_trust_access_application.sealed_secrets_cert[*].id,
+    cloudflare_zero_trust_access_application.crit_alert_bridge[*].id,
+    cloudflare_zero_trust_access_application.handoff_mcp[*].id,
+  )
+}
+
+resource "null_resource" "prune_duplicate_launcher_tiles" {
+  count = local.cloudflare_enabled ? 1 : 0
+
+  triggers = {
+    hosts  = sha256(jsonencode(local.launcher_hosts))
+    owned  = sha256(jsonencode(local.terraform_owned_access_app_ids))
+    keep   = sha256(jsonencode(var.launcher_tile_prune_keep_ids))
+    script = filesha256("${path.module}/prune-duplicate-launcher-tiles.py")
+  }
+
+  provisioner "local-exec" {
+    interpreter = ["bash", "-c"]
+    command     = "python3 '${path.module}/prune-duplicate-launcher-tiles.py'"
+
+    environment = {
+      CF_API_TOKEN    = var.cloudflare_api_token
+      CF_ACCOUNT_ID   = var.cloudflare_account_id
+      LAUNCHER_HOSTS  = join(",", local.launcher_hosts)
+      MANAGED_APP_IDS = join(",", local.terraform_owned_access_app_ids)
+      KEEP_APP_IDS    = join(",", var.launcher_tile_prune_keep_ids)
+    }
+  }
 }
 
 # Construct the cloudflared token from known fields.

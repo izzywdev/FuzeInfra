@@ -39,15 +39,61 @@ resources:
   requests: { cpu: "250m", memory: "512Mi" }
   limits:   { cpu: "1", memory: "3Gi" }
 
-# Cluster-internal only. No Ingress, no Cloudflare tunnel route, no CF Access
-# app — the gateway holds live provider keys and must stay unreachable from
-# outside the cluster by construction.
+# Postgres backing store — REQUIRED for the admin UI below to work at all.
+#
+# Without it the console renders and then hangs on its first session call, which
+# Cloudflare surfaces as error 522 (see the long note in values.yaml). The
+# gateway's PROXYING path never needed a database, which is why it ran fine for
+# weeks and only the UI was broken.
+#
+# `fuzeinfra-postgres` is the shared server in this namespace and `litellm` is a
+# dedicated logical database on it, created idempotently by the ensure-database
+# initContainer using the same fuzeinfra-secrets credentials Airflow uses.
+#
+# WATCH THE FIRST ROLLOUT: LiteLLM runs `prisma migrate deploy` at startup once
+# DATABASE_URL is set, so the cold start gets slower and a migration failure
+# CrashLoops a gateway that FuzeFront's chat-service depends on. The startupProbe
+# (60 x 10s) covers the extra time. If it ever does wedge, setting
+# `database.enabled: false` here reverts to the previous behaviour — a working
+# gateway with a broken UI — in one commit.
+database:
+  enabled: true
+
 networkPolicy:
   enabled: true
   allowedNamespaces:
     # FuzeFront chat-service + doc indexer (LITELLM_URL, and the indexer's
     # /embeddings calls).
     - fuzefront
+    # ARC self-hosted runner pods (`runs-on: staging`). CI agents talk to the
+    # gateway instead of holding a provider key: .github/workflows/a2a-maintain.yml
+    # points ANTHROPIC_BASE_URL at this Service. Reaching the gateway from INSIDE
+    # the cluster is what lets it stay ClusterIP-only — the alternative was a
+    # Cloudflare Access service token fronting a service that holds live provider
+    # keys. Remove this and a2a-maintain's preflight times out (and says so).
+    - arc-runners
+    # kube-system (Traefik) is appended automatically by the template because
+    # ingress.enabled is true below — do not add it here as well.
+
+# LiteLLM admin UI at https://litellm.prod.fuzefront.com, reached through the
+# Cloudflare tunnel and gated by the *.prod email-OTP Access app. The App
+# Launcher tile is declared in terraform/contabo/cloudflare.tf
+# (local.launcher_services).
+#
+# No per-host tunnel rule, CNAME or Access app is needed: litellm.prod lands
+# under the existing *.prod wildcard, so the catch-all tunnel rule → Traefik,
+# the *.prod CNAME and the *.prod OTP app already cover routing, DNS and gating.
+#
+# Understand what this exposes before changing it: LiteLLM serves the UI and the
+# API from one port, so /chat/completions and /embeddings are reachable at this
+# hostname too. The gates are Cloudflare Access OTP (admin allowlist) plus
+# LITELLM_MASTER_KEY on every API call. Traefik remains ClusterIP; no host port
+# is opened.
+ingress:
+  enabled: true
+  className: traefik
+  subdomain: litellm
+  domain: prod.fuzefront.com
 
 # NOTE ON NODE PINNING: FuzeFront's own values-prod.yaml pins a `litellm`
 # affinity to node `fuzefront-node-2`. That node does not exist in this cluster

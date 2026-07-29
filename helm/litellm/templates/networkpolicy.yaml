@@ -8,9 +8,19 @@ that as "from anywhere" — so the empty case must never render a rule. Same
 construction as the custom-hostname API's policy, for the same reason.
 
 policyTypes is Ingress-only on purpose: the gateway must egress to
-api.anthropic.com / api.openai.com, and adding Egress here would silently break
-every completion.
+api.anthropic.com / api.openai.com / generativelanguage.googleapis.com, and
+adding Egress here would silently break every completion.
+
+The ingress controller's namespace is appended AUTOMATICALLY when
+ingress.enabled — Traefik runs in kube-system, not fuzeinfra, so without this
+every request arriving through the Ingress is dropped by this policy and the
+App Launcher tile 502s. Deriving it here rather than asking the operator to
+remember it in values is the whole point.
 */ -}}
+{{- $allowed := .Values.networkPolicy.allowedNamespaces | default list -}}
+{{- if .Values.ingress.enabled -}}
+{{- $allowed = append $allowed (.Values.ingress.controllerNamespace | default "kube-system") -}}
+{{- end -}}
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -23,10 +33,10 @@ spec:
       {{- include "litellm.selectorLabels" . | nindent 6 }}
   policyTypes:
     - Ingress
-{{- if .Values.networkPolicy.allowedNamespaces }}
+{{- if $allowed }}
   ingress:
     - from:
-        {{- range (.Values.networkPolicy.allowedNamespaces | uniq) }}
+        {{- range ($allowed | uniq) }}
         - namespaceSelector:
             matchLabels:
               kubernetes.io/metadata.name: {{ . }}

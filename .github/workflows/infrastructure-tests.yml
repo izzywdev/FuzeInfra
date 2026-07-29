@@ -78,7 +78,9 @@ jobs:
           tests/test_ingress_wildcard_priority.py \
           tests/test_local_overlay_installable.py \
           tests/test_chroma_helm_security.py \
-          tests/test_fuzequality_provisioning.py
+          tests/test_fuzequality_provisioning.py \
+          tests/test_a2a_surface.py \
+          tests/test_litellm_ci_routing.py
 
     - name: Install Docker Compose
       run: |

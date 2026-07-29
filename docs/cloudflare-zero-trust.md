@@ -43,9 +43,18 @@ email One-Time PIN before forwarding the request to the tunnel.
 1. A Cloudflare account with `fuzefront.com` in the account's zones
 2. A Cloudflare API token with the following permissions:
    - **Zone > DNS > Edit** — creates CNAME records
+   - **Zone > Zone > Read**
+   - **Zone > SSL and Certificates > Edit** — Cloudflare for SaaS fallback origin
    - **Account > Cloudflare Tunnel > Edit** — creates Named Tunnels
    - **Account > Access: Apps and Policies > Edit** — creates Access apps
-   
+   - **Account > Access: Organizations, Identity Providers, and Groups > Edit** —
+     registers Authentik as an Access login method
+   - **Account > Workers Scripts > Edit** — the Grafana asset + crit-alert Workers
+
+   A missing Access or SSL scope **plans cleanly** and fails only at apply, with
+   a generic `Authentication error (10000)`. The authoritative copy of this table
+   is in [TERRAFORM_CD.md](TERRAFORM_CD.md#cloudflare_api_token-scope).
+
    Create at: [Cloudflare API Tokens](https://dash.cloudflare.com/profile/api-tokens)
 
 3. Terraform >= 1.6 and the Cloudflare provider (downloaded on `init`)

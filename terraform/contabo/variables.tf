@@ -109,10 +109,20 @@ variable "github_repo" {
 # AND injects the computed token into the cluster — no manual steps.
 #
 # Obtain a Cloudflare API token with these permissions:
-#   Zone > DNS > Edit
-#   Account > Cloudflare Tunnel > Edit
-#   Account > Access: Apps and Policies > Edit
+#   Zone    > DNS                                          > Edit
+#   Zone    > Zone                                          > Read
+#   Zone    > SSL and Certificates                          > Edit
+#   Account > Cloudflare Tunnel                             > Edit
+#   Account > Access: Apps and Policies                     > Edit
+#   Account > Access: Organizations, Identity Providers, and Groups > Edit
+#   Account > Workers Scripts                               > Edit
 # Create at: https://dash.cloudflare.com/profile/api-tokens
+#
+# The identity-provider scope is required by
+# cloudflare_zero_trust_access_identity_provider.authentik. A missing Access
+# scope plans CLEAN and fails only at apply, with a generic
+# "Authentication error (10000)" naming the resource but not the scope.
+# Keep this list in sync with docs/TERRAFORM_CD.md and docs/cloudflare-zero-trust.md.
 # ---------------------------------------------------------------------------
 variable "cloudflare_api_token" {
   description = "Cloudflare API token. Leave empty to skip all Cloudflare resources."
@@ -203,9 +213,39 @@ variable "saas_custom_hostnames_enabled" {
 }
 
 variable "allowed_admin_emails" {
-  description = "Email addresses allowed through Cloudflare Access (receives email OTP)"
+  description = "Email addresses allowed through Cloudflare Access. Applies to BOTH login methods: it is the `include` for the break-glass email-OTP policy and the `require` for the Authentik policy."
   type        = list(string)
   default     = ["izzy.weinberg@gmail.com"]
+}
+
+variable "authentik_host" {
+  description = <<-EOT
+    Public hostname of the Authentik IdP, used to build the Cloudflare Access
+    OIDC endpoints and the Authentik App Launcher tile.
+
+    MUST be a host outside the *.prod Access wall — Authentik cannot sit behind
+    the wall it authenticates. auth.fuzefront.com is in local.public_vanity_hosts
+    for exactly this reason. Authentik itself is deployed by izzywdev/FuzeFront.
+  EOT
+  type        = string
+  default     = "auth.fuzefront.com"
+}
+
+variable "authentik_access_client_secret" {
+  description = <<-EOT
+    OIDC client secret for the "cloudflare-access" provider in Authentik. Must
+    match the value sealed as AUTHENTIK_CF_ACCESS_CLIENT_SECRET into the
+    fuzefront-secrets SealedSecret, which is what the Authentik blueprint reads.
+
+    Empty disables the Authentik identity provider AND its Access policies,
+    leaving only the break-glass email-OTP path. Note this is a count gate: if
+    the CD workflow stops passing TF_VAR_authentik_access_client_secret, the
+    plan is a DESTROY of the IdP, not a no-op — the same failure mode already
+    documented for crit_bridge_token.
+  EOT
+  type        = string
+  default     = ""
+  sensitive   = true
 }
 
 variable "access_session_duration" {
@@ -390,3 +430,9 @@ variable "object_storage_bucket_blobs" {
   default     = "fuzeinfra-blobs"
 }
 
+
+variable "manage_control_plane_config" {
+  description = "Manage /etc/rancher/k3s/config.yaml on ALL control planes (control-planes.tf). DEFAULT FALSE: applying it rewrites the config and RESTARTS k3s on each control plane in turn — a live HA operation. Flip only for a deliberate, supervised run. Requires the SSH private key, so it runs from a workstation, not CD."
+  type        = bool
+  default     = false
+}

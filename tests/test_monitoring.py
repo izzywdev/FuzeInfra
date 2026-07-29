@@ -183,12 +183,33 @@ class TestLoki:
         assert response.status_code == 204
 
     def test_loki_query(self, service_urls, wait_for_services):
-        """Test Loki query API."""
-        # Query for any logs (basic query)
-        params = {"query": "{job=~\".+\"}"}
-        response = requests.get(f"{service_urls['loki']}/loki/api/v1/query", params=params, timeout=10)
-        assert response.status_code == 200
-        
+        """Test Loki query API over an explicitly bounded window.
+
+        This used to call the INSTANT endpoint (/loki/api/v1/query) with no time
+        bounds and got a flat 400. An unbounded query is measured against
+        `limits_config.max_query_length` (721h in the chart's Loki config), and
+        Loki rejects it outright rather than clamping.
+
+        A bounded range query is also what this test actually means: "logs from
+        the recent past are queryable". The window only has to cover
+        test_loki_log_ingestion above, which pushes at the current timestamp.
+        """
+        now = time.time()
+        params = {
+            "query": '{job=~".+"}',
+            "start": str(int((now - 300) * 1e9)),   # nanoseconds, 5 minutes back
+            "end": str(int(now * 1e9)),
+            "limit": 10,
+        }
+        response = requests.get(
+            f"{service_urls['loki']}/loki/api/v1/query_range", params=params, timeout=10
+        )
+        # Surface Loki's own error text — a bare status code told us nothing the
+        # last time this failed, and the reason is always in the body.
+        assert response.status_code == 200, (
+            f"Loki rejected the query ({response.status_code}): {response.text[:400]}"
+        )
+
         query_data = response.json()
         assert "data" in query_data
 

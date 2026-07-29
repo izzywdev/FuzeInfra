@@ -62,6 +62,51 @@ affinity: {}
 # -----------------------------------------------------------------------------
 secretName: litellm-secret
 
+# -----------------------------------------------------------------------------
+# Postgres backing store.
+#
+# THE ADMIN UI DOES NOT WORK WITHOUT THIS — that is upstream behaviour, not a
+# preference. LiteLLM's console serves its static bundle happily with no
+# database, which is why "GET /ui returns 200" was mistaken for "the UI works"
+# when the tile was added. The first thing the console does after booting is
+# mint a UI session key, and key generation is a database write. With no
+# DATABASE_URL that request never completes, the page sits on "Loading", and
+# Cloudflare eventually gives up on the origin and serves error 522. The origin
+# log shows exactly that shape: every /litellm-asset-prefix/_next/static/* chunk
+# 200s, and then nothing — uvicorn only writes an access-log line once a
+# response is sent, so a request that hangs forever leaves no trace at all.
+# Upstream: https://docs.litellm.ai/docs/proxy/ui and BerriAI/litellm#30328.
+#
+# CREDENTIALS follow the Airflow precedent rather than the serviceDatabases one.
+# LiteLLM is a FuzeInfra-owned component living in the `fuzeinfra` namespace, so
+# it reads POSTGRES_USER/POSTGRES_PASSWORD straight out of `fuzeinfra-secrets`
+# the same way helm/fuzeinfra/templates/airflow.yaml does — no SealedSecret has
+# to be minted and no credential is committed. serviceDatabases exists for the
+# other case: a CONSUMER repo that seals its own password into this namespace.
+#
+# HARDENING FOLLOW-UP: those are the Postgres SUPERUSER credentials. Airflow
+# already connects this way so this is no worse than the status quo, but the
+# better end state is a dedicated `litellm_svc` role via serviceDatabases, which
+# needs a sealed password. Doing that later is a values change plus a
+# SealedSecret — no template change.
+#
+# `name` is a separate logical database on the shared server, so LiteLLM's
+# prisma migrations can never touch another service's tables.
+# -----------------------------------------------------------------------------
+database:
+  # Off in the base chart for the same reason `enabled` is: a chart rendered
+  # without the fuzeinfra umbrella has no fuzeinfra-secrets to read.
+  enabled: false
+  host: fuzeinfra-postgres
+  port: 5432
+  name: litellm
+  credentialsSecret: fuzeinfra-secrets
+  userKey: POSTGRES_USER
+  passwordKey: POSTGRES_PASSWORD
+  # Used by the ensure-database initContainer only. postgres:15 matches the
+  # server version the umbrella chart runs, and it ships psql + pg_isready.
+  provisionImage: postgres:15
+
 # Provider keys wired into the pod as env. `required: false` renders the env var
 # with optional=true, so a missing key leaves the var unset (and only the models
 # that need it fail) instead of blocking pod start.
@@ -109,20 +154,70 @@ models:
   #
   # Model IDs verified against the live key's own /v1/models listing, not
   # assumed: this key exposes gpt-4.1 / gpt-4o but NOT gpt-5.
+  #
+  # `additional_drop_params` on every NON-Anthropic model below is what makes the
+  # fallback usable by Anthropic-format callers — chiefly Claude Code, which reaches
+  # the gateway via /v1/messages (ANTHROPIC_BASE_URL) rather than /chat/completions.
+  # Such a caller sends Anthropic-only body fields; when the router falls through to
+  # OpenAI or Gemini, LiteLLM bridges the request and the upstream rejects them with
+  # `Extra inputs are not permitted`. Dropping them turns a hard 400 on hop 2 into a
+  # served answer — the difference between a fallback chain that exists and one that
+  # works.
+  #
+  #   thinking            — Claude Code sends {"type":"adaptive"} on 4.6+ models, AND
+  #                         on any model name it does not recognise, which includes
+  #                         every gateway alias here. Not suppressible client-side.
+  #   context_management  — context-editing beta.
+  #   output_config       — effort / structured-output / task-budget settings.
+  #
+  # Deliberately scoped PER MODEL, not global: `litellm_settings` would strip these
+  # from the Anthropic primary too, silently downgrading normal operation to buy
+  # nothing. The primary path keeps full fidelity; only the hops that cannot accept
+  # these fields discard them.
   - name: gpt-4.1
     provider: openai/gpt-4.1
     keyEnv: OPENAI_API_KEY
+    extraParams:
+      additional_drop_params: ["thinking", "context_management", "output_config"]
   - name: gpt-4.1-mini
     provider: openai/gpt-4.1-mini
     keyEnv: OPENAI_API_KEY
-  # Gemini is the LAST hop and is currently NON-FUNCTIONAL: the key returns
-  # "You exceeded your current quota" (free-tier exhausted). Kept wired so it
-  # starts working the moment billing is fixed, with no chart change. It costs
-  # nothing in the normal path — fallbacks stop at the first success, so this is
-  # only ever reached if BOTH Anthropic and OpenAI have failed.
+    extraParams:
+      additional_drop_params: ["thinking", "context_management", "output_config"]
+  # --- Gemini ------------------------------------------------------------------
+  # ALL of these are currently NON-FUNCTIONAL: the key returns "You exceeded your
+  # current quota" (free tier exhausted). Wired anyway so they start working the
+  # moment billing is fixed, with no chart change. Costs nothing in the normal
+  # path — fallbacks stop at the first success, so gemini is only ever reached if
+  # BOTH Anthropic and OpenAI have failed.
+  #
+  # Model IDs taken from the key's own ListModels response (filtered to those
+  # advertising generateContent), not guessed.
+  - name: gemini-2.5-pro
+    provider: gemini/gemini-2.5-pro
+    keyEnv: GEMINI_API_KEY
+    extraParams:
+      additional_drop_params: ["thinking", "context_management", "output_config"]
+  - name: gemini-2.5-flash
+    provider: gemini/gemini-2.5-flash
+    keyEnv: GEMINI_API_KEY
+    extraParams:
+      additional_drop_params: ["thinking", "context_management", "output_config"]
+  - name: gemini-2.5-flash-lite
+    provider: gemini/gemini-2.5-flash-lite
+    keyEnv: GEMINI_API_KEY
+    extraParams:
+      additional_drop_params: ["thinking", "context_management", "output_config"]
   - name: gemini-2.0-flash
     provider: gemini/gemini-2.0-flash
     keyEnv: GEMINI_API_KEY
+    extraParams:
+      additional_drop_params: ["thinking", "context_management", "output_config"]
+  - name: gemini-2.0-flash-lite
+    provider: gemini/gemini-2.0-flash-lite
+    keyEnv: GEMINI_API_KEY
+    extraParams:
+      additional_drop_params: ["thinking", "context_management", "output_config"]
   # --- embeddings -------------------------------------------------------------
   # FuzeFront's LITELLM_EMBEDDING_MODEL default. OpenAI, not Anthropic —
   # Anthropic ships no embeddings endpoint, so /embeddings cannot be served by
@@ -161,23 +256,49 @@ generalSettings: {}
 #
 # Every name on BOTH sides of these maps must exist in `models` above.
 # -----------------------------------------------------------------------------
+# Each hop is matched to the primary's TIER, so a provider outage never silently
+# upgrades or downgrades what a caller gets: frontier falls back to frontier,
+# cheap/fast falls back to cheap/fast. Getting this wrong is how an outage
+# quietly multiplies cost per turn (or halves answer quality).
 routerSettings:
   fallbacks:
-    - claude-opus-4-5: ["gpt-4.1", "gemini-2.0-flash"]
-    - claude-opus-5: ["gpt-4.1", "gemini-2.0-flash"]
-    - claude-sonnet-5: ["gpt-4.1", "gemini-2.0-flash"]
-    # Haiku is the cheap/fast tier — fall back to a cheap/fast peer, not to a
-    # frontier model, so a provider outage cannot quietly multiply cost per turn.
-    - claude-haiku-4-5: ["gpt-4.1-mini", "gemini-2.0-flash"]
+    - claude-opus-4-5: ["gpt-4.1", "gemini-2.5-pro"]
+    - claude-opus-5: ["gpt-4.1", "gemini-2.5-pro"]
+    - claude-sonnet-5: ["gpt-4.1", "gemini-2.5-flash"]
+    - claude-haiku-4-5: ["gpt-4.1-mini", "gemini-2.5-flash-lite"]
 
 # -----------------------------------------------------------------------------
 # Defence in depth: only the namespaces listed here may open a connection to the
-# gateway. It holds live provider credentials, so it is never exposed through an
-# Ingress or the Cloudflare tunnel — cluster-internal only, by construction.
+# gateway.
 #
 # Egress is deliberately unrestricted (no Egress policyType): the gateway must
-# reach api.anthropic.com and api.openai.com.
+# reach api.anthropic.com, api.openai.com and generativelanguage.googleapis.com.
+#
+# NOTE: when `ingress.enabled` is true the template ALSO admits the ingress
+# controller's namespace automatically. Leaving that to the operator is how you
+# get a tile that 502s — Traefik runs in kube-system, not in fuzeinfra, so the
+# policy would otherwise drop every request coming through the Ingress.
 # -----------------------------------------------------------------------------
 networkPolicy:
   enabled: false
   allowedNamespaces: []
+
+# -----------------------------------------------------------------------------
+# Ingress — the LiteLLM ADMIN UI (/ui), reachable at
+# litellm.<domain> through the Cloudflare tunnel.
+#
+# SECURITY POSTURE, read before enabling. This service holds live provider API
+# keys, and exposing it publishes the FULL API surface (/chat/completions,
+# /embeddings) at that hostname, not just the UI — LiteLLM serves them from one
+# port and there is no path split here. Two independent gates stand in front:
+#   1. Cloudflare Access email-OTP on *.prod.fuzefront.com (admin allowlist), and
+#   2. LITELLM_MASTER_KEY, still required on every API call.
+# Traefik stays ClusterIP and all traffic arrives via the tunnel, so this opens
+# no host port. Off by default; prod turns it on deliberately.
+# -----------------------------------------------------------------------------
+ingress:
+  enabled: false
+  className: traefik
+  # Rendered host is "<subdomain>.<domain>". domain MUST be set when enabled.
+  subdomain: litellm
+  domain: ""

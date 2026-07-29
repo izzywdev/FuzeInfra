@@ -1,0 +1,19 @@
+# SealedSecret manifests. `spec.encryptedData` values are CIPHERTEXT, encrypted
+# against this cluster's published public cert; only the in-cluster controller
+# holds the private key. Being safe to commit is the entire point of Sealed
+# Secrets — see docs/SECRETS_MANAGEMENT.md, which makes committing them the
+# required workflow.
+#
+# generic.secrets.security.detected-generic-secret fires on the base64 blobs
+# regardless, and re-fires on the whole file the moment a diff touches ANY key,
+# so every routine credential rotation (including the self-service
+# rotate-sealed-secret.yml workflow) would turn this check red for a finding
+# that is a false positive by construction. A check that is red on every
+# rotation is a check people learn to ignore.
+#
+# SCOPE NOTE: this directory holds ONLY SealedSecrets and their `.template`
+# siblings. The trade-off is that a *plaintext* v1/Secret accidentally committed
+# HERE would no longer be caught by this rule — so keep the directory to sealed
+# manifests only. Detection is unchanged everywhere else in the repo, which is
+# where a real leak would actually land.
+deploy/sealed-secrets/

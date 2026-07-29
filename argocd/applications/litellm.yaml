@@ -11,9 +11,9 @@
 #   Postgres/Kafka/Grafana — and folding it in would make each of those a
 #   full-platform resync. Same rationale as argocd/applications/longhorn.yaml and
 #   fuzeinfra-sealed-secrets.yaml. There is no overlap: Argo tracks resources by
-#   `argocd.argoproj.io/instance` (argocd/argocd-server-config.yaml,
-#   application.instanceLabelKey), so fuzeinfra-prod's prune never touches
-#   objects this app owns, and vice versa.
+#   `argocd.argoproj.io/instance` (application.instanceLabelKey, left at the
+#   upstream default), so fuzeinfra-prod's prune never touches objects this app
+#   owns, and vice versa.
 #
 # HISTORY
 #   FuzeFront carried deploy/argocd/applications/litellm.yaml until f7c2ad56

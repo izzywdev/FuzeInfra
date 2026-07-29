@@ -26,6 +26,8 @@ on:
     branches: [main]
     paths:
       - 'argocd/cluster-config/**'
+      - 'argocd/cluster-bootstrap/**'
+      - 'argocd/cluster-settings/**'
       - 'argocd/notifications/**'
   workflow_dispatch: {}
 
@@ -42,16 +44,71 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # `runs-on: staging` is a self-hosted runner and does NOT ship kubectl.
+      # It used to be present in the image: this workflow last succeeded
+      # 2026-07-05 and then failed with "kubectl: command not found" on
+      # 2026-07-29, i.e. the runner drifted underneath us. Because every step
+      # here is a kubectl call, the whole workflow became a silent no-op that
+      # only surfaced when someone actually needed it to land a change.
+      #
+      # Install it explicitly rather than trusting the image, so the workflow is
+      # self-contained and survives the next runner rebuild.
+      - name: Install kubectl
+        run: |
+          if command -v kubectl >/dev/null 2>&1; then
+            echo "kubectl already present: $(kubectl version --client -o yaml 2>/dev/null | head -3 | tr '\n' ' ')"
+            exit 0
+          fi
+          # Pin to the cluster's minor version rather than `stable.txt`: kubectl
+          # supports +/-1 minor from the API server, so an unpinned client can
+          # drift out of the support window without warning.
+          KUBECTL_VERSION="v1.31.4"
+          curl -fsSLo /tmp/kubectl "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl"
+          chmod +x /tmp/kubectl
+          mkdir -p "$HOME/.local/bin"
+          mv /tmp/kubectl "$HOME/.local/bin/kubectl"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          echo "installed kubectl ${KUBECTL_VERSION}"
+
       - name: Configure kubectl
         run: |
           mkdir -p "$HOME/.kube"
           echo "${{ secrets.KUBE_CONFIG }}" | base64 -d > "$HOME/.kube/config"
+          kubectl version --client=true -o yaml >/dev/null
+          echo "kubectl configured."
 
       - name: Apply argocd/cluster-config
         run: |
           kubectl apply -f argocd/cluster-config/
           echo "Applied argocd/cluster-config/ to the shared cluster."
           echo "SealedSecrets decrypt in-cluster; ArgoCD picks up repo-creds on its next repo access."
+
+      - name: Apply argocd/cluster-bootstrap
+        run: |
+          kubectl apply -f argocd/cluster-bootstrap/
+          echo "Applied argocd/cluster-bootstrap/ — HelmChartConfigs (traefik, coredns, etc.)."
+          echo "k3s helm-controller reconciles within ~15s."
+
+      - name: Apply argocd/cluster-settings (server-side)
+        run: |
+          # SERVER-SIDE, deliberately — these patch ArgoCD's OWN ConfigMaps
+          # (argocd-cm, argocd-rbac-cm), which are not owned by git: upstream
+          # install.yaml ships defaults in them and a kubectl patch adds more.
+          # ConfigMap `data` is a granular map under SSA, so ownership is
+          # per-key and the keys we don't declare are left alone. A client-side
+          # `kubectl apply` would three-way-merge against install.yaml's
+          # last-applied and DELETE every key we omit — including the custom
+          # Ingress health check, without which every Application sits
+          # Progressing forever (Traefik is ClusterIP, so Ingresses get no
+          # ADDRESS).
+          #
+          # --force-conflicts takes ownership of the specific keys we declare
+          # from whichever manager set them first. It does not touch other keys.
+          kubectl apply --server-side --force-conflicts \
+            --field-manager=fuzeinfra-cluster-settings \
+            -f argocd/cluster-settings/
+          echo "Applied argocd/cluster-settings/ (server-side)."
+          echo "argocd-server reads oidc.config on demand; RBAC is hot-reloaded."
 
       - name: Apply argocd/notifications
         run: |

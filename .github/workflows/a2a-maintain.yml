@@ -8,9 +8,39 @@ name: A2A Maintain
 # can't (fork PR / first-time build), it opens a separate `auto-merge`-labelled follow-up
 # PR. It never fabricates a role's product behaviour, never handles creds, never deploys.
 #
-# Requires repo secret ANTHROPIC_API_KEY. No key -> SKIPS (never red). The `a2a-maintainer`
-# agent def is stamped by sdlc-bootstrap into .claude/agents/ and reconciled by
-# governance-sync; this workflow just invokes it.
+# PROVIDER-INDEPENDENT BY CONSTRUCTION. This workflow holds NO provider key. It talks
+# only to the shared LiteLLM gateway (docs/consuming-repos/LITELLM_GATEWAY.md) with
+# a scoped gateway key, and the gateway owns model routing, key custody and cross-provider
+# failover: `routerSettings.fallbacks` in helm/litellm/values.yaml retries the SAME
+# request against OpenAI, then Gemini, and returns a normal 200. The failover is a
+# LiteLLM Router feature — there is deliberately no fallback logic here, because a
+# client that implements its own failover has to hold every provider's key, which is
+# the coupling the gateway exists to remove.
+#
+# WHY: on 2026-07-29 the Anthropic account ran out of credit and every Claude-driven
+# workflow in the repo died on its first API call. The action's wrapper swallowed the
+# error and reported only `is_error:true, num_turns:1, $0`, so `a2a-maintain` went red
+# on every PR for a day with a log that said nothing actionable. One provider's billing
+# lapse should not be able to do that.
+#
+# Requires repo secret LITELLM_CI_KEY — a SCOPED virtual key (budget + model allowlist,
+# minted by scripts/mint-litellm-ci-key.sh), NOT the gateway admin key. Falls back to
+# LITELLM_MASTER_KEY with a warning so the migration is zero-downtime. No key at all,
+# or an unreachable gateway -> SKIPS (never red): none of that is the PR author's
+# fault, and a permanent red nobody can
+# clear is indistinguishable from a broken check — it trains people to ignore it,
+# including on the day it goes red for REAL A2A drift. A genuine agent failure is still
+# RED, with the real error text surfaced (see "Surface the real result" below).
+#
+# The `a2a-maintainer` agent def is stamped by sdlc-bootstrap into .claude/agents/ and
+# reconciled by governance-sync; this workflow just invokes it.
+#
+# RUNNER: `staging` (in-cluster ARC pods, namespace arc-runners) — NOT ubuntu-latest.
+# The gateway is ClusterIP-only with a NetworkPolicy and holds live provider keys; it is
+# unreachable from a hosted runner by design, and it should stay that way. Reaching it
+# from inside the cluster is what avoids punching a hole for CI. `arc-runners` is on the
+# gateway's networkPolicy.allowedNamespaces (helm/litellm/values-contabo.yaml) — remove
+# it there and this job's preflight starts timing out.
 
 on:
   pull_request:
@@ -25,22 +55,68 @@ concurrency:
   group: a2a-maintain-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
+env:
+  # Everything below is gateway addressing — no provider key, no provider hostname.
+  #
+  # Claude Code speaks the Anthropic Messages format to whatever ANTHROPIC_BASE_URL
+  # points at; LiteLLM serves that format at /v1/messages and bridges it to whichever
+  # provider the router picks. In-cluster service DNS, plain HTTP — pod network only.
+  ANTHROPIC_BASE_URL: http://litellm.fuzeinfra.svc.cluster.local:4000
+
+  # Pin EVERY alias to a name the gateway actually serves (`models[].name` in
+  # helm/litellm/values.yaml). Unpinned, Claude Code picks its own built-in IDs and the
+  # gateway 400s on a model it has never heard of — that is exactly what the original
+  # failing run did, requesting `claude-opus-5[1m]` (the `[1m]` suffix is the
+  # extended-context marker, not a model the gateway lists). DISABLE_1M_CONTEXT stops
+  # the suffix being appended at all. tests/test_litellm_ci_routing.py asserts every
+  # name here still exists in the gateway's model list.
+  ANTHROPIC_MODEL: claude-opus-5
+  ANTHROPIC_DEFAULT_OPUS_MODEL: claude-opus-5
+  ANTHROPIC_DEFAULT_SONNET_MODEL: claude-sonnet-5
+  # Also serves background functionality, so an unpinned value 400s mid-run rather
+  # than at startup — the most annoying way to discover a bad model name.
+  ANTHROPIC_DEFAULT_HAIKU_MODEL: claude-haiku-4-5
+  CLAUDE_CODE_DISABLE_1M_CONTEXT: "1"
+
+  # Pre-release capabilities (context_management, beta tool schema fields) are sent to
+  # Anthropic-format endpoints and rejected with `Extra inputs are not permitted` by a
+  # non-Anthropic upstream. Suppressing them client-side is what lets a fallback hop to
+  # OpenAI/Gemini actually complete instead of 400ing the moment Anthropic is down.
+  CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS: "1"
+  # Version checks, telemetry and auto-update go direct to Anthropic, not through the
+  # gateway. The action installs a pinned CLI per run, so there is nothing to update.
+  CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
+
 jobs:
   a2a-maintain:
-    # Loop guard: never run on our own maintenance branches.
-    if: ${{ !startsWith(github.event.pull_request.head.ref, 'a2a-maintain/') }}
-    runs-on: ubuntu-latest
+    # Loop guard: never run on our own maintenance branches. Same-repo guard: this job
+    # runs an agent with Bash on an IN-CLUSTER runner, so it must never execute code
+    # checked out from a fork. It already could not push to a fork branch (the prompt
+    # falls back to opening a follow-up PR), so the only thing lost is A2A upkeep on
+    # fork PRs — cheap next to handing a fork arbitrary execution inside the cluster.
+    if: >-
+      ${{ !startsWith(github.event.pull_request.head.ref, 'a2a-maintain/')
+          && github.event.pull_request.head.repo.full_name == github.repository }}
+    runs-on: staging
     steps:
-      - name: Skip if key absent or repo not onboarded
+      - name: Skip if gateway key absent
         id: guard
         env:
-          KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          KEY: ${{ secrets.LITELLM_CI_KEY || secrets.LITELLM_MASTER_KEY }}
+          SCOPED: ${{ secrets.LITELLM_CI_KEY != '' }}
         run: |
-          if [ ! -f .fuze/manifest.json ] 2>/dev/null; then :; fi
           if [ -z "$KEY" ]; then
-            echo "::notice::ANTHROPIC_API_KEY not set — A2A maintain skipped (set it to enable)."
+            echo "::notice::No gateway key set — A2A maintain skipped. Mint one with scripts/mint-litellm-ci-key.sh and set it as LITELLM_CI_KEY."
             echo "ok=false" >> "$GITHUB_OUTPUT"
           else
+            if [ "$SCOPED" != "true" ]; then
+              # Works, but the master key is the gateway ADMIN key: it can mint
+              # keys, read the proxy config and see every consumer's spend. CI
+              # needs none of that, and spend booked against it cannot be
+              # attributed. Deliberately a warning, not a failure — this path is
+              # what keeps the check alive during the migration.
+              echo "::warning::Falling back to LITELLM_MASTER_KEY (the gateway ADMIN key). Mint a scoped key with scripts/mint-litellm-ci-key.sh, set it as LITELLM_CI_KEY, then delete the LITELLM_MASTER_KEY repo secret."
+            fi
             echo "ok=true" >> "$GITHUB_OUTPUT"
           fi
 
@@ -63,11 +139,83 @@ jobs:
             echo "run=true" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Run a2a-maintainer
+      # Prove the WHOLE path before spending a run on it: gateway reachable through the
+      # NetworkPolicy, master key accepted, /v1/messages served, and the pinned model
+      # resolvable — including via fallback. A 200 here when Anthropic is dead is the
+      # gateway doing its job; that is the entire point of the exercise, so unlike the
+      # old direct-to-Anthropic preflight this one says nothing about any one provider.
+      #
+      # Any failure is a SKIP, not a red: an unreachable gateway, a revoked master key
+      # and a fallback chain that is exhausted are all operator problems, none of them
+      # fixable by the PR this is running on.
+      - name: Preflight — gateway reachable & serving the pinned model
+        id: preflight
         if: steps.guard.outputs.ok == 'true' && steps.marker.outputs.run == 'true'
+        env:
+          GATEWAY_KEY: ${{ secrets.LITELLM_CI_KEY || secrets.LITELLM_MASTER_KEY }}
+        run: |
+          set -uo pipefail
+          # NO `|| echo 000` here: curl's own -w already emits 000 when it never got
+          # an HTTP response, so appending another produced the literal code "000000",
+          # which matched no branch below and buried the real diagnosis in the generic
+          # arm. `|| true` keeps `bash -e` from killing the step on curl's exit code.
+          code=$(curl -sS -o /tmp/preflight.json -w '%{http_code}' --max-time 30 \
+            -X POST "${ANTHROPIC_BASE_URL}/v1/messages" \
+            -H "Authorization: Bearer ${GATEWAY_KEY}" \
+            -H "anthropic-version: 2023-06-01" \
+            -H "content-type: application/json" \
+            -d "{\"model\":\"${ANTHROPIC_MODEL}\",\"max_tokens\":1,\"messages\":[{\"role\":\"user\",\"content\":\"ping\"}]}" \
+            2>/tmp/preflight.err) || true
+          [ -z "${code:-}" ] && code="000"
+          err=$(jq -r '.error.message // .message // empty' /tmp/preflight.json 2>/dev/null || true)
+          # curl's stderr is the ONLY thing that distinguishes the transport failures
+          # from each other — "Could not resolve host" (cluster DNS), "Connection
+          # timed out" (NetworkPolicy drop) and "Connection refused" (nothing
+          # listening) all arrive as code 000 and need completely different fixes.
+          transport=$(tr -d '\r' < /tmp/preflight.err 2>/dev/null | grep -v '^$' | tail -1 || true)
+          echo "curl exit detail: ${transport:-<none>} (http_code=$code)"
+          [ -z "$err" ] && err="HTTP $code"
+          case "$code" in
+            200)
+              echo "ok=true" >> "$GITHUB_OUTPUT"
+              echo "LiteLLM gateway preflight OK (model ${ANTHROPIC_MODEL})" ;;
+            000)
+              # No HTTP response at all. `transport` says which of three unrelated
+              # faults it was, so the reason names the actual fix instead of listing
+              # every possibility.
+              echo "ok=false" >> "$GITHUB_OUTPUT"
+              echo "reason=LiteLLM gateway unreachable at ${ANTHROPIC_BASE_URL} — ${transport:-no detail from curl}. Resolve-host errors mean cluster DNS from arc-runners; timeouts mean the NetworkPolicy is dropping us (arc-runners must be on networkPolicy.allowedNamespaces); connection-refused means the pod is not serving." >> "$GITHUB_OUTPUT" ;;
+            401|403)
+              echo "ok=false" >> "$GITHUB_OUTPUT"
+              echo "reason=LiteLLM rejected the gateway key (HTTP $code): $err. A virtual key is revoked/expired or over budget; the master key would mean it drifted from the gateway's sealed value." >> "$GITHUB_OUTPUT" ;;
+            404)
+              echo "ok=false" >> "$GITHUB_OUTPUT"
+              echo "reason=Gateway did not serve /v1/messages (HTTP 404): $err. Claude Code speaks the Anthropic Messages format; this LiteLLM build must expose that endpoint." >> "$GITHUB_OUTPUT" ;;
+            *)
+              # Includes 400 (model not in the gateway's list) and 5xx (every fallback
+              # hop exhausted — i.e. all three providers failed).
+              echo "ok=false" >> "$GITHUB_OUTPUT"
+              echo "reason=Gateway could not serve ${ANTHROPIC_MODEL} (HTTP $code): $err" >> "$GITHUB_OUTPUT" ;;
+          esac
+
+      - name: Run a2a-maintainer
+        id: claude
+        if: steps.guard.outputs.ok == 'true' && steps.marker.outputs.run == 'true' && steps.preflight.outputs.ok == 'true'
+        # continue-on-error so the steps below own the verdict: they can tell an
+        # account-level outage (warn, stay green) from a real agent failure (red),
+        # which the action itself cannot.
+        continue-on-error: true
         uses: anthropics/claude-code-action@be7b93b1907a4abad570368f3c74b6fe3807510b  # v1
+        env:
+          # LiteLLM authenticates `Authorization: Bearer`, so the key has to travel in
+          # ANTHROPIC_AUTH_TOKEN — the action does not read that variable itself, which
+          # is why the same secret is ALSO passed as the input below: the input exists
+          # purely to satisfy the action's "some credential is configured" launch check,
+          # and the copy it puts in x-api-key is ignored. Dropping either one breaks the
+          # run, in two different and equally confusing ways.
+          ANTHROPIC_AUTH_TOKEN: ${{ secrets.LITELLM_CI_KEY || secrets.LITELLM_MASTER_KEY }}
         with:
-          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          anthropic_api_key: ${{ secrets.LITELLM_CI_KEY || secrets.LITELLM_MASTER_KEY }}
           prompt: |
             You are the **a2a-maintainer** for this repo (follow `.claude/agents/a2a-maintainer.md`
             exactly — same scope, boundaries, and done-contract). This is an automated CI run on
@@ -96,3 +244,98 @@ jobs:
             End with the done-contract line from your agent def
             (`A2A SURFACE: <in-sync|scaffolded|reconciled>` + what landed + `NEEDS PRODUCT/OPERATOR:` if any).
           claude_args: '--allowedTools "Bash,Read,Edit,MultiEdit,Write,Glob,Grep,WebFetch"'
+
+      # The wrapper prints only `is_error:true` and swallows WHY. Pull the result
+      # record out of the execution log and put the actual error text in the log +
+      # keep the whole log as an artifact, so the next failure is diagnosable from
+      # the run page instead of by re-deriving it from first principles.
+      - name: Surface the real result
+        id: result
+        if: always() && steps.claude.outcome != 'skipped'
+        env:
+          EXEC_FILE: ${{ steps.claude.outputs.execution_file }}
+        run: |
+          set -uo pipefail
+          if [ -z "${EXEC_FILE:-}" ] || [ ! -f "$EXEC_FILE" ]; then
+            echo "no execution file produced by the action"
+            echo "is_error=unknown" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          res=$(jq -rs '[.[] | .. | objects | select(.type? == "result")] | last' "$EXEC_FILE" 2>/dev/null || echo "null")
+          echo "--- claude result record ---"; echo "$res"
+          is_error=$(printf '%s' "$res" | jq -r '.is_error // false' 2>/dev/null || echo unknown)
+          # `.result`/`.error` carry the human-readable failure when the SDK sets one.
+          msg=$(printf '%s' "$res" | jq -r '(.error // .result // "") | tostring' 2>/dev/null || true)
+          echo "is_error=$is_error" >> "$GITHUB_OUTPUT"
+          {
+            echo "msg<<EOF"
+            echo "${msg:-<no message in result record>}"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Upload claude execution log
+        if: always() && steps.claude.outcome == 'failure'
+        uses: actions/upload-artifact@v7
+        with:
+          name: a2a-maintain-execution-log
+          path: ${{ steps.claude.outputs.execution_file }}
+          if-no-files-found: ignore
+          retention-days: 7
+
+      # The verdict. Gateway-level outage -> loud warning, green. Real agent failure
+      # -> red, with the surfaced message.
+      - name: Verdict
+        if: always() && steps.guard.outputs.ok == 'true' && steps.marker.outputs.run == 'true'
+        env:
+          PREFLIGHT_OK: ${{ steps.preflight.outputs.ok }}
+          PREFLIGHT_REASON: ${{ steps.preflight.outputs.reason }}
+          CLAUDE_OUTCOME: ${{ steps.claude.outcome }}
+          RESULT_IS_ERROR: ${{ steps.result.outputs.is_error }}
+          RESULT_MSG: ${{ steps.result.outputs.msg }}
+        run: |
+          set -uo pipefail
+          if [ "${PREFLIGHT_OK:-}" != "true" ]; then
+            echo "::warning::A2A maintain SKIPPED — ${PREFLIGHT_REASON}. A2A drift is NOT being checked on this PR until the LiteLLM gateway is reachable again."
+            {
+              echo "### ⚠️ A2A maintain skipped — LiteLLM gateway unusable"
+              echo ""
+              echo "\`${PREFLIGHT_REASON}\`"
+              echo ""
+              echo "This is an **infrastructure** problem, not a problem with this PR — nothing you"
+              echo "can change here will clear it. The reason above names the specific fix; see"
+              echo "\`docs/consuming-repos/LITELLM_GATEWAY.md\`. The check resumes on the next PR"
+              echo "event with no further action."
+              echo ""
+              echo "Note this is **not** a single-provider outage: the gateway fails over Anthropic →"
+              echo "OpenAI → Gemini on its own, so reaching this message means the gateway itself is"
+              echo "unreachable or every hop was exhausted."
+              echo ""
+              echo "**Until then the repo's A2A surface is not being checked for drift.**"
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          if [ "${CLAUDE_OUTCOME:-}" = "failure" ] || [ "${RESULT_IS_ERROR:-}" = "true" ]; then
+            echo "::error::a2a-maintainer did not complete: ${RESULT_MSG:-no error message surfaced}"
+            {
+              echo "### ❌ a2a-maintainer failed"
+              echo ""
+              echo '```'
+              echo "${RESULT_MSG:-no error message surfaced}"
+              echo '```'
+              echo ""
+              echo "Full execution log is attached as the \`a2a-maintain-execution-log\` artifact."
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          # The action reported success. If it also left no execution log there is no
+          # result record to corroborate that, so say so rather than printing a clean
+          # "completed" the run has not actually earned. Still green — the action's own
+          # outcome is real evidence — but this check exists precisely because a green
+          # that overstates what it verified is how the original outage hid for a day.
+          if [ "${RESULT_IS_ERROR:-}" = "unknown" ]; then
+            echo "::notice::a2a-maintainer reported success, but produced no execution log — completion could not be corroborated from a result record."
+            echo "### ✅ a2a-maintainer completed (unverified)" >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "The action exited successfully but wrote no execution log, so there is no result record to confirm what it did." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          echo "a2a-maintainer completed."

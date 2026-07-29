@@ -113,7 +113,13 @@ the token needs all of:
 | Zone → **SSL and Certificates → Edit** | `fuzefront.com` |
 | Account → Cloudflare Tunnel → Edit | the account |
 | Account → Access: Apps and Policies → Edit | the account |
+| Account → **Access: Organizations, Identity Providers, and Groups → Edit** | the account |
 | Account → Workers Scripts → Edit | the account |
+
+**Access: Organizations, Identity Providers, and Groups → Edit** is required by
+`cloudflare_zero_trust_access_identity_provider.authentik`, which registers
+Authentik as a login method for the admin wall. It fails the same silent way as
+the SSL scope below: clean plan, `Authentication error (10000)` at apply.
 
 A token missing **SSL and Certificates → Edit** plans cleanly and then fails at
 apply time with:

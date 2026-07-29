@@ -141,6 +141,37 @@ materializes the real `Secret` at sync time. Consequences:
 - The **private key never leaves the cluster** and is backed up by the operator
   out-of-band (see below).
 
+### Recovering a live value (operator only)
+
+You cannot unseal the committed blob, but the *materialized* `Secret` in the
+cluster still holds the plaintext, so an operator with node access can read it
+back. Pull the kubeconfig off the node and read the key directly:
+
+```bash
+ssh root@<server_ip> "cat /etc/rancher/k3s/k3s.yaml" \
+  | sed 's/127\.0\.0\.1/<server_ip>/g' > ~/.kube/contabo-prod.yaml
+chmod 600 ~/.kube/contabo-prod.yaml
+
+KUBECONFIG=~/.kube/contabo-prod.yaml kubectl -n fuzeinfra get secret <name> \
+  -o jsonpath='{.data.<KEY>}' | base64 -d; echo
+```
+
+`server_ip` is Terraform's output; SSH is key-based (the public key is injected
+via cloud-init in `terraform/contabo/vps.tf`), so there is no root password to
+know. If the private key is lost, recovery is Contabo's control panel — or
+rotation, which needs no cluster access at all.
+
+**Do not route this through `cluster-query`.** That workflow echoes kubectl output
+into a GitHub Actions job log, which is retained and readable by anyone with repo
+access — so `get secret -o jsonpath=…` there leaks the credential even though it
+is only a read. It is blocked for that reason
+(`.github/workflows/cluster-query.yml`, covered by
+`tests/test_cluster_query_guard.py`). SealedSecrets *are* readable there, being
+encrypted at rest.
+
+Treat any value recovered this way as exposed to whatever it passed through, and
+rotate if that set is wider than you want.
+
 ---
 
 ## 5. Key rotation
@@ -232,6 +263,9 @@ That gives every onboarded repo offline self-sealing with zero cluster access.
 - **Always fetch** the cert from the published URL; never hardcode a vendored cert.
 - **Seal offline**; decryption is **cluster-only**.
 - **No consumer gets a kubeconfig** — sealing needs only the public cert.
+- **Never read a `Secret` through a CI workflow.** Read-only is not the same as
+  safe-to-log: job logs are retained and repo-readable. Use the operator SSH path
+  in §4, or rotate.
 
 ## Related docs
 

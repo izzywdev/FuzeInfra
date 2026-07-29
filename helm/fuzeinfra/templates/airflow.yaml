@@ -91,7 +91,16 @@ referenced via $(VAR) interpolation to build the SQLAlchemy/Celery URLs.
     - bash
     - -c
     - |
+      # Bounded, not an open-ended poll. An unbounded wait would leave a pod
+      # sitting in Init indefinitely if the database never arrives — quiet, and
+      # invisible to anything watching restart counts. Failing at the deadline
+      # restarts the pod, which is the signal an operator actually sees.
+      deadline=$(( $(date +%s) + {{ .Values.airflow.init.waitTimeoutSeconds | default 600 }} ))
       until airflow db check-migrations -t 5 >/dev/null 2>&1; do
+        if [ "$(date +%s)" -ge "$deadline" ]; then
+          echo "airflow metadata database still not ready after {{ .Values.airflow.init.waitTimeoutSeconds | default 600 }}s — giving up so this surfaces as a restart." >&2
+          exit 1
+        fi
         echo "waiting for the airflow metadata database to be created and migrated..."
         sleep 5
       done
@@ -222,11 +231,19 @@ metadata:
 {{- end }}
 spec:
   backoffLimit: 6
-{{- if eq $initMode "inline" }}
-  # Nothing reaps a non-hook Job. Well clear of helm's --wait budget, so the
-  # Job is still around to be waited on.
-  ttlSecondsAfterFinished: 3600
-{{- end }}
+{{- /*
+  Deliberately NO ttlSecondsAfterFinished in inline mode.
+
+  A TTL would be actively harmful here. The Job is a tracked resource that Argo
+  owns, and prod runs `automated: {prune: true, selfHeal: true}` — so the TTL
+  controller deletes the completed Job, Argo notices the drift, recreates it, and
+  it re-runs `airflow db migrate` against live prod. Every hour. Forever, with
+  the app flapping OutOfSync the whole time.
+
+  Without a TTL there is exactly ONE Job per distinct pod-template hash and it
+  stays Completed. Superseded hashes stop being rendered, so Helm and Argo prune
+  them on the next upgrade/sync. Nothing accumulates.
+*/}}
   template:
     {{- $initPodTemplate | nindent 4 }}
 ---

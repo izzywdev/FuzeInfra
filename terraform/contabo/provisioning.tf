@@ -126,6 +126,17 @@ resource "null_resource" "provision" {
       "%{if local.private_net_enabled}flannel-iface: ${var.private_iface}%{endif}",
       "%{if local.private_net_enabled}node-ip: ${var.private_node_ip}%{endif}",
       "%{if local.private_net_enabled}node-external-ip: ${local.server_ip}%{endif}",
+      # advertise-address -> the address the API server publishes in the
+      # `kubernetes` Service (10.43.0.1) endpoints. MUST be the private IP.
+      # k3s defaults advertise-address to node-external-ip when that is set, so
+      # without this the Service advertises PUBLIC IPs while 6443 is firewalled
+      # on the public interface of most nodes. Pods on elastic nodes then cannot
+      # reach 10.43.0.1:443 at all (measured 0/5), which silently breaks every
+      # workload that talks to the Kubernetes API — custom-hostname-api sat
+      # Available=False for days on exactly this, reporting only
+      # "Kubernetes API is unreachable" from its readiness probe.
+      # With the private address advertised, the same probe is 8/8.
+      "%{if local.private_net_enabled}advertise-address: ${var.private_node_ip}%{endif}",
       "tls-san:",
       "  - ${local.server_ip}",
       # Private tls-san so kubeconfigs/agents can reach the API over the private IP.
@@ -158,6 +169,30 @@ resource "null_resource" "provision" {
       "HELMCFG",
       # Wait for k3s to reconcile Traefik to ClusterIP (it polls ~every 15s)
       "for i in $(seq 1 20); do TYPE=$(kubectl get svc traefik -n kube-system -o jsonpath='{.spec.type}' 2>/dev/null); [ \"$TYPE\" = 'ClusterIP' ] && break; sleep 5; done",
+
+      # --- CoreDNS HA: scale to 2 replicas with soft anti-affinity ---
+      # Prevents a single-replica CoreDNS SPOF where every query crosses the WireGuard
+      # overlay to one node, causing 5s/10s stalls on packet loss (FuzeInfra#375).
+      # Soft (preferred) anti-affinity keeps it schedulable during node maintenance.
+      "kubectl apply -f - <<'DNSCFG'",
+      "apiVersion: helm.cattle.io/v1",
+      "kind: HelmChartConfig",
+      "metadata:",
+      "  name: coredns",
+      "  namespace: kube-system",
+      "spec:",
+      "  valuesContent: |",
+      "    replicaCount: 2",
+      "    affinity:",
+      "      podAntiAffinity:",
+      "        preferredDuringSchedulingIgnoredDuringExecution:",
+      "          - weight: 100",
+      "            podAffinityTerm:",
+      "              labelSelector:",
+      "                matchLabels:",
+      "                  app.kubernetes.io/name: coredns",
+      "              topologyKey: kubernetes.io/hostname",
+      "DNSCFG",
 
       # --- ArgoCD ---
       "kubectl create namespace argocd --dry-run=client -o yaml | kubectl apply -f -",

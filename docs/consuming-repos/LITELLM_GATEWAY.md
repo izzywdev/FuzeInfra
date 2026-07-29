@@ -16,15 +16,23 @@ Chart: `helm/litellm` · Argo app: `argocd/applications/litellm.yaml` · namespa
 | **Port** | `4000` |
 | **Base URL** | `http://litellm.fuzeinfra.svc.cluster.local:4000` |
 | **Auth** | `Authorization: Bearer $LITELLM_MASTER_KEY` |
-| **Protocol** | OpenAI-compatible. `POST /chat/completions` (streaming + non-streaming) and `POST /embeddings`. The `/v1`-prefixed forms work too. |
+| **Protocol** | OpenAI-compatible. `POST /chat/completions` (streaming + non-streaming) and `POST /embeddings`. The `/v1`-prefixed forms work too. Anthropic-format clients use `POST /v1/messages` — see [Anthropic-format clients](#anthropic-format-clients-claude-code) below. |
 
-Plain HTTP, no TLS — this is cluster-internal traffic on the pod network. There
-is **no Ingress, no Cloudflare tunnel route, and no CF Access app**: the gateway
-holds live provider keys and is unreachable from outside the cluster by
-construction. A NetworkPolicy further restricts it to namespaces listed in
+Plain HTTP, no TLS — this is cluster-internal traffic on the pod network. A
+NetworkPolicy restricts it to the namespaces listed in
 `networkPolicy.allowedNamespaces` (`helm/litellm/values-contabo.yaml`) — if your
 service gets a connection timeout rather than a 401, your namespace is not on
 that list yet. Add it in a PR.
+
+> **Correction (2026-07-29).** This section previously said there was "no Ingress,
+> no Cloudflare tunnel route, and no CF Access app". That has not been true since
+> the admin UI was enabled: `values-contabo.yaml` sets `ingress.enabled: true`, so
+> the gateway is reachable at `https://litellm.prod.fuzefront.com` under the
+> `*.prod` wildcard — and because LiteLLM serves the UI and the API from one port,
+> `/chat/completions` and `/v1/messages` are exposed at that hostname too. The
+> gates are Cloudflare Access email-OTP plus `LITELLM_MASTER_KEY` on every API
+> call. In-cluster callers should still use the Service DNS above: it is the path
+> the NetworkPolicy is written for, and it avoids a tunnel round-trip.
 
 ## Models
 
@@ -36,16 +44,83 @@ Ask for these **by name**; the gateway maps each to a real upstream model.
 | `claude-opus-5` | `anthropic/claude-opus-5` | Chat. **Current default choice.** |
 | `claude-sonnet-5` | `anthropic/claude-sonnet-5` | Chat, cheaper/faster. |
 | `claude-haiku-4-5` | `anthropic/claude-haiku-4-5` | Cheap, latency-sensitive. |
+| `gpt-4.1` / `gpt-4.1-mini` | `openai/…` | Chat. Directly requestable, but their real job is being fallback targets. |
+| `gemini-2.5-pro` / `-flash` / `-flash-lite`, `gemini-2.0-flash` / `-lite` | `gemini/…` | Chat. Last fallback hop. |
 | `text-embedding-3-small` | `openai/text-embedding-3-small` | Embeddings. |
 
 Adding a model is a PR against `models:` in `helm/litellm/values.yaml`. That
 indirection is the point of running a gateway — do not work around it by calling
 a provider directly.
 
+### Cross-provider fallback — you do not implement this
+
+Ask for a Claude model and you get one, unless that provider is failing, in which
+case the router silently retries the **same request** against the next model and
+returns a normal 200. You never see the upstream failure and you write no failover
+code — a client that implements its own would have to hold every provider's key,
+which is exactly what the gateway exists to prevent.
+
+The chain is tier-matched, so an outage never quietly upgrades or downgrades what
+you get (`routerSettings.fallbacks`):
+
+| Primary | then | then |
+|---|---|---|
+| `claude-opus-5`, `claude-opus-4-5` | `gpt-4.1` | `gemini-2.5-pro` |
+| `claude-sonnet-5` | `gpt-4.1` | `gemini-2.5-flash` |
+| `claude-haiku-4-5` | `gpt-4.1-mini` | `gemini-2.5-flash-lite` |
+
+Hops stop at the first success, so a dead last hop costs nothing — Gemini is
+currently quota-exhausted and that is fine. This exists because on 2026-07-29 the
+Anthropic account's credit ran out and took every chat turn down while the gateway
+itself was perfectly healthy.
+
 > **`/embeddings` needs an OpenAI key on the gateway.** Anthropic ships no
 > embeddings endpoint, so embeddings cannot be served by an Anthropic key alone.
 > If `OPENAI_API_KEY` is absent from the gateway's secret, chat works and
 > `/embeddings` returns an auth error.
+
+## Virtual keys — prefer these over the master key
+
+`LITELLM_MASTER_KEY` is the gateway **admin** key. It can mint keys, read the proxy
+config and see every consumer's spend. Most consumers need none of that, and spend
+booked against it is unattributable — which is why `values-contabo.yaml` notes that
+per-consumer cost attribution "is NOT meaningful" today.
+
+A **virtual key** fixes all three: it carries a budget, a model allowlist and its own
+line in the spend report. `scripts/mint-litellm-ci-key.sh` is the worked example
+(it mints the key `a2a-maintain-ci` that CI uses):
+
+```bash
+kubectl -n fuzeinfra port-forward svc/litellm 4000:4000 &
+export LITELLM_MASTER_KEY=$(kubectl -n fuzeinfra get secret litellm-secret \
+    -o jsonpath='{.data.LITELLM_MASTER_KEY}' | base64 -d)
+scripts/mint-litellm-ci-key.sh | gh secret set LITELLM_CI_KEY --repo izzywdev/FuzeInfra
+```
+
+Three things to know before minting your own:
+
+- **A virtual key is NOT GitOps.** It is runtime state in LiteLLM's Postgres database
+  (the one `database.enabled` provides), created over the API. It cannot be declared
+  in `values.yaml` and Argo will never reconcile it. What *is* version-controlled is
+  the mint payload — budget, allowlist, alias — so the key's properties stay
+  reviewable even though its existence is out-of-band.
+- **Allowlist the fallback targets, not just the model you ask for.** `models` is
+  enforced on the model actually *dispatched*. A key allowed only `claude-opus-5`
+  works perfectly right up until the router fails over to `gpt-4.1`, and is then
+  refused by its own ACL — turning the fallback into an outage on the one day it
+  matters.
+- **Do not set `rpm_limit` / `tpm_limit`.** LiteLLM's `parallel_request_limiter_v3`
+  hook injects `_litellm_rate_limit_descriptors` and friends into the **outbound
+  provider payload** whenever a key carries rate limits. OpenAI answers
+  `Unrecognized request arguments supplied: _litellm_...`; Anthropic answers
+  `_litellm_rate_limit_descriptors: Extra inputs are not permitted`. So a
+  rate-limited key does not throttle — it poisons every request *and every fallback
+  hop*. Upstream [BerriAI/litellm#28146](https://github.com/BerriAI/litellm/issues/28146),
+  open at time of writing. The budget still works; it is enforced on recorded spend,
+  not by that hook.
+
+Rotation is manual: LiteLLM enforces a unique `key_alias`, so delete the old key in
+the admin UI before re-minting under the same alias.
 
 ## Getting `LITELLM_MASTER_KEY`
 
@@ -95,6 +170,51 @@ kubectl -n fuzeinfra port-forward svc/litellm 4000:4000
 curl -s localhost:4000/v1/models -H "Authorization: Bearer $LITELLM_MASTER_KEY" | jq '.data[].id'
 ```
 
+## Anthropic-format clients (Claude Code)
+
+Claude Code speaks the **Anthropic Messages** format, not OpenAI's, so it does not
+use `/chat/completions`. Point it at the gateway and it calls `POST /v1/messages`;
+LiteLLM bridges that to whichever provider the router picks.
+
+`.github/workflows/a2a-maintain.yml` is the worked example — a CI agent that holds
+**no provider key at all**:
+
+```yaml
+env:
+  ANTHROPIC_BASE_URL: http://litellm.fuzeinfra.svc.cluster.local:4000
+  ANTHROPIC_MODEL: claude-opus-5           # must be a name in `models:` above
+  ANTHROPIC_DEFAULT_HAIKU_MODEL: claude-haiku-4-5
+  CLAUDE_CODE_DISABLE_1M_CONTEXT: "1"
+  CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS: "1"
+
+steps:
+  - uses: anthropics/claude-code-action@<sha>
+    env:
+      ANTHROPIC_AUTH_TOKEN: ${{ secrets.LITELLM_CI_KEY }}
+    with:
+      anthropic_api_key: ${{ secrets.LITELLM_CI_KEY }}
+```
+
+Four things that are easy to get wrong:
+
+- **Pass the key twice.** LiteLLM reads `Authorization: Bearer`, which only
+  `ANTHROPIC_AUTH_TOKEN` sets — but the action refuses to launch without its
+  `anthropic_api_key` input, and that copy (sent as `x-api-key`) is ignored. Omit
+  either and it fails, in two different confusing ways.
+- **Pin every model alias.** Unpinned, Claude Code uses its own built-in IDs and the
+  gateway 400s on a name it has never heard of. The original outage requested
+  `claude-opus-5[1m]` — the `[1m]` is the extended-context marker, not a model here.
+- **The job must run in-cluster** (`runs-on: staging`). A hosted runner cannot reach
+  a ClusterIP Service; `arc-runners` is on the NetworkPolicy allowlist for this.
+- **Set `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1`.** Pre-release fields
+  (`context_management`, beta tool schema fields) are rejected by a non-Anthropic
+  upstream, so leaving them on breaks the fallback hop specifically.
+
+Anthropic [does not support routing Claude Code to non-Claude models through a
+gateway](https://code.claude.com/docs/en/llm-gateway). The fallback hops here are
+configured to work anyway — see `additional_drop_params` in `values.yaml` — but
+treat a fallback-served agent run as best-effort, not a supported configuration.
+
 ## Gotchas
 
 - **Sampling params on Claude.** Claude Opus 5 / 4.8 / 4.7 **reject**
@@ -129,6 +249,38 @@ Register the Argo Application once on a new cluster:
 ```bash
 kubectl apply -f argocd/applications/litellm.yaml
 ```
+
+## The admin UI
+
+`https://litellm.prod.fuzefront.com/ui`, reached from the Cloudflare App
+Launcher tile and gated by the `*.prod.fuzefront.com` email-OTP Access app. Log
+in as **`admin`** with the `LITELLM_MASTER_KEY` value — LiteLLM falls back to
+the master key when `UI_USERNAME`/`UI_PASSWORD` are unset, which is why neither
+is wired into the chart.
+
+**The UI needs Postgres; the gateway does not.** Proxying (`/chat/completions`,
+`/embeddings`) is stateless and ran for weeks with no database. The console is
+not: the first thing it does after loading is mint a UI session key, and that is
+a database write. With no `DATABASE_URL` the request never completes, the page
+sits on "Loading", and Cloudflare eventually returns **error 522** for the
+origin. The origin log is the tell — every
+`/litellm-asset-prefix/_next/static/*` chunk returns 200 and then the log simply
+stops, because uvicorn writes its access-log line when a response is *sent*, so
+a request that hangs forever leaves no trace.
+
+`database.enabled: true` (`helm/litellm/values-contabo.yaml`) wires
+`DATABASE_URL` to a dedicated `litellm` database on the shared
+`fuzeinfra-postgres`, created idempotently by the `ensure-database`
+initContainer. Credentials come from `fuzeinfra-secrets`, the same way Airflow
+connects — no SealedSecret needed, because LiteLLM lives in the `fuzeinfra`
+namespace alongside them.
+
+Two consequences worth knowing before you touch it:
+
+- LiteLLM runs `prisma migrate deploy` at startup once `DATABASE_URL` is set, so
+  cold starts are slower. The `startupProbe` allows 10 minutes.
+- Reverting is one value: `database.enabled: false` restores a working gateway
+  with a non-functional UI.
 
 ## Related
 
