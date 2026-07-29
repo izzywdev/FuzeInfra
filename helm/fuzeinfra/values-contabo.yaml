@@ -98,6 +98,22 @@ grafana:
   # `grafana_dashboard: "1"`.
   dashboardSidecar:
     enabled: true
+  # Authentik SSO. Safe to enable: deploy/sealed-secrets/grafana-oidc.yaml is in
+  # this same change, and the `grafana` provider is live in Authentik
+  # (https://auth.fuzefront.com/application/o/grafana/ returns a discovery doc
+  # advertising the `groups` scope that roleAttributePath depends on).
+  #
+  # The local admin stays enabled — /login still works. See the break-glass note
+  # in templates/monitoring.yaml; do not remove it.
+  oidc:
+    enabled: true
+
+# Kafka UI has NO authentication without this — before Authentik SSO, anyone who
+# cleared the Cloudflare Access wall was an unauthenticated admin, and with
+# DYNAMIC_CONFIG_ENABLED=true that was write-capable.
+kafkaUi:
+  oidc:
+    enabled: true
 # Alertmanager: wire real notification receivers here. Example webhook receiver:
 # alertmanager:
 #   config:

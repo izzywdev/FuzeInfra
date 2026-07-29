@@ -86,6 +86,12 @@ env:
   # crit-alert bridge token — MUST be wired, else the plan sees crit_bridge_token=""
   # and DESTROYS the crit-bridge CF worker/route/secret (count gates on it != "").
   TF_VAR_crit_bridge_token: ${{ secrets.CRIT_BRIDGE_TOKEN }}
+  # Authentik OIDC client secret for the Cloudflare Access identity provider.
+  # Same count-gate hazard as crit_bridge_token above: if this stops being wired,
+  # the plan DESTROYS the Access IdP and its policies, dropping every admin UI
+  # back to email-OTP-only. Must equal AUTHENTIK_CF_ACCESS_CLIENT_SECRET in the
+  # fuzefront-secrets SealedSecret (izzywdev/FuzeFront).
+  TF_VAR_authentik_access_client_secret: ${{ secrets.AUTHENTIK_CF_ACCESS_CLIENT_SECRET }}
   TF_VAR_k3s_node_token: ${{ secrets.K3S_NODE_TOKEN }}
   TF_VAR_ci_worker_count: "1"
   # CF token now has Zone/Custom Hostnames:Edit — re-enabled after token fix

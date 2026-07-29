@@ -323,6 +323,51 @@ spec:
                   name: fuzeinfra-tunnel-secrets
                   key: CRIT_BRIDGE_TOKEN
                   optional: true
+            {{- if .Values.grafana.oidc.enabled }}
+            # ---- Authentik SSO (generic OAuth) --------------------------------
+            # GF_SECURITY_ADMIN_PASSWORD above is deliberately KEPT: /login still
+            # accepts the local admin. Authentik depends on this cluster's own
+            # Postgres+Redis, so an IdP outage must not lock us out of the
+            # dashboards used to diagnose it.
+            #
+            # ROOT_URL is not optional — Grafana builds the OAuth redirect_uri
+            # from it, and without it Authentik rejects the callback.
+            - name: GF_SERVER_ROOT_URL
+              value: "https://{{ include "fuzeinfra.host" (dict "root" . "sub" "grafana") }}/"
+            - name: GF_AUTH_GENERIC_OAUTH_ENABLED
+              value: "true"
+            - name: GF_AUTH_GENERIC_OAUTH_NAME
+              value: {{ .Values.grafana.oidc.displayName | quote }}
+            - name: GF_AUTH_GENERIC_OAUTH_CLIENT_ID
+              value: {{ .Values.grafana.oidc.clientId | quote }}
+            - name: GF_AUTH_GENERIC_OAUTH_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.grafana.oidc.secretName }}
+                  key: {{ .Values.grafana.oidc.secretKey }}
+            # `groups` is a custom scope on the Authentik provider; the role
+            # mapping below is a no-op without it.
+            - name: GF_AUTH_GENERIC_OAUTH_SCOPES
+              value: "openid email profile groups"
+            # These come off the GLOBAL /application/o/ base, not the per-app
+            # issuer — see the note on grafana.oidc.endpointBase in values.yaml.
+            - name: GF_AUTH_GENERIC_OAUTH_AUTH_URL
+              value: "{{ .Values.grafana.oidc.endpointBase }}/authorize/"
+            - name: GF_AUTH_GENERIC_OAUTH_TOKEN_URL
+              value: "{{ .Values.grafana.oidc.endpointBase }}/token/"
+            - name: GF_AUTH_GENERIC_OAUTH_API_URL
+              value: "{{ .Values.grafana.oidc.endpointBase }}/userinfo/"
+            # Grafana's SQLite lives in an emptyDir unless persistence.enabled,
+            # so every login must be able to (re)create the user from claims.
+            - name: GF_AUTH_GENERIC_OAUTH_ALLOW_SIGN_UP
+              value: "true"
+            - name: GF_AUTH_GENERIC_OAUTH_ROLE_ATTRIBUTE_PATH
+              value: {{ .Values.grafana.oidc.roleAttributePath | quote }}
+            # Fail closed: a token with no matching group gets no role rather
+            # than silently inheriting the default (Viewer).
+            - name: GF_AUTH_GENERIC_OAUTH_ROLE_ATTRIBUTE_STRICT
+              value: "true"
+            {{- end }}
           ports:
             - containerPort: 3000
               name: http
