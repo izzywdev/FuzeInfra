@@ -21,6 +21,14 @@ elasticsearch:
     requests: { cpu: 100m, memory: 512Mi }
     limits:   { cpu: 500m, memory: 1Gi }
 
+# The pytest smoke suite reaches Kafka over a port-forward and expects
+# localhost:29092. Without this listener it bootstraps successfully and is then
+# handed the in-cluster FQDN for every produce/consume, which does not resolve
+# from outside — see kafka.externalListener in values.yaml. Local only.
+kafka:
+  externalListener:
+    enabled: true
+
 airflow:
   workerReplicas: 1
   # NOTE: `init.mode: inline` used to be set here. It is now the chart-wide

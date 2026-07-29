@@ -18,6 +18,11 @@ spec:
     - name: controller
       port: 9093
       targetPort: 9093
+{{- if (dig "externalListener" "enabled" false .Values.kafka) }}
+    - name: external
+      port: {{ .Values.kafka.externalListener.port }}
+      targetPort: {{ .Values.kafka.externalListener.port }}
+{{- end }}
 ---
 apiVersion: apps/v1
 kind: StatefulSet
@@ -72,7 +77,7 @@ spec:
             - name: KAFKA_CONTROLLER_QUORUM_VOTERS
               value: "1@localhost:9093"
             - name: KAFKA_LISTENERS
-              value: "PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093"
+              value: "PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093{{ if (dig "externalListener" "enabled" false .Values.kafka) }},EXTERNAL://0.0.0.0:{{ .Values.kafka.externalListener.port }}{{ end }}"
             # Advertise the cluster-wide FQDN so cross-namespace clients (e.g. the
             # `fuzefront` and `mendys-prod` namespaces) can resolve the broker
             # returned in metadata. A bare service name only resolves inside this
@@ -86,10 +91,31 @@ spec:
             # `fuzeinfra-kafka.default.svc.cluster.local` accepts the bootstrap
             # connection and then fails every produce/consume on the unresolvable
             # metadata address. The helper turns that into a render-time failure.
+            {{- /*
+              A second, OPTIONAL listener for clients reaching the broker through
+              a `kubectl port-forward` — i.e. the pytest smoke suite, which the
+              chart otherwise cannot satisfy at all.
+
+              Kafka hands back the advertised address OF THE LISTENER THE CLIENT
+              CONNECTED ON, and the client then reconnects to that address for
+              every produce/consume. A port-forwarded client bootstrapping on the
+              PLAINTEXT listener is therefore told to go to
+              fuzeinfra-kafka.<ns>.svc.cluster.local:9092, which does not resolve
+              outside the cluster: the bootstrap SUCCEEDS and every subsequent
+              operation fails. Correcting the port-forward alone cannot fix that.
+
+              With this listener the port-forwarded client bootstraps on
+              localhost:<port> and is told localhost:<port> — consistent, and
+              reachable through the same forward. In-cluster clients still arrive
+              on 9092 and still get the FQDN, so nothing about their path changes.
+
+              LOCAL ONLY. Advertising `localhost` on a real cluster would hand
+              every client an address pointing at its own pod.
+            */}}
             - name: KAFKA_ADVERTISED_LISTENERS
-              value: "PLAINTEXT://{{ include "fuzeinfra.serviceFqdn" (dict "root" $ "svc" "fuzeinfra-kafka") }}:9092"
+              value: "PLAINTEXT://{{ include "fuzeinfra.serviceFqdn" (dict "root" $ "svc" "fuzeinfra-kafka") }}:9092{{ if (dig "externalListener" "enabled" false .Values.kafka) }},EXTERNAL://{{ .Values.kafka.externalListener.advertisedHost }}:{{ .Values.kafka.externalListener.port }}{{ end }}"
             - name: KAFKA_LISTENER_SECURITY_PROTOCOL_MAP
-              value: "CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT"
+              value: "CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT{{ if (dig "externalListener" "enabled" false .Values.kafka) }},EXTERNAL:PLAINTEXT{{ end }}"
             - name: KAFKA_CONTROLLER_LISTENER_NAMES
               value: "CONTROLLER"
             - name: KAFKA_INTER_BROKER_LISTENER_NAME

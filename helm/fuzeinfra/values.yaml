@@ -331,6 +331,19 @@ kafka:
   storage: 5Gi
   # Fixed cluster id so the StatefulSet can re-format storage deterministically.
   clusterId: "j7z6bP_dQ8-uF_3Dp5tiXw"
+  # Optional second listener for clients arriving through `kubectl port-forward`
+  # (the pytest smoke suite). MUST stay disabled anywhere real: it advertises
+  # `localhost`, which on a live cluster points every client at its own pod.
+  #
+  # Needed because Kafka returns the advertised address of the listener the
+  # client connected on. Without it a port-forwarded client bootstraps fine and
+  # is then redirected to fuzeinfra-kafka.<ns>.svc.cluster.local:9092, which does
+  # not resolve outside the cluster — so every produce/consume fails while the
+  # connection itself looks healthy. No port-forward mapping can fix that.
+  externalListener:
+    enabled: false
+    port: 29092
+    advertisedHost: localhost
   resources:
     requests: { cpu: 250m, memory: 512Mi }
     limits:   { cpu: "1",  memory: 1Gi }

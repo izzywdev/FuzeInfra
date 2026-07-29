@@ -448,3 +448,14 @@ def test_prod_overlays_do_not_enable_local_only_bootstrap_escapes():
             "while the database is missing. It works only on a cluster that "
             "already has one — so the failure is invisible until a rebuild."
         )
+
+        external_listeners = [
+            where for where, node in walk(doc)
+            if where.endswith("externalListener") and node.get("enabled") is True
+        ]
+        assert not external_listeners, (
+            f"{overlay} enables an externalListener at {external_listeners}. It "
+            "advertises `localhost`, and Kafka hands the advertised address back "
+            "to clients — on a real cluster every client would be redirected to "
+            "its own pod. kind only, for port-forwarded test clients."
+        )
