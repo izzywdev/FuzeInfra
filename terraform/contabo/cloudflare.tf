@@ -31,7 +31,7 @@ locals {
   # *.prod Access wildcard); FuzePlan declares its own Traefik Ingress for this
   # host in izzywdev/FuzePlan. Routing to Traefik is via the catch-all ingress
   # rule below — no per-host tunnel rule is needed.
-  public_vanity_hosts = ["app", "auth", "plan"]
+  public_vanity_hosts = ["app", "auth", "plan", "fuzehub"]
 }
 
 # 32-byte cryptographically random tunnel secret
