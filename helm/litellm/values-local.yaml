@@ -20,9 +20,12 @@ enabled: false
 
 replicas: 1
 
+# 768Mi here would have hit the same import-time OOMKill that took prod down at
+# 1Gi (exit 137, ~17s in, no logs). Kept at 3Gi so a kind cluster reproduces
+# prod's behaviour rather than failing in a way prod does not.
 resources:
   requests: { cpu: "100m", memory: "256Mi" }
-  limits:   { cpu: "500m", memory: "768Mi" }
+  limits:   { cpu: "500m", memory: "3Gi" }
 
 # Off locally: kind ships no NetworkPolicy enforcer by default, so a policy here
 # is a no-op that only makes local behaviour diverge from prod.

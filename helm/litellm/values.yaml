@@ -33,9 +33,14 @@ replicas: 1
 # docs/consuming-repos/LITELLM_GATEWAY.md before touching them.
 port: 4000
 
+# The memory LIMIT is sized for the import-time peak, not steady state. LiteLLM
+# loads its whole provider SDK surface at startup; 1Gi OOMKilled the container
+# (exit 137) ~17s in, before it logged anything. Do not lower this below 2Gi
+# without watching a cold start — the failure looks like a crash with no logs,
+# not like memory pressure.
 resources:
   requests: { cpu: "250m", memory: "512Mi" }
-  limits:   { cpu: "1", memory: "1Gi" }
+  limits:   { cpu: "1", memory: "3Gi" }
 
 nodeSelector: {}
 tolerations: []

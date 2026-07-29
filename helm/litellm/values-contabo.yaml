@@ -22,11 +22,22 @@ enabled: true
 
 replicas: 1
 
-# 4 vCPU / 8 GB nodes: the gateway is I/O-bound (it proxies, it does not infer),
-# so keep it small. Raise limits only if you see throttling under real load.
+# The gateway is I/O-bound at runtime (it proxies, it does not infer) but the
+# LiteLLM image is NOT cheap to START: it imports the full provider SDK surface
+# before it serves anything.
+#
+# MEASURED, NOT GUESSED: a 1Gi limit OOMKilled the container (exit 137) ~17s
+# into startup, before it could emit a single log line — 56 restarts in 4h40m.
+# The old "keep it small, raise only under load" note was wrong: the ceiling
+# that matters here is the import-time peak, which load testing never reveals
+# because the process never reaches serving. 3Gi clears it with headroom.
+#
+# requests stays 512Mi (steady-state RSS is far below the startup peak), so this
+# reserves little on the node — limits are a ceiling, not a reservation. Nodes
+# are 8 GB and sat at 10-50% when this was set.
 resources:
   requests: { cpu: "250m", memory: "512Mi" }
-  limits:   { cpu: "1", memory: "1Gi" }
+  limits:   { cpu: "1", memory: "3Gi" }
 
 # Cluster-internal only. No Ingress, no Cloudflare tunnel route, no CF Access
 # app — the gateway holds live provider keys and must stay unreachable from
