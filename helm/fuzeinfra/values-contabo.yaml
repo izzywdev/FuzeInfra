@@ -147,7 +147,12 @@ backups:
   # fuzeinfra-backups bucket + fuzeinfra-backups-s3 SealedSecret are provisioned,
   # flip `sink: s3` for durable off-cluster backups (the S3 block below is ready).
   enabled: true
-  sink: pvc
+  # s3 sink: dumps go OFF-cluster to Contabo Object Storage. The pvc sink was the
+  # interim tier and it failed exactly as feared — the durable nodes' Longhorn
+  # disks were re-initialised, every replica of fuzeinfra-db-backups referenced a
+  # dead disk UUID, the volume could not attach anywhere and all stored dumps
+  # were lost. Backups held on the storage they protect against are not backups.
+  sink: s3
   pvc:
     storageClass: longhorn
     size: 20Gi
