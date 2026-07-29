@@ -200,6 +200,26 @@ With 3 servers, losing one is non-fatal. Complete the deferred VLAN work:
   `vmi3396106` (emergency swap) — prefer Option B if capacity is tight, or ensure the
   4th durable node (elastic-0) absorbs drained DBs during Phase 2.
 - **flannel wireguard-native must match on all servers** or the overlay breaks.
+- **Stale `flannel.1` (VXLAN) leftovers after a VXLAN→wireguard-native switch (FuzeInfra#403).**
+  Switching `flannel-backend` to `wireguard-native` on an **already-running** node does
+  **not** delete the old `flannel.1` device or the per-peer VXLAN routes it created. Those
+  routes are `/24` (e.g. `10.42.1.0/24 via 10.42.1.0 dev flannel.1`) and therefore **shadow**
+  the correct `10.42.0.0/16 dev flannel-wg` route, so pod traffic to any node that only speaks
+  WireGuard is encapsulated as VXLAN and **blackholed** — a total connectivity failure, not a
+  slowdown. Symptom in #403: `vmi3383846`→`fuzeinfra-postgres-0` (rescheduled onto new node
+  `mendys-worker-1`) TCP-connect timed out, degrading Authentik auth to 16–27s, while UFW
+  (51820/udp open), public-IP reachability, and the node annotations all looked healthy.
+  Freshly-provisioned nodes are clean (they never had a `flannel.1`); **only migrated-in-place
+  nodes** carry the leftover. Fix / verify on each such node:
+  ```bash
+  ip route show | grep flannel.1            # any hit == stale VXLAN route shadowing flannel-wg
+  ip route show | grep flannel.1 | awk '{print $1}' | xargs -rn1 ip route del
+  ip link delete flannel.1                  # remove the unused device; wireguard-native won't recreate it
+  ip route get <remote-pod-ip>              # must now resolve `dev flannel-wg`
+  ```
+  Deleting the `/24` routes is immediately reversible and needs **no k3s restart** — traffic
+  falls through to the existing `/16 flannel-wg` route at once. A clean node shows a single
+  `flannel-wg` device and no `flannel.1`.
 - **Longhorn during control-plane work:** server restarts don't move pods, but the
   Phase-2 **drains** (Option A) do — reuse the VLAN data-safety gate (every volume 2+
   replicas off the node, no local-path PVC pinned) before each drain.
