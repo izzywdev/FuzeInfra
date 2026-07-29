@@ -6,7 +6,8 @@
 #
 # SECURITY: an allowed READ verb must appear as a token, AND no mutating/exec
 # token may appear (apply/delete/edit/patch/replace/exec/attach/cp/scale/
-# rollout/annotate/label/drain/cordon/proxy/port-forward/run/create/set).
+# rollout/annotate/label/drain/cordon/proxy/port-forward/run/create/set),
+# AND the Secret resource may not be read at all (see the guard below).
 #
 # Secret: KUBE_CONFIG (base64 kubeconfig) — same secret used by
 # apply-cluster-config.yml / argo-outofsync-autofix.yml.
@@ -16,7 +17,7 @@ on:
   workflow_dispatch:
     inputs:
       kubectl_args:
-        description: 'kubectl args, e.g. "-n mendys-prod get pods -o wide". Must contain a read verb (get/describe/logs/…).'
+        description: 'kubectl args, e.g. "-n mendys-prod get pods -o wide". Must contain a read verb (get/describe/logs/…). Reading Secrets is blocked — output lands in this job log; see docs/SECRETS_MANAGEMENT.md §4.'
         required: false
         default: 'get nodes'
       curl_url:
@@ -69,6 +70,30 @@ jobs:
             case "$tok" in
               exec|attach|cp|port-forward|proxy|run|delete|apply|edit|patch|replace|scale|rollout|cordon|drain|annotate|label|set|create|taint|uncordon|debug)
                 echo "::error::Rejected mutating/exec token: '$tok'."; exit 1;;
+            esac
+          done
+          # Reject reads of the Secret resource. `get secret -o jsonpath=...` passes
+          # every check above and prints the credential verbatim into THIS job log,
+          # which is retained and readable by anyone with repo access. That is not a
+          # hypothetical: it happened on 2026-07-29 to fetch LITELLM_MASTER_KEY, and
+          # the log had to be deleted after the fact. Read-only is not the same as
+          # safe-to-log, so the guard is separate from the verb checks.
+          #
+          # Separators are normalised FIRST. `secret/foo`, `pods,secrets` and
+          # `secrets.v1.` all name the resource but are each a single $ARGS token, so
+          # matching the raw token would miss every one of them; kubectl also accepts
+          # `Secret`, hence the case fold. Splitting on - would be wrong: it must not
+          # match a Secret's NAME (`litellm-secret` is fine to mention, e.g. in
+          # `describe deployment litellm-secret-reader`).
+          #
+          # `sealedsecret` deliberately still passes: it is encrypted at rest and
+          # useless to an attacker, so blocking it would cost debuggability for
+          # nothing.
+          for tok in $(printf '%s' "$ARGS" | tr '[:upper:]' '[:lower:]' | tr '/,.' '   '); do
+            case "$tok" in
+              secret|secrets)
+                echo "::error::Rejected: reading Secret objects would write the credential into this job log, which is retained and readable by anyone with repo access. Use the operator SSH path in docs/SECRETS_MANAGEMENT.md §4, or rotate the value instead. SealedSecrets are readable here."
+                exit 1;;
             esac
           done
           echo "### kubectl $ARGS"
