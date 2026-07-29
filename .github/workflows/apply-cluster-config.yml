@@ -26,6 +26,7 @@ on:
     branches: [main]
     paths:
       - 'argocd/cluster-config/**'
+      - 'argocd/cluster-bootstrap/**'
       - 'argocd/cluster-settings/**'
       - 'argocd/notifications/**'
   workflow_dispatch: {}
@@ -81,6 +82,12 @@ jobs:
           kubectl apply -f argocd/cluster-config/
           echo "Applied argocd/cluster-config/ to the shared cluster."
           echo "SealedSecrets decrypt in-cluster; ArgoCD picks up repo-creds on its next repo access."
+
+      - name: Apply argocd/cluster-bootstrap
+        run: |
+          kubectl apply -f argocd/cluster-bootstrap/
+          echo "Applied argocd/cluster-bootstrap/ — HelmChartConfigs (traefik, coredns, etc.)."
+          echo "k3s helm-controller reconciles within ~15s."
 
       - name: Apply argocd/cluster-settings (server-side)
         run: |
