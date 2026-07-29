@@ -492,8 +492,12 @@ Zone -> Zone                -> Read     (fuzefront.com only)
 ```
 
 That token cannot touch DNS records, Workers, Access policies, the tunnel, other
-zones, or the account. The static DNS records this feature needs are created
-once by Terraform under a *different*, human-held token.
+zones, or the account. The static edge setup this feature needs — the `connect`
+and `saas-origin` records **and the zone's Cloudflare for SaaS fallback origin**
+— is created once by Terraform under a *different*, human-held token. Note that
+the Terraform token therefore also needs `SSL and Certificates -> Edit` (the
+fallback origin is an SSL-scoped resource, not a DNS one); see
+`docs/TERRAFORM_CD.md` for its full scope table.
 
 **How FuzeFront authenticates:** bearer token over in-cluster service DNS.
 
