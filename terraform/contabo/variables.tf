@@ -430,3 +430,9 @@ variable "object_storage_bucket_blobs" {
   default     = "fuzeinfra-blobs"
 }
 
+
+variable "manage_control_plane_config" {
+  description = "Manage /etc/rancher/k3s/config.yaml on ALL control planes (control-planes.tf). DEFAULT FALSE: applying it rewrites the config and RESTARTS k3s on each control plane in turn — a live HA operation. Flip only for a deliberate, supervised run. Requires the SSH private key, so it runs from a workstation, not CD."
+  type        = bool
+  default     = false
+}
