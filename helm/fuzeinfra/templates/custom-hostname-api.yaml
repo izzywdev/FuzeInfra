@@ -187,6 +187,33 @@ spec:
         checksum/profiles: {{ toYaml $chapi.routeProfiles | sha256sum }}
     spec:
       serviceAccountName: custom-hostname-api
+      # Pin to a DURABLE node: this API talks to the Kubernetes API server, and
+      # pods on elastic nodes currently cannot reach it. The `kubernetes` Service
+      # (10.43.0.1) advertises the control planes' PUBLIC IPs, but after the
+      # private-VLAN cutover every node's InternalIP is 10.0.0.x and only ONE of
+      # the three public endpoints is reachable from an elastic node:
+      #   161.97.118.134 (vmi3383846)      reachable
+      #   194.163.136.242 (mendys-worker-1) UNREACHABLE
+      #   95.111.238.66  (vmi3396106)      UNREACHABLE
+      # so 10.43.0.1:443 fails and /readyz reports
+      #   {"status":"degraded","detail":"Kubernetes API is unreachable."}
+      # leaving the Deployment permanently Available=False and fuzeinfra-prod
+      # Degraded. This is a workaround: the real fix is for the API server to
+      # advertise the VLAN addresses (or to open 6443 between nodes), which is
+      # part of the unfinished VLAN cutover and must be done deliberately.
+      # Durable nodes are identified by the ABSENCE of fuzeinfra.io/pool
+      # (elastic nodes carry pool=elastic, the CI node pool=ci).
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: fuzeinfra.io/pool
+                    operator: DoesNotExist
+              - matchExpressions:
+                  - key: fuzeinfra.io/pool
+                    operator: NotIn
+                    values: ["elastic", "ci"]
       {{- with $chapi.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
