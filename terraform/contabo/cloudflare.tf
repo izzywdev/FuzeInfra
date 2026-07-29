@@ -241,6 +241,7 @@ resource "cloudflare_record" "saas_origin" {
 
 # Enabling the fallback origin is what turns Cloudflare for SaaS on for the zone.
 # It must point at a record that already exists and is proxied, hence depends_on.
+# Requires "Zone / Custom Hostnames: Edit" on the Cloudflare API token.
 resource "cloudflare_custom_hostname_fallback_origin" "saas" {
   count      = local.cloudflare_enabled && var.saas_custom_hostnames_enabled ? 1 : 0
   zone_id    = var.cloudflare_zone_id
