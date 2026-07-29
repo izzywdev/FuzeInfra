@@ -1,0 +1,26 @@
+{
+  "$schema": "../schema/environment.schema.json",
+  "name": "fuzeinfra-cloud-fuze",
+  "config": {
+    "type": "cloud",
+    "packages": {
+      "apt": ["gh"],
+      "npm": ["prettier"],
+      "pip": [
+        "pytest",
+        "pytest-asyncio",
+        "requests",
+        "httpx",
+        "pyyaml",
+        "yamllint",
+        "check-jsonschema"
+      ]
+    },
+    "networking": {
+      "type": "limited",
+      "allowed_hosts": [],
+      "allow_mcp_servers": true,
+      "allow_package_managers": true
+    }
+  }
+}

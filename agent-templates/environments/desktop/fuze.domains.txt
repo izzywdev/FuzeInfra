@@ -1,0 +1,5 @@
+# Fuze — Allowed domains for the cloud environment dialog.
+# GENERATED from cloud-fuze.json by render.py — do not edit by hand.
+#
+# No extra hosts needed: set Network access to **Trusted**, which already covers
+# package registries, GitHub, and the cloud SDKs. Leave this list unused.

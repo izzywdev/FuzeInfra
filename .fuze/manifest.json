@@ -41,6 +41,8 @@
       "digital-persona"
     ],
     "environments": [
+      "cloud-fuze",
+      "cloud-devops",
       "cloud-backend",
       "cloud-frontend",
       "cloud-qa",

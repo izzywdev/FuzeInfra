@@ -1,3 +1,8 @@
 # Cloudflare Worker scripts are uploaded verbatim by terraform file(); keep them
 # LF so a Windows (CRLF) checkout doesn't produce a spurious worker-content diff.
 terraform/contabo/*.js text eol=lf
+
+# Cloud-environment setup scripts get pasted into the claude.ai/code dialog and run
+# as Bash on Ubuntu; keep them LF so a Windows checkout can't paste CRLF and leave a
+# stray \r in the shebang.
+agent-templates/environments/desktop/*.sh text eol=lf
