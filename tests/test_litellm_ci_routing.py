@@ -56,12 +56,31 @@ def _model_names() -> set[str]:
 def test_workflow_holds_no_provider_key():
     """The point of the gateway: CI holds a gateway credential, never a provider key."""
     raw = WORKFLOW.read_text()
-    assert "secrets.LITELLM_MASTER_KEY" in raw
+    assert "secrets.LITELLM_CI_KEY" in raw
     assert "secrets.ANTHROPIC_API_KEY" not in raw, (
         "the workflow is back to holding a provider key directly, which defeats the "
         "gateway's key custody and re-couples CI to a single provider's billing"
     )
     assert "api.anthropic.com" not in raw, "CI must reach providers only via the gateway"
+
+
+def test_scoped_key_is_preferred_over_the_admin_key():
+    """Every place the credential is read must prefer the scoped virtual key.
+
+    `LITELLM_MASTER_KEY` is the gateway ADMIN key — it can mint keys, read the proxy
+    config and see every consumer's spend. It stays as a fallback so the migration is
+    zero-downtime, but a reference that reads it FIRST (or only) silently puts CI back
+    on admin credentials.
+    """
+    raw = WORKFLOW.read_text()
+    for line in raw.splitlines():
+        if "secrets.LITELLM_MASTER_KEY" not in line:
+            continue
+        if line.strip().startswith("#") or "::warning::" in line:
+            continue  # prose and the nudge itself may name it
+        assert "secrets.LITELLM_CI_KEY || secrets.LITELLM_MASTER_KEY" in line, (
+            f"master key read without preferring the scoped key: {line.strip()}"
+        )
 
 
 def test_base_url_points_at_the_in_cluster_gateway():
@@ -166,6 +185,77 @@ def test_runner_namespace_may_reach_the_gateway_in_prod():
     assert "arc-runners" in allowed, (
         "the ARC runner pods live in arc-runners; without it on the allowlist the "
         "NetworkPolicy drops every CI request and the preflight times out"
+    )
+
+
+def _mint_script() -> str:
+    return (ROOT / "scripts/mint-litellm-ci-key.sh").read_text()
+
+
+def _key_allowlist() -> set[str]:
+    """The `models` array the mint script sends to /key/generate."""
+    raw = _mint_script()
+    body = raw.split("MODELS='[", 1)[1].split("]'", 1)[0]
+    return {line.strip().strip('",') for line in body.splitlines() if line.strip().strip('",')}
+
+
+def test_key_allowlist_covers_every_model_the_workflow_pins():
+    env = _workflow()["env"]
+    allow = _key_allowlist()
+    for var in MODEL_VARS:
+        assert env[var] in allow, (
+            f"{var}={env[var]!r} is not on the virtual key's model allowlist, so the key "
+            f"would be refused for it. Add it to MODELS in scripts/mint-litellm-ci-key.sh."
+        )
+
+
+def test_key_allowlist_covers_every_fallback_hop():
+    """The subtle one: a key allowed only the Claude names breaks failover.
+
+    `models` is enforced on the model actually dispatched, so such a key passes in
+    normal operation and is rejected at the precise moment the router fails over —
+    converting the cross-provider fallback into an outage on the one day it matters.
+    """
+    env = _workflow()["env"]
+    allow = _key_allowlist()
+    fallbacks = yaml.safe_load(GATEWAY_VALUES.read_text())["routerSettings"]["fallbacks"]
+    pinned = {env[v] for v in MODEL_VARS}
+    for entry in fallbacks:
+        for primary, alts in entry.items():
+            if primary not in pinned:
+                continue  # CI never asks for it, so its hops are irrelevant here
+            for alt in alts:
+                assert alt in allow, (
+                    f"{primary!r} falls back to {alt!r} but the virtual key does not allow "
+                    f"{alt!r} — failover would be rejected by the key's own ACL"
+                )
+
+
+def test_mint_script_sets_no_rate_limits():
+    """rpm/tpm limits on a key poison every provider payload (BerriAI/litellm#28146).
+
+    The parallel_request_limiter_v3 hook injects `_litellm_*` params into the OUTBOUND
+    request whenever a key carries rate limits; OpenAI answers "Unrecognized request
+    arguments" and Anthropic "Extra inputs are not permitted". That breaks not just
+    throttled calls but every fallback hop — the machinery this repo added precisely to
+    survive a dead provider.
+    """
+    raw = _mint_script()
+    body = raw.split("BODY=$(cat <<JSON", 1)[1].split("JSON", 1)[0]
+    for forbidden in ("rpm_limit", "tpm_limit", "max_parallel_requests"):
+        assert forbidden not in body, (
+            f"{forbidden} is set on the CI virtual key; see BerriAI/litellm#28146 before "
+            f"adding it, and verify a fallback hop still completes"
+        )
+
+
+def test_mint_script_sets_a_budget_and_a_stable_alias():
+    """Budget is the control that still works, and the alias is the cost-attribution key."""
+    raw = _mint_script()
+    assert 'max_budget' in raw and 'budget_duration' in raw
+    assert 'ALIAS="a2a-maintain-ci"' in raw, (
+        "the alias is what the gateway's spend report groups by; changing it silently "
+        "splits this consumer's cost history in two"
     )
 
 
