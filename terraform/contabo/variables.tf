@@ -193,9 +193,13 @@ variable "saas_custom_hostnames_enabled" {
 
     Cost: 100 custom hostnames included on Free/Pro/Business, $0.10/month each
     beyond that (ceiling 50,000).
+
+    Requires the Terraform API token to have "Zone / Custom Hostnames: Edit"
+    permission. Set to true only after that permission is added to the
+    "FuzeInfra Terraform" token in the Cloudflare dashboard.
   EOT
   type        = bool
-  default     = true
+  default     = false
 }
 
 variable "allowed_admin_emails" {
