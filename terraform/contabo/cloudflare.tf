@@ -131,6 +131,25 @@ resource "cloudflare_record" "vanity" {
 # automatically. Adding a reserved host later means adding a record, not editing
 # an exclusion.
 #
+# THAT IS A DNS-LAYER STATEMENT AND IT DOES NOT EXTEND TO INGRESS ROUTING.
+# Cloudflare resolves plan.fuzefront.com to its own record, but the request still
+# lands on Traefik, which sorts routers by RULE LENGTH, not host specificity — so
+# a consumer's `*.fuzefront.com` Ingress rule outranks another product's exact
+# `plan.fuzefront.com` rule and silently captures it. That took FuzePlan down
+# once (FuzeFront#431, reverted #437). Any consumer adding a wildcard host must
+# isolate it in its own Ingress with
+# `traefik.ingress.kubernetes.io/router.priority: "1"`.
+# See docs/consuming-repos/CUSTOM_DOMAINS.md §3.
+#
+# PRE-EXISTING RECORD: a proxied wildcard CNAME for *.<zone> already exists in
+# the zone, created outside this state. This resource therefore does NOT gate
+# whether tenant hosts resolve — they already do; the consumer's Ingress rule is
+# the only gate on serving. Applying with tenant_wildcard_enabled = true on a
+# zone that already has the record fails on a duplicate rather than adopting it:
+# `terraform import 'cloudflare_record.tenant_wildcard[0]' '<zone_id>/<record_id>'`
+# first, and read the plan for a destroy/create pair before merging — that would
+# replace a record already serving production traffic.
+#
 # TLS is Cloudflare-terminated. Universal SSL already covers the apex and the
 # first-level wildcard `*.fuzefront.com` on every plan, so tenant subdomains get
 # a valid certificate with no cert-manager, no DNS-01 solver, and no new secret.

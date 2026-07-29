@@ -112,6 +112,8 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "422":
           $ref: "#/components/responses/ValidationError"
+        "429":
+          $ref: "#/components/responses/QuotaExceeded"
         "502":
           $ref: "#/components/responses/UpstreamError"
 
@@ -272,9 +274,12 @@ components:
 
     VerificationRecord:
       type: object
-      required: [method, record, value]
+      required: [method, record, value, purpose]
       additionalProperties: false
-      description: One DNS record the customer must publish.
+      description: |
+        One DNS record the customer must publish. `purpose` is REQUIRED — §4.4 of
+        the consuming-repo guide asks callers to render all three records grouped
+        by purpose, which is impossible if the field is optional.
       properties:
         method:
           type: string
@@ -296,6 +301,7 @@ components:
           description: |
             What the record proves. `ownership` proves domain control,
             `certificate` satisfies ACME DCV, `routing` sends traffic to us.
+            Always present — clients may switch on it exhaustively.
 
     Verification:
       type: object
@@ -515,6 +521,15 @@ components:
           schema: { $ref: "#/components/schemas/Error" }
     ValidationError:
       description: The domain was rejected (wildcard, managed zone, or malformed).
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    QuotaExceeded:
+      description: |
+        The custom hostname cap was reached (`error: quota_exceeded`). Checked
+        locally BEFORE calling Cloudflare, so crossing into overage billing is a
+        deliberate configuration change rather than an accident. Surface this to
+        the operator as a real error — retrying will not clear it.
       content:
         application/json:
           schema: { $ref: "#/components/schemas/Error" }

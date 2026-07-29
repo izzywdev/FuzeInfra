@@ -127,6 +127,45 @@ class TestFrozenContract:
                 frozen["components"]["schemas"][name]["enum"]
             )
 
+    @pytest.mark.parametrize(
+        "schema_name", ["CustomHostname", "VerificationRecord", "Verification", "Routing"]
+    )
+    def test_required_fields_match(self, frozen, client, schema_name):
+        """A field the spec calls required must be required in the model too.
+
+        Caught in review by a consumer: `VerificationRecord.purpose` was optional
+        in the spec while the guide told callers to render records grouped BY
+        purpose. An optional field they cannot rely on is a broken contract.
+        """
+        generated = client.app.openapi()["components"]["schemas"][schema_name]
+        frozen_required = set(frozen["components"]["schemas"][schema_name].get("required", []))
+        assert set(generated.get("required", [])) == frozen_required
+
+    def test_every_error_the_service_can_raise_is_declared(self, frozen):
+        """Undeclared status codes are untypeable by a generated client.
+
+        Caught in review by a consumer: `429 quota_exceeded` existed in the
+        `Error.error` enum and in the prose, but was not declared as a response
+        on POST, so a generated client had no type for the one error an operator
+        is most likely to hit.
+        """
+        post = frozen["paths"]["/custom-hostnames"]["post"]["responses"]
+        assert "429" in post, (
+            "POST can return 429 quota_exceeded (the local cap is checked before "
+            "Cloudflare is called) — declare it or a generated client cannot type it"
+        )
+
+        # Every code the error module can produce must appear on some operation.
+        declared = {
+            code
+            for path in frozen["paths"].values()
+            for method, spec in path.items()
+            if isinstance(spec, dict) and "responses" in spec
+            for code in spec["responses"]
+        }
+        for code in ("400", "401", "403", "404", "422", "429", "502"):
+            assert code in declared, f"{code} is reachable but declared nowhere"
+
 
 # ---------------------------------------------------------------------------
 # auth

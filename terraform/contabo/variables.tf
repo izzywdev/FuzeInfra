@@ -161,11 +161,23 @@ variable "zone_name" {
 # ---------------------------------------------------------------------------
 variable "tenant_wildcard_enabled" {
   description = <<-EOT
-    Create the proxied wildcard CNAME *.<zone_name> pointing at the tunnel, so
-    tenant subdomains (corpabc.fuzefront.com) reach Traefik. Reserved hosts need
-    no exclusion list — explicit records and the *.<prod_subdomain> wildcard are
-    more specific and win automatically. TLS comes from Cloudflare Universal SSL,
-    which covers the apex and the FIRST wildcard level only.
+    Let Terraform MANAGE the proxied wildcard CNAME *.<zone_name> pointing at the
+    tunnel, so tenant subdomains (corpabc.fuzefront.com) reach Traefik.
+
+    This does NOT gate whether *.<zone_name> resolves: a wildcard record already
+    exists in the zone, created outside this state, so tenant hosts resolve
+    regardless. The consumer's Ingress rule is the only gate on SERVING. Applying
+    this on a zone that already has the record fails on a duplicate unless the
+    record is imported first — see the comment in cloudflare.tf.
+
+    At the DNS layer, reserved hosts need no exclusion list: explicit records and
+    the *.<prod_subdomain> wildcard are more specific and win automatically. That
+    does NOT extend to Traefik, which sorts routers by rule length — a consumer's
+    wildcard Ingress rule will capture other products' exact hosts unless it is
+    isolated in its own Ingress at router.priority 1.
+
+    TLS comes from Cloudflare Universal SSL, which covers the apex and the FIRST
+    wildcard level only.
   EOT
   type        = bool
   default     = true
