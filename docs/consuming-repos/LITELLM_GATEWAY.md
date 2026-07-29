@@ -130,6 +130,38 @@ Register the Argo Application once on a new cluster:
 kubectl apply -f argocd/applications/litellm.yaml
 ```
 
+## The admin UI
+
+`https://litellm.prod.fuzefront.com/ui`, reached from the Cloudflare App
+Launcher tile and gated by the `*.prod.fuzefront.com` email-OTP Access app. Log
+in as **`admin`** with the `LITELLM_MASTER_KEY` value — LiteLLM falls back to
+the master key when `UI_USERNAME`/`UI_PASSWORD` are unset, which is why neither
+is wired into the chart.
+
+**The UI needs Postgres; the gateway does not.** Proxying (`/chat/completions`,
+`/embeddings`) is stateless and ran for weeks with no database. The console is
+not: the first thing it does after loading is mint a UI session key, and that is
+a database write. With no `DATABASE_URL` the request never completes, the page
+sits on "Loading", and Cloudflare eventually returns **error 522** for the
+origin. The origin log is the tell — every
+`/litellm-asset-prefix/_next/static/*` chunk returns 200 and then the log simply
+stops, because uvicorn writes its access-log line when a response is *sent*, so
+a request that hangs forever leaves no trace.
+
+`database.enabled: true` (`helm/litellm/values-contabo.yaml`) wires
+`DATABASE_URL` to a dedicated `litellm` database on the shared
+`fuzeinfra-postgres`, created idempotently by the `ensure-database`
+initContainer. Credentials come from `fuzeinfra-secrets`, the same way Airflow
+connects — no SealedSecret needed, because LiteLLM lives in the `fuzeinfra`
+namespace alongside them.
+
+Two consequences worth knowing before you touch it:
+
+- LiteLLM runs `prisma migrate deploy` at startup once `DATABASE_URL` is set, so
+  cold starts are slower. The `startupProbe` allows 10 minutes.
+- Reverting is one value: `database.enabled: false` restores a working gateway
+  with a non-functional UI.
+
 ## Related
 
 - [`CHROMADB_PROVISIONING.md`](CHROMADB_PROVISIONING.md) — vector store for RAG.

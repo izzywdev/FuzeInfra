@@ -31,3 +31,14 @@ resources:
 # is a no-op that only makes local behaviour diverge from prod.
 networkPolicy:
   enabled: false
+
+# Off locally because a bare `helm install litellm` on kind has no
+# fuzeinfra-postgres and no fuzeinfra-secrets to read, and the ensure-database
+# initContainer would block the pod in Init forever waiting for a server that
+# will never answer.
+#
+# The gateway's PROXYING path does not need this — only the admin UI does (see
+# values.yaml). If you are working ON the UI, bring the umbrella chart up first
+# so Postgres exists, then `--set database.enabled=true`.
+database:
+  enabled: false

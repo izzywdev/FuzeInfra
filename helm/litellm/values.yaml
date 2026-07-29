@@ -62,6 +62,51 @@ affinity: {}
 # -----------------------------------------------------------------------------
 secretName: litellm-secret
 
+# -----------------------------------------------------------------------------
+# Postgres backing store.
+#
+# THE ADMIN UI DOES NOT WORK WITHOUT THIS — that is upstream behaviour, not a
+# preference. LiteLLM's console serves its static bundle happily with no
+# database, which is why "GET /ui returns 200" was mistaken for "the UI works"
+# when the tile was added. The first thing the console does after booting is
+# mint a UI session key, and key generation is a database write. With no
+# DATABASE_URL that request never completes, the page sits on "Loading", and
+# Cloudflare eventually gives up on the origin and serves error 522. The origin
+# log shows exactly that shape: every /litellm-asset-prefix/_next/static/* chunk
+# 200s, and then nothing — uvicorn only writes an access-log line once a
+# response is sent, so a request that hangs forever leaves no trace at all.
+# Upstream: https://docs.litellm.ai/docs/proxy/ui and BerriAI/litellm#30328.
+#
+# CREDENTIALS follow the Airflow precedent rather than the serviceDatabases one.
+# LiteLLM is a FuzeInfra-owned component living in the `fuzeinfra` namespace, so
+# it reads POSTGRES_USER/POSTGRES_PASSWORD straight out of `fuzeinfra-secrets`
+# the same way helm/fuzeinfra/templates/airflow.yaml does — no SealedSecret has
+# to be minted and no credential is committed. serviceDatabases exists for the
+# other case: a CONSUMER repo that seals its own password into this namespace.
+#
+# HARDENING FOLLOW-UP: those are the Postgres SUPERUSER credentials. Airflow
+# already connects this way so this is no worse than the status quo, but the
+# better end state is a dedicated `litellm_svc` role via serviceDatabases, which
+# needs a sealed password. Doing that later is a values change plus a
+# SealedSecret — no template change.
+#
+# `name` is a separate logical database on the shared server, so LiteLLM's
+# prisma migrations can never touch another service's tables.
+# -----------------------------------------------------------------------------
+database:
+  # Off in the base chart for the same reason `enabled` is: a chart rendered
+  # without the fuzeinfra umbrella has no fuzeinfra-secrets to read.
+  enabled: false
+  host: fuzeinfra-postgres
+  port: 5432
+  name: litellm
+  credentialsSecret: fuzeinfra-secrets
+  userKey: POSTGRES_USER
+  passwordKey: POSTGRES_PASSWORD
+  # Used by the ensure-database initContainer only. postgres:15 matches the
+  # server version the umbrella chart runs, and it ships psql + pg_isready.
+  provisionImage: postgres:15
+
 # Provider keys wired into the pod as env. `required: false` renders the env var
 # with optional=true, so a missing key leaves the var unset (and only the models
 # that need it fail) instead of blocking pod start.

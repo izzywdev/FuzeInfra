@@ -39,6 +39,26 @@ resources:
   requests: { cpu: "250m", memory: "512Mi" }
   limits:   { cpu: "1", memory: "3Gi" }
 
+# Postgres backing store — REQUIRED for the admin UI below to work at all.
+#
+# Without it the console renders and then hangs on its first session call, which
+# Cloudflare surfaces as error 522 (see the long note in values.yaml). The
+# gateway's PROXYING path never needed a database, which is why it ran fine for
+# weeks and only the UI was broken.
+#
+# `fuzeinfra-postgres` is the shared server in this namespace and `litellm` is a
+# dedicated logical database on it, created idempotently by the ensure-database
+# initContainer using the same fuzeinfra-secrets credentials Airflow uses.
+#
+# WATCH THE FIRST ROLLOUT: LiteLLM runs `prisma migrate deploy` at startup once
+# DATABASE_URL is set, so the cold start gets slower and a migration failure
+# CrashLoops a gateway that FuzeFront's chat-service depends on. The startupProbe
+# (60 x 10s) covers the extra time. If it ever does wedge, setting
+# `database.enabled: false` here reverts to the previous behaviour — a working
+# gateway with a broken UI — in one commit.
+database:
+  enabled: true
+
 networkPolicy:
   enabled: true
   allowedNamespaces:
