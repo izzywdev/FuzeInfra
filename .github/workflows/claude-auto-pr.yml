@@ -2,8 +2,34 @@ name: Auto-PR from claude branches
 
 # Closes the issue->PR autonomy gap: anthropics/claude-code-action (in claude.yml)
 # pushes a `claude/**` branch and only posts a "Create PR" link — it does not open
-# the PR itself. This workflow opens a DRAFT PR from any pushed `claude/**` branch
-# when one doesn't already exist (draft = a human still reviews before merge).
+# the PR itself. This workflow opens a PR from any pushed `claude/**` branch when
+# one doesn't already exist. The PR is opened ready-for-review (not draft) and a
+# human still merges it.
+#
+# ---------------------------------------------------------------------------
+# WHY THIS USES A PAT AND NOT secrets.GITHUB_TOKEN
+#
+# A PR opened with GITHUB_TOKEN is authored by `github-actions[bot]`, and GitHub
+# gates workflow runs whose actor is a bot: every `pull_request` run on the PR is
+# created with conclusion `action_required`, waiting on a human to click Approve.
+# Observed on PR #410 — all 11 checks (Harden Gate, Infrastructure Tests, Helm
+# Chart Validation, kind-validate, terraform-plan-apply, ...) sat gated:
+#
+#     event: pull_request · actor: github-actions[bot] · conclusion: action_required
+#
+# In practice nobody clicks Approve, so Claude-authored PRs get merged with the
+# entire harden gate un-run — which is how a doc error reached main and took
+# plan.fuzefront.com down (see docs/consuming-repos/CUSTOM_DOMAINS.md §3). The
+# gate existed; the bot authorship silently disarmed it.
+#
+# Opening the PR with a real-user PAT makes the actor a real user, so checks run
+# immediately and normally. GH_TOKEN is the repo's real-user PAT (see claude.yml,
+# provision-*.yml); the `||` fallback keeps PR creation working if it is ever
+# unset, degrading to today's gated-but-created behaviour rather than failing.
+#
+# No recursion risk from dropping the GITHUB_TOKEN guard: this workflow only
+# opens/edits a PR, it never pushes a commit, so it cannot re-trigger itself.
+# ---------------------------------------------------------------------------
 on:
   push:
     branches:
@@ -22,12 +48,21 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Open draft PR if none exists
+      - name: Open PR if none exists
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Real-user PAT — see the header. With GITHUB_TOKEN the PR is authored
+          # by github-actions[bot] and every check on it lands in action_required.
+          GH_TOKEN: ${{ secrets.GH_TOKEN || secrets.GITHUB_TOKEN }}
+          HAVE_PAT: ${{ secrets.GH_TOKEN != '' }}
           BRANCH: ${{ github.ref_name }}
           BASE: ${{ github.event.repository.default_branch }}
         run: |
+          if [ "$HAVE_PAT" != "true" ]; then
+            echo "::warning::secrets.GH_TOKEN is unset — opening this PR as github-actions[bot]." \
+                 "Every check on it will be created as 'action_required' and will NOT run until a" \
+                 "human clicks Approve in the Actions tab. Set GH_TOKEN to a real-user PAT" \
+                 "(contents: read, pull-requests: write) to restore automatic checks."
+          fi
           existing=$(gh pr list --head "$BRANCH" --state open --json number --jq '.[0].number' 2>/dev/null || true)
           if [ -n "$existing" ]; then
             echo "PR #$existing already open for $BRANCH — nothing to do."
