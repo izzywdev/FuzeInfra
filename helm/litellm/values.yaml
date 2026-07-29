@@ -70,6 +70,10 @@ providerKeys:
     required: true
   - name: OPENAI_API_KEY
     required: false
+  # Third provider, used only as the last fallback hop. Optional: a missing key
+  # leaves the var unset and only the gemini-* models fail.
+  - name: GEMINI_API_KEY
+    required: false
 
 # -----------------------------------------------------------------------------
 # Model routing. `name` is what consumers ask for over the wire; `provider` is
@@ -98,6 +102,27 @@ models:
   - name: claude-haiku-4-5
     provider: anthropic/claude-haiku-4-5
     keyEnv: ANTHROPIC_API_KEY
+  # --- cross-provider fallback chat models -------------------------------------
+  # These exist so a provider-level outage does not take chat down. They are
+  # directly requestable too, but their real job is being fallback targets in
+  # routerSettings below. Every fallback target MUST be listed here.
+  #
+  # Model IDs verified against the live key's own /v1/models listing, not
+  # assumed: this key exposes gpt-4.1 / gpt-4o but NOT gpt-5.
+  - name: gpt-4.1
+    provider: openai/gpt-4.1
+    keyEnv: OPENAI_API_KEY
+  - name: gpt-4.1-mini
+    provider: openai/gpt-4.1-mini
+    keyEnv: OPENAI_API_KEY
+  # Gemini is the LAST hop and is currently NON-FUNCTIONAL: the key returns
+  # "You exceeded your current quota" (free-tier exhausted). Kept wired so it
+  # starts working the moment billing is fixed, with no chart change. It costs
+  # nothing in the normal path — fallbacks stop at the first success, so this is
+  # only ever reached if BOTH Anthropic and OpenAI have failed.
+  - name: gemini-2.0-flash
+    provider: gemini/gemini-2.0-flash
+    keyEnv: GEMINI_API_KEY
   # --- embeddings -------------------------------------------------------------
   # FuzeFront's LITELLM_EMBEDDING_MODEL default. OpenAI, not Anthropic —
   # Anthropic ships no embeddings endpoint, so /embeddings cannot be served by
@@ -118,6 +143,32 @@ litellmSettings:
 
 # Free-form general_settings passthrough (master_key is injected by the template).
 generalSettings: {}
+
+# -----------------------------------------------------------------------------
+# Cross-provider fallbacks — the reason a consumer talks to a gateway instead of
+# to Anthropic directly. If the primary provider errors, the router transparently
+# retries the SAME request against the next model in the list and the caller gets
+# a normal 200; it never sees the upstream failure.
+#
+# WHY THIS EXISTS (2026-07-29): the Anthropic account's credit balance was
+# exhausted, so every chat turn 400'd while the gateway itself was perfectly
+# healthy. A single-provider gateway turns one billing lapse into a total chat
+# outage. OpenAI was verified live and funded, so it is hop 2.
+#
+# Ordering is deliberate: Claude first (the quality bar consumers asked for),
+# then OpenAI (verified working), then Gemini (currently quota-exhausted, see
+# above). Fallbacks stop at the first success, so a dead last hop costs nothing.
+#
+# Every name on BOTH sides of these maps must exist in `models` above.
+# -----------------------------------------------------------------------------
+routerSettings:
+  fallbacks:
+    - claude-opus-4-5: ["gpt-4.1", "gemini-2.0-flash"]
+    - claude-opus-5: ["gpt-4.1", "gemini-2.0-flash"]
+    - claude-sonnet-5: ["gpt-4.1", "gemini-2.0-flash"]
+    # Haiku is the cheap/fast tier — fall back to a cheap/fast peer, not to a
+    # frontier model, so a provider outage cannot quietly multiply cost per turn.
+    - claude-haiku-4-5: ["gpt-4.1-mini", "gemini-2.0-flash"]
 
 # -----------------------------------------------------------------------------
 # Defence in depth: only the namespaces listed here may open a connection to the
