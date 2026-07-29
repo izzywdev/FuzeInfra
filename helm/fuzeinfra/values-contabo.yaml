@@ -170,6 +170,7 @@ backups:
     bucket: "fuzeinfra-backups"
     prefix: "db"
     existingSecret: "fuzeinfra-backups-s3"
+    lifecycleExpireDays: 30   # provider expires db/ objects after 30 days
 airflow:
   replicas: 0 # TEMP headroom (#93): webserver/scheduler/flower -> 0 pods
   workerReplicas: 0 # TEMP headroom (#93): celery worker -> 0 pods
