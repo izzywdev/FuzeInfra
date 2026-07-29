@@ -159,6 +159,30 @@ resource "null_resource" "provision" {
       # Wait for k3s to reconcile Traefik to ClusterIP (it polls ~every 15s)
       "for i in $(seq 1 20); do TYPE=$(kubectl get svc traefik -n kube-system -o jsonpath='{.spec.type}' 2>/dev/null); [ \"$TYPE\" = 'ClusterIP' ] && break; sleep 5; done",
 
+      # --- CoreDNS HA: scale to 2 replicas with soft anti-affinity ---
+      # Prevents a single-replica CoreDNS SPOF where every query crosses the WireGuard
+      # overlay to one node, causing 5s/10s stalls on packet loss (FuzeInfra#375).
+      # Soft (preferred) anti-affinity keeps it schedulable during node maintenance.
+      "kubectl apply -f - <<'DNSCFG'",
+      "apiVersion: helm.cattle.io/v1",
+      "kind: HelmChartConfig",
+      "metadata:",
+      "  name: coredns",
+      "  namespace: kube-system",
+      "spec:",
+      "  valuesContent: |",
+      "    replicaCount: 2",
+      "    affinity:",
+      "      podAntiAffinity:",
+      "        preferredDuringSchedulingIgnoredDuringExecution:",
+      "          - weight: 100",
+      "            podAffinityTerm:",
+      "              labelSelector:",
+      "                matchLabels:",
+      "                  app.kubernetes.io/name: coredns",
+      "              topologyKey: kubernetes.io/hostname",
+      "DNSCFG",
+
       # --- ArgoCD ---
       "kubectl create namespace argocd --dry-run=client -o yaml | kubectl apply -f -",
       "kubectl apply -n argocd -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml",
