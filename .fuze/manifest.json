@@ -60,6 +60,18 @@
       "exec-coordinator"
     ]
   },
+  "dependsOn": [],
+  "providesTo": [],
+  "a2a": {
+    "enabled": false,
+    "servingRoles": [
+      "ceo",
+      "cto",
+      "cfo",
+      "ciso"
+    ],
+    "external": false
+  },
   "hardening": {
     "ruleset": true,
     "requireSignatures": true,
