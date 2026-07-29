@@ -143,25 +143,36 @@ jobs:
           LITELLM_MASTER_KEY: ${{ secrets.LITELLM_MASTER_KEY }}
         run: |
           set -uo pipefail
+          # NO `|| echo 000` here: curl's own -w already emits 000 when it never got
+          # an HTTP response, so appending another produced the literal code "000000",
+          # which matched no branch below and buried the real diagnosis in the generic
+          # arm. `|| true` keeps `bash -e` from killing the step on curl's exit code.
           code=$(curl -sS -o /tmp/preflight.json -w '%{http_code}' --max-time 30 \
             -X POST "${ANTHROPIC_BASE_URL}/v1/messages" \
             -H "Authorization: Bearer ${LITELLM_MASTER_KEY}" \
             -H "anthropic-version: 2023-06-01" \
             -H "content-type: application/json" \
             -d "{\"model\":\"${ANTHROPIC_MODEL}\",\"max_tokens\":1,\"messages\":[{\"role\":\"user\",\"content\":\"ping\"}]}" \
-            || echo "000")
+            2>/tmp/preflight.err) || true
+          [ -z "${code:-}" ] && code="000"
           err=$(jq -r '.error.message // .message // empty' /tmp/preflight.json 2>/dev/null || true)
+          # curl's stderr is the ONLY thing that distinguishes the transport failures
+          # from each other — "Could not resolve host" (cluster DNS), "Connection
+          # timed out" (NetworkPolicy drop) and "Connection refused" (nothing
+          # listening) all arrive as code 000 and need completely different fixes.
+          transport=$(tr -d '\r' < /tmp/preflight.err 2>/dev/null | grep -v '^$' | tail -1 || true)
+          echo "curl exit detail: ${transport:-<none>} (http_code=$code)"
           [ -z "$err" ] && err="HTTP $code"
           case "$code" in
             200)
               echo "ok=true" >> "$GITHUB_OUTPUT"
               echo "LiteLLM gateway preflight OK (model ${ANTHROPIC_MODEL})" ;;
             000)
-              # No TCP answer: NetworkPolicy does not admit arc-runners, the gateway is
-              # down, or its Service DNS changed. Distinguished from an HTTP error
-              # because the fix is completely different.
+              # No HTTP response at all. `transport` says which of three unrelated
+              # faults it was, so the reason names the actual fix instead of listing
+              # every possibility.
               echo "ok=false" >> "$GITHUB_OUTPUT"
-              echo "reason=LiteLLM gateway unreachable at ${ANTHROPIC_BASE_URL} (no response). Check the pod is Running and that arc-runners is on networkPolicy.allowedNamespaces." >> "$GITHUB_OUTPUT" ;;
+              echo "reason=LiteLLM gateway unreachable at ${ANTHROPIC_BASE_URL} — ${transport:-no detail from curl}. Resolve-host errors mean cluster DNS from arc-runners; timeouts mean the NetworkPolicy is dropping us (arc-runners must be on networkPolicy.allowedNamespaces); connection-refused means the pod is not serving." >> "$GITHUB_OUTPUT" ;;
             401|403)
               echo "ok=false" >> "$GITHUB_OUTPUT"
               echo "reason=LiteLLM rejected LITELLM_MASTER_KEY (HTTP $code): $err. The secret and the gateway's sealed key have drifted — they rotate together." >> "$GITHUB_OUTPUT" ;;
