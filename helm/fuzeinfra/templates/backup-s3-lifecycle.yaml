@@ -1,0 +1,76 @@
+{{- /*
+=================== S3 backup retention (bucket lifecycle policy) ===================
+With sink=s3 the CronJobs upload and exit — the in-pod `keep=N` prune only ever
+applied to the PVC sink, so nothing ages out S3 objects. Retention therefore has
+to be a BUCKET LIFECYCLE POLICY, exactly as backup-cronjobs.yaml says.
+
+This applies it the GitOps way: a declarative Argo PostSync hook Job that asserts
+the policy on every sync. put-bucket-lifecycle-configuration is a full replace, so
+it is idempotent — re-running converges rather than accumulating rules, and the
+policy is re-asserted if anything mutates it out of band.
+
+Deletion is done by the storage provider, not by us: no pod has to run on time,
+and a missed CronJob can never cause unbounded growth.
+*/ -}}
+{{- $b := .Values.backups }}
+{{- if and $b.enabled (eq $b.sink "s3") (gt (int $b.s3.lifecycleExpireDays) 0) }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: fuzeinfra-backup-s3-lifecycle
+  labels:
+    {{- include "fuzeinfra.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: backup-lifecycle
+  annotations:
+    # Runs after the chart syncs, so the bucket/secret it needs already exist.
+    argocd.argoproj.io/hook: PostSync
+    # Replace the previous hook Job each sync — Job spec is immutable, so without
+    # this a second sync fails with "field is immutable".
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+spec:
+  backoffLimit: 2
+  activeDeadlineSeconds: 300
+  template:
+    metadata:
+      labels:
+        {{- include "fuzeinfra.labels" $ | nindent 8 }}
+        app.kubernetes.io/component: backup-lifecycle
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: lifecycle
+          image: {{ $b.awsCliImage | quote }}
+          imagePullPolicy: {{ include "fuzeinfra.pullPolicy" $ }}
+          env:
+            {{- include "fuzeinfra.backup.s3env" (dict "b" $b "root" $) | nindent 12 }}
+            - name: EXPIRE_DAYS
+              value: {{ $b.s3.lifecycleExpireDays | quote }}
+            - name: PREFIX
+              value: {{ $b.s3.prefix | quote }}
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -eu
+              # IMDS is not reachable in-cluster; without this the CLI stalls on it.
+              export AWS_EC2_METADATA_DISABLED=true
+              cat > /tmp/lifecycle.json <<JSON
+              {
+                "Rules": [
+                  {
+                    "ID": "expire-db-backups",
+                    "Status": "Enabled",
+                    "Filter": { "Prefix": "${PREFIX}/" },
+                    "Expiration": { "Days": ${EXPIRE_DAYS} },
+                    "AbortIncompleteMultipartUpload": { "DaysAfterInitiation": 7 }
+                  }
+                ]
+              }
+              JSON
+              aws --endpoint-url "$S3_ENDPOINT" s3api put-bucket-lifecycle-configuration \
+                --bucket "$S3_BUCKET" --lifecycle-configuration file:///tmp/lifecycle.json
+              echo "Lifecycle applied: s3://${S3_BUCKET}/${PREFIX}/ expires after ${EXPIRE_DAYS} days."
+              # Read it back so the Job fails loudly if the provider silently ignored it.
+              aws --endpoint-url "$S3_ENDPOINT" s3api get-bucket-lifecycle-configuration \
+                --bucket "$S3_BUCKET"
+{{- end }}

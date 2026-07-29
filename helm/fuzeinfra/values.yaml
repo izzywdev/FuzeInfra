@@ -529,6 +529,11 @@ backups:
     existingSecret: ""
     accessKeyIdKey: BACKUP_S3_ACCESS_KEY_ID
     secretAccessKeyKey: BACKUP_S3_SECRET_ACCESS_KEY
+    # Age-out for the dumps, applied as a BUCKET LIFECYCLE POLICY (the provider
+    # deletes them, not us). Required with sink=s3: the in-pod `pvc.keep` prune
+    # only ever applied to the PVC sink, so without this S3 grows forever.
+    # 0 disables the policy entirely.
+    lifecycleExpireDays: 30
   # Per-database toggles. Each dumps a *running* instance (no downtime) and is
   # independently gated so an overlay can enable only the DBs it runs.
   postgres:
