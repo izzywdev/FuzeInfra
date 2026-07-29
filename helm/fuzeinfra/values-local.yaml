@@ -23,6 +23,26 @@ elasticsearch:
 
 airflow:
   workerReplicas: 1
+  # A fresh cluster has no `airflow` database, and the default `hook` mode
+  # cannot create one: Helm runs post-install hooks only after `--wait` reports
+  # the release ready, and the Airflow pods can never be ready until the hook
+  # has run. `--wait` burns its full 10m, the hook never fires, and all four
+  # pods sit in CrashLoopBackOff on
+  #   FATAL:  database "airflow" does not exist
+  # Local is the only place that genuinely cold-starts, so it is the only place
+  # that needs `inline`. See airflow.init.mode in values.yaml.
+  init:
+    mode: inline
+
+# The admin token Secret is a SealedSecret in prod and does not exist on kind.
+# Without this the chromadb pod is stuck in Init:CreateContainerConfigError
+# forever. Throwaway value — never set this in a real overlay.
+chromadb:
+  auth:
+    adminSecret:
+      devSecret:
+        enabled: true
+        token: local-dev-chroma-admin-token
 
 # Optional local DNS server for *.dev.local. Exposed in-cluster; query it via the
 # dnsmasq Service. CoreDNS still handles in-cluster service names.
