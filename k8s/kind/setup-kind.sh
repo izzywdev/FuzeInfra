@@ -111,14 +111,36 @@ if [ -n "$PROFILE" ]; then
   echo "    applying profile overlay: $PROFILE"
   PROFILE_ARGS=(-f "$PFILE")
 fi
-helm upgrade --install fuzeinfra "$REPO_ROOT/helm/fuzeinfra" \
-  --namespace "$NAMESPACE" --create-namespace \
-  -f "$REPO_ROOT/helm/fuzeinfra/values-local.yaml" \
-  ${PROFILE_ARGS[@]+"${PROFILE_ARGS[@]}"} \
-  --wait --timeout 10m || {
-    echo "Helm install reported a timeout; some heavy images (elasticsearch, kafka)"
-    echo "may still be pulling. Check: kubectl -n $NAMESPACE get pods"
-  }
+# A slow image pull is tolerable; a broken chart is not. The previous version
+# swallowed EVERY helm failure as "reported a timeout" and exited 0, so a hard
+# install error (e.g. a SealedSecret rendering on a cluster with no Sealed
+# Secrets CRD) was reported as a successful deploy — the caller then "validated"
+# an empty namespace and passed. Distinguish the two: tolerate a genuine
+# --wait timeout, fail on anything else.
+set +e
+helm_out="$(
+  helm upgrade --install fuzeinfra "$REPO_ROOT/helm/fuzeinfra" \
+    --namespace "$NAMESPACE" --create-namespace \
+    -f "$REPO_ROOT/helm/fuzeinfra/values-local.yaml" \
+    ${PROFILE_ARGS[@]+"${PROFILE_ARGS[@]}"} \
+    --wait --timeout 10m 2>&1
+)"
+helm_rc=$?
+set -e
+printf '%s\n' "$helm_out"
+
+if [ "$helm_rc" -ne 0 ]; then
+  if printf '%s' "$helm_out" | grep -qiE 'timed out waiting|context deadline exceeded'; then
+    echo ""
+    echo "WARNING: helm --wait timed out. Heavy images (elasticsearch, kafka) may still"
+    echo "be pulling; the release itself installed. Check: kubectl -n $NAMESPACE get pods"
+  else
+    echo "" >&2
+    echo "ERROR: helm install FAILED (exit $helm_rc) — this is not a timeout." >&2
+    echo "The release is not deployed; do not treat the environment as up." >&2
+    exit "$helm_rc"
+  fi
+fi
 
 cat <<EOF
 

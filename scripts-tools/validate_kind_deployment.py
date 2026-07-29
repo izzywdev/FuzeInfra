@@ -195,6 +195,24 @@ def main() -> int:
         # Fallback: validate whatever workloads are deployed.
         services = sorted(workloads.keys())
         print("    (using deployed-workload discovery)")
+
+    # An EMPTY service set is a failure, never a pass. This used to print
+    # "[OK] all 0 enabled service(s) are Ready" and exit 0 — a vacuous green that
+    # is worse than a red, because it certifies an empty namespace as healthy.
+    # It masked a real incident: helm install failed, setup-kind.sh swallowed the
+    # error, and this validator then "verified" a cluster with nothing in it.
+    # There is no legitimate configuration in which the chart deploys nothing.
+    if not services:
+        print(
+            "\n[FAIL] no enabled services found and no workloads deployed in "
+            f"namespace '{args.namespace}'.\n"
+            "       The release is absent or its install failed — an empty "
+            "namespace is a failed deploy, not a healthy one.\n"
+            f"       Check: helm -n {args.namespace} list --all && "
+            f"kubectl -n {args.namespace} get all"
+        )
+        return 1
+
     print(f"    enabled services: {', '.join(services)}\n")
 
     print("==> Waiting for workloads to become Ready (budget %ds)..." % args.timeout)

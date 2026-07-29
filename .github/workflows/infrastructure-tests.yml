@@ -76,6 +76,7 @@ jobs:
         pytest -v --junitxml=unit-test-results.xml \
           tests/test_custom_hostname_api.py \
           tests/test_ingress_wildcard_priority.py \
+          tests/test_local_overlay_installable.py \
           tests/test_chroma_helm_security.py \
           tests/test_fuzequality_provisioning.py
 
