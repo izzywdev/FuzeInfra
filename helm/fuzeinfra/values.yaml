@@ -440,9 +440,14 @@ grafana:
     enabled: false
     displayName: Authentik
     clientId: grafana
-    # Authentik OIDC application base. Grafana appends authorize/ token/ userinfo/.
-    # The trailing path segment is the Authentik application slug.
-    issuer: https://auth.fuzefront.com/application/o/grafana
+    # Authentik serves authorize/, token/ and userinfo/ at the /application/o/
+    # ROOT — they are NOT per-application. Only `issuer` and `jwks_uri` carry the
+    # application slug. Verified against the live discovery document:
+    #   issuer                 .../application/o/grafana/
+    #   authorization_endpoint .../application/o/authorize/
+    # Deriving these from the per-app path yields a 404 on the first redirect,
+    # so this is deliberately a shared base, not the issuer.
+    endpointBase: https://auth.fuzefront.com/application/o
     secretName: grafana-oidc
     secretKey: CLIENT_SECRET
     # JMESPath over the ID-token claims. Requires the `groups` scope to be

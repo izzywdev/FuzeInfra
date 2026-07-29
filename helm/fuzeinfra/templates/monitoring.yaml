@@ -349,12 +349,14 @@ spec:
             # mapping below is a no-op without it.
             - name: GF_AUTH_GENERIC_OAUTH_SCOPES
               value: "openid email profile groups"
+            # These come off the GLOBAL /application/o/ base, not the per-app
+            # issuer — see the note on grafana.oidc.endpointBase in values.yaml.
             - name: GF_AUTH_GENERIC_OAUTH_AUTH_URL
-              value: "{{ .Values.grafana.oidc.issuer }}/authorize/"
+              value: "{{ .Values.grafana.oidc.endpointBase }}/authorize/"
             - name: GF_AUTH_GENERIC_OAUTH_TOKEN_URL
-              value: "{{ .Values.grafana.oidc.issuer }}/token/"
+              value: "{{ .Values.grafana.oidc.endpointBase }}/token/"
             - name: GF_AUTH_GENERIC_OAUTH_API_URL
-              value: "{{ .Values.grafana.oidc.issuer }}/userinfo/"
+              value: "{{ .Values.grafana.oidc.endpointBase }}/userinfo/"
             # Grafana's SQLite lives in an emptyDir unless persistence.enabled,
             # so every login must be able to (re)create the user from claims.
             - name: GF_AUTH_GENERIC_OAUTH_ALLOW_SIGN_UP

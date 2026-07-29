@@ -1,0 +1,14 @@
+---
+apiVersion: bitnami.com/v1alpha1
+kind: SealedSecret
+metadata:
+  name: grafana-oidc
+  namespace: fuzeinfra
+spec:
+  encryptedData:
+    CLIENT_SECRET: AgAYvaciWtLvwAkqdpau7gtVcTRoLVD7LaD86YnPbPqnp8CaZX52KN4QCW/yf0234QIzT8iNOvMMgETgKGPxDanlvfvjpvQPDDuromaMRsHLlnVco5GAjzoJXw/0J4vJT80qa9ForMFt54sYxmTwgNUhsFMn3gYgW0YQq+2PEEVRzogax3y3FiZ6ENMZkZKN03hQNphfi6hmcw5DsZO8KZdhBoxZSht1eqiWK6gtealHXJ9pHohI9ck0s+Y+6cvHTOiFsBtzjD4VQTjtdFFSwBIqHhXAxPIe0GukyNcZYnHHuByNq7TG34OIJTOQO17JXFwvno9fJF/EOZF8yBOjIdkKVxd5YNnTalMYBXtEZONSzEieFg0XayN1QS4Wge1WF2FU3PXNlkR8xVi12U11/S6W20rVHcpgUnrJR8O5KRq3ry5El7MJEq1Ub0O6rNlet+53VSVrIgI43jVyx/30vIstRGDXskXB+DjzwM6eStVyXBJm6cuiSlpwbIu4tVC5iMZuRPNPq4wf4MVFtkcC5LRXim9JNtUxl9trV474uUHGgJfuACy17P2Ni7JVEJNMbjDUkhulsTpOqrLhOtdZvcqORrO5bNwXrjCryMGWzH4wNYW+KkSM4KbInho5RMKbvJGWCv6DVZjtAle7nwseXaT0s0mANws84fDBmy55IZWT7KYqSbwq9YssRj1frQoDn1qAPUq4KO3/cMYkr8IJ6RQRrQl8SS8DRfrm95SFqbrl/dgzPwUIZ31qQLCaRj6N/WPxQxGXWsu8/SHxcjH9TQHTjiNT6gmTpNtbxIy2UEInPpBVLYkWlT6oKEEbASrjTD8=
+  template:
+    metadata:
+      name: grafana-oidc
+      namespace: fuzeinfra
+    type: Opaque
