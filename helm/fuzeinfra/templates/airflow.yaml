@@ -59,6 +59,106 @@ referenced via $(VAR) interpolation to build the SQLAlchemy/Celery URLs.
       mountPath: /dags
 {{- end -}}
 
+{{- /*
+  `hook` (default, unchanged) or `inline`. See airflow.init.mode in values.yaml
+  for why the hook variant cannot cold-start.
+*/ -}}
+{{- define "fuzeinfra.airflowInitMode" -}}
+{{- dig "init" "mode" "hook" .Values.airflow -}}
+{{- end -}}
+
+{{- /*
+  Gate for `inline` mode: hold every Airflow pod at Init until the metadata
+  database exists AND its migrations have been applied.
+
+  Without it the pods start concurrently with the init Job, die immediately on
+  `database "airflow" does not exist`, and CrashLoopBackOff pushes the retry
+  interval out to ~5 minutes — so a pod can stay down long after the database is
+  ready, which is its own way of blowing helm's --wait budget. Blocking in an
+  init container converts that race into a deterministic wait.
+
+  `airflow db check-migrations` is the same readiness check the upstream Airflow
+  chart uses. `-t 5` bounds a single attempt so the loop keeps polling rather
+  than blocking on one long call; a missing database exits non-zero and retries.
+*/ -}}
+{{- define "fuzeinfra.airflowWaitForDb" -}}
+- name: wait-for-airflow-db
+  image: {{ .Values.airflow.image }}
+  imagePullPolicy: {{ include "fuzeinfra.pullPolicy" . }}
+  env:
+    {{- include "fuzeinfra.airflowEnv" . | nindent 4 }}
+  command:
+    - bash
+    - -c
+    - |
+      until airflow db check-migrations -t 5 >/dev/null 2>&1; do
+        echo "waiting for the airflow metadata database to be created and migrated..."
+        sleep 5
+      done
+      echo "airflow metadata database is ready."
+  resources:
+    requests: { cpu: 50m, memory: 128Mi }
+    limits:   { cpu: 250m, memory: 512Mi }
+{{- end -}}
+
+{{- /*
+  Pod template for the init Job, factored out so its hash can name the Job in
+  `inline` mode. The body is identical in both modes — only the Job's name,
+  annotations and TTL differ.
+*/ -}}
+{{- define "fuzeinfra.airflowInitPodTemplate" -}}
+metadata:
+  labels:
+    {{- include "fuzeinfra.labels" . | nindent 4 }}
+    {{- include "fuzeinfra.selectorLabels" (dict "component" "airflow-init" "root" .) | nindent 4 }}
+spec:
+  restartPolicy: Never
+  containers:
+    - name: airflow-init
+      image: {{ .Values.airflow.image }}
+      imagePullPolicy: {{ include "fuzeinfra.pullPolicy" . }}
+      env:
+        {{- include "fuzeinfra.airflowEnv" . | nindent 8 }}
+        - name: AIRFLOW_ADMIN_USER
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "fuzeinfra.secretName" . }}
+              key: AIRFLOW_ADMIN_USER
+        - name: AIRFLOW_ADMIN_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "fuzeinfra.secretName" . }}
+              key: AIRFLOW_ADMIN_PASSWORD
+      command:
+        - bash
+        - -c
+        - |
+          set -e
+          echo "Waiting for PostgreSQL..."
+          until PGPASSWORD="$POSTGRES_PASSWORD" psql -h fuzeinfra-postgres -U "$POSTGRES_USER" -d postgres -c '\q' 2>/dev/null; do
+            sleep 2
+          done
+          echo "Ensuring 'airflow' database exists..."
+          PGPASSWORD="$POSTGRES_PASSWORD" psql -h fuzeinfra-postgres -U "$POSTGRES_USER" -d postgres -tc \
+            "SELECT 1 FROM pg_database WHERE datname = 'airflow'" | grep -q 1 || \
+            PGPASSWORD="$POSTGRES_PASSWORD" psql -h fuzeinfra-postgres -U "$POSTGRES_USER" -d postgres -c "CREATE DATABASE airflow"
+          # Pre-create a database matching the role name ("$POSTGRES_USER").
+          # Clients/health-probes that connect without naming a database
+          # (e.g. `pg_isready -U $POSTGRES_USER`) fall back to a DB named
+          # after the role, otherwise spamming
+          # `FATAL: database "..." does not exist` on every probe.
+          echo "Ensuring role-default '$POSTGRES_USER' database exists..."
+          PGPASSWORD="$POSTGRES_PASSWORD" psql -h fuzeinfra-postgres -U "$POSTGRES_USER" -d postgres -tc \
+            "SELECT 1 FROM pg_database WHERE datname = '$POSTGRES_USER'" | grep -q 1 || \
+            PGPASSWORD="$POSTGRES_PASSWORD" psql -h fuzeinfra-postgres -U "$POSTGRES_USER" -d postgres -c "CREATE DATABASE \"$POSTGRES_USER\""
+          echo "Running airflow db migrate..."
+          airflow db migrate
+          echo "Creating admin user (idempotent)..."
+          airflow users create \
+            --username "$AIRFLOW_ADMIN_USER" --firstname Admin --lastname User \
+            --role Admin --email admin@example.com --password "$AIRFLOW_ADMIN_PASSWORD" || true
+{{- end -}}
+
 {{- define "fuzeinfra.dagVolumes" -}}
 - name: dags
   emptyDir: {}
@@ -95,71 +195,40 @@ data:
         )
 ---
 {{- /* ===================== Airflow DB migrate / bootstrap Job ===================== */}}
+{{- $initMode := include "fuzeinfra.airflowInitMode" . }}
+{{- $initPodTemplate := include "fuzeinfra.airflowInitPodTemplate" . }}
 apiVersion: batch/v1
 kind: Job
 metadata:
+{{- if eq $initMode "inline" }}
+  {{- /* A plain Job's pod template is immutable, so a fixed name would make the
+         next `helm upgrade` fail with "field is immutable" as soon as anything
+         here changed. Suffixing with the template's own hash makes each distinct
+         spec a distinct Job, and an unchanged spec re-uses the completed one
+         instead of re-running it. */}}
+  name: fuzeinfra-airflow-init-{{ $initPodTemplate | sha256sum | trunc 8 }}
+{{- else }}
   name: fuzeinfra-airflow-init
+{{- end }}
   labels:
     {{- include "fuzeinfra.labels" . | nindent 4 }}
+{{- if eq $initMode "hook" }}
   annotations:
     "helm.sh/hook": post-install,post-upgrade
     "helm.sh/hook-weight": "0"
     "helm.sh/hook-delete-policy": before-hook-creation
     "argocd.argoproj.io/hook": PostSync
     "argocd.argoproj.io/hook-delete-policy": BeforeHookCreation
+{{- end }}
 spec:
   backoffLimit: 6
+{{- if eq $initMode "inline" }}
+  # Nothing reaps a non-hook Job. Well clear of helm's --wait budget, so the
+  # Job is still around to be waited on.
+  ttlSecondsAfterFinished: 3600
+{{- end }}
   template:
-    metadata:
-      labels:
-        {{- include "fuzeinfra.labels" . | nindent 8 }}
-        {{- include "fuzeinfra.selectorLabels" (dict "component" "airflow-init" "root" $) | nindent 8 }}
-    spec:
-      restartPolicy: Never
-      containers:
-        - name: airflow-init
-          image: {{ .Values.airflow.image }}
-          imagePullPolicy: {{ include "fuzeinfra.pullPolicy" . }}
-          env:
-            {{- include "fuzeinfra.airflowEnv" . | nindent 12 }}
-            - name: AIRFLOW_ADMIN_USER
-              valueFrom:
-                secretKeyRef:
-                  name: {{ include "fuzeinfra.secretName" . }}
-                  key: AIRFLOW_ADMIN_USER
-            - name: AIRFLOW_ADMIN_PASSWORD
-              valueFrom:
-                secretKeyRef:
-                  name: {{ include "fuzeinfra.secretName" . }}
-                  key: AIRFLOW_ADMIN_PASSWORD
-          command:
-            - bash
-            - -c
-            - |
-              set -e
-              echo "Waiting for PostgreSQL..."
-              until PGPASSWORD="$POSTGRES_PASSWORD" psql -h fuzeinfra-postgres -U "$POSTGRES_USER" -d postgres -c '\q' 2>/dev/null; do
-                sleep 2
-              done
-              echo "Ensuring 'airflow' database exists..."
-              PGPASSWORD="$POSTGRES_PASSWORD" psql -h fuzeinfra-postgres -U "$POSTGRES_USER" -d postgres -tc \
-                "SELECT 1 FROM pg_database WHERE datname = 'airflow'" | grep -q 1 || \
-                PGPASSWORD="$POSTGRES_PASSWORD" psql -h fuzeinfra-postgres -U "$POSTGRES_USER" -d postgres -c "CREATE DATABASE airflow"
-              # Pre-create a database matching the role name ("$POSTGRES_USER").
-              # Clients/health-probes that connect without naming a database
-              # (e.g. `pg_isready -U $POSTGRES_USER`) fall back to a DB named
-              # after the role, otherwise spamming
-              # `FATAL: database "..." does not exist` on every probe.
-              echo "Ensuring role-default '$POSTGRES_USER' database exists..."
-              PGPASSWORD="$POSTGRES_PASSWORD" psql -h fuzeinfra-postgres -U "$POSTGRES_USER" -d postgres -tc \
-                "SELECT 1 FROM pg_database WHERE datname = '$POSTGRES_USER'" | grep -q 1 || \
-                PGPASSWORD="$POSTGRES_PASSWORD" psql -h fuzeinfra-postgres -U "$POSTGRES_USER" -d postgres -c "CREATE DATABASE \"$POSTGRES_USER\""
-              echo "Running airflow db migrate..."
-              airflow db migrate
-              echo "Creating admin user (idempotent)..."
-              airflow users create \
-                --username "$AIRFLOW_ADMIN_USER" --firstname Admin --lastname User \
-                --role Admin --email admin@example.com --password "$AIRFLOW_ADMIN_PASSWORD" || true
+    {{- $initPodTemplate | nindent 4 }}
 ---
 {{- /* ===================== Airflow Webserver ===================== */}}
 apiVersion: v1
@@ -196,6 +265,9 @@ spec:
     spec:
       initContainers:
         {{- include "fuzeinfra.dagInitContainer" . | nindent 8 }}
+        {{- if eq (include "fuzeinfra.airflowInitMode" .) "inline" }}
+        {{- include "fuzeinfra.airflowWaitForDb" . | nindent 8 }}
+        {{- end }}
       containers:
         - name: webserver
           image: {{ .Values.airflow.image }}
@@ -241,6 +313,9 @@ spec:
     spec:
       initContainers:
         {{- include "fuzeinfra.dagInitContainer" . | nindent 8 }}
+        {{- if eq (include "fuzeinfra.airflowInitMode" .) "inline" }}
+        {{- include "fuzeinfra.airflowWaitForDb" . | nindent 8 }}
+        {{- end }}
       containers:
         - name: scheduler
           image: {{ .Values.airflow.image }}
@@ -274,6 +349,9 @@ spec:
     spec:
       initContainers:
         {{- include "fuzeinfra.dagInitContainer" . | nindent 8 }}
+        {{- if eq (include "fuzeinfra.airflowInitMode" .) "inline" }}
+        {{- include "fuzeinfra.airflowWaitForDb" . | nindent 8 }}
+        {{- end }}
       containers:
         - name: worker
           image: {{ .Values.airflow.image }}
@@ -324,6 +402,13 @@ spec:
         {{- include "fuzeinfra.labels" . | nindent 8 }}
         {{- include "fuzeinfra.selectorLabels" (dict "component" "airflow-flower" "root" $) | nindent 8 }}
     spec:
+      {{- /* Flower has no DAG sync, so this is its only init container. It
+             reads the Celery result backend, which is the same Postgres
+             database, so it crashloops on a cold start exactly like the rest. */}}
+      {{- if eq (include "fuzeinfra.airflowInitMode" .) "inline" }}
+      initContainers:
+        {{- include "fuzeinfra.airflowWaitForDb" . | nindent 8 }}
+      {{- end }}
       containers:
         - name: flower
           image: {{ .Values.airflow.image }}

@@ -468,6 +468,32 @@ spec:
 
 {{- /* ============================ ChromaDB ============================ */ -}}
 {{- if .Values.chromadb.enabled }}
+{{- $chromaAdmin := .Values.chromadb.auth.adminSecret }}
+{{- if (dig "devSecret" "enabled" false $chromaAdmin) }}
+{{- if not (dig "devSecret" "token" "" $chromaAdmin) }}
+{{- fail "chromadb.auth.adminSecret.devSecret.enabled=true requires a non-empty devSecret.token" }}
+{{- end }}
+---
+# LOCAL DEVELOPMENT ONLY. Renders the ChromaDB admin token so kind clusters work
+# with no SealedSecret ceremony — the same escape hatch customHostnameApi.devSecret
+# already uses in templates/custom-hostname-api.yaml.
+#
+# Without this the `render-auth-config` init container below fails closed with
+#   Error: secret "chromadb-admin-credentials" not found
+# forever, because the only thing that produces that Secret is
+# deploy/sealed-secrets/chromadb-admin-credentials.yaml — which needs a Sealed
+# Secrets controller and the prod private key. Prod/AWS keep taking it from
+# there; this must stay off in every real overlay.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ required "chromadb.auth.adminSecret.name is required" $chromaAdmin.name }}
+  labels:
+    {{- include "fuzeinfra.labels" . | nindent 4 }}
+type: Opaque
+stringData:
+  {{ required "chromadb.auth.adminSecret.key is required" $chromaAdmin.key }}: {{ $chromaAdmin.devSecret.token | quote }}
+{{- end }}
 ---
 apiVersion: v1
 kind: Service
