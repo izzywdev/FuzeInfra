@@ -11,6 +11,18 @@ name: A2A Maintain
 # Requires repo secret ANTHROPIC_API_KEY. No key -> SKIPS (never red). The `a2a-maintainer`
 # agent def is stamped by sdlc-bootstrap into .claude/agents/ and reconciled by
 # governance-sync; this workflow just invokes it.
+#
+# A KEY THE API DEFINITIVELY REJECTS (no credit / revoked / model not entitled) is
+# treated the SAME as no key: warn loudly, skip, stay green. That is not leniency —
+# it is what this check went silently non-functional for a day teaching us. On
+# 2026-07-29 the Anthropic account ran out of credit; the action's wrapper swallowed
+# the API error and reported only `is_error:true, num_turns:1, $0`, so every PR in the
+# repo carried a red `a2a-maintain` whose log said nothing actionable. A permanent red
+# that no PR author can fix is indistinguishable from a broken check and trains people
+# to ignore it — including on the day it goes red for a REAL A2A drift. So: an
+# account-level outage is a loud WARNING (annotation + job summary), a genuine agent
+# failure is still RED, and the real error text is always surfaced (see the preflight
+# and the "Surface the real result" step below) instead of being swallowed.
 
 on:
   pull_request:
@@ -63,8 +75,49 @@ jobs:
             echo "run=true" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Run a2a-maintainer
+      # Is the key actually usable? One 1-token live call. This is an ACCOUNT-level
+      # liveness probe (key valid + credit available), not a model-entitlement probe:
+      # the model the action itself runs is its own default, not this one. Haiku is
+      # the cheapest rung of governance/model-registry.md and exercises the same
+      # auth/credit path, which is the failure class that actually bites here.
+      # Transient conditions (429/5xx/timeout) do NOT stop the run — the action has
+      # its own retries; only definitive rejections do.
+      - name: Preflight — Anthropic key valid & funded
+        id: preflight
         if: steps.guard.outputs.ok == 'true' && steps.marker.outputs.run == 'true'
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          set -uo pipefail
+          code=$(curl -sS -o /tmp/preflight.json -w '%{http_code}' --max-time 20 \
+            -X POST https://api.anthropic.com/v1/messages \
+            -H "x-api-key: ${ANTHROPIC_API_KEY}" \
+            -H "anthropic-version: 2023-06-01" \
+            -H "content-type: application/json" \
+            -d '{"model":"claude-haiku-4-5-20251001","max_tokens":1,"messages":[{"role":"user","content":"ping"}]}' \
+            || echo "000")
+          err=$(jq -r '.error.message // empty' /tmp/preflight.json 2>/dev/null || true)
+          case "$code" in
+            200)
+              echo "ok=true" >> "$GITHUB_OUTPUT"
+              echo "Anthropic preflight OK" ;;
+            400|401|402|403)
+              # Deterministic and repo-unfixable: bad key, no credit, or no model access.
+              [ -z "$err" ] && err="HTTP $code"
+              echo "ok=false" >> "$GITHUB_OUTPUT"
+              echo "reason=Anthropic API rejected the key (HTTP $code): $err" >> "$GITHUB_OUTPUT" ;;
+            *)
+              echo "ok=true" >> "$GITHUB_OUTPUT"
+              echo "::warning::Anthropic preflight inconclusive (HTTP $code) — proceeding; the action retries on its own." ;;
+          esac
+
+      - name: Run a2a-maintainer
+        id: claude
+        if: steps.guard.outputs.ok == 'true' && steps.marker.outputs.run == 'true' && steps.preflight.outputs.ok == 'true'
+        # continue-on-error so the steps below own the verdict: they can tell an
+        # account-level outage (warn, stay green) from a real agent failure (red),
+        # which the action itself cannot.
+        continue-on-error: true
         uses: anthropics/claude-code-action@be7b93b1907a4abad570368f3c74b6fe3807510b  # v1
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
@@ -96,3 +149,81 @@ jobs:
             End with the done-contract line from your agent def
             (`A2A SURFACE: <in-sync|scaffolded|reconciled>` + what landed + `NEEDS PRODUCT/OPERATOR:` if any).
           claude_args: '--allowedTools "Bash,Read,Edit,MultiEdit,Write,Glob,Grep,WebFetch"'
+
+      # The wrapper prints only `is_error:true` and swallows WHY. Pull the result
+      # record out of the execution log and put the actual error text in the log +
+      # keep the whole log as an artifact, so the next failure is diagnosable from
+      # the run page instead of by re-deriving it from first principles.
+      - name: Surface the real result
+        id: result
+        if: always() && steps.claude.outcome != 'skipped'
+        env:
+          EXEC_FILE: ${{ steps.claude.outputs.execution_file }}
+        run: |
+          set -uo pipefail
+          if [ -z "${EXEC_FILE:-}" ] || [ ! -f "$EXEC_FILE" ]; then
+            echo "no execution file produced by the action"
+            echo "is_error=unknown" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          res=$(jq -rs '[.[] | .. | objects | select(.type? == "result")] | last' "$EXEC_FILE" 2>/dev/null || echo "null")
+          echo "--- claude result record ---"; echo "$res"
+          is_error=$(printf '%s' "$res" | jq -r '.is_error // false' 2>/dev/null || echo unknown)
+          # `.result`/`.error` carry the human-readable failure when the SDK sets one.
+          msg=$(printf '%s' "$res" | jq -r '(.error // .result // "") | tostring' 2>/dev/null || true)
+          echo "is_error=$is_error" >> "$GITHUB_OUTPUT"
+          {
+            echo "msg<<EOF"
+            echo "${msg:-<no message in result record>}"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Upload claude execution log
+        if: always() && steps.claude.outcome == 'failure'
+        uses: actions/upload-artifact@v7
+        with:
+          name: a2a-maintain-execution-log
+          path: ${{ steps.claude.outputs.execution_file }}
+          if-no-files-found: ignore
+          retention-days: 7
+
+      # The verdict. Account-level outage -> loud warning, green. Real agent failure
+      # -> red, with the surfaced message.
+      - name: Verdict
+        if: always() && steps.guard.outputs.ok == 'true' && steps.marker.outputs.run == 'true'
+        env:
+          PREFLIGHT_OK: ${{ steps.preflight.outputs.ok }}
+          PREFLIGHT_REASON: ${{ steps.preflight.outputs.reason }}
+          CLAUDE_OUTCOME: ${{ steps.claude.outcome }}
+          RESULT_IS_ERROR: ${{ steps.result.outputs.is_error }}
+          RESULT_MSG: ${{ steps.result.outputs.msg }}
+        run: |
+          set -uo pipefail
+          if [ "${PREFLIGHT_OK:-}" != "true" ]; then
+            echo "::warning::A2A maintain SKIPPED — ${PREFLIGHT_REASON}. A2A drift is NOT being checked on this PR until the Anthropic account is repaired."
+            {
+              echo "### ⚠️ A2A maintain skipped — Anthropic key unusable"
+              echo ""
+              echo "\`${PREFLIGHT_REASON}\`"
+              echo ""
+              echo "This is an **account-level** problem, not a problem with this PR — nothing you"
+              echo "can change here will clear it. An operator must repair/fund the \`ANTHROPIC_API_KEY\`"
+              echo "secret's account; the check resumes on the next PR event with no further action."
+              echo ""
+              echo "**Until then the repo's A2A surface is not being checked for drift.**"
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          if [ "${CLAUDE_OUTCOME:-}" = "failure" ] || [ "${RESULT_IS_ERROR:-}" = "true" ]; then
+            echo "::error::a2a-maintainer did not complete: ${RESULT_MSG:-no error message surfaced}"
+            {
+              echo "### ❌ a2a-maintainer failed"
+              echo ""
+              echo '```'
+              echo "${RESULT_MSG:-no error message surfaced}"
+              echo '```'
+              echo ""
+              echo "Full execution log is attached as the \`a2a-maintain-execution-log\` artifact."
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          echo "a2a-maintainer completed."
