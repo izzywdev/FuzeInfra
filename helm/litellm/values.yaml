@@ -195,36 +195,58 @@ models:
     extraParams:
       additional_drop_params: ["thinking", "context_management", "output_config", "reasoning_effort"]
   # --- Gemini ------------------------------------------------------------------
-  # ALL of these are currently NON-FUNCTIONAL: the key returns "You exceeded your
-  # current quota" (free tier exhausted). Wired anyway so they start working the
-  # moment billing is fixed, with no chart change. Costs nothing in the normal
-  # path — fallbacks stop at the first success, so gemini is only ever reached if
-  # BOTH Anthropic and OpenAI have failed.
+  # VERIFIED LIVE 2026-08-02 by calling generateContent with this cluster's own
+  # GEMINI_API_KEY. Every model previously listed here was dead, in two different
+  # ways, and the fallback chain routed to them anyway:
   #
-  # Model IDs taken from the key's own ListModels response (filtered to those
-  # advertising generateContent), not guessed.
-  - name: gemini-2.5-pro
-    provider: gemini/gemini-2.5-pro
+  #   Pro-class (gemini-2.5-pro, gemini-pro-latest, gemini-3-pro-preview)
+  #     429 RESOURCE_EXHAUSTED — "generate_content_free_tier_requests, limit: 0".
+  #     The `free_tier` metric with limit 0 is Google saying this key belongs to a
+  #     project with no billing enabled. It is NOT "out of credit": Pro simply has
+  #     no free tier at all. Attaching the key to a billing-enabled project is what
+  #     unlocks these — nothing in this chart can.
+  #
+  #   gemini-2.5-flash, gemini-2.5-flash-lite
+  #     404 NOT_FOUND — "no longer available to new users". Retired by Google.
+  #
+  # ListModels still ADVERTISES the retired IDs, so the previous comment's method
+  # ("taken from the key's own ListModels response") was reasonable and still
+  # produced two dead hops. Only generateContent tells the truth. Re-probe with a
+  # real call before changing any ID here.
+  #
+  # Flash-class works on the free tier, so that is what the chain routes to.
+  #
+  # `-latest` aliases, not pinned versions, and deliberately so: the failure that
+  # motivated this change was a PINNED id being retired out from under us, which
+  # surfaced only during an outage — exactly when the hop is load-bearing and
+  # nobody is watching. For a last-resort hop, tracking whatever Google currently
+  # serves beats determinism. Pinned ids are listed too for callers that want one.
+  - name: gemini-flash-latest
+    provider: gemini/gemini-flash-latest
     keyEnv: GEMINI_API_KEY
     extraParams:
       additional_drop_params: ["thinking", "context_management", "output_config", "reasoning_effort"]
-  - name: gemini-2.5-flash
-    provider: gemini/gemini-2.5-flash
+  - name: gemini-flash-lite-latest
+    provider: gemini/gemini-flash-lite-latest
     keyEnv: GEMINI_API_KEY
     extraParams:
       additional_drop_params: ["thinking", "context_management", "output_config", "reasoning_effort"]
-  - name: gemini-2.5-flash-lite
-    provider: gemini/gemini-2.5-flash-lite
+  # Pinned, verified-live alternatives. Directly requestable; not in any chain.
+  - name: gemini-3.6-flash
+    provider: gemini/gemini-3.6-flash
     keyEnv: GEMINI_API_KEY
     extraParams:
       additional_drop_params: ["thinking", "context_management", "output_config", "reasoning_effort"]
-  - name: gemini-2.0-flash
-    provider: gemini/gemini-2.0-flash
+  - name: gemini-3.1-flash-lite
+    provider: gemini/gemini-3.1-flash-lite
     keyEnv: GEMINI_API_KEY
     extraParams:
       additional_drop_params: ["thinking", "context_management", "output_config", "reasoning_effort"]
-  - name: gemini-2.0-flash-lite
-    provider: gemini/gemini-2.0-flash-lite
+  # Listed so promoting it is a one-line change once billing is enabled on the
+  # key's project. Deliberately NOT in any fallback chain until then — routing to
+  # a model that answers 429 on every call is how hop 3 was dead for a week.
+  - name: gemini-pro-latest
+    provider: gemini/gemini-pro-latest
     keyEnv: GEMINI_API_KEY
     extraParams:
       additional_drop_params: ["thinking", "context_management", "output_config", "reasoning_effort"]
@@ -285,6 +307,14 @@ generalSettings: {}
 # cheap/fast falls back to cheap/fast. Getting this wrong is how an outage
 # quietly multiplies cost per turn (or halves answer quality).
 #
+# EXCEPTION, hop 3: the frontier chains fall back to gemini FLASH, not Pro. Pro is
+# unavailable on this key at any tier (free tier grants it limit 0 — see the Gemini
+# block above), so the tier-matched choice is not a choice between good and better,
+# it is a choice between degraded and nothing. Hop 3 only runs when Anthropic AND
+# OpenAI have both already failed, so "nothing" is the real alternative. Restore
+# tier matching by enabling billing on the key's project and promoting
+# gemini-pro-latest into the frontier chains — the model entry is already here.
+#
 # `enable_pre_call_checks` makes the router check a deployment's context window BEFORE
 # dispatching, and skip any deployment that cannot hold the request. It defaults to
 # false, so without it the window is never checked and an oversized request simply
@@ -303,15 +333,15 @@ generalSettings: {}
 routerSettings:
   enable_pre_call_checks: true
   fallbacks:
-    - claude-opus-4-5: ["gpt-4.1", "gemini-2.5-pro"]
-    - claude-opus-5: ["gpt-4.1", "gemini-2.5-pro"]
-    - claude-sonnet-5: ["gpt-4.1", "gemini-2.5-flash"]
-    - claude-haiku-4-5: ["gpt-4.1-mini", "gemini-2.5-flash-lite"]
+    - claude-opus-4-5: ["gpt-4.1", "gemini-flash-latest"]
+    - claude-opus-5: ["gpt-4.1", "gemini-flash-latest"]
+    - claude-sonnet-5: ["gpt-4.1", "gemini-flash-latest"]
+    - claude-haiku-4-5: ["gpt-4.1-mini", "gemini-flash-lite-latest"]
   context_window_fallbacks:
-    - claude-opus-4-5: ["gpt-4.1", "gemini-2.5-pro"]
-    - claude-opus-5: ["gpt-4.1", "gemini-2.5-pro"]
-    - claude-sonnet-5: ["gpt-4.1", "gemini-2.5-flash"]
-    - claude-haiku-4-5: ["gpt-4.1-mini", "gemini-2.5-flash-lite"]
+    - claude-opus-4-5: ["gpt-4.1", "gemini-flash-latest"]
+    - claude-opus-5: ["gpt-4.1", "gemini-flash-latest"]
+    - claude-sonnet-5: ["gpt-4.1", "gemini-flash-latest"]
+    - claude-haiku-4-5: ["gpt-4.1-mini", "gemini-flash-lite-latest"]
 
 # -----------------------------------------------------------------------------
 # Defence in depth: only the namespaces listed here may open a connection to the
