@@ -74,9 +74,8 @@ MODELS='[
   "claude-haiku-4-5",
   "gpt-4.1",
   "gpt-4.1-mini",
-  "gemini-2.5-pro",
-  "gemini-2.5-flash",
-  "gemini-2.5-flash-lite"
+  "gemini-flash-latest",
+  "gemini-flash-lite-latest"
 ]'
 
 # ─────────────────────────────────────────────────────────────────────────────
