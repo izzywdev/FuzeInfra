@@ -15,6 +15,7 @@ PR (or provisioning run) that creates an allocation. See
 | fuzesocial | `fuzesocial_app` | `fuzesocial` | izzywdev/FuzeSocial | active (FuzeInfra#150) — owner+grants verified; consumer-authoritative credential in `fuzesocial/fuzesocial-secrets:DB_PASSWORD` |
 | fuzequality | `fuzequality_user` | `fuzequality` | izzywdev/FuzeFront (`FuzeQuality`) | declared (FuzeInfra#316) |
 | authentik-mendys | `authentik_mendys_user` | `authentik_mendys` | izzywdev/FuzeFront (MendysRobotics IdP silo) | declared — gated off until FuzeFront seals `authentik-mendys-db-credentials` for the `fuzeinfra` namespace |
+| fuzehub | `fuzehub_svc` | `fuzehub` | izzywdev/FuzeHub | declared |
 
 > `authentik_mendys` backs a **second Authentik instance** deployed by the
 > FuzeFront chart, serving MendysRobotics as an isolated identity silo
