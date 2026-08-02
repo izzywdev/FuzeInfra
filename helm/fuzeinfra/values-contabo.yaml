@@ -468,6 +468,17 @@ serviceDatabases:
     passwordSecret:
       name: authentik-mendys-db-credentials
       key: password
+  # GATED: flip to enabled:true in the same PR that commits
+  # deploy/sealed-secrets/fuzesocial-db-credentials.yaml (sealed for fuzeinfra
+  # namespace, key: password). The provision-fuzesocial workflow does both
+  # atomically. See issue #149.
+  - name: fuzesocial
+    enabled: false
+    role: fuzesocial_app
+    database: fuzesocial
+    passwordSecret:
+      name: fuzesocial-db-credentials
+      key: password
 # Per-service MongoDB provisioning (Helm REPLACES lists, so the full set must be
 # declared here — the base values default every entry to enabled: false).
 #

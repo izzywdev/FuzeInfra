@@ -1,0 +1,133 @@
+name: Provision FuzeSocial database
+
+# Bootstrap provisioning for the FuzeSocial Postgres role and database.
+# Resolves FuzeInfra issue #149.
+#
+# What this workflow does atomically:
+#   1. Generates a cryptographically random password for the fuzesocial_app role.
+#   2. Seals it as `fuzesocial-db-credentials` (key: password) for the
+#      fuzeinfra namespace — the provisioning Job reads it via secretKeyRef.
+#   3. Sets FUZESOCIAL_DB_PASSWORD on izzywdev/FuzeSocial so the app's own
+#      Helm chart / SealedSecrets can be generated from it.
+#   4. Flips the `fuzesocial` serviceDatabases gate to enabled:true in
+#      helm/fuzeinfra/values-contabo.yaml.
+#   5. Opens a PR in FuzeInfra with the ciphertext + gate flip.
+#
+# After the PR merges, Argo triggers the PostSync provisioning Job which
+# creates the fuzesocial role and database on the shared Postgres cluster.
+# The FuzeSocial bootstrap Job can then connect and apply schema.sql/seed.sql.
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: provision-fuzesocial
+  cancel-in-progress: false
+
+jobs:
+  provision:
+    runs-on: staging
+    environment: production
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install kubeseal
+        run: |
+          set -euo pipefail
+          version=0.27.1
+          curl -fsSL -o /tmp/kubeseal.tgz \
+            "https://github.com/bitnami-labs/sealed-secrets/releases/download/v${version}/kubeseal-${version}-linux-amd64.tar.gz"
+          tar -xzf /tmp/kubeseal.tgz -C /tmp kubeseal
+          sudo install -m0755 /tmp/kubeseal /usr/local/bin/kubeseal
+
+      - name: Install GitHub CLI
+        run: |
+          set -euo pipefail
+          version=2.74.2
+          archive="gh_${version}_linux_amd64.tar.gz"
+          curl -fsSLO "https://github.com/cli/cli/releases/download/v${version}/${archive}"
+          curl -fsSLO "https://github.com/cli/cli/releases/download/v${version}/gh_${version}_checksums.txt"
+          grep " ${archive}$" "gh_${version}_checksums.txt" | sha256sum -c -
+          tar -xzf "$archive"
+          sudo install -m0755 "gh_${version}_linux_amd64/bin/gh" /usr/local/bin/gh
+          gh --version
+
+      - name: Generate credentials, seal, set GH secret, open PR
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+        run: |
+          set -euo pipefail
+          umask 077
+          test -n "$GH_TOKEN" || { echo '::error::GH_TOKEN is required (needs repo + secrets:write on FuzeSocial)'; exit 1; }
+
+          work=$(mktemp -d)
+          trap 'rm -rf "$work"' EXIT
+
+          # Generate a 48-char hex password (192 bits of entropy).
+          db_password=$(openssl rand -hex 24)
+          echo "::add-mask::$db_password"
+          printf '%s' "$db_password" > "$work/db-password"
+
+          # Seal for strict scope: fuzeinfra/fuzesocial-db-credentials
+          bash scripts/seal-secret.sh "fuzeinfra/fuzesocial-db-credentials" \
+            "password=@$work/db-password" \
+            --cert deploy/sealed-secrets/sealing-cert.pem \
+            --out "deploy/sealed-secrets/fuzesocial-db-credentials.yaml"
+
+          # Deliver plaintext password to FuzeSocial repo as a GH Actions secret
+          # so its Helm chart can seal its own DATABASE_URL credential.
+          gh secret set FUZESOCIAL_DB_PASSWORD \
+            --repo izzywdev/FuzeSocial \
+            --body "$db_password"
+
+          # Flip the gate in values-contabo.yaml.
+          config=helm/fuzeinfra/values-contabo.yaml
+          before=$(grep -A1 -- '- name: fuzesocial' "$config" | grep -c 'enabled: false' || true)
+          test "$before" -eq 1 || { echo '::error::fuzesocial gate not found or already enabled'; exit 1; }
+          sed -i '/- name: fuzesocial/{n;s/enabled: false/enabled: true/;}' "$config"
+          remaining=$(grep -A1 -- '- name: fuzesocial' "$config" | grep -c 'enabled: false' || true)
+          test "$remaining" -eq 0 || { echo '::error::fuzesocial gate still disabled after sed'; exit 1; }
+
+          run_id=${{ github.run_id }}
+          branch="provision/fuzesocial-db-$run_id"
+          git config --local --unset-all http.https://github.com/.extraheader || true
+          gh auth setup-git
+          git config user.name 'FuzeInfra Provisioning'
+          git config user.email 'provisioning@fuzeinfra'
+          git checkout -b "$branch"
+          git add deploy/sealed-secrets/fuzesocial-db-credentials.yaml \
+                  helm/fuzeinfra/values-contabo.yaml
+          git commit -m 'feat(postgres): provision FuzeSocial database (#149)
+
+Adds strict-scoped ciphertext for fuzesocial_app password and enables
+the declarative PostgreSQL allocation. Argo PostSync provisions the
+fuzesocial role and database on the shared cluster.
+
+FUZESOCIAL_DB_PASSWORD is now set on izzywdev/FuzeSocial so that repo
+can seal its own DATABASE_URL SealedSecret for the bootstrap Job.'
+          git push origin "$branch"
+          gh pr create \
+            --repo izzywdev/FuzeInfra \
+            --base main \
+            --head "$branch" \
+            --title 'feat(postgres): provision FuzeSocial database' \
+            --body 'Provisions the `fuzesocial` database and `fuzesocial_app` role on the
+shared FuzeInfra Postgres cluster.
+
+Changes:
+- `deploy/sealed-secrets/fuzesocial-db-credentials.yaml` — strict-scoped
+  ciphertext for the `fuzeinfra/fuzesocial-db-credentials` Secret (key:
+  `password`). The provisioning PostSync Job reads it via secretKeyRef.
+- `helm/fuzeinfra/values-contabo.yaml` — flips `fuzesocial` gate to
+  `enabled: true`; Argo triggers the provisioning Job on next sync.
+
+After merge, Argo creates the role and database. The FuzeSocial bootstrap
+Job can then connect with `FUZESOCIAL_DB_PASSWORD` (now set as a GH secret
+on izzywdev/FuzeSocial) to apply schema.sql/seed.sql.
+
+No plaintext secret material is present. Closes #149.'
