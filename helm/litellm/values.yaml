@@ -169,6 +169,16 @@ models:
   #                         every gateway alias here. Not suppressible client-side.
   #   context_management  — context-editing beta.
   #   output_config       — effort / structured-output / task-budget settings.
+  #   reasoning_effort    — NOT a field the caller sends. LiteLLM's own bridge to
+  #                         OpenAI's Responses API SYNTHESISES it from the Anthropic
+  #                         effort setting, downstream of the drops above, and
+  #                         gpt-4.1 is not a reasoning model: "Unsupported parameter:
+  #                         'reasoning.effort' is not supported with this model."
+  #                         Dropping `output_config` cannot prevent this — the param
+  #                         is added on the OpenAI side, after ours is gone. This is
+  #                         why hop 2 was dead on arrival and every credit-exhausted
+  #                         request still surfaced the Anthropic error: the chain ran,
+  #                         and every hop failed.
   #
   # Deliberately scoped PER MODEL, not global: `litellm_settings` would strip these
   # from the Anthropic primary too, silently downgrading normal operation to buy
@@ -178,12 +188,12 @@ models:
     provider: openai/gpt-4.1
     keyEnv: OPENAI_API_KEY
     extraParams:
-      additional_drop_params: ["thinking", "context_management", "output_config"]
+      additional_drop_params: ["thinking", "context_management", "output_config", "reasoning_effort"]
   - name: gpt-4.1-mini
     provider: openai/gpt-4.1-mini
     keyEnv: OPENAI_API_KEY
     extraParams:
-      additional_drop_params: ["thinking", "context_management", "output_config"]
+      additional_drop_params: ["thinking", "context_management", "output_config", "reasoning_effort"]
   # --- Gemini ------------------------------------------------------------------
   # ALL of these are currently NON-FUNCTIONAL: the key returns "You exceeded your
   # current quota" (free tier exhausted). Wired anyway so they start working the
@@ -197,27 +207,27 @@ models:
     provider: gemini/gemini-2.5-pro
     keyEnv: GEMINI_API_KEY
     extraParams:
-      additional_drop_params: ["thinking", "context_management", "output_config"]
+      additional_drop_params: ["thinking", "context_management", "output_config", "reasoning_effort"]
   - name: gemini-2.5-flash
     provider: gemini/gemini-2.5-flash
     keyEnv: GEMINI_API_KEY
     extraParams:
-      additional_drop_params: ["thinking", "context_management", "output_config"]
+      additional_drop_params: ["thinking", "context_management", "output_config", "reasoning_effort"]
   - name: gemini-2.5-flash-lite
     provider: gemini/gemini-2.5-flash-lite
     keyEnv: GEMINI_API_KEY
     extraParams:
-      additional_drop_params: ["thinking", "context_management", "output_config"]
+      additional_drop_params: ["thinking", "context_management", "output_config", "reasoning_effort"]
   - name: gemini-2.0-flash
     provider: gemini/gemini-2.0-flash
     keyEnv: GEMINI_API_KEY
     extraParams:
-      additional_drop_params: ["thinking", "context_management", "output_config"]
+      additional_drop_params: ["thinking", "context_management", "output_config", "reasoning_effort"]
   - name: gemini-2.0-flash-lite
     provider: gemini/gemini-2.0-flash-lite
     keyEnv: GEMINI_API_KEY
     extraParams:
-      additional_drop_params: ["thinking", "context_management", "output_config"]
+      additional_drop_params: ["thinking", "context_management", "output_config", "reasoning_effort"]
   # --- embeddings -------------------------------------------------------------
   # FuzeFront's LITELLM_EMBEDDING_MODEL default. OpenAI, not Anthropic —
   # Anthropic ships no embeddings endpoint, so /embeddings cannot be served by
@@ -231,8 +241,22 @@ models:
 #                  400ing. Load-bearing: Claude Opus 5 / 4.8 / 4.7 REJECT
 #                  temperature/top_p/top_k, which OpenAI-shaped clients send by
 #                  default. Without this every such call fails.
+#   modify_params — clamp `max_tokens` down to each hop's OWN max_output_tokens,
+#                  per attempt. Required because the hops do not share an output
+#                  ceiling: claude-opus-5 allows 128000, gpt-4.1 allows 32768.
+#                  A caller asking for more than 32768 is legal on the primary and
+#                  a hard 400 on hop 2, so without this the fallback chain breaks
+#                  for exactly the long-output requests most worth rescuing.
+#                  Clamping per attempt (not per deployment) is the point: the
+#                  primary keeps its full 128000. Setting `max_tokens` in a
+#                  deployment's litellm_params does NOT work — the router builds
+#                  `{**litellm_params, ..., **kwargs}`, so the caller's value wins.
+#                  Gated on this flag in litellm/utils.py::wrapper (CHECK MAX
+#                  TOKENS), which explicitly allows call_type anthropic_messages —
+#                  i.e. it covers /v1/messages, the endpoint Claude Code uses.
 litellmSettings:
   drop_params: true
+  modify_params: true
   num_retries: 2
   request_timeout: 600
 
@@ -260,8 +284,30 @@ generalSettings: {}
 # upgrades or downgrades what a caller gets: frontier falls back to frontier,
 # cheap/fast falls back to cheap/fast. Getting this wrong is how an outage
 # quietly multiplies cost per turn (or halves answer quality).
+#
+# `enable_pre_call_checks` makes the router check a deployment's context window BEFORE
+# dispatching, and skip any deployment that cannot hold the request. It defaults to
+# false, so without it the window is never checked and an oversized request simply
+# fails at the provider. It is also the prerequisite for `context_window_fallbacks`.
+#
+# `context_window_fallbacks` is a SEPARATE list from `fallbacks` above, keyed on
+# ContextWindowExceededError rather than on a provider error. It exists so the
+# tier-matching rule below is enforced by the router instead of remembered by
+# whoever edits this file next: a hop must have an input window at least as large
+# as the primary's. Today every hop is ~1M (opus-5 1000000, gpt-4.1 1047576,
+# gemini-2.5-* 1048576) so it should never fire — that is the point. The router
+# never summarises or trims to fit; it only ever routes to a bigger window. Add a
+# 128k/200k model as a hop without this and a caller sized to the primary's window
+# would overflow it with no signal, because the gateway hides the substitution
+# behind the alias and the client cannot compact for a swap it cannot see.
 routerSettings:
+  enable_pre_call_checks: true
   fallbacks:
+    - claude-opus-4-5: ["gpt-4.1", "gemini-2.5-pro"]
+    - claude-opus-5: ["gpt-4.1", "gemini-2.5-pro"]
+    - claude-sonnet-5: ["gpt-4.1", "gemini-2.5-flash"]
+    - claude-haiku-4-5: ["gpt-4.1-mini", "gemini-2.5-flash-lite"]
+  context_window_fallbacks:
     - claude-opus-4-5: ["gpt-4.1", "gemini-2.5-pro"]
     - claude-opus-5: ["gpt-4.1", "gemini-2.5-pro"]
     - claude-sonnet-5: ["gpt-4.1", "gemini-2.5-flash"]

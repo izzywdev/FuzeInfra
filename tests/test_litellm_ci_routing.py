@@ -36,9 +36,13 @@ MODEL_VARS = (
     "ANTHROPIC_DEFAULT_HAIKU_MODEL",
 )
 
-# Anthropic-only body fields a non-Anthropic upstream rejects with
-# "Extra inputs are not permitted" when the router falls through to it.
-REQUIRED_DROPS = {"thinking", "context_management", "output_config"}
+# Body fields a non-Anthropic upstream rejects when the router falls through to it.
+# The first three are Anthropic-only fields the CALLER sends ("Extra inputs are not
+# permitted"). `reasoning_effort` is different in kind and must not be dropped from
+# this set on the theory that it is redundant: LiteLLM's own OpenAI-Responses bridge
+# synthesises it downstream of the other drops, and gpt-4.1 rejects it outright
+# ("Unsupported parameter: 'reasoning.effort' is not supported with this model").
+REQUIRED_DROPS = {"thinking", "context_management", "output_config", "reasoning_effort"}
 
 
 def _workflow() -> dict:
@@ -151,15 +155,48 @@ def test_fallback_targets_drop_anthropic_only_fields():
         )
 
 
+def test_max_tokens_is_clamped_per_hop():
+    """The hops do not share an output ceiling, so an unclamped max_tokens 400s hop 2."""
+    settings = yaml.safe_load(GATEWAY_VALUES.read_text())["litellmSettings"]
+    assert settings.get("modify_params") is True, (
+        "litellm_settings.modify_params is not true, so max_tokens is passed through "
+        "unchanged. claude-opus-5 allows 128000 output tokens and gpt-4.1 allows 32768 — "
+        "any request above 32768 is legal on the primary and a hard 400 on the fallback, "
+        "breaking the chain for exactly the long-output requests worth rescuing. Setting "
+        "max_tokens in a deployment's litellm_params does NOT substitute: the router "
+        "builds {**litellm_params, ..., **kwargs}, so the caller's value wins."
+    )
+
+
+def test_context_window_overflow_routes_to_a_bigger_window():
+    """A hop with a smaller window than the primary silently truncates the caller."""
+    router = yaml.safe_load(GATEWAY_VALUES.read_text())["routerSettings"]
+    assert router.get("enable_pre_call_checks") is True, (
+        "enable_pre_call_checks defaults to false, so no deployment's context window is "
+        "ever checked and context_window_fallbacks cannot fire."
+    )
+    overflow = router.get("context_window_fallbacks")
+    assert overflow, "no context_window_fallbacks; a ContextWindowExceededError is terminal"
+    # Every primary that has a provider-failure chain needs an overflow chain too —
+    # the client sizes its context to the alias, and cannot see a swap behind it.
+    provider_primaries = {p for entry in router["fallbacks"] for p in entry}
+    overflow_primaries = {p for entry in overflow for p in entry}
+    assert provider_primaries <= overflow_primaries, (
+        f"{sorted(provider_primaries - overflow_primaries)} can fall back on a provider "
+        f"error but not on a context overflow"
+    )
+
+
 def test_every_fallback_target_is_a_real_model():
     """LiteLLM silently never routes to a fallback name absent from model_list."""
     served = _model_names()
-    fallbacks = yaml.safe_load(GATEWAY_VALUES.read_text())["routerSettings"]["fallbacks"]
-    for entry in fallbacks:
-        for primary, alts in entry.items():
-            assert primary in served, f"fallback primary {primary!r} is not in model_list"
-            for alt in alts:
-                assert alt in served, f"fallback target {alt!r} is not in model_list"
+    router = yaml.safe_load(GATEWAY_VALUES.read_text())["routerSettings"]
+    for key in ("fallbacks", "context_window_fallbacks"):
+        for entry in router.get(key, []):
+            for primary, alts in entry.items():
+                assert primary in served, f"{key} primary {primary!r} is not in model_list"
+                for alt in alts:
+                    assert alt in served, f"{key} target {alt!r} is not in model_list"
 
 
 def test_the_ci_model_has_a_cross_provider_fallback_chain():
