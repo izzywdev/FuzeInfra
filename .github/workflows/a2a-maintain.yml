@@ -175,28 +175,45 @@ jobs:
           transport=$(tr -d '\r' < /tmp/preflight.err 2>/dev/null | grep -v '^$' | tail -1 || true)
           echo "curl exit detail: ${transport:-<none>} (http_code=$code)"
           [ -z "$err" ] && err="HTTP $code"
+          reason=""
           case "$code" in
             200)
-              echo "ok=true" >> "$GITHUB_OUTPUT"
-              echo "LiteLLM gateway preflight OK (model ${ANTHROPIC_MODEL})" ;;
+              ok=true ;;
             000)
               # No HTTP response at all. `transport` says which of three unrelated
               # faults it was, so the reason names the actual fix instead of listing
               # every possibility.
-              echo "ok=false" >> "$GITHUB_OUTPUT"
-              echo "reason=LiteLLM gateway unreachable at ${ANTHROPIC_BASE_URL} — ${transport:-no detail from curl}. Resolve-host errors mean cluster DNS from arc-runners; timeouts mean the NetworkPolicy is dropping us (arc-runners must be on networkPolicy.allowedNamespaces); connection-refused means the pod is not serving." >> "$GITHUB_OUTPUT" ;;
+              ok=false
+              reason="LiteLLM gateway unreachable at ${ANTHROPIC_BASE_URL} — ${transport:-no detail from curl}. Resolve-host errors mean cluster DNS from arc-runners; timeouts mean the NetworkPolicy is dropping us (arc-runners must be on networkPolicy.allowedNamespaces); connection-refused means the pod is not serving." ;;
             401|403)
-              echo "ok=false" >> "$GITHUB_OUTPUT"
-              echo "reason=LiteLLM rejected the gateway key (HTTP $code): $err. A virtual key is revoked/expired or over budget; the master key would mean it drifted from the gateway's sealed value." >> "$GITHUB_OUTPUT" ;;
+              ok=false
+              reason="LiteLLM rejected the gateway key (HTTP $code): $err. A virtual key is revoked/expired or over budget; the master key would mean it drifted from the gateway's sealed value." ;;
             404)
-              echo "ok=false" >> "$GITHUB_OUTPUT"
-              echo "reason=Gateway did not serve /v1/messages (HTTP 404): $err. Claude Code speaks the Anthropic Messages format; this LiteLLM build must expose that endpoint." >> "$GITHUB_OUTPUT" ;;
+              ok=false
+              reason="Gateway did not serve /v1/messages (HTTP 404): $err. Claude Code speaks the Anthropic Messages format; this LiteLLM build must expose that endpoint." ;;
             *)
               # Includes 400 (model not in the gateway's list) and 5xx (every fallback
               # hop exhausted — i.e. all three providers failed).
-              echo "ok=false" >> "$GITHUB_OUTPUT"
-              echo "reason=Gateway could not serve ${ANTHROPIC_MODEL} (HTTP $code): $err" >> "$GITHUB_OUTPUT" ;;
+              ok=false
+              reason="Gateway could not serve ${ANTHROPIC_MODEL} (HTTP $code): $err" ;;
           esac
+          if [ "$ok" = true ]; then
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+            echo "LiteLLM gateway preflight OK (model ${ANTHROPIC_MODEL})"
+          else
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+            # $err (and therefore $reason) comes from the gateway/provider and can
+            # contain embedded newlines — e.g. a fallback hop's nested JSON error body.
+            # A plain `reason=...` KEY=value line breaks $GITHUB_OUTPUT's format on any
+            # such value and turns the intended graceful skip into a hard step failure
+            # (this is what happened when a Gemini rate-limit body was multi-line).
+            # Use the delimited form, same as the `msg` output below.
+            {
+              echo "reason<<GHA_EOF"
+              echo "$reason"
+              echo "GHA_EOF"
+            } >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Run a2a-maintainer
         id: claude
