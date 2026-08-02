@@ -1,0 +1,57 @@
+{{/*
+Cross-namespace read grants for consumer CI that needs to seal a secret it does
+not own.
+
+WHY THIS LIVES IN FUZEINFRA. A consumer repo cannot grant itself read access to
+another product's namespace — that is the platform's boundary to hand out, and
+the same governance rule that puts AppProjects here (FuzeInfra#99) puts these
+RoleBindings here. FuzeMarket originally shipped this RBAC in its OWN Helm chart
+(deploy/helm/fuzemarket/templates/arc-runner-rbac.yaml), which broke two ways at
+once: the consumer was asserting a grant over the `fuzefront` namespace, and
+because its Argo Application runs under a project restricted to `fuzemarket`,
+Argo rejected the whole sync with "namespace fuzefront is not permitted in
+project 'fuzemarket'" — blocking every resource in the app, not just the RBAC
+(the same failure already annotated in argocd/projects/fuzeinfra.yaml).
+
+Each grant is deliberately minimal: `get` on ONE named Secret, in ONE namespace,
+for ONE ServiceAccount. No list/watch — list would expose every Secret in the
+namespace, and resourceNames does not constrain a list.
+
+The `fuzeinfra` AppProject already permits the `fuzefront` destination, so these
+sync without widening the project.
+*/}}
+{{- if .Values.consumerRegistrationRbac.enabled }}
+{{- range $index, $grant := .Values.consumerRegistrationRbac.grants }}
+{{- $name := printf "%s-read-%s" $grant.subjectName $grant.secretName | trunc 63 | trimSuffix "-" }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $name }}
+  namespace: {{ required (printf "consumerRegistrationRbac.grants[%d].namespace is required" $index) $grant.namespace }}
+  labels:
+    {{- include "fuzeinfra.labels" $ | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames:
+      - {{ required (printf "consumerRegistrationRbac.grants[%d].secretName is required" $index) $grant.secretName }}
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $name }}
+  namespace: {{ $grant.namespace }}
+  labels:
+    {{- include "fuzeinfra.labels" $ | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ $name }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ required (printf "consumerRegistrationRbac.grants[%d].subjectName is required" $index) $grant.subjectName }}
+    namespace: {{ required (printf "consumerRegistrationRbac.grants[%d].subjectNamespace is required" $index) $grant.subjectNamespace }}
+{{- end }}
+{{- end }}

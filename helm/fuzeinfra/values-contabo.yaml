@@ -247,6 +247,26 @@ handoffMcp:
 # Enabling before (1) CrashLoops the pod (CreateContainerConfigError); enabling
 # before (2) issues certificates for domains that resolve nowhere.
 # -----------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
+# Consumer registration RBAC.
+#
+# FuzeMarket's seal-registration-secret workflow runs on an ARC runner and must
+# read the FuzeFront registration token once in order to seal a copy for its own
+# namespace. That is a cross-namespace read, so the grant is issued here rather
+# than asserted by FuzeMarket's chart — see the header of
+# templates/consumer-registration-rbac.yaml for what went wrong when it wasn't.
+#
+# Scope is one Secret, `get` only. Revoking FuzeMarket's access is deleting the
+# entry below; nothing in the consumer repo can re-grant it.
+# -----------------------------------------------------------------------------
+consumerRegistrationRbac:
+  enabled: true
+  grants:
+    - namespace: fuzefront
+      secretName: fuzefront-registration
+      subjectName: arc-runner-sa
+      subjectNamespace: arc-runners
+
 customHostnameApi:
   enabled: true
   provider: cloudflare
