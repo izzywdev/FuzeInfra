@@ -1,0 +1,60 @@
+# RBAC for the ARC runner service account (system:serviceaccount:arc-runners:arc-runner-sa).
+#
+# Managed by argocd/applications/arc-selfheal.yaml (project: fuzeinfra), so ArgoCD
+# applies these with cluster-admin. The fuzeinfra AppProject allows fuzefront and
+# argocd as destinations, which is why cross-namespace bindings are legal here.
+#
+# Grants:
+#   1. Read fuzefront/fuzefront-registration Secret — used by FuzeMarket's
+#      seal-registration-secret.yml CI workflow to fetch and seal the token.
+#   2. Get/create/update ArgoCD Applications in argocd namespace — kept as an
+#      escape-hatch for apply-argocd-app.yml after this RBAC is bootstrapped.
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: arc-runner-read-registration-secret
+  namespace: fuzefront
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: ["fuzefront-registration"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: arc-runner-read-registration-secret
+  namespace: fuzefront
+subjects:
+  - kind: ServiceAccount
+    name: arc-runner-sa
+    namespace: arc-runners
+roleRef:
+  kind: Role
+  name: arc-runner-read-registration-secret
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: arc-runner-argocd-apply
+  namespace: argocd
+rules:
+  - apiGroups: ["argoproj.io"]
+    resources: ["applications"]
+    verbs: ["get", "create", "update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: arc-runner-argocd-apply
+  namespace: argocd
+subjects:
+  - kind: ServiceAccount
+    name: arc-runner-sa
+    namespace: arc-runners
+roleRef:
+  kind: Role
+  name: arc-runner-argocd-apply
+  apiGroup: rbac.authorization.k8s.io
