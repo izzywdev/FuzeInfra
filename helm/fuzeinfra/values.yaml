@@ -908,6 +908,26 @@ handoffMcp:
 # OFF by default. Enable per-overlay in the SAME change that lands
 # deploy/sealed-secrets/custom-hostname-api-secret.yaml.
 # -----------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
+# Consumer registration RBAC — cross-namespace secret reads for consumer CI.
+#
+# A consumer whose CI must seal a token owned by ANOTHER product needs `get` on
+# that one Secret. The grant lives here, not in the consumer's chart: handing out
+# access to another namespace is the platform's boundary to control (FuzeInfra#99),
+# and a consumer chart that renders RBAC into a foreign namespace gets its whole
+# Argo sync rejected by its own restricted AppProject.
+#
+# Each entry is one Secret, one namespace, one ServiceAccount, `get` only.
+# OFF by default; enable per-overlay alongside the consumer that needs it.
+# -----------------------------------------------------------------------------
+consumerRegistrationRbac:
+  enabled: false
+  # - namespace: fuzefront            # where the Secret lives
+  #   secretName: fuzefront-registration
+  #   subjectName: arc-runner-sa      # the ServiceAccount being granted access
+  #   subjectNamespace: arc-runners
+  grants: []
+
 customHostnameApi:
   enabled: false
   image: ghcr.io/izzywdev/fuzeinfra/custom-hostname-api
