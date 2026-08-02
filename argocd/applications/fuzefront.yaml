@@ -1,0 +1,42 @@
+# Root "app of apps" for FuzeFront — registered by FuzeInfra.
+#
+# ROOT CAUSE OF THE "Argo isn't syncing FuzeFront" REPORT: this file never
+# existed. FuzeFront's own repo has always carried the app-of-apps shape
+# (deploy/argocd/app-of-apps.yaml -> deploy/argocd/applications/{fuzefront,
+# fuzefront-sealed,unleash}.yaml), matching the fuzeagent-apps/fuzepicker-apps
+# pattern below — but nothing in FuzeInfra ever registered the root
+# `fuzefront-apps` Application that watches it. Only `fuzequality.yaml`
+# (a one-off Application pointing at a different path in the same repo) was
+# ever registered, so Argo had no Application syncing the actual FuzeFront
+# product (deploy/helm/fuzefront) at all.
+#
+# The `fuzefront` AppProject (argocd/projects/fuzefront.yaml) already exists
+# and correctly restricts destinations to fuzefront/fuzequality/argocd (see
+# that file's header re: FuzeInfra#99 — never widen it back to `fuzeinfra`).
+# The three child Applications this recurses into all target the `fuzefront`
+# namespace under the `fuzefront` project, so they fit that boundary as-is.
+#
+# REGISTRATION: automatic. deploy-prod.yml globs argocd/applications/*.yaml on
+# every push to main that touches this directory, so this Application is
+# applied without a manual kubectl step. Thereafter ArgoCD self-syncs
+# FuzeFront's deploy/argocd/applications automatically.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: fuzefront-apps
+  namespace: argocd
+spec:
+  project: fuzefront
+  source:
+    repoURL: https://github.com/izzywdev/FuzeFront.git
+    targetRevision: master
+    path: deploy/argocd/applications
+    directory:
+      recurse: true
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: argocd
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
