@@ -6,7 +6,7 @@
 # Helm values files (that is why this lives in runners/arc/gitops/ and not
 # alongside runner-scale-set-values.yaml).
 #
-# It watches two independent failure modes that both end with "runner pods
+# It watches three independent failure modes that all end with "runner pods
 # Pending forever, CI queues silently":
 #
 #   1. CONTROLLER WEDGED (2026-07-24) — the gha-rs-controller stopped creating
@@ -23,9 +23,30 @@
 #      fuzeinfra.io/owner-repo namespace annotation — docs/crit-log-autofix.md)
 #      and deliberately SKIPS the restart.
 #
+#   3. ONE SCALE SET'S LISTENER WEDGED ON A DEAD NODE (2026-08-02) — each scale
+#      set has its own per-repo AutoscalingListener Pod in arc-systems
+#      (label app.kubernetes.io/component=runner-scale-set-listener, e.g.
+#      fuzehub-<hash>-listener). Checks 1+2 are cluster-wide/count-based, so
+#      when the node under ONE listener pod goes NotReady the pod sticks in
+#      Terminating forever (kubelet is unreachable, so the delete can never
+#      complete) while every OTHER scale set stays healthy — `ephemeralrunner`
+#      count across the cluster is still >0, so check 2 sees nothing wrong.
+#      That one repo's CI queues silently with 0 desired runners. Observed:
+#      fuzehub/fuzecontact/staging listeners stuck Terminating 3+ days on
+#      `mendys-prod` after its kubelet died. Fixed by hand via
+#      `kubectl delete pod <listener> -n arc-systems --grace-period=0 --force`,
+#      which lets the AutoscalingListener controller recreate the pod on a
+#      healthy node. Check 3 automates exactly that: force-delete any listener
+#      pod that has been Terminating longer than $LISTENER_STUCK_SECS. This is
+#      a symptom fix, not a root-cause fix — the dead node itself still needs
+#      manual attention, so it also emits CRIT.
+#
 # NOTE ON THE IMAGE: this ran with `rancher/kubectl` + `command: ["sh","-c"]`
 # from creation until 2026-07-27 and StartError'd on EVERY run — that image
-# ships no shell. Any replacement image MUST contain /bin/sh.
+# ships no shell. Any replacement image MUST contain /bin/sh. Check 3 also
+# relies on this image's bundled /usr/bin/jq (with fromdateiso8601/now) to
+# compute how long a pod has been Terminating — BusyBox `date -d` in this
+# image does NOT parse RFC3339 timestamps, so don't rewrite check 3 to use it.
 # =============================================================================
 apiVersion: v1
 kind: ServiceAccount
@@ -50,6 +71,10 @@ kind: Role
 metadata: {name: arc-selfheal, namespace: arc-systems}
 rules:
   - {apiGroups: ["apps"], resources: ["deployments"], verbs: ["get","patch"]}
+  # AutoscalingListener pods live only in arc-systems (check 3) — namespaced
+  # Role, not the cluster-wide ClusterRole, to keep delete scoped as tightly
+  # as possible.
+  - {apiGroups: [""], resources: ["pods"], verbs: ["get","list","delete"]}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
@@ -141,6 +166,34 @@ spec:
                     fi
                   else
                     echo "ok controller: creating runners normally"
+                  fi
+
+                  # ---- check 3: per-scale-set listener wedged on a dead node ----
+                  # A listener stuck Terminating past this is not "still shutting
+                  # down" - normal termination completes in low tens of seconds.
+                  LISTENER_STUCK_SECS=300
+                  listeners_json=$(kubectl get pods -n arc-systems \
+                    -l app.kubernetes.io/component=runner-scale-set-listener \
+                    -o json 2>/dev/null)
+
+                  if [ -z "$listeners_json" ]; then
+                    echo "warn listener-pods: could not list scale-set listener pods, skipping check 3"
+                  else
+                    stuck=$(printf '%s' "$listeners_json" | jq -r --argjson thresh "$LISTENER_STUCK_SECS" '
+                      .items[]
+                      | select(.metadata.deletionTimestamp != null)
+                      | select((now - (.metadata.deletionTimestamp | fromdateiso8601)) > $thresh)
+                      | .metadata.name' 2>/dev/null)
+
+                    if [ -z "$stuck" ]; then
+                      echo "ok listener-pods: no scale-set listener stuck Terminating"
+                    else
+                      for name in $stuck; do
+                        echo "CRIT ARC listener-pod: $name has been Terminating for over ${LISTENER_STUCK_SECS}s - likely wedged on a dead/NotReady node (kubelet unreachable, delete can never complete), so that scale set's CI has 0 runners while the rest of the cluster looks healthy. Force-deleting so the AutoscalingListener controller recreates it elsewhere; the underlying node still needs manual attention."
+                        kubectl -n arc-systems delete pod "$name" --grace-period=0 --force >/dev/null 2>&1
+                        crit=1
+                      done
+                    fi
                   fi
 
                   # Fail the Job on CRIT so PodFailed alerting and
