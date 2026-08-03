@@ -869,6 +869,86 @@ resource "cloudflare_zero_trust_access_policy" "handoff_mcp_bypass" {
 }
 
 # ---------------------------------------------------------------------------
+# MendysRobotics.com subdomain routing (issue #120)
+#
+# MendysRobotics has its own apex domain (mendysrobotics.com) managed in its
+# own Cloudflare zone. FuzeInfra owns the DNS + Access for the three product
+# subdomains because they route through the shared FuzeInfra CF Tunnel and
+# would otherwise require MendysRobotics to hold FuzeInfra cluster credentials.
+#
+# Enable by setting mendysrobotics_zone_id in terraform.tfvars (or as a GH
+# Actions secret MENDYSROBOTICS_ZONE_ID). All three resources are gated on
+# the variable being non-empty so a bare `terraform apply` with no variable
+# remains byte-identical.
+#
+# INVARIANT: never touch the mendysrobotics.com apex or www record — those are
+# managed in the MendysRobotics landing repo.
+# ---------------------------------------------------------------------------
+locals {
+  mendysrobotics_enabled = local.cloudflare_enabled && var.mendysrobotics_zone_id != ""
+}
+
+# DNS: live.mendysrobotics.com → shared FuzeInfra tunnel CNAME.
+# Proxied so Cloudflare terminates TLS at the edge (Universal SSL).
+resource "cloudflare_record" "mendys_live" {
+  count   = local.mendysrobotics_enabled ? 1 : 0
+  zone_id = var.mendysrobotics_zone_id
+  name    = "live"
+  value   = cloudflare_zero_trust_tunnel_cloudflared.fuzeinfra[0].cname
+  type    = "CNAME"
+  proxied = true
+  ttl     = 1
+}
+
+# DNS: marketplace.mendysrobotics.com → same tunnel (public-facing, no Access gate).
+resource "cloudflare_record" "mendys_marketplace" {
+  count   = local.mendysrobotics_enabled ? 1 : 0
+  zone_id = var.mendysrobotics_zone_id
+  name    = "marketplace"
+  value   = cloudflare_zero_trust_tunnel_cloudflared.fuzeinfra[0].cname
+  type    = "CNAME"
+  proxied = true
+  ttl     = 1
+}
+
+# DNS: wp.mendysrobotics.com → same tunnel (public-facing WordPress, no Access gate).
+resource "cloudflare_record" "mendys_wp" {
+  count   = local.mendysrobotics_enabled ? 1 : 0
+  zone_id = var.mendysrobotics_zone_id
+  name    = "wp"
+  value   = cloudflare_zero_trust_tunnel_cloudflared.fuzeinfra[0].cname
+  type    = "CNAME"
+  proxied = true
+  ttl     = 1
+}
+
+# CF Access: gate live.mendysrobotics.com behind email-OTP.
+# The management portal requires authentication; marketplace and wp are public.
+resource "cloudflare_zero_trust_access_application" "mendys_live" {
+  count            = local.mendysrobotics_enabled ? 1 : 0
+  account_id       = var.cloudflare_account_id
+  name             = "MendysRobotics Live (management portal)"
+  domain           = "live.mendysrobotics.com"
+  type             = "self_hosted"
+  session_duration = var.access_session_duration
+
+  app_launcher_visible = true
+}
+
+resource "cloudflare_zero_trust_access_policy" "mendys_live_otp" {
+  count          = local.mendysrobotics_enabled ? 1 : 0
+  account_id     = var.cloudflare_account_id
+  application_id = cloudflare_zero_trust_access_application.mendys_live[0].id
+  name           = "Admin email allowlist (OTP)"
+  precedence     = 1
+  decision       = "allow"
+
+  include {
+    email = var.allowed_admin_emails
+  }
+}
+
+# ---------------------------------------------------------------------------
 # fuzeinfra-tunnel-secrets — Terraform-owned Secret (ArgoCD never touches it)
 #
 # Separate from fuzeinfra-secrets (Helm/ArgoCD-owned) so that ArgoCD resyncs

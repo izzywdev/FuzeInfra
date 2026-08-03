@@ -1,0 +1,63 @@
+# Traefik IngressRoutes for mendysrobotics.com subdomains (issue #120).
+#
+# These resources are placed in the TARGET namespaces (mendys-prod, mendys-wp)
+# so Traefik can route directly to the in-namespace services without needing
+# cross-namespace service references. Traefik watches all namespaces for
+# IngressRoute resources by default.
+#
+# Traffic flow:
+#   Client → Cloudflare (TLS termination) → CF Tunnel → Traefik (kube-system)
+#   → IngressRoute (host-match) → Service in target namespace
+#
+# Prerequisites:
+#   - Cloudflare DNS CNAME records created by terraform/contabo/cloudflare.tf
+#     (requires MENDYSROBOTICS_ZONE_ID to be set).
+#   - Services mendys-platform-svc, mendys-marketplace-svc (mendys-prod) and
+#     mendys-wp-svc (mendys-wp) exist and are ready.
+#
+# Applied by apply-cluster-config.yml on push to argocd/cluster-bootstrap/**.
+---
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: mendys-live
+  namespace: mendys-prod
+spec:
+  entryPoints:
+    - web
+  routes:
+    - match: Host(`live.mendysrobotics.com`)
+      kind: Rule
+      services:
+        - name: mendys-platform-svc
+          port: 80
+---
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: mendys-marketplace
+  namespace: mendys-prod
+spec:
+  entryPoints:
+    - web
+  routes:
+    - match: Host(`marketplace.mendysrobotics.com`)
+      kind: Rule
+      services:
+        - name: mendys-marketplace-svc
+          port: 80
+---
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: mendys-wp
+  namespace: mendys-wp
+spec:
+  entryPoints:
+    - web
+  routes:
+    - match: Host(`wp.mendysrobotics.com`)
+      kind: Rule
+      services:
+        - name: mendys-wp-svc
+          port: 80

@@ -212,6 +212,16 @@ variable "saas_custom_hostnames_enabled" {
   default     = false
 }
 
+# ---------------------------------------------------------------------------
+# MendysRobotics.com subdomain routing (issue #120)
+# ---------------------------------------------------------------------------
+variable "mendysrobotics_zone_id" {
+  description = "Cloudflare Zone ID for the mendysrobotics.com zone. Leave empty to skip all mendysrobotics.com DNS + Access resources."
+  type        = string
+  default     = ""
+  sensitive   = true
+}
+
 variable "allowed_admin_emails" {
   description = "Email addresses allowed through Cloudflare Access. Applies to BOTH login methods: it is the `include` for the break-glass email-OTP policy and the `require` for the Authentik policy."
   type        = list(string)
