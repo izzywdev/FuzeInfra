@@ -84,7 +84,7 @@ jobs:
                 --cert deploy/sealed-secrets/sealing-cert.pem \
             > argocd/cluster-config/ghcr-pull-secret-fuzeplan.yaml
 
-          run_id=${{ github.run_id }}
+          run_id="${{ github.run_id }}"
           branch="provision/fuzeplan-ghcr-$run_id"
           git config --local --unset-all http.https://github.com/.extraheader || true
           gh auth setup-git

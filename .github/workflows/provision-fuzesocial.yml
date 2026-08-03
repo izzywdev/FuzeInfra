@@ -93,7 +93,7 @@ jobs:
           remaining=$(grep -A1 -- '- name: fuzesocial' "$config" | grep -c 'enabled: false' || true)
           test "$remaining" -eq 0 || { echo '::error::fuzesocial gate still disabled after sed'; exit 1; }
 
-          run_id=${{ github.run_id }}
+          run_id="${{ github.run_id }}"
           branch="provision/fuzesocial-db-$run_id"
           git config --local --unset-all http.https://github.com/.extraheader || true
           gh auth setup-git
