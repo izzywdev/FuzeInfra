@@ -132,3 +132,101 @@ modest at cpu:500m / mem:1Gi so scheduling isn't blocked). The CI node
 `fuzeinfra-ci-runner-1` is 4 CPU / 7.75 GB, so heavy parallel image builds across
 many scale sets can contend — scale the CI pool (see the node-autoscaling design
 doc) if builds start queuing on capacity.
+
+---
+
+## Troubleshooting
+
+Real-world root causes and fixes confirmed in production.
+
+### A) Control plane UFW must be updated for every new runner node
+
+**Symptom:** Runner pods show `Running` in Kubernetes but appear offline on GitHub; DNS
+resolution fails inside pods (can `curl 8.8.8.8` but not `api.github.com`).
+
+**Root cause:** UFW on the control plane has no INPUT rule for UDP port 8472 from the
+new node's IP, making flannel VXLAN one-directional. Packets go out but never come back.
+
+**Diagnosis:** On the runner node:
+```bash
+ip -s link show flannel.1
+```
+If `RX packets: 0`, the return path is broken.
+
+**Fix (run on control plane):**
+```bash
+ufw allow from <NEW_NODE_IP> to any port 8472 proto udp comment 'flannel vxlan from <node-name>'
+```
+
+This step is mandatory after every new node joins the cluster. See also
+`docs/runbooks/node-provisioning.md` for the full post-join checklist.
+
+---
+
+### B) harden-gate.yml needs `actions/setup-python@v6` before pip steps
+
+**Symptom:** `gate-sast` or `gate-authz` jobs fail with `pip: command not found` on
+ARC runners (the same jobs succeed on `ubuntu-latest`).
+
+**Root cause:** The ARC runner image does not pre-install Python. The `harden-gate`
+workflow template invokes `pip` without first setting up the Python environment.
+
+**Fix:** Add a `setup-python` step before any `pip` invocation in both `gate-sast` and
+`gate-authz` jobs:
+```yaml
+- uses: actions/setup-python@v6
+  with:
+    python-version: '3.12'
+```
+
+---
+
+### C) Entrypoint wrapper required in Helm values
+
+**Symptom:** Runner pods start and complete in 2-3 seconds without picking up any jobs.
+
+**Root cause:** Without an explicit entrypoint, the container's default `CMD` (`/bin/bash`)
+runs and exits immediately. ARC only injects `run.sh` on the non-dind path.
+
+**Fix:** Ensure `command` and `args` are set in the runner scale set Helm values:
+```yaml
+command: ["/bin/bash", "-c"]
+args: ["exec /entrypoint.sh"]
+```
+Or, for the dind path: `exec /home/runner/run.sh`.
+
+---
+
+### D) ARC namespace reference table
+
+| What you're looking for | Namespace | Command |
+|---|---|---|
+| Scale set listener (per repo) | `arc-systems` | `kubectl get pods -n arc-systems \| grep <slug>-listener` |
+| Runner pods (ephemeral) | `arc-runners` | `kubectl get pods -n arc-runners -l app.kubernetes.io/name=<slug>` |
+| Controller | `arc-systems` | `kubectl get pods -n arc-systems \| grep controller` |
+
+---
+
+### E) Diagnostic checklist
+
+Work through these in order when runners are not picking up jobs:
+
+1. **Listener running?**
+   ```bash
+   kubectl get pods -n arc-systems | grep <slug>-listener
+   ```
+2. **Runner pods being created?**
+   ```bash
+   kubectl get pods -n arc-runners -l app.kubernetes.io/name=<slug>
+   ```
+3. **Runners online on GitHub?**
+   ```bash
+   gh api repos/<org>/<repo>/actions/runners --jq '.runners[] | "\(.name) \(.status)"'
+   ```
+4. **If offline — check VXLAN return path:**
+   ```bash
+   ip -s link show flannel.1   # on the runner node
+   ```
+   `RX packets: 0` → add UFW rule on control plane (see A above).
+5. **gate-sast failing with `pip not found`?** Add `actions/setup-python@v6` before any
+   pip step (see B above).

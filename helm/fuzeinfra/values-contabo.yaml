@@ -468,6 +468,16 @@ serviceDatabases:
     passwordSecret:
       name: authentik-mendys-db-credentials
       key: password
+  # FuzeHub backend (Prisma). fuzehub-db-credentials sealed for the fuzeinfra
+  # namespace (key `password`) in the same PR as this gate flip, so the
+  # PostSync provisioning Job finds it on first sync — no separate follow-up.
+  - name: fuzehub
+    enabled: true
+    role: fuzehub_svc
+    database: fuzehub
+    passwordSecret:
+      name: fuzehub-db-credentials
+      key: password
   # GATED: flip to enabled:true in the same PR that commits
   # deploy/sealed-secrets/fuzesocial-db-credentials.yaml (sealed for fuzeinfra
   # namespace, key: password). The provision-fuzesocial workflow does both
