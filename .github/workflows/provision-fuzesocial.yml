@@ -102,32 +102,12 @@ jobs:
           git checkout -b "$branch"
           git add deploy/sealed-secrets/fuzesocial-db-credentials.yaml \
                   helm/fuzeinfra/values-contabo.yaml
-          git commit -m 'feat(postgres): provision FuzeSocial database (#149)
-
-Adds strict-scoped ciphertext for fuzesocial_app password and enables
-the declarative PostgreSQL allocation. Argo PostSync provisions the
-fuzesocial role and database on the shared cluster.
-
-FUZESOCIAL_DB_PASSWORD is now set on izzywdev/FuzeSocial so that repo
-can seal its own DATABASE_URL SealedSecret for the bootstrap Job.'
+          git commit -m "feat(postgres): provision FuzeSocial database (#149)"
           git push origin "$branch"
+          pr_body="Provisions the fuzesocial database and fuzesocial_app role on the shared FuzeInfra Postgres cluster. Adds strict-scoped ciphertext for the fuzeinfra/fuzesocial-db-credentials Secret and flips the serviceDatabases gate to enabled:true. FUZESOCIAL_DB_PASSWORD is now set on izzywdev/FuzeSocial. No plaintext secret material. Closes #149."
           gh pr create \
             --repo izzywdev/FuzeInfra \
             --base main \
             --head "$branch" \
-            --title 'feat(postgres): provision FuzeSocial database' \
-            --body 'Provisions the `fuzesocial` database and `fuzesocial_app` role on the
-shared FuzeInfra Postgres cluster.
-
-Changes:
-- `deploy/sealed-secrets/fuzesocial-db-credentials.yaml` — strict-scoped
-  ciphertext for the `fuzeinfra/fuzesocial-db-credentials` Secret (key:
-  `password`). The provisioning PostSync Job reads it via secretKeyRef.
-- `helm/fuzeinfra/values-contabo.yaml` — flips `fuzesocial` gate to
-  `enabled: true`; Argo triggers the provisioning Job on next sync.
-
-After merge, Argo creates the role and database. The FuzeSocial bootstrap
-Job can then connect with `FUZESOCIAL_DB_PASSWORD` (now set as a GH secret
-on izzywdev/FuzeSocial) to apply schema.sql/seed.sql.
-
-No plaintext secret material is present. Closes #149.'
+            --title "feat(postgres): provision FuzeSocial database" \
+            --body "$pr_body"

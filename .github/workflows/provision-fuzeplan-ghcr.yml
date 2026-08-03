@@ -92,24 +92,12 @@ jobs:
           git config user.email 'provisioning@fuzeinfra'
           git checkout -b "$branch"
           git add argocd/cluster-config/ghcr-pull-secret-fuzeplan.yaml
-          git commit -m 'feat(fuzeplan): add ghcr-pull SealedSecret for fuzeplan namespace (#137)
-
-Seals the approved GHCR registry credential for the strict scope
-fuzeplan/ghcr-pull-secret so FuzePlan pods can pull ghcr.io/izzywdev/*
-images. Credential sourced from the existing fuzefront/ghcr-pull secret —
-same izzywdev org, same images. Only ciphertext is committed.'
+          git commit -m "feat(fuzeplan): add ghcr-pull SealedSecret for fuzeplan namespace (#137)"
           git push origin "$branch"
+          pr_body="Adds the strict namespace/name-scoped ciphertext for the FuzePlan GHCR pull credential (fuzeplan/ghcr-pull-secret). Sourced from the existing fuzefront/ghcr-pull secret — same org, same images. After merge, dispatch apply-cluster-config. Resolves #137. No plaintext secret material."
           gh pr create \
             --repo izzywdev/FuzeInfra \
             --base main \
             --head "$branch" \
-            --title 'feat(fuzeplan): add ghcr-pull SealedSecret for fuzeplan namespace' \
-            --body 'Adds the strict namespace/name-scoped ciphertext for the FuzePlan GHCR pull
-credential (`fuzeplan/ghcr-pull-secret`). The credential is sourced from
-the existing approved `fuzefront/ghcr-pull` secret — same org, same images.
-
-After this PR merges, dispatch `apply-cluster-config` to push the sealed
-secret to the cluster immediately (or wait for the next push to
-`argocd/cluster-config/**`).
-
-Resolves #137. No plaintext secret material is present.'
+            --title "feat(fuzeplan): add ghcr-pull SealedSecret for fuzeplan namespace" \
+            --body "$pr_body"
