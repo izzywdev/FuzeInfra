@@ -141,6 +141,13 @@ materializes the real `Secret` at sync time. Consequences:
 - The **private key never leaves the cluster** and is backed up by the operator
   out-of-band (see below).
 
+> **Delivering a value to another repo — never by reading it back.** If a
+> consumer repo needs a credential FuzeInfra owns, do NOT recover the plaintext
+> and pass it along. FuzeInfra publishes it **pre-sealed** for the consumer's
+> namespace + Secret name, automatically, via
+> [`CREDENTIAL_HANDOFF.md`](./CREDENTIAL_HANDOFF.md). That path exists precisely
+> because `cluster-query` (correctly) refuses to read Secrets into a job log.
+
 ### Recovering a live value (operator only)
 
 You cannot unseal the committed blob, but the *materialized* `Secret` in the
@@ -274,5 +281,8 @@ That gives every onboarded repo offline self-sealing with zero cluster access.
 
 - [`DEPLOYING_A_SERVICE_TO_K8S.md`](./DEPLOYING_A_SERVICE_TO_K8S.md) — how a service
   consumes the sealed secret in its Deployment.
+- [`CREDENTIAL_HANDOFF.md`](./CREDENTIAL_HANDOFF.md) — the automated, plaintext-free
+  hand-off of a FuzeInfra-owned credential to a consumer repo, plus the periodic
+  auth check that catches a stale one before it becomes an outage.
 - [`gitops.md`](./gitops.md) — how Argo CD delivers FuzeInfra (and the controller).
 - [Bitnami Sealed Secrets](https://github.com/bitnami-labs/sealed-secrets) — upstream project.

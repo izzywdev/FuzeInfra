@@ -1,0 +1,138 @@
+# =============================================================================
+# publish-sealed-handoff — deliver a FuzeInfra-owned credential to a consumer
+# repo as SEALED CIPHERTEXT, with no plaintext anywhere in the path.
+#
+# WHY THIS EXISTS (FuzeInfra#510, from the #499/#500 incident):
+# Consumers used to refresh their sealed DB credential by asking cluster-query to
+# `get secret … -o json` and scraping the value out of FuzeInfra's job log. On
+# 2026-07-29 cluster-query was hardened to reject reading ANY Secret object,
+# because that log is retained and readable by anyone with repo access. That
+# hardening is CORRECT and is not touched here. But it removed the last automated
+# hand-off channel and nothing replaced it, so MendysRobotics' sealed credential
+# silently froze on 2026-07-09 and only surfaced weeks later, as an outage, when
+# pods happened to restart.
+#
+# The inversion that fixes it: the consumer never reads a Secret. FuzeInfra reads
+# its OWN Secret in-cluster and publishes the value already sealed — ciphertext,
+# which is safe in a log, an artifact, or a commit, and `--scope strict` binds it
+# to exactly one namespace + Secret name so it decrypts nowhere else.
+#
+# WHY A SCHEDULE DOES NOT MEAN CHURN: the job compares the fingerprint of what
+# the source holds against the fingerprint of what the consumer's live Secret
+# holds. Equal → it exits having created no branch, no commit and no PR. So the
+# only thing that ever produces a commit is an ACTUAL divergence, i.e. a
+# rotation. The schedule exists because a push-triggered run would race Argo CD
+# (at push time the cluster still holds the OLD value, so the run would see "in
+# sync" and never republish) — a reconciler that is a no-op unless something
+# really diverged has neither problem.
+#
+# Secrets: KUBE_CONFIG (read the source + target Secrets in-cluster),
+#          GH_TOKEN (PAT with contents+pull-requests write on the CONSUMER repos;
+#          the default GITHUB_TOKEN is scoped to FuzeInfra only and cannot do it).
+# Registry: governance/credential-handoff.json — the ONLY place a source→target
+#          mapping may come from. See docs/CREDENTIAL_HANDOFF.md.
+# =============================================================================
+name: publish-sealed-handoff
+
+on:
+  workflow_dispatch:
+    inputs:
+      id:
+        description: 'Hand-off id from governance/credential-handoff.json (blank = every enabled entry)'
+        required: false
+        default: ''
+      force:
+        description: 'Re-seal + PR even when the consumer is already in sync'
+        required: false
+        type: boolean
+        default: false
+  # Lets the verifier (or a consumer holding the already-distributed
+  # FUZEINFRA_DISPATCH_TOKEN) ask for a re-publish without minting a new
+  # credential — the same reasoning as cluster-query.yml's repository_dispatch.
+  repository_dispatch:
+    types: [publish-sealed-handoff]
+  schedule:
+    # Every 6h. A run with nothing diverged does nothing at all.
+    - cron: '23 */6 * * *'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-sealed-handoff
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: azure/setup-kubectl@829323503d1be3d00ca8346e5391ca0b07a9ab0d # v5.1.0
+
+      - name: Install kubeseal
+        run: |
+          set -euo pipefail
+          VER="0.27.1"
+          curl -fsSL -o /tmp/ks.tgz \
+            "https://github.com/bitnami-labs/sealed-secrets/releases/download/v${VER}/kubeseal-${VER}-linux-amd64.tar.gz"
+          tar -xzf /tmp/ks.tgz -C /tmp kubeseal
+          sudo install -m0755 /tmp/kubeseal /usr/local/bin/kubeseal
+          kubeseal --version
+
+      - name: Configure kubectl
+        env:
+          KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
+        run: |
+          set -euo pipefail
+          if [ -z "$KUBE_CONFIG" ]; then echo "::error::KUBE_CONFIG unset"; exit 1; fi
+          umask 077
+          mkdir -p "$HOME/.kube"
+          printf '%s' "$KUBE_CONFIG" | base64 -d > "$HOME/.kube/config"
+          chmod 600 "$HOME/.kube/config"
+          echo "KUBECONFIG=$HOME/.kube/config" >> "$GITHUB_ENV"
+
+      # The id is validated against the registry by the script itself (an unknown
+      # id is a hard error, not a silent no-op). It is passed via env, never
+      # interpolated into the shell.
+      - name: Publish sealed hand-offs
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+          HANDOFF_ID: ${{ github.event.inputs.id || github.event.client_payload.id }}
+          HANDOFF_FORCE: ${{ github.event.inputs.force }}
+          # The current controller cert. Sealing keys rotate (two are active;
+          # newest sealed-secrets-keyfdwvn, 2026-07-25) and seal-secret.sh always
+          # fetches this URL first, falling back to the committed public cert.
+          FUZEINFRA_SEALED_CERT_URL: https://sealed-secrets.prod.fuzefront.com/v1/cert.pem
+        run: |
+          set -euo pipefail
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "::error::GH_TOKEN unset — a PAT with write access to the consumer repos is required to open the hand-off PR. The default GITHUB_TOKEN cannot reach another repository."
+            exit 1
+          fi
+          args=(publish)
+          case "${HANDOFF_ID:-}" in
+            "") : ;;
+            *[!a-z0-9-]*) echo "::error::invalid hand-off id"; exit 1 ;;
+            *) args+=(--id "$HANDOFF_ID") ;;
+          esac
+          if [ "${HANDOFF_FORCE:-false}" = "true" ]; then args+=(--force); fi
+          bash scripts/credential-handoff.sh "${args[@]}"
+
+      # Failure here means a credential is undeliverable, which is exactly the
+      # silent-by-construction condition #510 is about. Say so loudly on the same
+      # Telegram channel the Argo notifications already use.
+      - name: Telegram 🔴 on failure
+        if: failure()
+        env:
+          TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          CHAT: ${{ secrets.TELEGRAM_CHAT_ID }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -uo pipefail
+          if [ -z "${TOKEN:-}" ]; then echo "::warning::TELEGRAM_BOT_TOKEN unset — skipping alert"; exit 0; fi
+          curl -s -X POST "https://api.telegram.org/bot${TOKEN}/sendMessage" \
+            --data-urlencode "chat_id=${CHAT}" \
+            --data-urlencode "text=🔴 FuzeInfra credential hand-off FAILED to publish. A consumer may be running a credential that no longer works. ${RUN_URL}" \
+            --data "disable_web_page_preview=true" >/dev/null && echo "telegram sent" \
+            || echo "::warning::telegram send failed"
