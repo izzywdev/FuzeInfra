@@ -78,6 +78,13 @@ RBAC confines read access to the consumer namespace. No git, no issue, no log.
 
 ### C — Sealed-ciphertext handover (token-free cross-repo)
 
+> **Automated.** For FuzeInfra→consumer database credentials this channel is now
+> implemented end-to-end and needs no agent improvisation: register the consumer
+> in `governance/credential-handoff.json` and `publish-sealed-handoff.yml` seals
+> + PRs the ciphertext, while `verify-consumer-credentials.yml` proves the
+> delivered value still authenticates. See
+> [`CREDENTIAL_HANDOFF.md`](./CREDENTIAL_HANDOFF.md).
+
 When delivery must traverse the consumer's git and the provider has **no**
 cross-repo write token, hand over **ciphertext**:
 

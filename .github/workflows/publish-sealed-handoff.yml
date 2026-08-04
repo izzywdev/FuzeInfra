@@ -116,7 +116,7 @@ jobs:
             *[!a-z0-9-]*) echo "::error::invalid hand-off id"; exit 1 ;;
             *) args+=(--id "$HANDOFF_ID") ;;
           esac
-          [ "${HANDOFF_FORCE:-false}" = "true" ] && args+=(--force)
+          if [ "${HANDOFF_FORCE:-false}" = "true" ]; then args+=(--force); fi
           bash scripts/credential-handoff.sh "${args[@]}"
 
       # Failure here means a credential is undeliverable, which is exactly the
@@ -129,8 +129,8 @@ jobs:
           CHAT: ${{ secrets.TELEGRAM_CHAT_ID }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
-          set -euo pipefail
-          [ -z "${TOKEN:-}" ] && { echo "::warning::TELEGRAM_BOT_TOKEN unset — skipping alert"; exit 0; }
+          set -uo pipefail
+          if [ -z "${TOKEN:-}" ]; then echo "::warning::TELEGRAM_BOT_TOKEN unset — skipping alert"; exit 0; fi
           curl -s -X POST "https://api.telegram.org/bot${TOKEN}/sendMessage" \
             --data-urlencode "chat_id=${CHAT}" \
             --data-urlencode "text=🔴 FuzeInfra credential hand-off FAILED to publish. A consumer may be running a credential that no longer works. ${RUN_URL}" \
