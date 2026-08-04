@@ -11,12 +11,28 @@
 # Secret: argocd-notifications-secret must hold `github-token` (a PAT/OAuth token
 # with repo scope to POST .../dispatches).
 #
-# Coverage note (why three triggers): Argo only reaches `OutOfSync` when it can
+# Coverage note (why four triggers): Argo only reaches `OutOfSync` when it can
 # RENDER the manifests and finds live != desired. If rendering itself fails
 # (bad values/kustomize) the app goes `Unknown` (ComparisonError) and OutOfSync
 # never fires — so on-sync-unknown is required to catch render breakage. Runtime
 # failures (ImagePullBackOff / CrashLoop) show as `Degraded` health with sync
-# often still Synced — so on-health-degraded is required to catch those.
+# often still Synced — so on-health-degraded is required to catch those. And a
+# sync that RENDERS fine but is REJECTED on apply is a fourth, distinct state —
+# see on-sync-failed below.
+#
+# WHY on-sync-failed EXISTS (FuzeInfra#501 — do not delete it):
+# FuzeFront prod shipped nothing for a week while every release reported green.
+# One manifest in the chart rendered an invalid value (`port: 0` on a
+# NetworkPolicy, from values keys deleted by an unrelated commit). A single
+# invalid manifest fails the sync of the WHOLE Application, and Argo then latches:
+#   "Skipping auto-sync: failed previous sync attempt to [rev] and will not retry"
+# so each new release fails the same way and no Deployment ever rolls.
+# The three status-based triggers above could not surface this, because they are
+# `oncePer` a STATUS STRING: an app that goes OutOfSync and stays there alerts
+# exactly once, then is silent forever no matter how many releases fail after it.
+# on-sync-failed is keyed on the failing REVISION instead, so every release that
+# fails to apply alerts again — which is the whole point when the symptom is
+# "the pipeline is green and nothing shipped".
 # =============================================================================
 apiVersion: v1
 kind: ConfigMap
@@ -101,6 +117,15 @@ data:
     - when: app.status.health.status == 'Degraded'
       oncePer: app.status.health.status
       send: [app-unhealthy]
+  # Sync FAILED: manifests rendered, but the apply was rejected (invalid manifest,
+  # RBAC denial, failed hook, immutable-field conflict) — so the desired state was
+  # never reached and, per the header note, Argo will not retry that revision.
+  # oncePer the FAILING REVISION, not a status string: that is what makes a
+  # repeatedly-failing release re-alert instead of going quiet after the first one.
+  trigger.on-sync-failed: |
+    - when: app.status.operationState.phase in ['Error', 'Failed']
+      oncePer: app.status.operationState.syncResult.revision
+      send: [app-unhealthy]
 
   # ---- default subscription: all apps in this Argo instance ---------------
   subscriptions: |
@@ -111,3 +136,4 @@ data:
         - on-out-of-sync
         - on-sync-unknown
         - on-health-degraded
+        - on-sync-failed
