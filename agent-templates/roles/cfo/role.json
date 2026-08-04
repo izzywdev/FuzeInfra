@@ -21,5 +21,13 @@
     { "type": "url", "name": "stripe", "url": "${STRIPE_MCP_URL}" }
   ],
   "services": { "github": "read", "k8s": "none", "cloud": "read" },
-  "metadata": { "role": "cfo", "tier": "executive" }
+  "metadata": { "role": "cfo", "tier": "executive" },
+  "a2a": {
+    "examples": [
+      "What is our current cloud and LLM spend, and what is trending over budget?",
+      "Break down the unit economics of this product and flag anything unsustainable.",
+      "This change adds new infrastructure — what does it cost us per month?",
+      "Which line items should we cut to bring spend back under budget?"
+    ]
+  }
 }

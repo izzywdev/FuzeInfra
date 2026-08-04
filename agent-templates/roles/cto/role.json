@@ -21,5 +21,13 @@
     { "type": "url", "name": "slack", "url": "${SLACK_MCP_URL}" }
   ],
   "services": { "github": "read", "k8s": "none", "cloud": "read" },
-  "metadata": { "role": "cto", "tier": "executive" }
+  "metadata": { "role": "cto", "tier": "executive" },
+  "a2a": {
+    "examples": [
+      "Review this cross-repo architecture change and tell me whether it holds.",
+      "Should we adopt this protocol family-wide, or keep it scoped to one repo?",
+      "Is this change a spine-service boundary violation?",
+      "What is our technical direction on this area, and which repo owns it?"
+    ]
+  }
 }

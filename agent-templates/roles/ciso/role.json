@@ -21,5 +21,13 @@
     { "type": "url", "name": "slack", "url": "${SLACK_MCP_URL}" }
   ],
   "services": { "github": "read", "k8s": "none", "cloud": "read" },
-  "metadata": { "role": "ciso", "tier": "executive" }
+  "metadata": { "role": "ciso", "tier": "executive" },
+  "a2a": {
+    "examples": [
+      "Triage these CVE/SARIF findings and tell me what actually needs fixing first.",
+      "Review the auth architecture of this service for security posture issues.",
+      "A secret leaked — what is the response, and what is the blast radius?",
+      "Can we accept this risk, or does it need remediation before release?"
+    ]
+  }
 }
