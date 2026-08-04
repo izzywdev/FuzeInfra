@@ -20,6 +20,14 @@ adds its own ingress-nginx + cert-manager would open ports and break that invari
 Instead:
 - Ingress `className: traefik`, **no** `tls:` block, **no** cert-manager annotations
   (CF does TLS). The cluster is HTTP-only behind the tunnel.
+- If you pin a Traefik entrypoint at all, pin **`web`** — never `websecure`, and
+  never set `traefik.ingress.kubernetes.io/router.tls: "true"`. The tunnel's
+  catch-all hits Traefik as plaintext HTTP on port 80, so a `websecure`-only router
+  leaves nothing listening on `web` and every request falls through to Traefik's
+  default 404. The symptom is deceptive — **DNS resolves, TLS works, HTTP returns
+  404** — and reads exactly like a missing tunnel route, which sends people hunting
+  for a `Tunnel:Edit` API token they do not need. It is the entrypoint.
+  (Cost FuzeHub a round trip: izzywdev/FuzeHub#66.)
 - Per-product hostnames route through the **existing** tunnel; DNS is proxied CNAMEs
   in the product's own Cloudflare zone via the generic `modules/cloudflare-dns`
   Terraform module — **no product hostnames are hard-coded in FuzeInfra** (the
