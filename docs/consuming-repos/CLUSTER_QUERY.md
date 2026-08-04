@@ -37,68 +37,87 @@ this workflow:
 
 ---
 
-## 2. What you need — a dispatch credential
+## 2. What you need — almost certainly nothing new
 
-Triggering a `workflow_dispatch` on FuzeInfra needs a token that can write Actions on
-`izzywdev/FuzeInfra`, held by an identity with write access to the repo:
+Split the two halves, because they have different answers:
 
-| Token type | Required permission |
-|---|---|
-| Fine-grained PAT | Repository access: **FuzeInfra** → Repository permissions → **Actions: Read and write** |
-| Classic PAT | `repo` scope |
-| GitHub App installation token | Installed on FuzeInfra with **Actions: Read and write** |
+**Reading the result needs no credential at all.** FuzeInfra is a public repo, so its
+run metadata and job logs are world-readable — `GET /repos/izzywdev/FuzeInfra/actions/runs/<id>`
+answers `200` unauthenticated. Nothing needs an Actions grant to *read* an answer.
 
-Notes:
+**Triggering** needs a credential, and there are two events, so two ways in:
 
-- **`FUZEINFRA_DISPATCH_TOKEN` is not enough on its own.** The token described in
-  [`INFRA_REQUEST_DISPATCH.md`](../INFRA_REQUEST_DISPATCH.md) carries *Contents: Read
-  and write*, which authorizes `repository_dispatch` but **not**
-  `workflow_dispatch`. To reuse it here, a human adds **Actions: Read and write** to
-  it; otherwise use a separate secret.
-- Many repos already carry a `GH_TOKEN` PAT for the `@claude` handler. If that PAT has
-  the scope above, no new secret is needed.
-- **This grant is repo-wide.** GitHub cannot scope Actions:write to one workflow, so a
-  token that can dispatch `cluster-query` can dispatch *any* `workflow_dispatch`
-  workflow in FuzeInfra. Provision it deliberately, keep it in Actions secrets, and
-  give it a short expiry.
+| Event | Permission on FuzeInfra | Who already has it |
+|---|---|---|
+| **`repository_dispatch`** (preferred) | **Contents: write** | any repo holding **`FUZEINFRA_DISPATCH_TOKEN`** — the infra-request token from [`INFRA_REQUEST_DISPATCH.md`](../INFRA_REQUEST_DISPATCH.md) |
+| `workflow_dispatch` | **Actions: write** | a classic PAT with `repo`, or a fine-grained PAT / App token scoped to FuzeInfra |
 
-Check whether the token you have works — a `403`/`404` means it does not:
+**Use `repository_dispatch` and reuse the token you already have.** It is the same
+secret that fires infra-requests — no new credential, and no repo-wide Actions grant.
+It is also *less* privilege than it sounds: a token that can trigger `infra-request`
+can already apply Terraform and create VPS nodes, so letting it run a guarded
+read-only `kubectl` reduces relative privilege rather than escalating it.
 
 ```bash
-GH_TOKEN=<token> gh workflow run cluster-query.yml --repo izzywdev/FuzeInfra \
-  -f kubectl_args='version'
+gh api --method POST repos/izzywdev/FuzeInfra/dispatches \
+  -f event_type=cluster-query \
+  -f 'client_payload[kubectl_args]=-n <my-namespace> get pods -o wide'
 ```
 
-**No token, or you'd rather not hold one?** Delegate instead: open an `@claude` issue
-on FuzeInfra asking for the read. That path always works; it is just slower.
+A ready-made consumer workflow that dispatches this and prints the answer back into
+your own job log is at
+[`docs/workflows/consumer/cluster-query.yml`](../workflows/consumer/cluster-query.yml) —
+drop it at `.github/workflows/cluster-query.yml`.
+
+<details>
+<summary>If you have no FuzeInfra token at all</summary>
+
+Either mint one (a human step — GitHub has no API for creating PATs):
+
+1. GitHub → **Settings → Developer settings → Fine-grained personal access tokens → Generate new token**
+2. **Resource owner:** `izzywdev` · **Repository access:** *Only select repositories* → **FuzeInfra**
+3. **Repository permissions → Contents: Read and write** (leave everything else *No access*)
+4. Short expiry + a rotation reminder
+5. `gh secret set FUZEINFRA_DISPATCH_TOKEN --repo izzywdev/<your-repo>`
+
+…or skip the credential entirely and **delegate**: open an `@claude` issue on
+FuzeInfra asking for the read. That path always works; it is only slower.
+
+</details>
+
+> Choosing `workflow_dispatch` instead? Note the grant is repo-wide — GitHub cannot
+> scope Actions:write to a single workflow, so such a token can dispatch *any*
+> `workflow_dispatch` workflow in FuzeInfra, including deploys. That is why
+> `repository_dispatch` is the documented default.
 
 ---
 
 ## 3. Dispatch and read the result
 
 ```bash
-# 1. fire the query
-gh workflow run cluster-query.yml --repo izzywdev/FuzeInfra \
-  -f kubectl_args='-n mendys-prod get pods -o wide'
+# 1. fire the query (repository_dispatch — FUZEINFRA_DISPATCH_TOKEN)
+gh api --method POST repos/izzywdev/FuzeInfra/dispatches \
+  -f event_type=cluster-query \
+  -f 'client_payload[kubectl_args]=-n mendys-prod get pods -o wide'
 
 # 2. grab the run it created, wait for it, print the output
-RUN=$(gh run list --workflow=cluster-query.yml --repo izzywdev/FuzeInfra \
-        --limit 1 --json databaseId --jq '.[0].databaseId')
+RUN=$(gh run list --repo izzywdev/FuzeInfra --workflow=cluster-query.yml \
+        --event=repository_dispatch --limit 1 --json databaseId --jq '.[0].databaseId')
 gh run watch "$RUN" --repo izzywdev/FuzeInfra --exit-status
 gh run view  "$RUN" --repo izzywdev/FuzeInfra --log
 ```
 
-> `gh workflow run` does not return the run id, and the run takes a moment to appear —
-> if step 2 comes back with an older run, wait a few seconds and re-list. Both inputs
-> are optional; dispatching with neither runs the `get nodes` default.
+> Neither dispatch event returns the run id, and the run takes a moment to appear — if
+> step 2 comes back with an older run, wait a few seconds and re-list. The `concurrency`
+> group serializes runs, so they queue rather than interleave.
 
-Same thing over the REST API:
+If you hold an **Actions: write** token instead, the `workflow_dispatch` form is
+equivalent — same guard, same output — and both inputs are optional there, so
+dispatching with neither runs the `get nodes` default:
 
 ```bash
-curl -X POST -H "Authorization: Bearer $GH_TOKEN" \
-  -H "Accept: application/vnd.github+json" \
-  https://api.github.com/repos/izzywdev/FuzeInfra/actions/workflows/cluster-query.yml/dispatches \
-  -d '{"ref":"main","inputs":{"kubectl_args":"-n mendys-prod get pods -o wide"}}'
+gh workflow run cluster-query.yml --repo izzywdev/FuzeInfra \
+  -f kubectl_args='-n mendys-prod get pods -o wide'
 ```
 
 ### Optional second input — `curl_url`
@@ -106,9 +125,10 @@ curl -X POST -H "Authorization: Bearer $GH_TOKEN" \
 Probe a public URL from inside the cluster's network path (`curl -sSIL`, headers only):
 
 ```bash
-gh workflow run cluster-query.yml --repo izzywdev/FuzeInfra \
-  -f kubectl_args='-n mendys-prod get ingress' \
-  -f curl_url='https://www.mendysrobotics.com/'
+gh api --method POST repos/izzywdev/FuzeInfra/dispatches \
+  -f event_type=cluster-query \
+  -f 'client_payload[kubectl_args]=-n mendys-prod get ingress' \
+  -f 'client_payload[curl_url]=https://www.mendysrobotics.com/'
 ```
 
 Only `*.mendysrobotics.com` and `*.prod.fuzefront.com` are allowlisted; anything else

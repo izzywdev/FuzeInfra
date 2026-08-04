@@ -173,6 +173,38 @@ def test_mutating_args_are_rejected(args):
     )
 
 
+def test_both_trigger_events_feed_the_same_filter():
+    """A consumer dispatch must reach the guard, not silently run with empty args.
+
+    The workflow accepts workflow_dispatch (`inputs`) and repository_dispatch
+    (`client_payload`). The step reads ONE env var, so it needs a fallback across
+    both shapes. Drop either side and that event runs with ARGS empty — which
+    exits 0 (see the empty-args no-op below) and therefore reports SUCCESS while
+    having queried nothing. A consumer would read a green run and an empty log.
+    """
+    wf = yaml.safe_load(WORKFLOW.read_text())
+
+    # `on:` parses as the boolean True in YAML 1.1 — hence the lookup dance.
+    triggers = wf.get("on", wf.get(True))
+    assert "repository_dispatch" in triggers, (
+        "cluster-query no longer accepts repository_dispatch; consumer repos hold "
+        "FUZEINFRA_DISPATCH_TOKEN (Contents:write), which cannot workflow_dispatch"
+    )
+    assert triggers["repository_dispatch"]["types"] == ["cluster-query"], (
+        "the event_type must stay 'cluster-query' — consumers dispatch that literal, "
+        "and a bare repository_dispatch would also fire on infra-request"
+    )
+
+    steps = wf["jobs"]["query"]["steps"]
+    args_expr = next(s for s in steps if s.get("name") == STEP_NAME)["env"]["ARGS"]
+    for shape in ("github.event.inputs.kubectl_args",
+                  "github.event.client_payload.kubectl_args"):
+        assert shape in args_expr, (
+            f"ARGS does not read {shape} — that event would run with empty args and "
+            f"pass as a green, empty result.\nARGS: {args_expr}"
+        )
+
+
 def test_read_verb_is_still_required():
     """A command with no read verb at all is refused (pre-existing behaviour)."""
     result = run_filter("-n fuzeinfra")

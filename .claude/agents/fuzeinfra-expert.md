@@ -49,10 +49,12 @@ Apps attach via `networks: { FuzeInfra: { external: true } }` and reach services
 `deploy-prod.yml` (validate → ArgoCD sync), `helm-validate.yml` (helm lint + **kubeconform `-ignore-missing-schemas`** for Traefik CRDs), `infrastructure-tests.yml` (pytest against a live stack), `deploy-ec2.yml`, `claude-ci-autofix.yml` + `grafana-crit-fix.yml` (Claude-driven autofix bots), `auto-merge.yml`, `telegram-pr-merged.yml`, `update-ignore-list.yml`.
 
 ## Read access to prod for anyone (including consuming repos) — `cluster-query`
-`.github/workflows/cluster-query.yml` (`workflow_dispatch`, `runs-on: staging`) is **self-service read-only `kubectl` against the prod cluster**, and it is **not** FuzeInfra-only — any repo whose token can write Actions on FuzeInfra can dispatch it. Tell consumers this rather than relaying cluster state by hand:
+`.github/workflows/cluster-query.yml` (`runs-on: staging`) is **self-service read-only `kubectl` against the prod cluster**, and it is **not** FuzeInfra-only. It takes **both** `workflow_dispatch` (needs Actions:write) and `repository_dispatch` with `event_type: cluster-query` (needs Contents:write — i.e. the **`FUZEINFRA_DISPATCH_TOKEN` consumers already hold** for infra-requests, so nothing new is minted). Tell consumers this rather than relaying cluster state by hand:
 ```bash
-gh workflow run cluster-query.yml --repo izzywdev/FuzeInfra -f kubectl_args='-n <ns> get pods -o wide'
+gh api --method POST repos/izzywdev/FuzeInfra/dispatches -f event_type=cluster-query \
+  -f 'client_payload[kubectl_args]=-n <ns> get pods -o wide'
 ```
+Reading the answer needs **no** credential — FuzeInfra is public, so run metadata/logs are world-readable (that is also why the guard exists). Drop-in consumer workflow: `docs/workflows/consumer/cluster-query.yml`.
 Guard (executable in `tests/test_cluster_query_guard.py`): a read verb must be present (`get describe logs top events version api-resources api-versions explain cluster-info config`); every mutating/exec token is refused; **`Secret` reads and `--raw` are blocked** because FuzeInfra's job logs are **public** and a read whose *output* is a credential leaks it (this happened on 2026-07-29 with `LITELLM_MASTER_KEY`). SealedSecrets are readable on purpose. Consumer-facing doc: `docs/consuming-repos/CLUSTER_QUERY.md`. Recovering a live Secret value goes through the operator SSH path in `docs/SECRETS_MANAGEMENT.md` §4, never through here.
 
 ## Gotchas (learned the hard way — verify they're still in the code)
