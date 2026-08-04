@@ -30,6 +30,7 @@ are identical; only the deployment mechanics differ.
 - [ ] Set **resource requests and limits** on every container (required — the cluster is shared).
 - [ ] Add **Prometheus scrape annotations** + dashboard/alert **ConfigMap labels** for observability.
 - [ ] Commit an Argo CD **`Application`** (repoURL / path / values) and apply it once.
+- [ ] **Verify it in the cluster yourself** with `cluster-query` (read-only `kubectl`, dispatchable from your repo — see [`consuming-repos/CLUSTER_QUERY.md`](./consuming-repos/CLUSTER_QUERY.md)). Green CI is not a deploy.
 
 ---
 
@@ -383,6 +384,7 @@ Commit this (plus the Service, SealedSecrets, and ConfigMaps) under your chart
 
 ## Related docs
 
+- [`consuming-repos/CLUSTER_QUERY.md`](./consuming-repos/CLUSTER_QUERY.md) — read-only `kubectl` against prod, dispatchable from your own repo.
 - [`gitops.md`](./gitops.md) — how FuzeInfra itself is delivered via Argo CD.
 - [`kubernetes-migration.md`](./kubernetes-migration.md) — chart layout, kind/EKS bring-up.
 - [`SERVICE_USAGE_GUIDELINES.md`](./SERVICE_USAGE_GUIDELINES.md) — shared-service isolation rules (Compose & k8s).

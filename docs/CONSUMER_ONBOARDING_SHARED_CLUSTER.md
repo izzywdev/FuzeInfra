@@ -117,7 +117,25 @@ Steps for a new service (`<service>`):
 MongoDB follows the same shape — see `docs/consuming-repos/MONGODB_PROVISIONING.md`
 (`<service>-mongo-credentials`, `serviceMongoDatabases:`).
 
-## 5. Self-heal covers it going forward
+## 5. Verifying it — you have read access to the cluster
+
+Consumers never *operate* the cluster, but they are not blind to it. FuzeInfra's
+**`cluster-query`** workflow is dispatchable from any repo holding a FuzeInfra
+Actions-write token, and gives you read-only `kubectl` against prod — no kubeconfig
+changes hands, and no human has to relay output back to you:
+
+```bash
+gh workflow run cluster-query.yml --repo izzywdev/FuzeInfra \
+  -f kubectl_args='-n <my-namespace> get pods -o wide'
+```
+
+Use it to confirm a rollout actually landed (`-n argocd get applications`), to read
+pod events/logs when it didn't, and as the evidence in your done-report. Mutating and
+exec verbs are refused, and `Secret` reads plus `--raw` are blocked because FuzeInfra's
+job logs are **public**. Full usage + caveats:
+[`consuming-repos/CLUSTER_QUERY.md`](consuming-repos/CLUSTER_QUERY.md).
+
+## 6. Self-heal covers it going forward
 
 Once live, `docs/argo-selfheal-autofix.md` keeps it healthy: any `OutOfSync`,
 `Degraded`, or `Unknown`/ComparisonError on the consumer's Argo apps fires an

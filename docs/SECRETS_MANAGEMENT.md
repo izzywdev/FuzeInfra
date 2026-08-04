@@ -166,8 +166,11 @@ into a GitHub Actions job log, which is retained and readable by anyone with rep
 access — so `get secret -o jsonpath=…` there leaks the credential even though it
 is only a read. It is blocked for that reason
 (`.github/workflows/cluster-query.yml`, covered by
-`tests/test_cluster_query_guard.py`). SealedSecrets *are* readable there, being
-encrypted at rest.
+`tests/test_cluster_query_guard.py`), as is `--raw` (`kubectl config view --raw`
+prints the runner's cluster-admin kubeconfig). SealedSecrets *are* readable there,
+being encrypted at rest — see
+[`consuming-repos/CLUSTER_QUERY.md`](./consuming-repos/CLUSTER_QUERY.md) for what
+`cluster-query` *is* for.
 
 Treat any value recovered this way as exposed to whatever it passed through, and
 rotate if that set is wider than you want.

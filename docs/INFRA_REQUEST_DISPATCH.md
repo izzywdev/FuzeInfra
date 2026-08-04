@@ -190,6 +190,7 @@ for the full rationale.
 
 ## Related docs
 
+- [`consuming-repos/CLUSTER_QUERY.md`](consuming-repos/CLUSTER_QUERY.md) — the **read** side of this bridge: dispatch read-only `kubectl` against prod from a consumer repo. (Note the credential differs — `cluster-query` is a `workflow_dispatch`, so it needs **Actions: write**, which `FUZEINFRA_DISPATCH_TOKEN`'s Contents-only grant does not cover.)
 - [`TERRAFORM_CD.md`](TERRAFORM_CD.md) — the full merge-to-apply model (FuzeInfra-owned plane A + this dispatch bridge plane B), backend bootstrap, and the FuzeOne consumer-side workflows.
 - [ADR 0001](adr/0001-cluster-autoscaling-identity-scoped-baseline.md) — why cluster autoscaling uses an identity-scoped floating baseline (decoupling from consumer-dispatched nodes).
 - [`K3S_SECOND_NODE_RUNBOOK.md`](K3S_SECOND_NODE_RUNBOOK.md) — manual node-join procedure this automates.

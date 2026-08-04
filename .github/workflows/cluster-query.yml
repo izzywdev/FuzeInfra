@@ -96,6 +96,19 @@ jobs:
                 exit 1;;
             esac
           done
+          # Reject --raw. `kubectl config view --raw` prints THIS runner's kubeconfig —
+          # client cert + key, i.e. cluster-admin — into a job log on a PUBLIC repo.
+          # `config` is an allowed read verb and --raw names no resource, so nothing
+          # above catches it; without --raw, `config view` redacts those fields
+          # (DATA+OMITTED), which is why the verb itself stays allowed. The cost is
+          # `get --raw /metrics`, a read nothing here needs.
+          for tok in $ARGS; do
+            case "$tok" in
+              --raw|--raw=*)
+                echo "::error::Rejected '--raw': 'kubectl config view --raw' would print this runner's cluster-admin kubeconfig into a job log that is public and retained. Ask for the specific resource instead."
+                exit 1;;
+            esac
+          done
           echo "### kubectl $ARGS"
           # shellcheck disable=SC2086
           kubectl $ARGS 2>&1 | head -c 200000
