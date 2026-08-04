@@ -137,6 +137,30 @@ env:
 
 ---
 
+## Read-only cluster introspection (`cluster-query`)
+
+Consumers do not get a kubeconfig — but they are **not** blind to the cluster. FuzeInfra
+publishes a dispatchable read-only introspection workflow, `cluster-query`, so any
+consuming repo can answer "is my app running / why is that pod down / did Argo sync"
+itself instead of relaying `kubectl` output through a human.
+
+```bash
+gh workflow run cluster-query.yml --repo izzywdev/FuzeInfra \
+  -f kubectl_args='-n <my-namespace> get pods -o wide'
+# then read the job log for the output
+```
+
+It is read-only by construction: a read verb must be present, every mutating/exec verb
+is refused, `Secret` reads and `--raw` are blocked (their output *is* a credential, and
+FuzeInfra's job logs are public), and there is no `exec`/`port-forward`/`proxy`. Full
+usage, the dispatch credential it needs, and the caveats:
+[`docs/consuming-repos/CLUSTER_QUERY.md`](docs/consuming-repos/CLUSTER_QUERY.md).
+
+Changing anything in the cluster remains GitOps (your own `deploy/**`) or an `@claude`
+delegation to FuzeInfra. This is the read half only.
+
+---
+
 ## Network Policy note
 
 If your cluster enforces NetworkPolicy, consumers must allow egress to namespace `fuzeinfra` on the ports listed above. FuzeInfra itself runs no NetworkPolicy that restricts ingress from other namespaces.

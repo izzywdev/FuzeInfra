@@ -21,5 +21,13 @@
     { "type": "url", "name": "slack", "url": "${SLACK_MCP_URL}" }
   ],
   "services": { "github": "read", "k8s": "none", "cloud": "read" },
-  "metadata": { "role": "ceo", "tier": "executive" }
+  "metadata": { "role": "ceo", "tier": "executive" },
+  "a2a": {
+    "examples": [
+      "What should we prioritize across FuzeOne this quarter, and why?",
+      "Two products want the same engineering capacity next sprint — which one wins?",
+      "Summarize delivery status across the product family and flag anything off track.",
+      "Should this be a new product line, or folded into an existing one?"
+    ]
+  }
 }

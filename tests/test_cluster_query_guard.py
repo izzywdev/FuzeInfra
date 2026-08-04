@@ -101,6 +101,19 @@ BLOCKED_SECRET_READS = [
     "-n fuzeinfra get SECRETS",
 ]
 
+# --- credential reads that are not Secret objects ----------------------------------
+# `config` is an allowed read verb and `--raw` names no resource, so these clear every
+# check above — and print the runner's cluster-admin kubeconfig (client cert + key)
+# into a job log on a PUBLIC repo. Strictly worse than the 2026-07-29 Secret leak: the
+# credential is the cluster itself, not one app's key.
+BLOCKED_KUBECONFIG_READS = [
+    "config view --raw",
+    "config view --raw -o yaml",
+    "config view --minify --raw",
+    "config view --raw=true",
+    "get --raw /api/v1/namespaces/fuzeinfra/pods",
+]
+
 # --- mutation/exec, i.e. the pre-existing guard ------------------------------------
 BLOCKED_MUTATIONS = [
     "-n fuzeinfra delete pod litellm-69d54765ff-sc9gz",
@@ -130,6 +143,24 @@ def test_secret_reads_are_rejected(args):
     assert "job log" in result.stdout, (
         "a Secret read was rejected, but not by the secret guard — the error should "
         f"explain the logging risk and point at the SSH alternative.\n{result.stdout}"
+    )
+
+
+@pytest.mark.parametrize("args", BLOCKED_KUBECONFIG_READS)
+def test_raw_kubeconfig_reads_are_rejected(args):
+    result = run_filter(args)
+    assert result.returncode != 0, (
+        f"cluster-query ALLOWED a --raw read: {args!r}\n"
+        "`kubectl config view --raw` prints the runner's cluster-admin kubeconfig "
+        f"into a public, retained job log.\n{result.stdout}{result.stderr}"
+    )
+
+
+def test_redacted_config_view_is_still_allowed():
+    """Without --raw, `config view` redacts cert/key data — keep it usable."""
+    result = run_filter("config view")
+    assert result.returncode == 0, (
+        f"cluster-query rejected a redacted config read\n{result.stdout}{result.stderr}"
     )
 
 
