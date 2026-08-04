@@ -128,14 +128,18 @@ MongoDB follows the same shape — see `docs/consuming-repos/MONGODB_PROVISIONIN
 ## 5. Verifying it — you have read access to the cluster
 
 Consumers never *operate* the cluster, but they are not blind to it. FuzeInfra's
-**`cluster-query`** workflow is dispatchable from any repo holding a FuzeInfra
-Actions-write token, and gives you read-only `kubectl` against prod — no kubeconfig
-changes hands, and no human has to relay output back to you:
+**`cluster-query`** workflow gives you read-only `kubectl` against prod — no kubeconfig
+changes hands, and no human has to relay output back to you. It reuses the
+**`FUZEINFRA_DISPATCH_TOKEN`** you already hold for infra-requests, so there is
+nothing new to mint:
 
 ```bash
-gh workflow run cluster-query.yml --repo izzywdev/FuzeInfra \
-  -f kubectl_args='-n <my-namespace> get pods -o wide'
+gh api --method POST repos/izzywdev/FuzeInfra/dispatches \
+  -f event_type=cluster-query \
+  -f 'client_payload[kubectl_args]=-n <my-namespace> get pods -o wide'
 ```
+
+Drop-in consumer workflow: [`workflows/consumer/cluster-query.yml`](workflows/consumer/cluster-query.yml).
 
 Use it to confirm a rollout actually landed (`-n argocd get applications`), to read
 pod events/logs when it didn't, and as the evidence in your done-report. Mutating and

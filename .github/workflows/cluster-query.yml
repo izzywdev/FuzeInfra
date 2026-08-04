@@ -24,6 +24,16 @@ on:
         description: 'Optional https URL to probe (only *.mendysrobotics.com / *.prod.fuzefront.com).'
         required: false
         default: ''
+  # repository_dispatch is what makes this usable from a CONSUMER repo without
+  # minting a new credential. workflow_dispatch needs Actions:write on FuzeInfra;
+  # repository_dispatch needs Contents:write — which is exactly what the already-
+  # distributed FUZEINFRA_DISPATCH_TOKEN carries (docs/INFRA_REQUEST_DISPATCH.md).
+  # That token can already trigger infra-request, i.e. apply Terraform and create
+  # VPS nodes, so letting it run a guarded read-only kubectl is a REDUCTION in
+  # relative privilege, not an escalation. Same guard either way — the filter
+  # below does not care which event delivered the args.
+  repository_dispatch:
+    types: [cluster-query]
 
 permissions:
   contents: read
@@ -50,7 +60,10 @@ jobs:
 
       - name: Run read-only kubectl
         env:
-          ARGS: ${{ github.event.inputs.kubectl_args }}
+          # Both event shapes feed the SAME filter. Drop either side of this
+          # fallback and that event silently runs with empty args (a no-op that
+          # looks like success) — tests/test_cluster_query_guard.py pins it.
+          ARGS: ${{ github.event.inputs.kubectl_args || github.event.client_payload.kubectl_args }}
         run: |
           set -u
           [ -z "${ARGS// }" ] && { echo "no kubectl_args"; exit 0; }
@@ -114,9 +127,9 @@ jobs:
           kubectl $ARGS 2>&1 | head -c 200000
 
       - name: Probe public URL
-        if: ${{ github.event.inputs.curl_url != '' }}
+        if: ${{ (github.event.inputs.curl_url || github.event.client_payload.curl_url) != '' }}
         env:
-          URL: ${{ github.event.inputs.curl_url }}
+          URL: ${{ github.event.inputs.curl_url || github.event.client_payload.curl_url }}
         run: |
           case "$URL" in
             https://*.mendysrobotics.com|https://*.mendysrobotics.com/*|https://*.prod.fuzefront.com|https://*.prod.fuzefront.com/*)
