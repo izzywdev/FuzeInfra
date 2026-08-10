@@ -210,11 +210,37 @@ and it:
    the controller decrypts it → the Secret updates.
 
 For the consumer to pick up the new value automatically, it must carry a
-**reloader trigger** — a [stakater/reloader](https://github.com/stakater/Reloader)
-annotation or a Helm `checksum/secret` pod annotation — so its pods restart on
-the Secret change. (If neither is present, pass `reload_argocd_app=<app>` to have
-the workflow hard-refresh + sync that Argo app.) The result: rotating a secret is
-**fire-the-workflow → done**, with no human running `seal-secret.sh` by hand.
+**reloader trigger** so its pods restart on the Secret change. (If none is
+present, pass `reload_argocd_app=<app>` to have the workflow hard-refresh + sync
+that Argo app.) The result: rotating a secret is **fire-the-workflow → done**,
+with no human running `seal-secret.sh` by hand.
+
+> **Use a `checksum/` annotation, not stakater/reloader.** Earlier revisions of
+> this page offered both. Only one of them works here: the
+> [stakater/reloader](https://github.com/stakater/Reloader) controller is **not
+> deployed on this cluster** — it appears nowhere in `helm/` or `argocd/`, only
+> in this document. Its annotation is therefore inert decoration that *reads* as
+> a working rotation trigger, which is the most dangerous way for a rotation to
+> fail: the Secret updates, the pod keeps running on the old credential, and
+> nothing anywhere says so.
+>
+> Hash the source files in the pod template instead — no controller required:
+>
+> ```yaml
+> template:
+>   metadata:
+>     annotations:
+>       checksum/my-secret: {{ .Files.Get "sealed-my-secret.yaml" | sha256sum }}
+> ```
+>
+> Two things to know. The hash is over the **sealed** file, and `kubeseal` is
+> non-deterministic, so re-sealing an unchanged value still rolls the pod once —
+> a cheap false positive, and much preferable to missing a real rotation. And
+> verify the wiring rather than trusting it: change a byte in the sealed file,
+> re-render, and confirm the digest actually moves.
+>
+> If Reloader is ever installed, revisit this note rather than assuming the
+> annotation started working.
 
 This is the family-standard primitive — replicate the workflow in each repo (like
 `claude.yml` / `auto-merge.yml`) pointed at that repo's SealedSecret. An agent's
