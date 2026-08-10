@@ -90,8 +90,7 @@ jobs:
       - name: Install kubectl
         run: |
           if command -v kubectl >/dev/null 2>&1; then
-            echo "kubectl already present: $(kubectl version --client -o yaml 2>/dev/null | head -3 | tr '
-' ' ')"
+            kubectl version --client --short 2>/dev/null || kubectl version --client 2>/dev/null | head -3
             exit 0
           fi
           # Pin to cluster minor version; kubectl supports ±1 minor from the server.
