@@ -652,3 +652,69 @@ spec:
         duration: 10s
         factor: 2
         maxDuration: 3m
+---
+# -----------------------------------------------------------------------------
+# mendysroboticswp  ->  workflows target it with `runs-on: mendysroboticswp`
+#
+# Separate scale set for izzywdev/MendysRoboticsWP (WordPress site). The
+# existing `mendysrobotics` set covers the main MendysRobotics repo; WP has
+# its own CI jobs and its own job-matching key to avoid cross-repo interference.
+#
+# Prerequisite: the GitHub App (githubConfigSecret: arc-runner-github-app) must
+# have the MendysRoboticsWP repository added to its installation. Verify via
+# GitHub App settings -> Repository access; if missing, the listener pod will
+# log "could not find installation" and never pick up jobs.
+# -----------------------------------------------------------------------------
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: arc-runners-mendysroboticswp
+  namespace: argocd
+  labels:
+    app.kubernetes.io/part-of: arc-runners
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: fuzeinfra
+  sources:
+    - repoURL: ghcr.io/actions/actions-runner-controller-charts
+      chart: gha-runner-scale-set
+      targetRevision: "0.14.2"
+      helm:
+        releaseName: mendysroboticswp
+        valueFiles:
+          - $values/runners/arc/runner-scale-set-values.yaml
+        parameters:
+          - name: githubConfigUrl
+            value: "https://github.com/izzywdev/MendysRoboticsWP"
+          - name: runnerScaleSetName
+            value: "mendysroboticswp"
+          - name: maxRunners
+            value: "3"
+          - name: minRunners
+            value: "0"
+    - repoURL: https://github.com/izzywdev/FuzeInfra.git
+      targetRevision: main
+      ref: values
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: arc-runners
+  ignoreDifferences:
+    - group: actions.github.com
+      kind: EphemeralRunnerSet
+      jsonPointers:
+        - /spec/replicas
+        - /spec/patchID
+  syncPolicy:
+    automated:
+      selfHeal: true
+      prune: false
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 3m
