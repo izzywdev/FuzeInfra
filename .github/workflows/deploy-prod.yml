@@ -10,12 +10,10 @@ on:
     paths:
       - 'helm/**'
       - 'deploy/sealed-secrets/**'
-      # Any Application manifest — the registration step below globs the whole
-      # directory, so listing files individually here only risks going stale.
+      # Any Application or AppProject manifest — the registration step below globs
+      # both directories, so listing files individually only risks going stale.
       - 'argocd/applications/**'
-      - 'argocd/projects/fuzefront.yaml'
-      - 'argocd/projects/fuzeinfra.yaml'
-      - 'argocd/projects/fuzemarket.yaml'
+      - 'argocd/projects/**'
       - 'runners/arc/gitops/**'
       - '.github/workflows/deploy-prod.yml'
   workflow_dispatch:
@@ -25,6 +23,14 @@ jobs:
     name: Validate → ArgoCD sync
     runs-on: staging
     environment: production
+
+    env:
+      # The apps this workflow kicks AND waits on. Single source of truth so the
+      # trigger loop and the wait step can never drift apart.
+      SYNC_APPS: "fuzeinfra-prod sealed-secrets fuzeinfra-sealed-secrets fuzequality arc-selfheal"
+      # Per-app budget for reaching Synced. Matches the five-minute rollout budget
+      # the stale-operation recovery above already assumes.
+      SYNC_WAIT_TIMEOUT: "300"
 
     steps:
       - uses: actions/checkout@v7
@@ -75,24 +81,26 @@ jobs:
           export KUBECONFIG=/tmp/kubeconfig
 
           # AppProjects are the destination/security boundary and must exist
-          # before their Applications are registered or synchronized.
-          kubectl apply -f argocd/projects/fuzefront.yaml
-          echo "registered fuzefront AppProject"
-
-          # The fuzeinfra AppProject gates which namespaces its Applications may
-          # target. arc-selfheal lives in arc-systems, so the project must be
-          # applied from Git BEFORE that Application is registered — otherwise
-          # Argo rejects it with InvalidSpecError.
-          kubectl apply -f argocd/projects/fuzeinfra.yaml
-          echo "registered fuzeinfra AppProject"
-
-          # FuzeMarket is a separate repo + namespace, so it gets its own project
-          # (argocd/projects/fuzemarket.yaml). The Application loop below globs
-          # argocd/applications/*.yaml and will register `fuzemarket`, which
-          # declares `project: fuzemarket` — without this apply Argo rejects it
-          # with InvalidSpecError, exactly like the arc-selfheal case above.
-          kubectl apply -f argocd/projects/fuzemarket.yaml
-          echo "registered fuzemarket AppProject"
+          # before their Applications are registered or synchronized. An Application
+          # naming a project that does not exist yet is rejected outright with
+          # InvalidSpecError (this bit arc-selfheal, which lives in arc-systems, and
+          # again fuzemarket).
+          #
+          # Register EVERY project, for the same reason the Application loop below
+          # globs: this was a hand-maintained list of three (fuzefront, fuzeinfra,
+          # fuzemarket) while argocd/projects/ also held fuzeagent, fuzepicker and
+          # fuzeplan. Those three were applied once by hand and never reconciled
+          # after, so an edit to them in Git silently did nothing and a VPS rebuild
+          # would drop them entirely — exactly the drift the Applications glob was
+          # introduced to kill. A glob cannot go stale the same way.
+          #
+          # NOTE: this means edits to fuzeagent/fuzepicker/fuzeplan projects now
+          # take effect on merge instead of needing a manual apply. That is the
+          # point, but it does make Git authoritative for their destination lists.
+          for f in argocd/projects/*.yaml; do
+            kubectl apply -f "$f"
+            echo "registered $(basename "$f" .yaml) AppProject"
+          done
 
           # Register the standalone Application manifests idempotently on every prod
           # deploy. Terraform only applies them on first-provision, so on a VPS
@@ -146,7 +154,7 @@ jobs:
           # refresh + sync on the ARC scale sets would restart listeners and can
           # disrupt in-flight CI jobs. Those Applications carry selfHeal, so Argo
           # converges them on its own without being kicked.
-          for app in fuzeinfra-prod sealed-secrets fuzeinfra-sealed-secrets fuzequality arc-selfheal; do
+          for app in $SYNC_APPS; do
             # Ensure the sync renders this Git revision instead of reusing a
             # cached Helm result whose reported revision has already advanced.
             kubectl -n argocd annotate application "$app" \
@@ -155,3 +163,62 @@ jobs:
               -p '{"operation":{"initiatedBy":{"username":"ci"},"sync":{}}}'
             echo "sync triggered for $app"
           done
+
+      # Until this step existed the job ended here, two seconds after the last
+      # patch call — so a green "Deploy FuzeInfra – Production" meant only that a
+      # sync had been REQUESTED, never that it landed. That is a misleading signal
+      # on a GitOps repo whose whole contract is "merge to main = live in prod",
+      # and it actively misleads debugging: a change can sit unapplied for tens of
+      # minutes behind a green tick while everyone reads the tick as proof it is
+      # deployed. (Cost real time chasing a FuzeMarket RBAC grant that a green
+      # deploy said was live and was not.)
+      #
+      # Waiting on SYNC status only, deliberately not --health:
+      #   sync   = "the cluster now has the manifests this commit describes", which
+      #            is exactly the claim the green tick should be making, and is
+      #            entirely caused by this deploy.
+      #   health = workload readiness, which routinely degrades for reasons no
+      #            single deploy owns (a CrashLoop from a missing secret, a node
+      #            under pressure, a scaled-to-0 StatefulSet). Gating on it would
+      #            make prod deploys red for pre-existing conditions and train
+      #            people to ignore the result — the same failure in a new place.
+      # Health is still reported, as a warning, so a degraded app stays visible.
+      - name: Wait for ArgoCD syncs to land
+        run: |
+          set -euo pipefail
+          export KUBECONFIG=/tmp/kubeconfig
+          kubectl config set-context --current --namespace=argocd
+          argocd login --core
+
+          failed=""
+          for app in $SYNC_APPS; do
+            if argocd app wait "$app" --core --operation --sync \
+                 --timeout "$SYNC_WAIT_TIMEOUT"; then
+              health=$(kubectl -n argocd get application "$app" \
+                         -o jsonpath='{.status.health.status}' 2>/dev/null || echo Unknown)
+              if [ "$health" = Healthy ]; then
+                echo "$app synced and healthy"
+              else
+                echo "::warning::$app is Synced but health=$health (not failing the deploy — health degrades for reasons one deploy does not own; investigate if it persists)"
+              fi
+            else
+              echo "::error::$app did not reach Synced within ${SYNC_WAIT_TIMEOUT}s"
+              # Print why, so the failure is actionable from the log alone rather
+              # than needing someone to go get cluster access.
+              kubectl -n argocd get application "$app" -o jsonpath='
+          sync:      {.status.sync.status}
+          health:    {.status.health.status}
+          phase:     {.status.operationState.phase}
+          message:   {.status.operationState.message}
+          revision:  {.status.sync.revision}
+          ' 2>/dev/null || true
+              echo
+              failed="$failed $app"
+            fi
+          done
+
+          if [ -n "$failed" ]; then
+            echo "::error::sync did not land for:$failed"
+            exit 1
+          fi
+          echo "all syncs landed"
