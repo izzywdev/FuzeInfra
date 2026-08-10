@@ -82,6 +82,25 @@ jobs:
           sparse-checkout: |
             ${{ inputs.path || 'deploy/argocd' }}
 
+
+      # `runs-on: staging` is a self-hosted runner that does NOT reliably ship
+      # kubectl — the image drifted and caused all recent runs to fail with
+      # "kubectl: command not found" (exit 127). Install explicitly so the workflow
+      # is self-contained and survives runner rebuilds. See FuzeInfra#135.
+      - name: Install kubectl
+        run: |
+          if command -v kubectl >/dev/null 2>&1; then
+            kubectl version --client --short 2>/dev/null || kubectl version --client 2>/dev/null | head -3
+            exit 0
+          fi
+          # Pin to cluster minor version; kubectl supports ±1 minor from the server.
+          KUBECTL_VERSION="v1.31.4"
+          curl -fsSLo /tmp/kubectl "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl"
+          chmod +x /tmp/kubectl
+          mkdir -p "$HOME/.local/bin"
+          mv /tmp/kubectl "$HOME/.local/bin/kubectl"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
       - name: Configure kubectl
         run: |
           mkdir -p "$HOME/.kube"
