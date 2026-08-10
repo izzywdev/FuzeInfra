@@ -886,6 +886,8 @@ resource "cloudflare_zero_trust_access_policy" "handoff_mcp_bypass" {
 #
 # INVARIANT: never touch the mendysrobotics.com apex or www record — those are
 # managed in the MendysRobotics landing repo.
+#
+# Trigger: retrigger plan after stale-plan failure on PR #519 (run 31439208312).
 # ---------------------------------------------------------------------------
 locals {
   mendysrobotics_enabled = local.cloudflare_enabled && var.mendysrobotics_zone_id != ""
