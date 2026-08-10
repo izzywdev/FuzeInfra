@@ -881,6 +881,9 @@ resource "cloudflare_zero_trust_access_policy" "handoff_mcp_bypass" {
 # the variable being non-empty so a bare `terraform apply` with no variable
 # remains byte-identical.
 #
+# MENDYSROBOTICS_ZONE_ID is now set (#120) — live.mendysrobotics.com,
+# marketplace.mendysrobotics.com, and wp.mendysrobotics.com are active.
+#
 # INVARIANT: never touch the mendysrobotics.com apex or www record — those are
 # managed in the MendysRobotics landing repo.
 # ---------------------------------------------------------------------------
