@@ -287,6 +287,25 @@ neo4j:
     requests: { cpu: 200m, memory: 512Mi }
     limits:   { cpu: "1",  memory: 2Gi }
 
+# Per-consumer dedicated Neo4j instances (Community edition — one database per container).
+# Community edition does not support multi-database or RBAC; each consumer gets a fully
+# isolated Neo4j with its own PVC and credentials. Flip enabled:true once the corresponding
+# SealedSecret (key: password) is present in the fuzeinfra namespace.
+# Consumer bolt address: bolt://fuzeinfra-neo4j-<name>.fuzeinfra.svc.cluster.local:7687
+serviceNeo4jInstances: []
+# Example:
+# serviceNeo4jInstances:
+#   - name: fuzeplan
+#     enabled: false
+#     passwordSecret:
+#       name: neo4j-fuzeplan-credentials
+#       key: password
+#     storage: 5Gi
+#     nodeSelector: {}
+#     resources:
+#       requests: {cpu: 200m, memory: 1Gi}
+#       limits: {cpu: "1", memory: 2Gi}
+
 elasticsearch:
   enabled: true
   image: docker.elastic.co/elasticsearch/elasticsearch:8.8.0

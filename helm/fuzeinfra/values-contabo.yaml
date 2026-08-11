@@ -67,6 +67,22 @@ neo4j:
   # on an ephemeral autoscaled node once products start seeding it.
   nodeSelector:
     node.longhorn.io/create-default-disk: "true"
+serviceNeo4jInstances:
+  # FuzePlan gets a dedicated Neo4j — Community edition cannot RBAC or multi-DB,
+  # so full isolation requires a separate container with its own PVC + creds.
+  # Bolt address for FuzePlan: bolt://fuzeinfra-neo4j-fuzeplan.fuzeinfra.svc.cluster.local:7687
+  # enabled: false until neo4j-fuzeplan-credentials SealedSecret is present in fuzeinfra ns.
+  - name: fuzeplan
+    enabled: false
+    passwordSecret:
+      name: neo4j-fuzeplan-credentials
+      key: password
+    storage: 5Gi
+    nodeSelector:
+      node.longhorn.io/create-default-disk: "true"
+    resources:
+      requests: {cpu: 200m, memory: 1Gi}
+      limits: {cpu: "1", memory: 2Gi}
 redis:
   storage: 2Gi
   resources:

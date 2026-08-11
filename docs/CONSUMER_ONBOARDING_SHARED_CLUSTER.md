@@ -143,6 +143,42 @@ Steps for a new service (`<service>`):
 MongoDB follows the same shape — see `docs/consuming-repos/MONGODB_PROVISIONING.md`
 (`<service>-mongo-credentials`, `serviceMongoDatabases:`).
 
+### Neo4j — dedicated instance per consumer
+
+Neo4j **Community edition** (what FuzeInfra runs) supports exactly one database
+and no RBAC — sharing the admin credential with multiple products is the only
+Community option. FuzeInfra therefore provisions a **dedicated Neo4j StatefulSet**
+per consumer: its own container, PVC, and credentials, giving full isolation at
+the cost of ~1-2 GiB extra heap.
+
+Steps for a new service (`<service>`):
+
+1. Open an `@claude` issue on FuzeInfra requesting a Neo4j instance named `<service>`.
+   FuzeInfra will seal a password as `neo4j-<service>-credentials` (key: `password`)
+   in the `fuzeinfra` namespace.
+2. Once the SealedSecret is merged, FuzeInfra flips `enabled: true` in the
+   `serviceNeo4jInstances` entry and opens a PR. Argo applies it on merge.
+3. In your app repo, seal the app-namespace secret with the bolt URL:
+   ```
+   NEO4J_URI=bolt://fuzeinfra-neo4j-<service>.fuzeinfra.svc.cluster.local:7687
+   NEO4J_USER=neo4j
+   NEO4J_PASSWORD=<the same password>
+   ```
+4. In your `.fuze/manifest.json`, declare the neo4j store so the dataTier
+   reconciler knows to expect the provision:
+   ```json
+   { "type": "neo4j", "store": "<service>" }
+   ```
+
+The `DISABLED` advisory from the reconciler means the instance exists but
+`enabled: false` — the SealedSecret is not yet in place; flip it only after
+the sealed file is committed.
+
+> **Never connect to `fuzeinfra-neo4j.fuzeinfra` (the shared instance).** That
+> instance uses a single shared `neo4j` database and the same admin credentials
+> for all callers — it is a legacy integration path that will be deprecated as
+> each consumer migrates to their own `fuzeinfra-neo4j-<service>` instance.
+
 ## 5. Verifying it — you have read access to the cluster
 
 Consumers never *operate* the cluster, but they are not blind to it. FuzeInfra's

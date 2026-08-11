@@ -48,7 +48,7 @@ DEFAULT_VALUES = REPO_ROOT / "helm" / "fuzeinfra" / "values-contabo.yaml"
 CONSUMING_REPOS_CONFIG = REPO_ROOT / "config" / "consuming-repos.yaml"
 
 # Stores whose provisioning is currently supported by this reconciler.
-SUPPORTED_STORES = {"postgres", "mongo"}
+SUPPORTED_STORES = {"postgres", "mongo", "neo4j"}
 
 
 # ---------------------------------------------------------------------------
@@ -103,6 +103,16 @@ def _mongo_index(values: dict) -> dict[str, dict]:
     for e in values.get("serviceMongoDatabases", []):
         for key in filter(None, [e.get("user"), e.get("name")]):
             idx[key.lower()] = e
+    return idx
+
+
+def _neo4j_index(values: dict) -> dict[str, dict]:
+    """Index per-consumer Neo4j instances by name."""
+    idx: dict[str, dict] = {}
+    for e in values.get("serviceNeo4jInstances", []):
+        name = e.get("name", "")
+        if name:
+            idx[name.lower()] = e
     return idx
 
 
@@ -212,9 +222,40 @@ def _check_mongo(repo: str, dt: dict, mongo_idx: dict[str, dict]) -> list[Gap]:
     return gaps
 
 
+def _check_neo4j(repo: str, dt: dict, neo4j_idx: dict[str, dict]) -> list[Gap]:
+    instance_name: str = dt.get("instance", dt.get("store", ""))
+    existing = neo4j_idx.get(instance_name.lower())
+    if not existing:
+        return [
+            {
+                "repo": repo,
+                "store": "neo4j",
+                "status": "MISSING",
+                "instance": instance_name,
+                "detail": f"No serviceNeo4jInstances entry with name='{instance_name}'",
+            }
+        ]
+    gaps: list[Gap] = []
+    if not existing.get("enabled", True):
+        gaps.append(
+            {
+                "repo": repo,
+                "store": "neo4j",
+                "status": "DISABLED",
+                "instance": instance_name,
+                "detail": (
+                    f"serviceNeo4jInstances entry '{instance_name}' exists but is disabled "
+                    f"(flip enabled:true after sealing {existing.get('passwordSecret', {}).get('name', 'credentials')})"
+                ),
+            }
+        )
+    return gaps
+
+
 def detect_gaps(manifest: dict, repo: str, values: dict) -> list[Gap]:
     pg_idx = _pg_index(values)
     mongo_idx = _mongo_index(values)
+    neo4j_idx = _neo4j_index(values)
     gaps: list[Gap] = []
 
     for dt in manifest.get("dataTier", []):
@@ -226,6 +267,8 @@ def detect_gaps(manifest: dict, repo: str, values: dict) -> list[Gap]:
             gaps.extend(_check_postgres(repo, dt, pg_idx))
         elif store == "mongo":
             gaps.extend(_check_mongo(repo, dt, mongo_idx))
+        elif store == "neo4j":
+            gaps.extend(_check_neo4j(repo, dt, neo4j_idx))
 
     return gaps
 
@@ -404,7 +447,10 @@ def main() -> int:
         if gaps:
             print(f"{len(gaps)} gap(s)")
             for g in gaps:
-                print(f"    [{g['status']}] {g['store']} role={g['role']} db={g['database']}")
+                if g["store"] == "neo4j":
+                    print(f"    [{g['status']}] {g['store']} instance={g.get('instance', '?')}")
+                else:
+                    print(f"    [{g['status']}] {g['store']} role={g.get('role', '?')} db={g.get('database', '?')}")
                 print(f"    → {g['detail']}")
         else:
             print("OK")
@@ -422,7 +468,10 @@ def main() -> int:
     if advisory:
         print(f"ℹ️   {len(advisory)} advisory gap(s) (require manual review — do not fail CI):")
         for g in advisory:
-            print(f"    [{g['status']}] {g['store']} {g['repo']} role={g['role']} db={g['database']}")
+            if g["store"] == "neo4j":
+                print(f"    [{g['status']}] {g['store']} {g['repo']} instance={g.get('instance', '?')}")
+            else:
+                print(f"    [{g['status']}] {g['store']} {g['repo']} role={g.get('role', '?')} db={g.get('database', '?')}")
             print(f"    → {g['detail']}")
             if g["status"] == "DB_MISMATCH":
                 print(
@@ -436,7 +485,10 @@ def main() -> int:
             f"\n❌  {len(blocking)} blocking gap(s) — provisions are MISSING and must be added:\n"
         )
         for g in blocking:
-            print(f"    [{g['status']}] {g['store']} {g['repo']} role={g['role']} db={g['database']}")
+            if g["store"] == "neo4j":
+                print(f"    [{g['status']}] {g['store']} {g['repo']} instance={g.get('instance', '?')}")
+            else:
+                print(f"    [{g['status']}] {g['store']} {g['repo']} role={g.get('role', '?')} db={g.get('database', '?')}")
             print(f"    → {g['detail']}")
 
         if args.apply:
