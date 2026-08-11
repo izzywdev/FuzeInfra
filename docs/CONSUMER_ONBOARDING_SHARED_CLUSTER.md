@@ -151,28 +151,35 @@ Community option. FuzeInfra therefore provisions a **dedicated Neo4j StatefulSet
 per consumer: its own container, PVC, and credentials, giving full isolation at
 the cost of ~1-2 GiB extra heap.
 
-Steps for a new service (`<service>`):
+Provisioning is a **single GitOps workflow** — no manual sealing, no local
+kubectl access needed:
 
 1. Open an `@claude` issue on FuzeInfra requesting a Neo4j instance named `<service>`.
-   FuzeInfra will seal a password as `neo4j-<service>-credentials` (key: `password`)
-   in the `fuzeinfra` namespace.
-2. Once the SealedSecret is merged, FuzeInfra flips `enabled: true` in the
-   `serviceNeo4jInstances` entry and opens a PR. Argo applies it on merge.
-3. In your app repo, seal the app-namespace secret with the bolt URL:
+   FuzeInfra creates and runs a `provision-<service>-neo4j` workflow that:
+   - Generates a random hex password runner-side (masked, never logged).
+   - Seals it as `neo4j-<service>-credentials` (key: `password`) for the
+     `fuzeinfra` namespace, offline via the committed `sealing-cert.pem`.
+   - Sets `<SERVICE>_NEO4J_PASSWORD` on your repo as a GH Actions secret.
+   - Flips `serviceNeo4jInstances[<service>].enabled` to `true` in
+     `helm/fuzeinfra/values-contabo.yaml`.
+   - Opens a PR in FuzeInfra with the sealed ciphertext + gate flip.
+2. The PR merges → Argo applies the SealedSecret → the StatefulSet boots with
+   `NEO4J_AUTH=neo4j/<password>`.
+3. In your app repo, use the delivered GH Actions secret to seal the
+   app-namespace credential:
    ```
    NEO4J_URI=bolt://fuzeinfra-neo4j-<service>.fuzeinfra.svc.cluster.local:7687
    NEO4J_USER=neo4j
-   NEO4J_PASSWORD=<the same password>
+   NEO4J_PASSWORD=<the GH Actions secret value>
    ```
 4. In your `.fuze/manifest.json`, declare the neo4j store so the dataTier
-   reconciler knows to expect the provision:
+   reconciler tracks the provision:
    ```json
    { "type": "neo4j", "store": "<service>" }
    ```
 
 The `DISABLED` advisory from the reconciler means the instance exists but
-`enabled: false` — the SealedSecret is not yet in place; flip it only after
-the sealed file is committed.
+`enabled: false` — the provision workflow has not been run yet.
 
 > **Never connect to `fuzeinfra-neo4j.fuzeinfra` (the shared instance).** That
 > instance uses a single shared `neo4j` database and the same admin credentials
