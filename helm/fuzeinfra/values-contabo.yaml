@@ -483,7 +483,7 @@ serviceDatabases:
   # namespace, key: password). The provision-fuzesocial workflow does both
   # atomically. See issue #149.
   - name: fuzesocial
-    enabled: false
+    enabled: true
     role: fuzesocial_app
     database: fuzesocial
     passwordSecret:
