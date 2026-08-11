@@ -1,0 +1,18 @@
+# Consuming repos that declare dataTier[] / egress[] in their .fuze/manifest.json.
+# The reconciler (scripts-tools/reconcile_datatier.py) reads this list, fetches
+# each manifest, and compares against helm/fuzeinfra/values-contabo.yaml.
+#
+# When onboarding a new repo, add it here. The reconciler will open a PR
+# with the missing Helm values entries if any dataTier is undeclared.
+repos:
+  - izzywdev/MendysRobotics
+  - izzywdev/FuzeFront
+  - izzywdev/FuzeHub
+  - izzywdev/FuzeAgent
+  - izzywdev/FuzePicker
+  - izzywdev/FuzeMarket
+  - izzywdev/FuzeSales
+  - izzywdev/FuzeSocial
+  - izzywdev/FuzeContact
+  - izzywdev/FuzeService
+  - izzywdev/FuzePlan
