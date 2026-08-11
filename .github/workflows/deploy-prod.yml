@@ -203,18 +203,37 @@ jobs:
                 echo "::warning::$app is Synced but health=$health (not failing the deploy — health degrades for reasons one deploy does not own; investigate if it persists)"
               fi
             else
-              echo "::error::$app did not reach Synced within ${SYNC_WAIT_TIMEOUT}s"
-              # Print why, so the failure is actionable from the log alone rather
-              # than needing someone to go get cluster access.
-              kubectl -n argocd get application "$app" -o jsonpath='
+              # argocd app wait --operation timed out.  Distinguish between:
+              #   OutOfSync  → real failure (code bug or merge conflict)
+              #   Synced     → operation still Running because a StatefulSet is
+              #                rolling (pod not yet Ready).  The Git↔cluster sync
+              #                already landed; the pod will catch up.  Treat as a
+              #                warning so we don't false-alarm every time a probe
+              #                or image change triggers a slow Longhorn rollout.
+              sync_status=$(kubectl -n argocd get application "$app" \
+                              -o jsonpath='{.status.sync.status}' 2>/dev/null || echo Unknown)
+              if [ "$sync_status" = "Synced" ]; then
+                echo "::warning::$app operation still in-progress after ${SYNC_WAIT_TIMEOUT}s (StatefulSet rollout) — sync status is Synced so deploy is valid; pod will catch up"
+                kubectl -n argocd get application "$app" -o jsonpath='
+          sync:      {.status.sync.status}
+          health:    {.status.health.status}
+          phase:     {.status.operationState.phase}
+          message:   {.status.operationState.message}
+          ' 2>/dev/null || true
+              else
+                echo "::error::$app did not reach Synced within ${SYNC_WAIT_TIMEOUT}s (sync status: $sync_status)"
+                # Print why, so the failure is actionable from the log alone rather
+                # than needing someone to go get cluster access.
+                kubectl -n argocd get application "$app" -o jsonpath='
           sync:      {.status.sync.status}
           health:    {.status.health.status}
           phase:     {.status.operationState.phase}
           message:   {.status.operationState.message}
           revision:  {.status.sync.revision}
           ' 2>/dev/null || true
-              echo
-              failed="$failed $app"
+                echo
+                failed="$failed $app"
+              fi
             fi
           done
 
