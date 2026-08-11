@@ -91,13 +91,14 @@ jobs:
             --body "$neo4j_password"
 
           # Flip the serviceNeo4jInstances gate in values-contabo.yaml.
-          # Use end-anchor ('- name: fuzeplan$') to avoid matching
-          # '- name: fuzeplan-repo-digester' in serviceChromaCollections.
+          # Use '--' before the pattern so grep doesn't parse '- name:...' as flags.
+          # '- name: fuzeplan-repo-digester' (Chroma) has enabled:true so the
+          # -c 'enabled: false' count is unaffected even if it also matches.
           config=helm/fuzeinfra/values-contabo.yaml
-          before=$(grep -A1 '- name: fuzeplan$' "$config" | grep -c 'enabled: false' || true)
+          before=$(grep -A1 -- '- name: fuzeplan' "$config" | grep -c 'enabled: false' || true)
           test "$before" -eq 1 || { echo '::error::fuzeplan neo4j gate not found or already enabled'; exit 1; }
-          sed -i '/- name: fuzeplan$/{n;s/enabled: false/enabled: true/;}' "$config"
-          remaining=$(grep -A1 '- name: fuzeplan$' "$config" | grep -c 'enabled: false' || true)
+          sed -i '/- name: fuzeplan/{n;s/enabled: false/enabled: true/;}' "$config"
+          remaining=$(grep -A1 -- '- name: fuzeplan' "$config" | grep -c 'enabled: false' || true)
           test "$remaining" -eq 0 || { echo '::error::fuzeplan neo4j gate still disabled after sed'; exit 1; }
 
           run_id="${{ github.run_id }}"
