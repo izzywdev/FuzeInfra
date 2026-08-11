@@ -73,7 +73,7 @@ serviceNeo4jInstances:
   # Bolt address for FuzePlan: bolt://fuzeinfra-neo4j-fuzeplan.fuzeinfra.svc.cluster.local:7687
   # enabled: false until neo4j-fuzeplan-credentials SealedSecret is present in fuzeinfra ns.
   - name: fuzeplan
-    enabled: false
+    enabled: true
     passwordSecret:
       name: neo4j-fuzeplan-credentials
       key: password
