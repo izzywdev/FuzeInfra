@@ -52,6 +52,23 @@ DB index 0 is reserved for FuzeInfra platform services.
 > uses authentik's default of 0) or the two would collide and leak session
 > state across the very boundary the separate instance creates.
 
+## Neo4j (dedicated instance per consumer)
+
+Neo4j Community edition cannot RBAC or multi-tenant; each consumer gets its own
+StatefulSet (`fuzeinfra-neo4j-<name>`), PVC, and credential pair. Provision via
+the `provision-<name>-neo4j.yml` workflow (generates sealed cred + pushes GH
+secret + flips `serviceNeo4jInstances[<name>].enabled` gate — no manual steps).
+
+| App | Instance name | Sealed secret | Consumer repo | Status |
+|---|---|---|---|---|
+| FuzePlan | `fuzeplan` | `neo4j-fuzeplan-credentials` | izzywdev/FuzePlan | declared (FuzeInfra#157) — run `provision-fuzeplan-neo4j` workflow to activate |
+
+Bolt address template: `bolt://fuzeinfra-neo4j-<name>.fuzeinfra.svc.cluster.local:7687`
+
+> The shared `fuzeinfra-neo4j` instance (the original single-node) is a legacy
+> integration path. New consumers MUST use their own dedicated instance; the
+> shared instance will be deprecated as each consumer migrates.
+
 ## ChromaDB (shared `fuzeinfra-chromadb`)
 
 | App | Tenant | Database | Bootstrap collection | Consumer repo | Status |
