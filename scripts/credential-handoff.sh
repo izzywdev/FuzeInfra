@@ -238,8 +238,8 @@ do_publish() {
       /*|*..*) note "   FAIL: unsafe manifestPath '$t_path'"; rc=1; continue ;;
     esac
     if [ ! -f "$repo_dir/$t_path" ]; then
-      note "   FAIL: $t_path does not exist in $consumer — the consumer must own the manifest first"
-      rc=1; continue
+      note "   $t_path absent in $consumer — will create new SealedSecret manifest"
+      mkdir -p "$(dirname "$repo_dir/$t_path")"
     fi
 
     # --merge-into: update exactly this one encryptedData key and leave every other
@@ -247,12 +247,14 @@ do_publish() {
     # DROP the consumer's out-of-band keys — the exact destructive footgun called
     # out in FuzeInfra#499 (MendysRobotics' force-reseal path composes only 16 of
     # 24 keys) and the reason MendysRobotics#273 hand-edited a single key.
+    # For a new (absent) manifest seal-secret.sh creates it from scratch rather
+    # than merging, so the consumer gets a single-key SealedSecret they own.
     bash "$seal" "$t_ns/$t_name" "${t_key}=@${d}/want" --out "$repo_dir/$t_path"
 
     local sub=0
     if (
       cd "$repo_dir"
-      if git diff --quiet -- "$t_path"; then
+      if git diff --quiet -- "$t_path" && [ -z "$(git status --porcelain "$t_path")" ]; then
         note "   sealed output identical — nothing to commit"; exit 3
       fi
       git config user.name  "FuzeInfra Credential Hand-off"

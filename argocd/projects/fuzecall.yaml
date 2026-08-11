@@ -1,0 +1,20 @@
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: fuzecall
+  namespace: argocd
+spec:
+  description: FuzeCall product (consumer of FuzeInfra) — may deploy ONLY into its own namespace.
+  sourceRepos:
+    - https://github.com/izzywdev/FuzeCall.git
+  destinations:
+    - namespace: fuzecall
+      server: https://kubernetes.default.svc
+    - namespace: argocd
+      server: https://kubernetes.default.svc
+  clusterResourceWhitelist:
+    - group: "*"
+      kind: "*"
+  namespaceResourceWhitelist:
+    - group: "*"
+      kind: "*"
