@@ -28,9 +28,10 @@ jobs:
       # The apps this workflow kicks AND waits on. Single source of truth so the
       # trigger loop and the wait step can never drift apart.
       SYNC_APPS: "fuzeinfra-prod sealed-secrets fuzeinfra-sealed-secrets fuzequality arc-selfheal"
-      # Per-app budget for reaching Synced. Matches the five-minute rollout budget
-      # the stale-operation recovery above already assumes.
-      SYNC_WAIT_TIMEOUT: "300"
+      # Per-app budget for reaching Synced. 600s (10 min) to accommodate first-boot
+      # of newly-provisioned stateful services (e.g. Neo4j fresh PVC + image pull
+      # + DB bootstrap easily exceeds 5 min on cold start).
+      SYNC_WAIT_TIMEOUT: "600"
 
     steps:
       - uses: actions/checkout@v7
