@@ -87,9 +87,9 @@ spec:
           readinessProbe:
             tcpSocket:
               port: 7687
-            initialDelaySeconds: 20
-            periodSeconds: 10
-            failureThreshold: 12
+            initialDelaySeconds: 60
+            periodSeconds: 15
+            failureThreshold: 20
           resources:
             {{- toYaml .resources | nindent 12 }}
   volumeClaimTemplates:
