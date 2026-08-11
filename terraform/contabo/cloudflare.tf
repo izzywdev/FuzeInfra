@@ -896,35 +896,38 @@ locals {
 # DNS: live.mendysrobotics.com → shared FuzeInfra tunnel CNAME.
 # Proxied so Cloudflare terminates TLS at the edge (Universal SSL).
 resource "cloudflare_record" "mendys_live" {
-  count   = local.mendysrobotics_enabled ? 1 : 0
-  zone_id = var.mendysrobotics_zone_id
-  name    = "live"
-  value   = cloudflare_zero_trust_tunnel_cloudflared.fuzeinfra[0].cname
-  type    = "CNAME"
-  proxied = true
-  ttl     = 1
+  count           = local.mendysrobotics_enabled ? 1 : 0
+  zone_id         = var.mendysrobotics_zone_id
+  name            = "live"
+  value           = cloudflare_zero_trust_tunnel_cloudflared.fuzeinfra[0].cname
+  type            = "CNAME"
+  proxied         = true
+  ttl             = 1
+  allow_overwrite = true
 }
 
 # DNS: marketplace.mendysrobotics.com → same tunnel (public-facing, no Access gate).
 resource "cloudflare_record" "mendys_marketplace" {
-  count   = local.mendysrobotics_enabled ? 1 : 0
-  zone_id = var.mendysrobotics_zone_id
-  name    = "marketplace"
-  value   = cloudflare_zero_trust_tunnel_cloudflared.fuzeinfra[0].cname
-  type    = "CNAME"
-  proxied = true
-  ttl     = 1
+  count           = local.mendysrobotics_enabled ? 1 : 0
+  zone_id         = var.mendysrobotics_zone_id
+  name            = "marketplace"
+  value           = cloudflare_zero_trust_tunnel_cloudflared.fuzeinfra[0].cname
+  type            = "CNAME"
+  proxied         = true
+  ttl             = 1
+  allow_overwrite = true
 }
 
 # DNS: wp.mendysrobotics.com → same tunnel (public-facing WordPress, no Access gate).
 resource "cloudflare_record" "mendys_wp" {
-  count   = local.mendysrobotics_enabled ? 1 : 0
-  zone_id = var.mendysrobotics_zone_id
-  name    = "wp"
-  value   = cloudflare_zero_trust_tunnel_cloudflared.fuzeinfra[0].cname
-  type    = "CNAME"
-  proxied = true
-  ttl     = 1
+  count           = local.mendysrobotics_enabled ? 1 : 0
+  zone_id         = var.mendysrobotics_zone_id
+  name            = "wp"
+  value           = cloudflare_zero_trust_tunnel_cloudflared.fuzeinfra[0].cname
+  type            = "CNAME"
+  proxied         = true
+  ttl             = 1
+  allow_overwrite = true
 }
 
 # CF Access: gate live.mendysrobotics.com behind email-OTP.
