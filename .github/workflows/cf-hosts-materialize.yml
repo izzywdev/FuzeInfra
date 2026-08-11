@@ -1,0 +1,159 @@
+name: CF hosts materialize
+
+# Receives a repository_dispatch from a consumer repo that has updated its
+# deploy/cf/hosts.yaml, validates against FuzeInfra policy, regenerates
+# terraform/contabo/materialized/consumers.tfvars, and opens (or force-updates)
+# a PR per declaring app. The terraform-plan-apply.yml saved-plan gate is the
+# review/approval step — this workflow NEVER auto-merges.
+#
+# Trigger from a consumer repo CI job:
+#   curl -X POST https://api.github.com/repos/izzywdev/FuzeInfra/dispatches \
+#     -H "Authorization: Bearer $FUZEINFRA_DISPATCH_TOKEN" \
+#     -H "Content-Type: application/json" \
+#     -d '{"event_type":"cf-hosts-declare","client_payload":{"repo":"izzywdev/MyApp","ref":"abc1234"}}'
+#
+# See governance/cf-host-declaration.md for the consumer contract.
+
+on:
+  repository_dispatch:
+    types: [cf-hosts-declare]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  materialize:
+    name: Materialize CF hosts — ${{ github.event.client_payload.repo }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Validate payload
+        id: payload
+        run: |
+          REPO="${{ github.event.client_payload.repo }}"
+          REF="${{ github.event.client_payload.ref }}"
+          if [ -z "$REPO" ] || [ -z "$REF" ]; then
+            echo "::error::client_payload must include 'repo' and 'ref'"
+            exit 1
+          fi
+          # Basic sanity: must be org/name format
+          if ! echo "$REPO" | grep -qE '^[a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+$'; then
+            echo "::error::Invalid repo format: '$REPO'"
+            exit 1
+          fi
+          APP=$(echo "$REPO" | cut -d/ -f2 | tr '[:upper:]' '[:lower:]')
+          echo "repo=$REPO" >> "$GITHUB_OUTPUT"
+          echo "ref=$REF"   >> "$GITHUB_OUTPUT"
+          echo "app=$APP"   >> "$GITHUB_OUTPUT"
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install pyyaml
+
+      - name: Run materializer
+        id: materialize
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+        run: |
+          set +e
+          python scripts-tools/materialize_cf_hosts.py \
+            --repo "${{ steps.payload.outputs.repo }}" \
+            --ref  "${{ steps.payload.outputs.ref }}" \
+            2>&1 | tee /tmp/materialize.out
+          echo "exit_code=$?" >> "$GITHUB_OUTPUT"
+          RESULT=$(grep '^RESULT:' /tmp/materialize.out | tail -1 | cut -d' ' -f2)
+          echo "result=${RESULT:-UNKNOWN}" >> "$GITHUB_OUTPUT"
+
+      - name: Post rejection comment (policy violation)
+        if: steps.materialize.outputs.exit_code == '1'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          REPO="${{ steps.payload.outputs.repo }}"
+          LOG=$(cat /tmp/materialize.out)
+          gh issue create \
+            --repo izzywdev/FuzeInfra \
+            --title "CF host declaration rejected — $REPO" \
+            --label "policy-violation" \
+            --body "The \`cf-hosts-declare\` dispatch from **$REPO** (ref \`${{ steps.payload.outputs.ref }}\`) was **rejected** by FuzeInfra policy.
+
+          \`\`\`
+          $LOG
+          \`\`\`
+
+          Fix the violations in \`deploy/cf/hosts.yaml\` and re-trigger the dispatch.
+
+          See [governance/cf-host-declaration.md](../blob/main/governance/cf-host-declaration.md) for the full policy." || true
+          echo "::error::Policy violations — see above. Rejection issue filed."
+          exit 1
+
+      - name: Nothing to do (no manifest or no change)
+        if: >
+          steps.materialize.outputs.exit_code == '0' &&
+          (steps.materialize.outputs.result == 'NO_MANIFEST' ||
+           steps.materialize.outputs.result == 'NO_CHANGE')
+        run: |
+          echo "::notice::${{ steps.materialize.outputs.result }} — no PR needed."
+
+      - name: Open / update auto-PR
+        if: >
+          steps.materialize.outputs.exit_code == '0' &&
+          steps.materialize.outputs.result == 'CHANGED'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          APP="${{ steps.payload.outputs.app }}"
+          REPO="${{ steps.payload.outputs.repo }}"
+          REF="${{ steps.payload.outputs.ref }}"
+          BRANCH="materialize/cf-hosts-${APP}"
+
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # Force-update the branch (one open PR per app; re-dispatch rewrites it).
+          git checkout -B "$BRANCH"
+          git add terraform/contabo/materialized/consumers.tfvars
+          git commit -m "chore(cf): materialize CF hosts for ${REPO} (ref ${REF})"
+          git push origin "$BRANCH" --force
+
+          # Check for an existing PR for this branch.
+          EXISTING=$(gh pr list --head "$BRANCH" --json number --jq '.[0].number // empty')
+          if [ -n "$EXISTING" ]; then
+            echo "::notice::Force-updated existing PR #$EXISTING"
+            gh pr comment "$EXISTING" --body \
+              "Re-dispatched from $REPO@${REF} — \`consumers.tfvars\` updated. Review the diff before merging."
+          else
+            LOG=$(cat /tmp/materialize.out)
+            gh pr create \
+              --title "chore(cf): materialize CF hosts for ${REPO}" \
+              --body "Consumer-declared CF hosts for **${REPO}** have been materialized into \`terraform/contabo/materialized/consumers.tfvars\`.
+
+          **Declaring repo:** ${REPO}
+          **Ref:** \`${REF}\`
+
+          ## Materializer output
+
+          \`\`\`
+          $LOG
+          \`\`\`
+
+          ## Review checklist
+
+          - [ ] Terraform diff (plan) shows only expected CNAME/Access-app creates/destroys
+          - [ ] Labels are correct and don't collide with reserved or existing entries
+          - [ ] Merge will trigger \`terraform-plan-apply.yml\` which applies to prod
+
+          **Do NOT merge without reviewing the plan.** The \`terraform-plan-apply.yml\` saved-plan gate is the approval step.
+
+          See [governance/cf-host-declaration.md](../blob/main/governance/cf-host-declaration.md) for the consumer contract." \
+              --head "$BRANCH" \
+              --base main
+          fi

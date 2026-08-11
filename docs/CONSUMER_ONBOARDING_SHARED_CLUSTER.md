@@ -35,6 +35,24 @@ Instead:
 - Public sites: no CF Access policy on those hostnames. Admin UIs: add a CF Access
   app (FuzeInfra `terraform/contabo/cloudflare.tf`).
 
+### 1a. Shared-zone hostnames (`*.prod.fuzefront.com`)
+
+Products that use FuzeInfra's shared subdomain (`myapp.prod.fuzefront.com`) declare
+their hostnames via the **consumer CF host declaration flow** — they do NOT hardcode
+them in FuzeInfra Terraform. The full contract is in
+[governance/cf-host-declaration.md](../governance/cf-host-declaration.md).
+
+Short version:
+1. Create `deploy/cf/hosts.yaml` in your repo (see doc for schema).
+2. Add a CI job that fires a `repository_dispatch` (`event_type: cf-hosts-declare`)
+   to FuzeInfra whenever `hosts.yaml` changes.
+3. FuzeInfra validates, materializes into `consumers.tfvars`, and opens a PR — no
+   human touches `consumers.tfvars` directly.
+
+> Products on their **own domain** (e.g. mendysrobotics.com) use the generic
+> `modules/cloudflare-dns` Terraform module in FuzeInfra instead — no `hosts.yaml`
+> needed.
+
 ## 2. Git auth for Argo — one GitHub App for ALL private repos
 
 Argo pulls private consumer repos using a **repo-creds credential template** backed
