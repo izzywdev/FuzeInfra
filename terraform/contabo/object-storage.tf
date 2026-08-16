@@ -44,6 +44,12 @@ resource "contabo_object_storage" "this" {
     # Purchased quota is a paid, one-way-ish change; never let an unrelated plan
     # silently resize it. Quota changes go through a deliberate, reviewed apply.
     prevent_destroy = true
+    # Contabo API returns region as "European Union" (old format) but the variable
+    # uses "EU" (new format); they refer to the same region so ignore the drift.
+    # auto_scaling: Contabo always returns a disabled block even when autoscaling
+    # is off; our config omits the block (dynamic only emits when limit_tb > 0),
+    # causing spurious diff on every plan — ignore it too.
+    ignore_changes = [region, auto_scaling]
   }
 }
 
