@@ -29,6 +29,8 @@ locals {
   # NOTE: `auth` (auth.fuzefront.com) was retired — FuzeFront now hides its
   # Authentik IdP behind app.fuzefront.com/api/auth/idp/* (reverse-proxied
   # in-cluster, see izzywdev/FuzeFront#247), so no public IdP host is needed.
+  # The DNS record was removed from config in #268; this PR triggers the apply
+  # that destroys cloudflare_record.vanity["auth"] from Terraform state.
   #
   # `plan` = FuzePlan (plan.fuzefront.com). FuzeFront's portal loads FuzePlan's
   # module-federation remoteEntry.js from here, so it must be public (outside the
