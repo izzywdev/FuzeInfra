@@ -57,6 +57,12 @@ on:
   push:
     branches: [main]
     paths: ["terraform/**"]   # apply only when terraform actually changed
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: 'PR number whose saved plan to apply (leave blank to skip apply — use for testing)'
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -243,7 +249,7 @@ jobs:
   # APPLY — on merge to main. Applies the SAVED plan that was reviewed.
   # =========================================================================
   apply:
-    if: github.event_name == 'push'
+    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.pr_number != '')
     name: apply (saved plan)
     runs-on: ubuntu-latest
     concurrency:
@@ -258,18 +264,23 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # The saved plan was uploaded keyed by the PR head SHA. Find the PR
-          # that produced this merge commit and recover that SHA.
-          PR=$(gh api "repos/${{ github.repository }}/commits/${{ github.sha }}/pulls" \
-                 --jq '.[0].number' 2>/dev/null || echo "")
-          if [ -z "$PR" ] || [ "$PR" = "null" ]; then
-            echo "No associated PR for ${{ github.sha }} — refusing to apply without a reviewed plan."
-            exit 1
+          # workflow_dispatch: PR number supplied directly as input.
+          # push: find the PR that produced this merge commit.
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ inputs.pr_number }}" ]; then
+            PR="${{ inputs.pr_number }}"
+            echo "workflow_dispatch: using supplied PR #$PR"
+          else
+            PR=$(gh api "repos/${{ github.repository }}/commits/${{ github.sha }}/pulls" \
+                   --jq '.[0].number' 2>/dev/null || echo "")
+            if [ -z "$PR" ] || [ "$PR" = "null" ]; then
+              echo "No associated PR for ${{ github.sha }} — refusing to apply without a reviewed plan."
+              exit 1
+            fi
           fi
           HEAD_SHA=$(gh api "repos/${{ github.repository }}/pulls/$PR" --jq '.head.sha')
           echo "pr=$PR" >> "$GITHUB_OUTPUT"
           echo "head_sha=$HEAD_SHA" >> "$GITHUB_OUTPUT"
-          echo "Merged PR #$PR, reviewed plan keyed by head SHA $HEAD_SHA"
+          echo "Resolved PR #$PR, reviewed plan keyed by head SHA $HEAD_SHA"
 
       - name: Download the reviewed plan
         uses: dawidd6/action-download-artifact@b6e2e70617bc3265edd6dab6c906732b2f1ae151 # v21
