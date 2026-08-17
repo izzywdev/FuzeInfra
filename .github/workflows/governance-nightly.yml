@@ -33,6 +33,8 @@ jobs:
         uses: anthropics/claude-code-action@6b082c41935b4c8a3b8b0ef85ba4ba4d9eeb8975  # v1.0.189
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          # github_token bypasses the OIDC→App token exchange that fails on staging runners.
+          github_token: ${{ secrets.GH_TOKEN }}
           prompt: |
             You are the **platform-governance** agent running the nightly **governance-reconciliation**
             sweep for the repository ${{ github.repository }}. Follow the governance-reconciliation skill.

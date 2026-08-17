@@ -56,6 +56,12 @@ jobs:
             echo "::notice title=nightly-integration::Detected suite=$SUITE, local-up=$CT"
           fi
 
+      - name: Activate Python toolcache
+        if: env.SUITE_PRESENT == 'true'
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
       - name: Stand up bounded local-up (consumer-test + mocks)
         if: env.SUITE_PRESENT == 'true'
         shell: bash
@@ -133,6 +139,8 @@ jobs:
         uses: anthropics/claude-code-action@6b082c41935b4c8a3b8b0ef85ba4ba4d9eeb8975  # v1.0.189
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          # github_token bypasses the OIDC→App token exchange that fails on staging runners.
+          github_token: ${{ secrets.GH_TOKEN }}
           prompt: |
             The **nightly integration suite** for ${{ github.repository }} FAILED
             (run ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}).
