@@ -24,7 +24,10 @@ jobs:
       - name: Post @claude mention
         id: post
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Must use GH_TOKEN (admin PAT, posts as izzywdev/OWNER), NOT GITHUB_TOKEN.
+          # GitHub suppresses workflow events from github-actions[bot] comments, so
+          # GITHUB_TOKEN here means claude.yml never fires and the smoke check always fails.
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
           ISSUE: ${{ github.event.inputs.issue_number || '171' }}
           REPO: ${{ github.repository }}
         run: |
