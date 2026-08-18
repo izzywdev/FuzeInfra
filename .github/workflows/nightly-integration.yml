@@ -58,7 +58,7 @@ jobs:
 
       - name: Activate Python toolcache
         if: env.SUITE_PRESENT == 'true'
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: "3.11"
 
