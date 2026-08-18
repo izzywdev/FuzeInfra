@@ -89,6 +89,32 @@ RUN set -eux; \
     rm -rf /var/lib/apt/lists/*; \
     gh --version
 
+# --- Helm (Kubernetes package manager) ---------------------------------------
+# Baked in so helm-validate.yml jobs on the staging runner don't download helm
+# per-run. azure/setup-helm@v5 detects a matching version and skips the fetch.
+# Version must match the `version:` pin in .github/workflows/helm-validate.yml.
+ARG HELM_VERSION=3.16.4
+RUN set -eux; \
+    curl -sSLo /tmp/helm.tar.gz \
+      "https://get.helm.sh/helm-v${HELM_VERSION}-linux-amd64.tar.gz"; \
+    tar -xzf /tmp/helm.tar.gz -C /tmp linux-amd64/helm; \
+    install -m0755 /tmp/linux-amd64/helm /usr/local/bin/helm; \
+    helm version; \
+    rm -rf /tmp/helm.tar.gz /tmp/linux-amd64
+
+# --- kubeconform (Kubernetes manifest validation) ----------------------------
+# Baked in so helm-validate.yml jobs skip the per-run download entirely. The
+# workflow's install step is idempotent — it checks `command -v kubeconform`
+# first and skips the download when this binary is on PATH.
+ARG KUBECONFORM_VERSION=0.6.7
+RUN set -eux; \
+    curl -sSLo /tmp/kubeconform.tar.gz \
+      "https://github.com/yannh/kubeconform/releases/download/v${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz"; \
+    tar -xzf /tmp/kubeconform.tar.gz -C /tmp kubeconform; \
+    install -m0755 /tmp/kubeconform /usr/local/bin/kubeconform; \
+    kubeconform -v; \
+    rm /tmp/kubeconform.tar.gz /tmp/kubeconform
+
 # --- Playwright browser system dependencies ----------------------------------
 # e2e / visual-regression jobs run Playwright. The heavy, root-requiring part is
 # the OS-level libraries the browsers need (libnss3, libatk, fonts, …); baking
