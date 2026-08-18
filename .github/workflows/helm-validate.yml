@@ -62,13 +62,25 @@ jobs:
           tar -xzf /tmp/kubeconform.tar.gz -C /tmp
           sudo install /tmp/kubeconform /usr/local/bin/kubeconform
 
+      # The staging runner is in-cluster and cannot reach raw.githubusercontent.com
+      # (NetworkPolicy blocks external egress to that host). github.com releases and
+      # git-over-HTTPS both work fine, so clone the schema repo via git sparse-checkout
+      # and point kubeconform at the local copy. This also avoids per-resource download
+      # bursts that trigger rate limits on shared hosted runners.
+      - name: Cache Kubernetes JSON schemas (v1.29.0)
+        run: |
+          git clone --depth=1 --filter=blob:none --sparse \
+            https://github.com/yannh/kubernetes-json-schema.git /tmp/k8s-schemas
+          cd /tmp/k8s-schemas && git sparse-checkout set "v1.29.0-standalone-strict"
+
       - name: Render & validate (local + aws overlays)
         run: |
           for overlay in values-local.yaml values-aws.yaml; do
             echo "::group::$overlay"
             helm template fuzeinfra helm/fuzeinfra -f "helm/fuzeinfra/$overlay" \
               --namespace fuzeinfra \
-              | kubeconform -strict -summary -kubernetes-version 1.29.0 -ignore-missing-schemas
+              | kubeconform -strict -summary -kubernetes-version 1.29.0 -ignore-missing-schemas \
+                  -schema-location 'file:///tmp/k8s-schemas/{{.NormalizedKubernetesVersion}}-standalone-strict/{{.ResourceKind}}{{.KindSuffix}}.json'
             echo "::endgroup::"
           done
 
@@ -82,7 +94,8 @@ jobs:
           for overlay in values-local.yaml values-contabo.yaml; do
             echo "::group::litellm/$overlay"
             helm template litellm helm/litellm -f "helm/litellm/$overlay" --set enabled=true \
-              | kubeconform -strict -summary -kubernetes-version 1.29.0 -ignore-missing-schemas
+              | kubeconform -strict -summary -kubernetes-version 1.29.0 -ignore-missing-schemas \
+                  -schema-location 'file:///tmp/k8s-schemas/{{.NormalizedKubernetesVersion}}-standalone-strict/{{.ResourceKind}}{{.KindSuffix}}.json'
             echo "::endgroup::"
           done
 
