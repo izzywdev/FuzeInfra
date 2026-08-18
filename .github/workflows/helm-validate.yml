@@ -57,10 +57,14 @@ jobs:
 
       - name: Install kubeconform
         run: |
-          curl -sSLo /tmp/kubeconform.tar.gz \
-            https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz
-          tar -xzf /tmp/kubeconform.tar.gz -C /tmp
-          sudo install /tmp/kubeconform /usr/local/bin/kubeconform
+          if command -v kubeconform &>/dev/null; then
+            echo "kubeconform pre-baked in runner image: $(kubeconform -v 2>&1)"
+          else
+            curl -sSLo /tmp/kubeconform.tar.gz \
+              https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz
+            tar -xzf /tmp/kubeconform.tar.gz -C /tmp
+            sudo install /tmp/kubeconform /usr/local/bin/kubeconform
+          fi
 
       # The staging runner is in-cluster and cannot reach raw.githubusercontent.com
       # (NetworkPolicy blocks external egress to that host). github.com releases and
