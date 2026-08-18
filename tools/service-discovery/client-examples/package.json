@@ -11,7 +11,7 @@
     "consul": "^0.40.0"
   },
   "devDependencies": {
-    "@types/node": "^18.0.0"
+    "@types/node": "^24.13.3"
   },
   "keywords": [
     "fuzeinfra",
@@ -20,5 +20,9 @@
     "microservices"
   ],
   "author": "FuzeInfra",
-  "license": "MIT"
+  "license": "MIT",
+  "engines": {
+    "node": ">=24.0.0",
+    "npm": ">=10.0.0"
+  }
 }
