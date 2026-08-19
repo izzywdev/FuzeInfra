@@ -55,8 +55,12 @@ image the runners use). **Do not touch these.**
 | `actionlint.yml` | 27 | optional | pure YAML lint |
 
 > `claude-ci-autofix.yml` is a **reusable-workflow caller**
-> (`uses: izzywdev/AITools/.github/workflows/claude-ci-autofix.yml@main`); its
-> `runs-on` lives in the **AITools** repo — migrate it there, not here.
+> (`uses: izzywdev/FuzeSDLC/.github/workflows/reusable-claude-ci-autofix.yml@main`). It has
+> no `runs-on` of its own — the runner is now chosen **here**, by passing a `runner:` input
+> to the reusable workflow. (This previously said the `runs-on` lived in the AITools repo
+> and had to be migrated there. AITools has been retired into FuzeSDLC, and hard-coding the
+> runner in the hosting repo was the defect: a reusable workflow's job runs in the CALLER's
+> context and bills to the CALLER, so the hosting repo can never know the right value.)
 > `cluster-query.yml` is **already** on `staging` (issue text was stale).
 
 Use the established bare-label form to match the existing self-hosted workflows:
