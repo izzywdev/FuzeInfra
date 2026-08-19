@@ -71,9 +71,10 @@ serviceNeo4jInstances:
   # FuzePlan gets a dedicated Neo4j — Community edition cannot RBAC or multi-DB,
   # so full isolation requires a separate container with its own PVC + creds.
   # Bolt address for FuzePlan: bolt://fuzeinfra-neo4j-fuzeplan.fuzeinfra.svc.cluster.local:7687
-  # enabled: false until neo4j-fuzeplan-credentials SealedSecret is present in fuzeinfra ns.
+  # Disabled: Longhorn volume pvc-7cbb913f faulted (8d ContainerCreating, 5700+ FailedAttachVolume).
+  # PVCs survive STS deletion — re-enable after Longhorn volume is repaired via Longhorn UI.
   - name: fuzeplan
-    enabled: true
+    enabled: false
     passwordSecret:
       name: neo4j-fuzeplan-credentials
       key: password
