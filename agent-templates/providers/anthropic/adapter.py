@@ -97,8 +97,14 @@ class AnthropicProvider(AgentProvider):
                 continue
             if key in have:
                 continue
-            common.request("POST", f"/v1/vaults/{vid}/credentials",
-                           body={"display_name": cred["display_name"], "auth": auth})
+            try:
+                common.request("POST", f"/v1/vaults/{vid}/credentials",
+                               body={"display_name": cred["display_name"], "auth": auth})
+            except Exception as e:
+                if "409" in str(e):
+                    pass  # credential already exists for this URL — idempotent
+                else:
+                    raise
         return {"name": name, "id": vid}
 
     def ensure_memory(self, manifest):
