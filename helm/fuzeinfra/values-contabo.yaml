@@ -266,7 +266,7 @@ cloudflareTunnel:
 #   2. helm/fuzeinfra/files/handoff-state/*.json (the provisioned ids).
 # Enabling before the secret exists CrashLoops the pod (CreateContainerConfigError).
 handoffMcp:
-  enabled: false
+  enabled: true
 # -----------------------------------------------------------------------------
 # Custom Hostname API (prod) — runtime provisioning of customer-owned domains
 # for FuzeFront's multi-tenant portals (EPIC-16). Cloudflare for SaaS issues and
