@@ -194,6 +194,26 @@ spec:
       {{- include "fuzeinfra.selectorLabels" (dict "component" "kafka-ui" "root" $) | nindent 6 }}
   template:
     metadata:
+      {{- if .Values.kafkaUi.oidc.enabled }}
+      annotations:
+        # Roll the pod whenever the OIDC wiring changes.
+        #
+        # kafka-ui is Spring Security, which fetches the issuer's discovery
+        # document ONCE at startup and caches it for the life of the process. It
+        # therefore keeps using whatever endpoints it saw when it booted, even
+        # after the IdP starts advertising different ones — and nothing in this
+        # Deployment changes, so Argo has no reason to restart it.
+        #
+        # That is not hypothetical: after the IdP was fixed to advertise https://
+        # issuers instead of http://, Grafana recovered immediately (it is
+        # configured with explicit URLs, no discovery) while kafka-ui kept failing
+        # with "Invalid credentials" because it was still holding the stale http://
+        # endpoints from its previous start.
+        #
+        # Hashing the OIDC block means any future change to the issuer, client id
+        # or secret reference forces a fresh discovery fetch.
+        checksum/oidc: {{ .Values.kafkaUi.oidc | toYaml | sha256sum }}
+      {{- end }}
       labels:
         {{- include "fuzeinfra.labels" . | nindent 8 }}
         {{- include "fuzeinfra.selectorLabels" (dict "component" "kafka-ui" "root" $) | nindent 8 }}
