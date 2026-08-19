@@ -17,6 +17,12 @@
 
 locals {
   cloudflare_enabled = var.cloudflare_api_token != ""
+
+  # Gate for the Google Access IdP and the two policies that reference it. Both
+  # halves of the credential must be present: a half-wired IdP plans a DESTROY of
+  # the IdP AND its policies, which silently drops the admin plane to email-OTP
+  # only rather than failing loudly.
+  google_idp_enabled = var.cloudflare_api_token != "" && var.google_access_client_id != "" && var.google_access_client_secret != ""
   prod_domain        = "${var.prod_subdomain}.${var.zone_name}"
 
   # Public vanity hosts served directly by the FuzeFront platform.
@@ -320,40 +326,40 @@ resource "cloudflare_zero_trust_access_policy" "public_app_bypass" {
 }
 
 # ---------------------------------------------------------------------------
-# Authentik as a Cloudflare Access identity provider (OIDC).
+# Google as the Cloudflare Access identity provider.
 #
-# Authentik is the platform IdP, deployed by izzywdev/FuzeFront into the
-# `fuzefront` namespace and served at auth.fuzefront.com — a PUBLIC vanity host
-# (see local.public_vanity_hosts), deliberately OUTSIDE the *.prod Access wall.
-# That placement is load-bearing: if the IdP sat behind the wall it authenticates,
-# logging in would require already being logged in.
+# Google is the ROOT credential for the entire admin plane. It authenticates you
+# to Cloudflare Access (this resource), and SEPARATELY it authenticates you into
+# Authentik, which in turn authenticates every internal service that speaks OIDC.
+# One human credential; two independent consumers of it.
 #
-# The matching OIDC provider (client_id "cloudflare-access") is defined
-# declaratively as an Authentik blueprint in the FuzeFront repo at
-# deploy/helm/fuzefront/authentik/blueprints/provider-oidc-cloudflare-access.yaml.
-# Its redirect URI must be https://fuzefront.cloudflareaccess.com/cdn-cgi/access/callback.
+# WHY NOT AUTHENTIK HERE — it used to be, and it was backwards:
+# Authentik runs INSIDE the cluster this wall protects, on FuzeInfra's own
+# Postgres and Redis. Using it as the Access IdP made the network gate depend on
+# the very thing it gates, and it forced auth.fuzefront.com to be published to
+# the internet, because an IdP sitting behind the wall it authenticates cannot be
+# reached in order to log in. Google is external, so the wall no longer depends
+# on the cluster at all — and that is precisely what lets Authentik move BEHIND
+# the wall (see local.public_vanity_hosts and var.authentik_host).
 #
-# TOKEN SCOPE: this resource needs "Access: Organizations, Identity Providers,
-# and Groups > Edit" on the Cloudflare API token, ON TOP of the scopes the rest
-# of this file needs. A missing Access scope plans CLEAN and fails only at apply
-# with a generic "Authentication error (10000)" — see docs/TERRAFORM_CD.md.
+# TOKEN SCOPE: needs "Access: Organizations, Identity Providers, and Groups >
+# Edit" on the Cloudflare API token, on top of every other scope this file needs.
+# A missing Access scope plans CLEAN and fails only at apply, with a generic
+# "Authentication error (10000)" — see docs/TERRAFORM_CD.md.
 #
 # The `!= ""` guard follows the crit_bridge_token convention: a count-gated
-# resource whose secret is unwired plans a DESTROY, not a no-op. Wire
-# TF_VAR_authentik_access_client_secret in the CD workflow BEFORE merging.
-resource "cloudflare_zero_trust_access_identity_provider" "authentik" {
-  count      = local.cloudflare_enabled && var.authentik_access_client_secret != "" ? 1 : 0
+# resource whose secret is unwired plans a DESTROY, not a no-op. Wire both
+# TF_VAR_google_access_client_id and _secret in the CD workflow BEFORE merging,
+# or the apply silently drops the whole admin plane to email-OTP only.
+resource "cloudflare_zero_trust_access_identity_provider" "google" {
+  count      = local.google_idp_enabled ? 1 : 0
   account_id = var.cloudflare_account_id
-  name       = "Authentik"
-  type       = "oidc"
+  name       = "Google"
+  type       = "google"
 
   config {
-    client_id     = "cloudflare-access"
-    client_secret = var.authentik_access_client_secret
-    auth_url      = "https://${var.authentik_host}/application/o/authorize/"
-    token_url     = "https://${var.authentik_host}/application/o/token/"
-    certs_url     = "https://${var.authentik_host}/application/o/cloudflare-access/jwks/"
-    scopes        = ["openid", "email", "profile"]
+    client_id     = var.google_access_client_id
+    client_secret = var.google_access_client_secret
   }
 }
 
@@ -370,20 +376,35 @@ resource "cloudflare_zero_trust_access_application" "admin_services" {
   app_launcher_visible = false
 }
 
-# Preferred login path: Authentik (which in turn federates Google/Gmail).
-# `require email` keeps the existing allowlist posture — passing Authentik is
-# necessary but not sufficient, so onboarding a user in Authentik does not by
-# itself grant infra-admin access.
-resource "cloudflare_zero_trust_access_policy" "admin_authentik" {
-  count          = local.cloudflare_enabled && var.authentik_access_client_secret != "" ? 1 : 0
+# Preferred login path: Google.
+#
+# THE TWO-BLOCK SHAPE IS LOAD-BEARING — do not collapse it into one block.
+#   include { login_method } = HOW you authenticated (necessary, NOT sufficient)
+#   require { email }        = WHO you are           (the actual allowlist)
+#
+# `include` is OR-semantics; `require` is AND-semantics. Moving the email list
+# into `include` would mean "authenticated via Google OR on the list" — i.e.
+# every Google account on the internet gets in. `email_domain = ["gmail.com"]`
+# would likewise admit all of Gmail, and `gsuite {}` matches Workspace GROUP
+# addresses, which a consumer gmail.com identity has none of. `email` (or
+# `email_list`) is the only primitive that expresses "these specific people".
+#
+# This carries more weight than it appears to. For most hosts behind this wall —
+# Prometheus, Alertmanager, Mongo Express, ChromaDB, LiteLLM — Cloudflare Access
+# is the ENTIRE authorization layer; there is no second gate underneath. And
+# Authentik itself does not restrict enrollment, so any Google identity that
+# reaches it is provisioned as a real user. This block is what stands between
+# that and the internet.
+resource "cloudflare_zero_trust_access_policy" "admin_google" {
+  count          = local.google_idp_enabled ? 1 : 0
   account_id     = var.cloudflare_account_id
   application_id = cloudflare_zero_trust_access_application.admin_services[0].id
-  name           = "Admin via Authentik"
+  name           = "Admin via Google"
   precedence     = 1
   decision       = "allow"
 
   include {
-    login_method = [cloudflare_zero_trust_access_identity_provider.authentik[0].id]
+    login_method = [cloudflare_zero_trust_access_identity_provider.google[0].id]
   }
 
   require {
@@ -393,12 +414,15 @@ resource "cloudflare_zero_trust_access_policy" "admin_authentik" {
 
 # BREAK-GLASS — do not remove.
 #
-# Authentik depends on FuzeInfra's own Postgres and Redis. If those degrade (it
-# has happened: the durable-node OOM and the Longhorn storage-revert incident),
-# an Authentik-only wall locks us out of Grafana, Prometheus and ArgoCD — exactly
-# the tools needed to diagnose the outage. Email OTP is the independent path in.
-# Kept at lower precedence so Authentik is tried first, and `allowed_idps` is
-# deliberately NOT set on the applications so both methods stay selectable.
+# Email OTP is the only login path that depends on neither Google nor this
+# cluster. Google is external so it survives a cluster outage, but it is still a
+# single third party that can lock you out (account lockout, consent revoked, a
+# billing or policy action). OTP is delivered by Cloudflare itself, so it is
+# independent of both.
+#
+# Kept at lower precedence so Google is tried first, and `allowed_idps` is
+# deliberately NOT set on the applications so both methods stay selectable on the
+# Access login page.
 resource "cloudflare_zero_trust_access_policy" "admin_email_otp" {
   count          = local.cloudflare_enabled ? 1 : 0
   account_id     = var.cloudflare_account_id
@@ -431,16 +455,16 @@ resource "cloudflare_zero_trust_access_application" "app_launcher" {
   }
 }
 
-resource "cloudflare_zero_trust_access_policy" "app_launcher_authentik" {
-  count          = local.cloudflare_enabled && var.authentik_access_client_secret != "" ? 1 : 0
+resource "cloudflare_zero_trust_access_policy" "app_launcher_google" {
+  count          = local.google_idp_enabled ? 1 : 0
   account_id     = var.cloudflare_account_id
   application_id = cloudflare_zero_trust_access_application.app_launcher[0].id
-  name           = "Admin via Authentik"
+  name           = "Admin via Google"
   precedence     = 1
   decision       = "allow"
 
   include {
-    login_method = [cloudflare_zero_trust_access_identity_provider.authentik[0].id]
+    login_method = [cloudflare_zero_trust_access_identity_provider.google[0].id]
   }
 
   require {
