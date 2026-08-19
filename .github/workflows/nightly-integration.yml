@@ -79,7 +79,7 @@ jobs:
               (npm ci || npm install) >/dev/null 2>&1
               if npm run | grep -q 'test:integration'; then npm run test:integration; else npm run test:e2e; fi ;;
             pytest)
-              for req in $(git ls-files '**/requirements*.txt' 'requirements*.txt' | head -3); do pip install -q -r "$req" 2>/dev/null || true; done
+              for req in $(git ls-files '**/requirements*.txt' 'requirements*.txt' | head -20); do pip install -q -r "$req" 2>/dev/null || true; done
               pip install -q pytest
               pytest -m integration -q ;;
             manifest)
