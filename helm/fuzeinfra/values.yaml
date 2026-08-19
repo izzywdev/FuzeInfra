@@ -409,7 +409,10 @@ prometheus:
   enabled: true
   image: prom/prometheus:latest
   port: 9090
-  storage: 10Gi
+  storage: 20Gi
+  retention:
+    time: "15d"
+    size: "15GB"
   # Discover alert/recording rules from labeled ConfigMaps in ANY namespace.
   # Opt-in: runs a k8s-sidecar that watches ConfigMaps with the configured label
   # and writes their data into Prometheus' rules dir, then triggers a reload.
