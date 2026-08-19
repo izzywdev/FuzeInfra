@@ -95,7 +95,10 @@ jobs:
           echo "$provision_out"
           if [ "$provision_ok" = "false" ]; then
             if echo "$provision_out" | grep -q "HTTP 409"; then
-              echo "::notice::Provisioning hit HTTP 409 (resource already registered) — vault credentials are pre-provisioned, continuing."
+              # 409 = vault credential already registered from a prior run; the vault is set up.
+              # Re-run without the vault step so agent-ids.json is still written.
+              echo "::notice::Provisioning hit HTTP 409 (vault credential pre-provisioned) — re-running with --no-vault to write agent-ids.json."
+              python providers/provision.py --provider anthropic --no-vault
             else
               exit 1
             fi
