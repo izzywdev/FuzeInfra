@@ -114,6 +114,13 @@ grafana:
   # `grafana_dashboard: "1"`.
   dashboardSidecar:
     enabled: true
+  # Real break-glass admin password, from deploy/sealed-secrets/grafana-admin.yaml.
+  # Without this, prod inherited the chart default — the literal string "admin" —
+  # because no overlay ever set credentials.grafana.adminPassword. Cloudflare
+  # Access was the only thing in front of admin/admin.
+  adminPasswordSecret:
+    name: grafana-admin
+    key: GRAFANA_ADMIN_PASSWORD
   # Authentik SSO. Safe to enable: deploy/sealed-secrets/grafana-oidc.yaml is in
   # this same change, and the `grafana` provider is live in Authentik
   # (https://authentik.prod.fuzefront.com/application/o/grafana/ returns a discovery doc

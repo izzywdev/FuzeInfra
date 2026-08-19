@@ -455,6 +455,12 @@ grafana:
   #
   # The local admin (GF_SECURITY_ADMIN_PASSWORD) stays enabled either way — see
   # the break-glass note in templates/monitoring.yaml.
+  # Source the local break-glass admin password from a dedicated Secret instead
+  # of the chart-managed fuzeinfra-secrets. Leave name empty to keep the existing
+  # behaviour. Set it in an overlay so the real password never rides in values.
+  adminPasswordSecret:
+    name: ""
+    key: GRAFANA_ADMIN_PASSWORD
   oidc:
     enabled: false
     displayName: Authentik
@@ -472,7 +478,16 @@ grafana:
     # JMESPath over the ID-token claims. Requires the `groups` scope to be
     # granted by the Authentik provider, and the group to exist there
     # (blueprint: groups-fuzeinfra-admins.yaml in izzywdev/FuzeFront).
-    roleAttributePath: "contains(groups[*], 'fuzeinfra-admins') && 'Admin' || 'Viewer'"
+    #
+    # NO `|| 'Viewer'` FALLBACK — that is deliberate, and it is a fix.
+    # With a fallback this expression can never evaluate to nothing, so
+    # GF_AUTH_GENERIC_OAUTH_ROLE_ATTRIBUTE_STRICT has nothing to reject: a token
+    # with no `groups` claim at all took the fallback branch and, together with
+    # ALLOW_SIGN_UP, was auto-created as a Viewer. Combined with Authentik not
+    # gating enrollment, that meant any account in the directory silently got
+    # read access to every dashboard. Without the fallback, no matching group
+    # yields no role and strict mode denies the login outright.
+    roleAttributePath: "contains(groups[*], 'fuzeinfra-admins') && 'Admin'"
   # Discover dashboards from labeled ConfigMaps in ANY namespace.
   # Opt-in: runs a k8s-sidecar that watches ConfigMaps with the configured label
   # and writes their JSON into a Grafana provisioning folder. Consumers ship

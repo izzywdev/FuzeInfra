@@ -1,0 +1,14 @@
+---
+apiVersion: bitnami.com/v1alpha1
+kind: SealedSecret
+metadata:
+  name: grafana-admin
+  namespace: fuzeinfra
+spec:
+  encryptedData:
+    GRAFANA_ADMIN_PASSWORD: AgDoCaUDbr7VvXteM9v9lo/47fVhXxjXPeSdfcI2G5QQse2NPFj1v+xdgL+Vf/x85N2ZdFhSnQpy+hhScrepqk5fIJf0xHRHEUjHaLHwEv+QCY7+ol0UkjfzDVGuJVjHyIHupCxz0cQLLsisrkMRAS6OvK7EZubzVLfZSMwrsWSJMje7rVvdPvyNxpZd356D8LXV6xWHadA2lvuNdbOq0rMl/RIC8JT3V/bI4TrLgl8rHDFjFNnAtSvR32ulCNvK59MtQ9jhZ3hQKGANxYIOXn7GZDidk7DXOUR+91UvxGge4MkELtE1sMUrutLECn6xlfIA0bcr/pDNDcmpriXLSqVBVCGbMDJYm6ZDPcF2MXXwzOrtHwxA/aq620bj+OF9IyLqdjM1p70xvPt3Y/khbsYyYI+h15wKSTIt8WrhfLxdbcQES9M0/c+EEP6OdKMM1KRpp17NQA0RJaEExG/fc+VCiKIoWMdnZTR0alAlGCiNvLkeYnwIds09OILHS09zLkYJfuuG/Olxyea+IZxkucsu1eR85yGpaHb6xKGoaWBGFmr+eo1myBjoNijYGABGZ9EwPQuAQPbHIBA/7RKIRPJpGgRP7ltZhdWQzKgkh/cwekVFLMpdbi3UZo3md7M+2FlZ8Qk/Q+UxTiR2dTXYv+AdblhzDDUBu8WaW3n97iGG3r54lRWMi/tGn3fgygB5wJ5AnpZKT4LyqoQJXOB3JhB0fXZmyZ+YqeZ/XSzFbEVlTTDdrTgQxc82uT2kKFaS5rc=
+  template:
+    metadata:
+      name: grafana-admin
+      namespace: fuzeinfra
+    type: Opaque
