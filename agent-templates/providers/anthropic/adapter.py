@@ -97,15 +97,8 @@ class AnthropicProvider(AgentProvider):
                 continue
             if key in have:
                 continue
-            try:
-                common.request("POST", f"/v1/vaults/{vid}/credentials",
-                               body={"display_name": cred["display_name"], "auth": auth})
-            except SystemExit as exc:
-                # 409 means the credential already exists server-side (the list_all
-                # check above may miss it if the API omits auth fields in list responses).
-                # Treat as idempotent success; any other error re-raises.
-                if "HTTP 409" not in str(exc):
-                    raise
+            common.request("POST", f"/v1/vaults/{vid}/credentials",
+                           body={"display_name": cred["display_name"], "auth": auth})
         return {"name": name, "id": vid}
 
     def ensure_memory(self, manifest):
