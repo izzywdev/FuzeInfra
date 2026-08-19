@@ -106,6 +106,9 @@ env:
   TF_VAR_ci_worker_count: "1"
   # CF token now has Zone/Custom Hostnames:Edit — re-enabled after token fix
   TF_VAR_saas_custom_hostnames_enabled: "true"
+  # Handoff MCP — more-specific CF Access bypass app for mcp-handoff.<domain>
+  # so Anthropic Managed Agents (machine, non-interactive) skip email-OTP.
+  TF_VAR_handoff_mcp_access_enabled: "true"
   # mendysrobotics.com zone ID — gates all mendys DNS + Access resources.
   # Default empty string disables those resources; set the secret to enable.
   TF_VAR_mendysrobotics_zone_id: ${{ secrets.MENDYSROBOTICS_ZONE_ID }}
