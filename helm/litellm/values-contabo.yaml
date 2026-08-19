@@ -95,6 +95,26 @@ ingress:
   subdomain: litellm
   domain: prod.fuzefront.com
 
+# Authentik SSO for the LiteLLM admin UI.
+#
+# DELIBERATELY STILL FALSE. deploy/sealed-secrets/litellm-oidc.yaml does not
+# exist yet: the value has to be minted by a human and sealed TWICE
+# (fuzefront/fuzefront-secrets key LITELLM_CLIENT_SECRET for the IdP side,
+# fuzeinfra/litellm-oidc key CLIENT_SECRET for this side) — see
+# deploy/sealed-secrets/authentik-oidc-secrets.yaml.template. Enabling first
+# gives the pod CreateContainerConfigError, exactly as documented for
+# grafana.oidc and kafkaUi.oidc.
+#
+# Second precondition, and it is not a technical one: upstream makes SSO free
+# only up to FIVE users. Confirm the admin roster is within that before
+# flipping, or the sixth person's login is a licence failure, not a bug. Full
+# note on the `sso` block in values.yaml.
+#
+# Unlike airflow, this service IS running (replicas: 1), so once the secret
+# lands this one can actually be verified end to end.
+sso:
+  enabled: false
+
 # NOTE ON NODE PINNING: FuzeFront's own values-prod.yaml pins a `litellm`
 # affinity to node `fuzefront-node-2`. That node does not exist in this cluster
 # (Contabo nodes are vmi* / fuzeinfra-elastic-*), and that block belonged to the

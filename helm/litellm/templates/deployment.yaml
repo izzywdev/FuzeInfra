@@ -116,6 +116,35 @@ spec:
                   key: {{ .name }}
                   optional: {{ not .required }}
             {{- end }}
+            {{- if .Values.sso.enabled }}
+            # ---- Authentik SSO for the admin UI (LiteLLM "generic" provider) --
+            # Endpoints are given explicitly rather than discovered: LiteLLM
+            # reads these three env vars and does not fetch the discovery
+            # document. They live at the /application/o/ ROOT in Authentik, not
+            # under the per-application path — see values.yaml.
+            - name: GENERIC_CLIENT_ID
+              value: {{ .Values.sso.clientId | quote }}
+            - name: GENERIC_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.sso.secretName }}
+                  key: {{ .Values.sso.secretKey }}
+            - name: GENERIC_AUTHORIZATION_ENDPOINT
+              value: "{{ .Values.sso.endpointBase }}/authorize/"
+            - name: GENERIC_TOKEN_ENDPOINT
+              value: "{{ .Values.sso.endpointBase }}/token/"
+            - name: GENERIC_USERINFO_ENDPOINT
+              value: "{{ .Values.sso.endpointBase }}/userinfo/"
+            - name: GENERIC_SCOPE
+              value: {{ .Values.sso.scope | quote }}
+            # The redirect_uri LiteLLM sends is "<PROXY_BASE_URL>/sso/callback".
+            # Authentik matches it strictly, so this must be the external host
+            # the browser sees, and it must match the redirect_uris entry on the
+            # "FuzeInfra LiteLLM" provider in izzywdev/FuzeFront exactly —
+            # trailing slash included, or rather excluded.
+            - name: PROXY_BASE_URL
+              value: {{ .Values.sso.proxyBaseUrl | quote }}
+            {{- end }}
             {{- if .Values.database.enabled }}
             # ORDER IS LOAD-BEARING: Kubernetes only expands $(VAR) references to
             # variables declared EARLIER in this list, so these two must precede
