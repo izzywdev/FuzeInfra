@@ -29,13 +29,17 @@ from pathlib import Path
 import pytest
 import yaml
 
-# The guard script is a bash snippet that only runs on Linux GitHub Actions runners.
-# Running it on Windows via Git Bash produces RPC handle errors because the env
-# override ("PATH=/usr/bin:/bin") completely replaces the Windows environment,
-# stripping everything Git Bash needs. Skip instead of producing false failures.
+# run_filter executes the real bash guard script from cluster-query.yml.
+# The test subject IS the bash script — there is no PowerShell equivalent to
+# test, and we can't port it without testing something different from the real
+# security gate. On Windows, subprocess passes multi-line -c scripts through
+# CreateProcess/list2cmdline, which truncates them at the first newline; only
+# `set -euo pipefail` runs, the loop never executes, and every BLOCKED case
+# silently exits 0 — giving false passes for the exact cases this suite guards.
+# The guard only ever runs on Linux GitHub Actions runners, so skip on Windows.
 pytestmark = pytest.mark.skipif(
     sys.platform == "win32",
-    reason="bash guard script targets Linux CI runners — skip on Windows",
+    reason="tests the real Linux CI bash guard — Git Bash truncates multi-line -c scripts",
 )
 
 ROOT = Path(__file__).parents[1]
