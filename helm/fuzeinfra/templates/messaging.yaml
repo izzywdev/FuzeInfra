@@ -305,11 +305,25 @@ spec:
                 secretKeyRef:
                   name: {{ include "fuzeinfra.secretName" . }}
                   key: RABBITMQ_USER
+            # Chart default for this is the literal "admin123". Override with a
+            # dedicated Secret rather than resealing fuzeinfra-secrets, which also
+            # carries the live Postgres/Mongo/Neo4j credentials.
+            #
+            # CAVEAT, because this is easy to get wrong: RABBITMQ_DEFAULT_PASS is
+            # only honoured on FIRST boot against an empty mnesia. Pointing this at
+            # a new Secret does NOT rotate an existing broker's user — that needs
+            # `rabbitmqctl change_password` or a wiped volume. It does guarantee a
+            # strong credential whenever the broker is initialised fresh.
             - name: RABBITMQ_DEFAULT_PASS
               valueFrom:
                 secretKeyRef:
+                  {{- with .Values.rabbitmq.passwordSecret }}
+                  name: {{ .name | default (include "fuzeinfra.secretName" $) }}
+                  key: {{ .key | default "RABBITMQ_PASSWORD" }}
+                  {{- else }}
                   name: {{ include "fuzeinfra.secretName" . }}
                   key: RABBITMQ_PASSWORD
+                  {{- end }}
           ports:
             - containerPort: 5672
               name: amqp

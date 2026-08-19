@@ -2,3 +2,15 @@
 # Terraform plan/exported artifacts (never commit — may contain secrets)
 tfplan
 plan.json
+
+# Local variable files holding LIVE credentials.
+#
+# terraform.tfvars in this directory contains the Contabo API user + password,
+# the Cloudflare API token, a GitHub token and the crit bridge token, all in
+# cleartext. Before this rule it was untracked only by OMISSION — nothing stopped
+# a `git add -A` in this directory from publishing it, and the Cloudflare token in
+# it is the credential that controls the Access allowlist protecting every admin
+# UI. Broad pattern, with the two files that ARE meant to be committed negated.
+*.tfvars
+!*.tfvars.example
+!materialized/consumers.tfvars

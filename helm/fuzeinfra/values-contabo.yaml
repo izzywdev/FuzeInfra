@@ -101,6 +101,15 @@ elasticsearch:
     limits: {cpu: "1", memory: 1536Mi}
 rabbitmq:
   replicas: 0 # TEMP headroom (#93) — restore to 1 when the node has capacity
+  # Strong credential from deploy/sealed-secrets/fuzeinfra-app-credentials.yaml,
+  # replacing the chart default "admin123" that prod was otherwise rendering.
+  # Takes effect only when the broker initialises against an empty mnesia — which
+  # is exactly what will happen whenever replicas goes back above 0 on a fresh
+  # volume. If an existing volume is reused, rotate with `rabbitmqctl
+  # change_password`, and re-seal any consumer repo holding the old value.
+  passwordSecret:
+    name: fuzeinfra-app-credentials
+    key: RABBITMQ_PASSWORD
 kafka:
   storage: 10Gi
 prometheus:
@@ -114,9 +123,16 @@ grafana:
   # `grafana_dashboard: "1"`.
   dashboardSidecar:
     enabled: true
+  # Real break-glass admin password, from deploy/sealed-secrets/grafana-admin.yaml.
+  # Without this, prod inherited the chart default — the literal string "admin" —
+  # because no overlay ever set credentials.grafana.adminPassword. Cloudflare
+  # Access was the only thing in front of admin/admin.
+  adminPasswordSecret:
+    name: grafana-admin
+    key: GRAFANA_ADMIN_PASSWORD
   # Authentik SSO. Safe to enable: deploy/sealed-secrets/grafana-oidc.yaml is in
   # this same change, and the `grafana` provider is live in Authentik
-  # (https://auth.fuzefront.com/application/o/grafana/ returns a discovery doc
+  # (https://authentik.prod.fuzefront.com/application/o/grafana/ returns a discovery doc
   # advertising the `groups` scope that roleAttributePath depends on).
   #
   # The local admin stays enabled — /login still works. See the break-glass note
@@ -205,6 +221,13 @@ backups:
     lifecycleExpireDays: 30   # provider expires db/ objects after 30 days
 airflow:
   replicas: 0 # TEMP headroom (#93): webserver/scheduler/flower -> 0 pods
+  # Strong credential, replacing the chart default "admin". Applies on a fresh
+  # metadata DB only: airflow-init runs `airflow users create ... || true`, which
+  # silently no-ops for an existing user. Rotate an existing one with
+  # `airflow users reset-password`.
+  adminPasswordSecret:
+    name: fuzeinfra-app-credentials
+    key: AIRFLOW_ADMIN_PASSWORD
   workerReplicas: 0 # TEMP headroom (#93): celery worker -> 0 pods
   # 4 vCPU / 8 GB node — cap concurrency and memory to stop the worker from
   # crowding out CoreDNS/Postgres under memory pressure.

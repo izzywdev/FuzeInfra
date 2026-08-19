@@ -223,35 +223,73 @@ variable "mendysrobotics_zone_id" {
 }
 
 variable "allowed_admin_emails" {
-  description = "Email addresses allowed through Cloudflare Access. Applies to BOTH login methods: it is the `include` for the break-glass email-OTP policy and the `require` for the Authentik policy."
+  description = <<-EOT
+    Email addresses allowed through Cloudflare Access. Applies to BOTH login
+    methods: it is the `include` for the break-glass email-OTP policy and the
+    `require` for the Google policy.
+
+    THIS IS THE PLATFORM'S PRIMARY AUTHORIZATION CONTROL. Not one layer of
+    several — for most hosts behind the *.prod wall (Prometheus, Alertmanager,
+    Mongo Express, ChromaDB, LiteLLM) it is the only one, because those products
+    have no identity layer of their own. Authentik does not restrict enrollment
+    either, so any Google identity that gets past this list is provisioned as a
+    real Authentik user.
+
+    Widening it to a domain, or moving it out of the policy's `require` block
+    into `include`, opens the admin plane to every Google account on the internet.
+  EOT
   type        = list(string)
   default     = ["izzy.weinberg@gmail.com"]
 }
 
 variable "authentik_host" {
   description = <<-EOT
-    Public hostname of the Authentik IdP, used to build the Cloudflare Access
-    OIDC endpoints and the Authentik App Launcher tile.
+    Hostname of the Authentik IdP, used for the Authentik App Launcher tile and
+    as the browser-facing OIDC host for the internal services it authenticates.
 
-    MUST be a host outside the *.prod Access wall — Authentik cannot sit behind
-    the wall it authenticates. auth.fuzefront.com is in local.public_vanity_hosts
-    for exactly this reason. Authentik itself is deployed by izzywdev/FuzeFront.
+    This is now a host INSIDE the *.prod Access wall, and that is a deliberate
+    reversal. It could not be, while Authentik was itself the Access IdP: an IdP
+    behind the wall it authenticates cannot be reached in order to log in. Now
+    that Cloudflare Access authenticates with Google instead, that circularity is
+    gone and Authentik is reachable only after passing Access — which is the
+    stated requirement that nothing, including the IdP, is exposed publicly.
+
+    Authentik itself is deployed by izzywdev/FuzeFront, which serves this host
+    from its own Traefik Ingress.
   EOT
   type        = string
-  default     = "auth.fuzefront.com"
+  default     = "authentik.prod.fuzefront.com"
 }
 
-variable "authentik_access_client_secret" {
+variable "google_access_client_id" {
   description = <<-EOT
-    OIDC client secret for the "cloudflare-access" provider in Authentik. Must
-    match the value sealed as AUTHENTIK_CF_ACCESS_CLIENT_SECRET into the
-    fuzefront-secrets SealedSecret, which is what the Authentik blueprint reads.
+    OAuth client ID for the Google identity provider used by Cloudflare Access.
+    Created in Google Cloud Console as a "Web application" OAuth client, with
+    authorized redirect URI:
 
-    Empty disables the Authentik identity provider AND its Access policies,
-    leaving only the break-glass email-OTP path. Note this is a count gate: if
-    the CD workflow stops passing TF_VAR_authentik_access_client_secret, the
-    plan is a DESTROY of the IdP, not a no-op — the same failure mode already
-    documented for crit_bridge_token.
+      https://<team>.cloudflareaccess.com/cdn-cgi/access/callback
+
+    Empty (or an empty client secret) disables the Google identity provider AND
+    both of its Access policies, leaving only the break-glass email-OTP path.
+    This is a count gate: if the CD workflow stops passing it, the plan is a
+    DESTROY of the IdP and its policies, not a no-op — the same failure mode
+    already documented for crit_bridge_token.
+  EOT
+  type        = string
+  default     = ""
+}
+
+variable "google_access_client_secret" {
+  description = <<-EOT
+    OAuth client secret paired with google_access_client_id. Wire as
+    TF_VAR_google_access_client_secret from the GitHub secret
+    GOOGLE_ACCESS_CLIENT_SECRET.
+
+    NOTE this is a DIFFERENT credential from the GOOGLE_CLIENT_ID/SECRET that
+    FuzeFront's Authentik and security-service use for Google sign-in. Both let
+    you log in with the same Google account, but they are separate OAuth clients
+    with different redirect URIs and must be rotated independently. Reusing one
+    for the other fails with redirect_uri_mismatch.
   EOT
   type        = string
   default     = ""

@@ -385,11 +385,17 @@ kafkaUi:
     clientId: kafka-ui
     # Full OIDC issuer; kafka-ui discovers endpoints from /.well-known.
     # Trailing slash matters — it must match the `iss` claim exactly.
-    issuer: https://auth.fuzefront.com/application/o/kafka-ui/
+    issuer: https://authentik.prod.fuzefront.com/application/o/kafka-ui/
     secretName: kafka-ui-oidc
     secretKey: CLIENT_SECRET
 
 rabbitmq:
+  # Source RABBITMQ_DEFAULT_PASS from a dedicated Secret instead of the
+  # chart-managed fuzeinfra-secrets. Empty name keeps existing behaviour.
+  # Only honoured on a FRESH broker — see templates/messaging.yaml.
+  passwordSecret:
+    name: ""
+    key: RABBITMQ_PASSWORD
   enabled: true
   image: rabbitmq:3-management
   amqpPort: 5672
@@ -455,6 +461,12 @@ grafana:
   #
   # The local admin (GF_SECURITY_ADMIN_PASSWORD) stays enabled either way — see
   # the break-glass note in templates/monitoring.yaml.
+  # Source the local break-glass admin password from a dedicated Secret instead
+  # of the chart-managed fuzeinfra-secrets. Leave name empty to keep the existing
+  # behaviour. Set it in an overlay so the real password never rides in values.
+  adminPasswordSecret:
+    name: ""
+    key: GRAFANA_ADMIN_PASSWORD
   oidc:
     enabled: false
     displayName: Authentik
@@ -466,13 +478,22 @@ grafana:
     #   authorization_endpoint .../application/o/authorize/
     # Deriving these from the per-app path yields a 404 on the first redirect,
     # so this is deliberately a shared base, not the issuer.
-    endpointBase: https://auth.fuzefront.com/application/o
+    endpointBase: https://authentik.prod.fuzefront.com/application/o
     secretName: grafana-oidc
     secretKey: CLIENT_SECRET
     # JMESPath over the ID-token claims. Requires the `groups` scope to be
     # granted by the Authentik provider, and the group to exist there
     # (blueprint: groups-fuzeinfra-admins.yaml in izzywdev/FuzeFront).
-    roleAttributePath: "contains(groups[*], 'fuzeinfra-admins') && 'Admin' || 'Viewer'"
+    #
+    # NO `|| 'Viewer'` FALLBACK — that is deliberate, and it is a fix.
+    # With a fallback this expression can never evaluate to nothing, so
+    # GF_AUTH_GENERIC_OAUTH_ROLE_ATTRIBUTE_STRICT has nothing to reject: a token
+    # with no `groups` claim at all took the fallback branch and, together with
+    # ALLOW_SIGN_UP, was auto-created as a Viewer. Combined with Authentik not
+    # gating enrollment, that meant any account in the directory silently got
+    # read access to every dashboard. Without the fallback, no matching group
+    # yields no role and strict mode denies the login outright.
+    roleAttributePath: "contains(groups[*], 'fuzeinfra-admins') && 'Admin'"
   # Discover dashboards from labeled ConfigMaps in ANY namespace.
   # Opt-in: runs a k8s-sidecar that watches ConfigMaps with the configured label
   # and writes their JSON into a Grafana provisioning folder. Consumers ship
@@ -670,6 +691,12 @@ kubeStateMetrics:
 # Reuses the in-cluster Postgres (metadata DB) and Redis (Celery broker).
 # -----------------------------------------------------------------------------
 airflow:
+  # Source AIRFLOW_ADMIN_PASSWORD from a dedicated Secret instead of the
+  # chart-managed fuzeinfra-secrets. Empty name keeps existing behaviour.
+  # Only honoured on a FRESH metadata DB — see templates/airflow.yaml.
+  adminPasswordSecret:
+    name: ""
+    key: AIRFLOW_ADMIN_PASSWORD
   enabled: true
   image: apache/airflow:2.9.1
   webPort: 8080
