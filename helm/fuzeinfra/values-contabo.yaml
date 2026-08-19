@@ -116,7 +116,7 @@ grafana:
     enabled: true
   # Authentik SSO. Safe to enable: deploy/sealed-secrets/grafana-oidc.yaml is in
   # this same change, and the `grafana` provider is live in Authentik
-  # (https://auth.fuzefront.com/application/o/grafana/ returns a discovery doc
+  # (https://authentik.prod.fuzefront.com/application/o/grafana/ returns a discovery doc
   # advertising the `groups` scope that roleAttributePath depends on).
   #
   # The local admin stays enabled — /login still works. See the break-glass note

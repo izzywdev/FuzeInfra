@@ -51,7 +51,7 @@ metadata:
 data:
   oidc.config: |
     name: Authentik
-    issuer: https://auth.fuzefront.com/application/o/argocd/
+    issuer: https://authentik.prod.fuzefront.com/application/o/argocd/
     clientID: argocd
     clientSecret: $argocd-oidc:clientSecret
     # `groups` is a dedicated scope on the Authentik provider, not just a claim

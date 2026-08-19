@@ -51,8 +51,8 @@ whichever manager set it.
 ## What lives here
 
 - **`argocd-cm.yaml`** — `oidc.config` only. Points ArgoCD at Authentik
-  (`auth.fuzefront.com`) so login uses the platform identity rather than the
-  local admin password.
+  (`authentik.prod.fuzefront.com`, inside the Access wall) so login uses the
+  platform identity rather than the local admin password.
 - **`argocd-rbac-cm.yaml`** — maps the Authentik group `fuzeinfra-admins` to
   `role:admin`, with `policy.default: ''` (fail closed).
 

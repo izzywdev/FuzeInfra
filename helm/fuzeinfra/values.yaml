@@ -385,7 +385,7 @@ kafkaUi:
     clientId: kafka-ui
     # Full OIDC issuer; kafka-ui discovers endpoints from /.well-known.
     # Trailing slash matters — it must match the `iss` claim exactly.
-    issuer: https://auth.fuzefront.com/application/o/kafka-ui/
+    issuer: https://authentik.prod.fuzefront.com/application/o/kafka-ui/
     secretName: kafka-ui-oidc
     secretKey: CLIENT_SECRET
 
@@ -466,7 +466,7 @@ grafana:
     #   authorization_endpoint .../application/o/authorize/
     # Deriving these from the per-app path yields a 404 on the first redirect,
     # so this is deliberately a shared base, not the issuer.
-    endpointBase: https://auth.fuzefront.com/application/o
+    endpointBase: https://authentik.prod.fuzefront.com/application/o
     secretName: grafana-oidc
     secretKey: CLIENT_SECRET
     # JMESPath over the ID-token claims. Requires the `groups` scope to be
