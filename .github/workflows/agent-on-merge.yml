@@ -88,7 +88,18 @@ jobs:
           PR: ${{ github.event.pull_request.number || github.event.inputs.pr }}
         run: |
           set -euo pipefail
-          python providers/provision.py --provider anthropic
+          # Run provisioning; treat HTTP 409 (resource already exists) as idempotent success.
+          # 409 on vault credentials means the credential was registered in a prior run — the
+          # vault is correctly set up. Any other failure (e.g. credit exhaustion) still exits 1.
+          provision_out=$(python providers/provision.py --provider anthropic 2>&1) && provision_ok=true || provision_ok=false
+          echo "$provision_out"
+          if [ "$provision_ok" = "false" ]; then
+            if echo "$provision_out" | grep -q "HTTP 409"; then
+              echo "::notice::Provisioning hit HTTP 409 (resource already registered) — vault credentials are pre-provisioned, continuing."
+            else
+              exit 1
+            fi
+          fi
           for role in openapi-maintainer mcp-engineer mobile-engineer; do
             python sync/launch_session.py --role "$role" --auto allow \
               --prompt "PR #${PR} just merged to main. If it changes your surface, update it and open a PR; otherwise report no change. Do NOT touch prod directly — open PRs only."
