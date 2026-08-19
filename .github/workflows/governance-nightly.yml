@@ -3,7 +3,9 @@ name: Governance Nightly
 # platform-governance's nightly reconciliation sweep (governance-reconciliation skill):
 # stale/drifting branches, open-PR triage, open-issue completion, and drift vs FuzeSDLC.
 # Takes only safe/reversible actions; files one "Governance reconciliation — <date>" issue.
-# Requires repo secret ANTHROPIC_API_KEY.
+# Requires repo secret LITELLM_CI_KEY (scoped gateway key) or LITELLM_MASTER_KEY (fallback).
+# Routes through the shared LiteLLM gateway with OpenAI/Gemini fallback — no direct
+# Anthropic dependency so it survives Anthropic credit exhaustion.
 
 on:
   schedule:
@@ -21,6 +23,23 @@ concurrency:
   group: governance-nightly
   cancel-in-progress: false
 
+env:
+  # Route through the shared LiteLLM gateway (Anthropic-compatible endpoint in-cluster).
+  # The gateway's routerSettings.fallbacks cascade to OpenAI/Gemini when Anthropic is
+  # unavailable (rate-limited, credit-exhausted, etc.) so this workflow survives Anthropic
+  # outages that direct-key calls cannot.
+  ANTHROPIC_BASE_URL: http://litellm.fuzeinfra.svc.cluster.local:4000
+  # Pin to gateway-registered model names (helm/litellm/values.yaml models[].name).
+  # Without pinning, Claude Code appends [1m] which the gateway rejects with 400.
+  ANTHROPIC_MODEL: claude-opus-5
+  ANTHROPIC_DEFAULT_OPUS_MODEL: claude-opus-5
+  ANTHROPIC_DEFAULT_SONNET_MODEL: claude-sonnet-5
+  ANTHROPIC_DEFAULT_HAIKU_MODEL: claude-haiku-4-5
+  CLAUDE_CODE_DISABLE_1M_CONTEXT: "1"
+  # Suppress Anthropic-only beta headers that non-Anthropic upstreams reject.
+  CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS: "1"
+  CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
+
 jobs:
   reconcile:
     runs-on: staging
@@ -32,7 +51,7 @@ jobs:
       - name: Run platform-governance reconciliation
         uses: anthropics/claude-code-action@6b082c41935b4c8a3b8b0ef85ba4ba4d9eeb8975  # v1.0.189
         with:
-          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          anthropic_api_key: ${{ secrets.LITELLM_CI_KEY || secrets.LITELLM_MASTER_KEY }}
           prompt: |
             You are the **platform-governance** agent running the nightly **governance-reconciliation**
             sweep for the repository ${{ github.repository }}. Follow the governance-reconciliation skill.
