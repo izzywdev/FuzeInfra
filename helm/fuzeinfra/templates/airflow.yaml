@@ -133,11 +133,23 @@ spec:
             secretKeyRef:
               name: {{ include "fuzeinfra.secretName" . }}
               key: AIRFLOW_ADMIN_USER
+        # Chart default for this is the literal "admin". See the rabbitmq note in
+        # messaging.yaml for why this uses a dedicated Secret.
+        #
+        # CAVEAT: the init below runs `airflow users create ... || true`, which
+        # silently succeeds when the user already exists. So changing this does
+        # NOT rotate an existing admin — that needs `airflow users reset-password`
+        # or a fresh metadata DB. It does set a strong password on first init.
         - name: AIRFLOW_ADMIN_PASSWORD
           valueFrom:
             secretKeyRef:
+              {{- with .Values.airflow.adminPasswordSecret }}
+              name: {{ .name | default (include "fuzeinfra.secretName" $) }}
+              key: {{ .key | default "AIRFLOW_ADMIN_PASSWORD" }}
+              {{- else }}
               name: {{ include "fuzeinfra.secretName" . }}
               key: AIRFLOW_ADMIN_PASSWORD
+              {{- end }}
       command:
         - bash
         - -c

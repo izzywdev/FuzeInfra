@@ -390,6 +390,12 @@ kafkaUi:
     secretKey: CLIENT_SECRET
 
 rabbitmq:
+  # Source RABBITMQ_DEFAULT_PASS from a dedicated Secret instead of the
+  # chart-managed fuzeinfra-secrets. Empty name keeps existing behaviour.
+  # Only honoured on a FRESH broker — see templates/messaging.yaml.
+  passwordSecret:
+    name: ""
+    key: RABBITMQ_PASSWORD
   enabled: true
   image: rabbitmq:3-management
   amqpPort: 5672
@@ -685,6 +691,12 @@ kubeStateMetrics:
 # Reuses the in-cluster Postgres (metadata DB) and Redis (Celery broker).
 # -----------------------------------------------------------------------------
 airflow:
+  # Source AIRFLOW_ADMIN_PASSWORD from a dedicated Secret instead of the
+  # chart-managed fuzeinfra-secrets. Empty name keeps existing behaviour.
+  # Only honoured on a FRESH metadata DB — see templates/airflow.yaml.
+  adminPasswordSecret:
+    name: ""
+    key: AIRFLOW_ADMIN_PASSWORD
   enabled: true
   image: apache/airflow:2.9.1
   webPort: 8080
