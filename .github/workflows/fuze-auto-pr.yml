@@ -1,0 +1,60 @@
+name: Auto-PR from fuze branches
+
+# Mirrors claude-auto-pr.yml for fuze/** branches. When the @fuze handler
+# (fuze.yml) pushes a `fuze/**` branch, this workflow opens a ready-for-review
+# PR if one doesn't already exist.
+#
+# Uses GH_TOKEN (PAT) so the PR is authored by a real user and CI checks run
+# immediately without an action_required gate. See claude-auto-pr.yml for the
+# full rationale.
+on:
+  push:
+    branches:
+      - 'fuze/**'
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  open-draft-pr:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Open PR if none exists
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN || secrets.GITHUB_TOKEN }}
+          HAVE_PAT: ${{ secrets.GH_TOKEN != '' }}
+          BRANCH: ${{ github.ref_name }}
+          BASE: ${{ github.event.repository.default_branch }}
+        run: |
+          if [ "$HAVE_PAT" != "true" ]; then
+            echo "::warning::secrets.GH_TOKEN is unset — opening this PR as github-actions[bot]." \
+                 "Every check on it will be created as 'action_required' and will NOT run until a" \
+                 "human clicks Approve in the Actions tab. Set GH_TOKEN to a real-user PAT" \
+                 "(contents: read, pull-requests: write) to restore automatic checks."
+          fi
+          existing=$(gh pr list --head "$BRANCH" --state open --json number --jq '.[0].number' 2>/dev/null || true)
+          if [ -n "$existing" ]; then
+            echo "PR #$existing already open for $BRANCH — nothing to do."
+            exit 0
+          fi
+          if git rev-list --count "origin/${BASE}..origin/${BRANCH}" | grep -qvE '^0$'; then
+            url=$(gh pr create --base "$BASE" --head "$BRANCH" --fill) \
+              || { echo "gh pr create failed (no diff or transient) — skipping."; exit 0; }
+            echo "Opened $url"
+            ISSUE=$(printf '%s' "$BRANCH" | sed -nE 's#^fuze/issue-0*([0-9]+).*#\1#p')
+            num=$(printf '%s' "$url" | sed -nE 's#.*/pull/([0-9]+).*#\1#p')
+            if [ -n "$ISSUE" ] && [ -n "$num" ]; then
+              gh pr view "$num" --json body --jq '.body' > /tmp/prbody.md
+              printf '\n\nCloses #%s\n' "$ISSUE" >> /tmp/prbody.md
+              gh pr edit "$num" --body-file /tmp/prbody.md \
+                && echo "PR #$num will close #$ISSUE on merge."
+            fi
+          else
+            echo "No commits on $BRANCH ahead of $BASE — no PR opened."
+          fi
