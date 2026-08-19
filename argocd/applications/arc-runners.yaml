@@ -654,6 +654,691 @@ spec:
         maxDuration: 3m
 ---
 # -----------------------------------------------------------------------------
+# fuzesdlc  ->  workflows target it with `runs-on: fuzesdlc`
+# Priority: FuzeSDLC#115 (v1.8.0 baseline release) is blocked on this set.
+# -----------------------------------------------------------------------------
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: arc-runners-fuzesdlc
+  namespace: argocd
+  labels:
+    app.kubernetes.io/part-of: arc-runners
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: fuzeinfra
+  sources:
+    - repoURL: ghcr.io/actions/actions-runner-controller-charts
+      chart: gha-runner-scale-set
+      targetRevision: "0.14.2"
+      helm:
+        releaseName: fuzesdlc
+        valueFiles:
+          - $values/runners/arc/runner-scale-set-values.yaml
+        parameters:
+          - name: githubConfigUrl
+            value: "https://github.com/izzywdev/FuzeSDLC"
+          - name: runnerScaleSetName
+            value: "fuzesdlc"
+          - name: maxRunners
+            value: "3"
+          - name: minRunners
+            value: "0"
+    - repoURL: https://github.com/izzywdev/FuzeInfra.git
+      targetRevision: main
+      ref: values
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: arc-runners
+  ignoreDifferences:
+    - group: actions.github.com
+      kind: EphemeralRunnerSet
+      jsonPointers:
+        - /spec/replicas
+        - /spec/patchID
+  syncPolicy:
+    automated:
+      selfHeal: true
+      prune: false
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 3m
+---
+# -----------------------------------------------------------------------------
+# fuzefront  ->  workflows target it with `runs-on: fuzefront`
+# -----------------------------------------------------------------------------
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: arc-runners-fuzefront
+  namespace: argocd
+  labels:
+    app.kubernetes.io/part-of: arc-runners
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: fuzeinfra
+  sources:
+    - repoURL: ghcr.io/actions/actions-runner-controller-charts
+      chart: gha-runner-scale-set
+      targetRevision: "0.14.2"
+      helm:
+        releaseName: fuzefront
+        valueFiles:
+          - $values/runners/arc/runner-scale-set-values.yaml
+        parameters:
+          - name: githubConfigUrl
+            value: "https://github.com/izzywdev/FuzeFront"
+          - name: runnerScaleSetName
+            value: "fuzefront"
+          - name: maxRunners
+            value: "3"
+          - name: minRunners
+            value: "0"
+    - repoURL: https://github.com/izzywdev/FuzeInfra.git
+      targetRevision: main
+      ref: values
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: arc-runners
+  ignoreDifferences:
+    - group: actions.github.com
+      kind: EphemeralRunnerSet
+      jsonPointers:
+        - /spec/replicas
+        - /spec/patchID
+  syncPolicy:
+    automated:
+      selfHeal: true
+      prune: false
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 3m
+---
+# -----------------------------------------------------------------------------
+# fuzeagent  ->  workflows target it with `runs-on: fuzeagent`
+# -----------------------------------------------------------------------------
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: arc-runners-fuzeagent
+  namespace: argocd
+  labels:
+    app.kubernetes.io/part-of: arc-runners
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: fuzeinfra
+  sources:
+    - repoURL: ghcr.io/actions/actions-runner-controller-charts
+      chart: gha-runner-scale-set
+      targetRevision: "0.14.2"
+      helm:
+        releaseName: fuzeagent
+        valueFiles:
+          - $values/runners/arc/runner-scale-set-values.yaml
+        parameters:
+          - name: githubConfigUrl
+            value: "https://github.com/izzywdev/FuzeAgent"
+          - name: runnerScaleSetName
+            value: "fuzeagent"
+          - name: maxRunners
+            value: "3"
+          - name: minRunners
+            value: "0"
+    - repoURL: https://github.com/izzywdev/FuzeInfra.git
+      targetRevision: main
+      ref: values
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: arc-runners
+  ignoreDifferences:
+    - group: actions.github.com
+      kind: EphemeralRunnerSet
+      jsonPointers:
+        - /spec/replicas
+        - /spec/patchID
+  syncPolicy:
+    automated:
+      selfHeal: true
+      prune: false
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 3m
+---
+# -----------------------------------------------------------------------------
+# fuzeplan  ->  workflows target it with `runs-on: fuzeplan`
+# -----------------------------------------------------------------------------
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: arc-runners-fuzeplan
+  namespace: argocd
+  labels:
+    app.kubernetes.io/part-of: arc-runners
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: fuzeinfra
+  sources:
+    - repoURL: ghcr.io/actions/actions-runner-controller-charts
+      chart: gha-runner-scale-set
+      targetRevision: "0.14.2"
+      helm:
+        releaseName: fuzeplan
+        valueFiles:
+          - $values/runners/arc/runner-scale-set-values.yaml
+        parameters:
+          - name: githubConfigUrl
+            value: "https://github.com/izzywdev/FuzePlan"
+          - name: runnerScaleSetName
+            value: "fuzeplan"
+          - name: maxRunners
+            value: "3"
+          - name: minRunners
+            value: "0"
+    - repoURL: https://github.com/izzywdev/FuzeInfra.git
+      targetRevision: main
+      ref: values
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: arc-runners
+  ignoreDifferences:
+    - group: actions.github.com
+      kind: EphemeralRunnerSet
+      jsonPointers:
+        - /spec/replicas
+        - /spec/patchID
+  syncPolicy:
+    automated:
+      selfHeal: true
+      prune: false
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 3m
+---
+# -----------------------------------------------------------------------------
+# fuzedeploy  ->  workflows target it with `runs-on: fuzedeploy`
+# -----------------------------------------------------------------------------
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: arc-runners-fuzedeploy
+  namespace: argocd
+  labels:
+    app.kubernetes.io/part-of: arc-runners
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: fuzeinfra
+  sources:
+    - repoURL: ghcr.io/actions/actions-runner-controller-charts
+      chart: gha-runner-scale-set
+      targetRevision: "0.14.2"
+      helm:
+        releaseName: fuzedeploy
+        valueFiles:
+          - $values/runners/arc/runner-scale-set-values.yaml
+        parameters:
+          - name: githubConfigUrl
+            value: "https://github.com/izzywdev/FuzeDeploy"
+          - name: runnerScaleSetName
+            value: "fuzedeploy"
+          - name: maxRunners
+            value: "3"
+          - name: minRunners
+            value: "0"
+    - repoURL: https://github.com/izzywdev/FuzeInfra.git
+      targetRevision: main
+      ref: values
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: arc-runners
+  ignoreDifferences:
+    - group: actions.github.com
+      kind: EphemeralRunnerSet
+      jsonPointers:
+        - /spec/replicas
+        - /spec/patchID
+  syncPolicy:
+    automated:
+      selfHeal: true
+      prune: false
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 3m
+---
+# -----------------------------------------------------------------------------
+# fuzebi  ->  workflows target it with `runs-on: fuzebi`
+# -----------------------------------------------------------------------------
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: arc-runners-fuzebi
+  namespace: argocd
+  labels:
+    app.kubernetes.io/part-of: arc-runners
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: fuzeinfra
+  sources:
+    - repoURL: ghcr.io/actions/actions-runner-controller-charts
+      chart: gha-runner-scale-set
+      targetRevision: "0.14.2"
+      helm:
+        releaseName: fuzebi
+        valueFiles:
+          - $values/runners/arc/runner-scale-set-values.yaml
+        parameters:
+          - name: githubConfigUrl
+            value: "https://github.com/izzywdev/FuzeBI"
+          - name: runnerScaleSetName
+            value: "fuzebi"
+          - name: maxRunners
+            value: "3"
+          - name: minRunners
+            value: "0"
+    - repoURL: https://github.com/izzywdev/FuzeInfra.git
+      targetRevision: main
+      ref: values
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: arc-runners
+  ignoreDifferences:
+    - group: actions.github.com
+      kind: EphemeralRunnerSet
+      jsonPointers:
+        - /spec/replicas
+        - /spec/patchID
+  syncPolicy:
+    automated:
+      selfHeal: true
+      prune: false
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 3m
+---
+# -----------------------------------------------------------------------------
+# fuzeexecutive  ->  workflows target it with `runs-on: fuzeexecutive`
+# -----------------------------------------------------------------------------
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: arc-runners-fuzeexecutive
+  namespace: argocd
+  labels:
+    app.kubernetes.io/part-of: arc-runners
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: fuzeinfra
+  sources:
+    - repoURL: ghcr.io/actions/actions-runner-controller-charts
+      chart: gha-runner-scale-set
+      targetRevision: "0.14.2"
+      helm:
+        releaseName: fuzeexecutive
+        valueFiles:
+          - $values/runners/arc/runner-scale-set-values.yaml
+        parameters:
+          - name: githubConfigUrl
+            value: "https://github.com/izzywdev/FuzeExecutive"
+          - name: runnerScaleSetName
+            value: "fuzeexecutive"
+          - name: maxRunners
+            value: "3"
+          - name: minRunners
+            value: "0"
+    - repoURL: https://github.com/izzywdev/FuzeInfra.git
+      targetRevision: main
+      ref: values
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: arc-runners
+  ignoreDifferences:
+    - group: actions.github.com
+      kind: EphemeralRunnerSet
+      jsonPointers:
+        - /spec/replicas
+        - /spec/patchID
+  syncPolicy:
+    automated:
+      selfHeal: true
+      prune: false
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 3m
+---
+# -----------------------------------------------------------------------------
+# fuzefinance  ->  workflows target it with `runs-on: fuzefinance`
+# -----------------------------------------------------------------------------
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: arc-runners-fuzefinance
+  namespace: argocd
+  labels:
+    app.kubernetes.io/part-of: arc-runners
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: fuzeinfra
+  sources:
+    - repoURL: ghcr.io/actions/actions-runner-controller-charts
+      chart: gha-runner-scale-set
+      targetRevision: "0.14.2"
+      helm:
+        releaseName: fuzefinance
+        valueFiles:
+          - $values/runners/arc/runner-scale-set-values.yaml
+        parameters:
+          - name: githubConfigUrl
+            value: "https://github.com/izzywdev/FuzeFinance"
+          - name: runnerScaleSetName
+            value: "fuzefinance"
+          - name: maxRunners
+            value: "3"
+          - name: minRunners
+            value: "0"
+    - repoURL: https://github.com/izzywdev/FuzeInfra.git
+      targetRevision: main
+      ref: values
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: arc-runners
+  ignoreDifferences:
+    - group: actions.github.com
+      kind: EphemeralRunnerSet
+      jsonPointers:
+        - /spec/replicas
+        - /spec/patchID
+  syncPolicy:
+    automated:
+      selfHeal: true
+      prune: false
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 3m
+---
+# -----------------------------------------------------------------------------
+# fuzecall  ->  workflows target it with `runs-on: fuzecall`
+# -----------------------------------------------------------------------------
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: arc-runners-fuzecall
+  namespace: argocd
+  labels:
+    app.kubernetes.io/part-of: arc-runners
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: fuzeinfra
+  sources:
+    - repoURL: ghcr.io/actions/actions-runner-controller-charts
+      chart: gha-runner-scale-set
+      targetRevision: "0.14.2"
+      helm:
+        releaseName: fuzecall
+        valueFiles:
+          - $values/runners/arc/runner-scale-set-values.yaml
+        parameters:
+          - name: githubConfigUrl
+            value: "https://github.com/izzywdev/FuzeCall"
+          - name: runnerScaleSetName
+            value: "fuzecall"
+          - name: maxRunners
+            value: "3"
+          - name: minRunners
+            value: "0"
+    - repoURL: https://github.com/izzywdev/FuzeInfra.git
+      targetRevision: main
+      ref: values
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: arc-runners
+  ignoreDifferences:
+    - group: actions.github.com
+      kind: EphemeralRunnerSet
+      jsonPointers:
+        - /spec/replicas
+        - /spec/patchID
+  syncPolicy:
+    automated:
+      selfHeal: true
+      prune: false
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 3m
+---
+# -----------------------------------------------------------------------------
+# fuzekeys  ->  workflows target it with `runs-on: fuzekeys`
+# -----------------------------------------------------------------------------
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: arc-runners-fuzekeys
+  namespace: argocd
+  labels:
+    app.kubernetes.io/part-of: arc-runners
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: fuzeinfra
+  sources:
+    - repoURL: ghcr.io/actions/actions-runner-controller-charts
+      chart: gha-runner-scale-set
+      targetRevision: "0.14.2"
+      helm:
+        releaseName: fuzekeys
+        valueFiles:
+          - $values/runners/arc/runner-scale-set-values.yaml
+        parameters:
+          - name: githubConfigUrl
+            value: "https://github.com/izzywdev/FuzeKeys"
+          - name: runnerScaleSetName
+            value: "fuzekeys"
+          - name: maxRunners
+            value: "3"
+          - name: minRunners
+            value: "0"
+    - repoURL: https://github.com/izzywdev/FuzeInfra.git
+      targetRevision: main
+      ref: values
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: arc-runners
+  ignoreDifferences:
+    - group: actions.github.com
+      kind: EphemeralRunnerSet
+      jsonPointers:
+        - /spec/replicas
+        - /spec/patchID
+  syncPolicy:
+    automated:
+      selfHeal: true
+      prune: false
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 3m
+---
+# -----------------------------------------------------------------------------
+# fuzex  ->  workflows target it with `runs-on: fuzex`
+# -----------------------------------------------------------------------------
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: arc-runners-fuzex
+  namespace: argocd
+  labels:
+    app.kubernetes.io/part-of: arc-runners
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: fuzeinfra
+  sources:
+    - repoURL: ghcr.io/actions/actions-runner-controller-charts
+      chart: gha-runner-scale-set
+      targetRevision: "0.14.2"
+      helm:
+        releaseName: fuzex
+        valueFiles:
+          - $values/runners/arc/runner-scale-set-values.yaml
+        parameters:
+          - name: githubConfigUrl
+            value: "https://github.com/izzywdev/FuzeX"
+          - name: runnerScaleSetName
+            value: "fuzex"
+          - name: maxRunners
+            value: "3"
+          - name: minRunners
+            value: "0"
+    - repoURL: https://github.com/izzywdev/FuzeInfra.git
+      targetRevision: main
+      ref: values
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: arc-runners
+  ignoreDifferences:
+    - group: actions.github.com
+      kind: EphemeralRunnerSet
+      jsonPointers:
+        - /spec/replicas
+        - /spec/patchID
+  syncPolicy:
+    automated:
+      selfHeal: true
+      prune: false
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 3m
+---
+# -----------------------------------------------------------------------------
+# fuzemerchandize  ->  workflows target it with `runs-on: fuzemerchandize`
+# -----------------------------------------------------------------------------
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: arc-runners-fuzemerchandize
+  namespace: argocd
+  labels:
+    app.kubernetes.io/part-of: arc-runners
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: fuzeinfra
+  sources:
+    - repoURL: ghcr.io/actions/actions-runner-controller-charts
+      chart: gha-runner-scale-set
+      targetRevision: "0.14.2"
+      helm:
+        releaseName: fuzemerchandize
+        valueFiles:
+          - $values/runners/arc/runner-scale-set-values.yaml
+        parameters:
+          - name: githubConfigUrl
+            value: "https://github.com/izzywdev/FuzeMerchandize"
+          - name: runnerScaleSetName
+            value: "fuzemerchandize"
+          - name: maxRunners
+            value: "3"
+          - name: minRunners
+            value: "0"
+    - repoURL: https://github.com/izzywdev/FuzeInfra.git
+      targetRevision: main
+      ref: values
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: arc-runners
+  ignoreDifferences:
+    - group: actions.github.com
+      kind: EphemeralRunnerSet
+      jsonPointers:
+        - /spec/replicas
+        - /spec/patchID
+  syncPolicy:
+    automated:
+      selfHeal: true
+      prune: false
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 3m
+---
+# -----------------------------------------------------------------------------
 # mendysroboticswp  ->  workflows target it with `runs-on: mendysroboticswp`
 #
 # Separate scale set for izzywdev/MendysRoboticsWP (WordPress site). The
