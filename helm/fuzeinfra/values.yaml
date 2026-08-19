@@ -701,6 +701,51 @@ airflow:
   image: apache/airflow:2.9.1
   webPort: 8080
   flowerPort: 5555
+  # Authentik SSO for the WEBSERVER only (Flask-AppBuilder AUTH_OAUTH).
+  #
+  # Off by default, same gate as grafana.oidc / kafkaUi.oidc: enabling without
+  # the SealedSecret named below present in the namespace yields
+  # CreateContainerConfigError. Flip on in the SAME commit that lands
+  # deploy/sealed-secrets/airflow-oidc.yaml.
+  #
+  # SCOPE: this covers the Airflow UI. It does NOT cover Flower — Flower's
+  # tornado auth has no generic OIDC handler (only hard-coded Google/GitHub/
+  # GitLab/Okta handlers, and the Okta one builds `<base>/v1/authorize`, which
+  # is not Authentik's endpoint shape). Flower stays gated by Cloudflare Access
+  # alone. It also does NOT touch the Airflow REST API, which keeps
+  # AIRFLOW__API__AUTH_BACKENDS=basic_auth, so machine callers are unaffected.
+  #
+  # The local admin created by airflow-init stays usable for break-glass: FAB's
+  # AUTH_OAUTH replaces the login PAGE, and the account remains in the metadata
+  # DB behind `airflow users` and the basic-auth REST API. Same rationale as
+  # Grafana's retained GF_SECURITY_ADMIN_PASSWORD.
+  oidc:
+    enabled: false
+    displayName: Authentik
+    # Load-bearing: the provider NAME must be the literal string "authentik".
+    # Flask-AppBuilder's get_oauth_user_info is a per-provider switch, and only
+    # its `authentik` branch decodes the ID token for the group claim
+    # (role_keys <- groups). Rename it and role mapping silently stops working,
+    # leaving every user on registrationRole.
+    providerName: authentik
+    clientId: airflow
+    # Per-application issuer. FAB is given server_metadata_url and discovers
+    # authorize/token/userinfo from it, so — unlike Grafana — the shared
+    # /application/o base is NOT needed here. Trailing slash matters: it must
+    # match the `iss` claim exactly.
+    issuer: https://authentik.prod.fuzefront.com/application/o/airflow/
+    secretName: airflow-oidc
+    secretKey: CLIENT_SECRET
+    # FAB role mapping, keyed on the `groups` claim. Requires the `groups`
+    # scope on the Authentik provider AND include_claims_in_id_token, because
+    # the authentik branch reads the ID TOKEN, not /userinfo.
+    #
+    # Anyone outside this group lands on registrationRole (FAB's `Public`) — no
+    # DAG visibility, no actions. That is deliberate: it fails closed for
+    # ordinary product users. The Authentik-side policy binding on the
+    # `airflow` Application is the primary gate; this is defence in depth.
+    adminGroup: fuzeinfra-admins
+    registrationRole: Public
   # Number of Celery worker pods (scale data pipeline throughput here).
   workerReplicas: 1
   # Celery prefork concurrency per worker pod. Default Celery uses nproc (can
