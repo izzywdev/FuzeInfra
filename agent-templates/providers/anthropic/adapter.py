@@ -79,33 +79,26 @@ class AnthropicProvider(AgentProvider):
         name = tmpl["display_name"]
         if name in existing:
             vid = existing[name]
-            print(f"  = vault {name}: exists ({vid})")
         else:
             body = {"display_name": name}
             if tmpl.get("metadata"):
                 body["metadata"] = tmpl["metadata"]
             vid = common.request("POST", "/v1/vaults", body=body)["id"]
-            print(f"  + vault {name}: created ({vid})")
         have = {(c.get("auth") or {}).get("mcp_server_url") or (c.get("auth") or {}).get("secret_name")
                 for c in common.list_all(f"/v1/vaults/{vid}/credentials")}
         for cred in tmpl.get("credentials", []):
             auth = cred["auth"]
             key = auth.get("mcp_server_url") or auth.get("secret_name")
-            label = cred.get("display_name", key)
             # Skip a credential whose secret isn't actually provided: an unresolved ${VAR}
             # (env unset -> literal "${...}") OR an empty/whitespace value (env set to "").
             if not key or "${" in json.dumps(auth):
-                print(f"  ! skip credential '{label}': unresolved ${{VAR}} — set the env var and re-provision")
                 continue
             if "token" in auth and not str(auth.get("token") or "").strip():
-                print(f"  ! skip credential '{label}': token env var is empty — set it and re-provision")
                 continue
             if key in have:
-                print(f"  = credential '{label}': exists ({key[:40]}...)" if len(key) > 40 else f"  = credential '{label}': exists ({key})")
                 continue
             common.request("POST", f"/v1/vaults/{vid}/credentials",
                            body={"display_name": cred["display_name"], "auth": auth})
-            print(f"  + credential '{label}': created ({key[:40]}...)" if len(key) > 40 else f"  + credential '{label}': created ({key})")
         return {"name": name, "id": vid}
 
     def ensure_memory(self, manifest):
