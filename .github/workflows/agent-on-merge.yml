@@ -33,9 +33,28 @@ jobs:
           if [ -z "${MA_KEY}" ]; then
             echo "::notice::MANAGED_AGENTS_API_KEY not set — skipping (agents not provisionable). See agent-templates/PORTING-TO-FUZEAGENT.md."
             echo "ok=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "ok=true" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
+          # Validate the key by probing /v1/environments. A 401/403 means the key
+          # is stale or not entitled for the Managed Agents beta — treat it the same
+          # as unset so the job skips cleanly rather than failing with an unhelpful
+          # Python traceback. Rotate at https://console.anthropic.com/settings/keys.
+          http_code=$(curl -s -o /dev/null -w "%{http_code}" \
+            -H "x-api-key: ${MA_KEY}" \
+            -H "anthropic-version: 2023-06-01" \
+            -H "anthropic-beta: managed-agents-2026-04-01" \
+            "https://api.anthropic.com/v1/environments")
+          if [ "$http_code" = "401" ] || [ "$http_code" = "403" ]; then
+            echo "::warning::MANAGED_AGENTS_API_KEY returned HTTP ${http_code} from the Managed Agents API — key is stale or not entitled. Skipping. Rotate it at https://console.anthropic.com/settings/keys and update the MANAGED_AGENTS_API_KEY repo secret."
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ "$http_code" != "200" ]; then
+            echo "::warning::Managed Agents API probe returned unexpected HTTP ${http_code} — skipping to avoid a misleading failure."
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "ok=true" >> "$GITHUB_OUTPUT"
 
       - name: Checkout
         if: steps.guard.outputs.ok == 'true'
