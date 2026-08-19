@@ -1,0 +1,56 @@
+name: Fuze handler smoke check
+
+# Proves the @fuze handler (fuze.yml) still does real work on a schedule.
+# Mirrors claude-smoke.yml for the @fuze path.
+on:
+  schedule:
+    - cron: "0 8 * * 1"        # Mondays 08:00 UTC
+  workflow_dispatch:
+    inputs:
+      issue_number:
+        description: "Sandbox issue number to mention @fuze on"
+        required: true
+        default: "171"          # reuses the same sandbox issue as the claude smoke check
+
+permissions:
+  issues: write
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Post @fuze mention
+        id: post
+        env:
+          # Must use GH_TOKEN (PAT), NOT GITHUB_TOKEN. GitHub suppresses workflow events
+          # from github-actions[bot] comments, so GITHUB_TOKEN here means fuze.yml never
+          # fires and the smoke check always fails.
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+          ISSUE: ${{ github.event.inputs.issue_number || '171' }}
+          REPO: ${{ github.repository }}
+        run: |
+          BODY="@fuze smoke check — please reply 'ack' with a one-line status. (run ${{ github.run_id }})"
+          gh api "repos/$REPO/issues/$ISSUE/comments" -f body="$BODY" --jq .id > mention_id.txt
+          echo "since=$(date -u +%FT%TZ)" >> "$GITHUB_OUTPUT"
+
+      - name: Wait for the handler to respond
+        run: sleep 240   # give the handler time to check out, run, and comment
+
+      - name: Assert a real (non-0s) response landed
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE: ${{ github.event.inputs.issue_number || '171' }}
+          REPO: ${{ github.repository }}
+          SINCE: ${{ steps.post.outputs.since }}
+        run: |
+          set -euo pipefail
+          REPLY=$(gh api "repos/$REPO/issues/$ISSUE/comments" \
+            --jq "[.[] | select(.created_at > \"$SINCE\") | select(.user.login|test(\"claude|fuze|github-actions\")) | .body] | last // \"\"")
+          echo "Handler reply: $REPLY"
+          if [ -z "$REPLY" ]; then
+            echo "::error::No handler reply within the wait window — @fuze handler may be broken."; exit 1
+          fi
+          if echo "$REPLY" | grep -qiE 'finished .* in 0s|in 0 seconds'; then
+            echo "::error::Handler replied with a 0s no-op — regression detected."; exit 1
+          fi
+          echo "Smoke check passed: @fuze handler produced a real response."

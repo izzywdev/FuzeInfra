@@ -122,7 +122,7 @@ jobs:
           gh label create argo-autofix --repo "$OWNER_REPO" --color B60205 --description "ArgoCD self-heal" 2>/dev/null || true
           COND=$(printf '%s' '${{ toJSON(github.event.client_payload.conditions) }}')
           BODY=$(cat <<BODY
-          @claude ArgoCD reports this repo's app **\`$APP\`** unhealthy on the shared FuzeInfra cluster.
+          @fuze ArgoCD reports this repo's app **\`$APP\`** unhealthy on the shared FuzeInfra cluster.
 
           - sync: \`$SYNC\`
           - health: \`$HEALTH\`
@@ -174,7 +174,14 @@ jobs:
           cat /tmp/argo_event.json
       - name: devops-engineer diagnose + fix
         env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          # Route through LiteLLM for cross-provider failover; no provider key held here.
+          ANTHROPIC_BASE_URL: http://litellm.fuzeinfra.svc.cluster.local:4000
+          ANTHROPIC_AUTH_TOKEN: ${{ secrets.LITELLM_FUZE_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.LITELLM_FUZE_KEY }}
+          ANTHROPIC_MODEL: claude-opus-5
+          CLAUDE_CODE_DISABLE_1M_CONTEXT: "1"
+          CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS: "1"
+          CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
         run: |
           PROMPT=$(cat <<PROMPT
           Use the **devops-engineer** agent. ArgoCD app "$APP" is UNHEALTHY (full
@@ -205,8 +212,8 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GH_TOKEN || secrets.GITHUB_TOKEN }}
         run: |
-          git config user.name "Claude Argo Auto-Fix"; git config user.email "claude-argofix@fuzeinfra"
-          BRANCH="claude/argo-fix-${APP}-${{ github.run_id }}"
+          git config user.name "Fuze Argo Auto-Fix"; git config user.email "fuze-argofix@fuzeinfra"
+          BRANCH="fuze/argo-fix-${APP}-${{ github.run_id }}"
           git checkout -b "$BRANCH"; git add -A
           if git diff --cached --quiet; then
             gh issue create --repo "${{ github.repository }}" --label argo-autofix \

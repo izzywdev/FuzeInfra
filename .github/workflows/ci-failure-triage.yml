@@ -41,7 +41,8 @@ jobs:
     # Only on failure; ignore the auto-fix bot's own branches to avoid loops.
     if: >-
       ${{ github.event.workflow_run.conclusion == 'failure' &&
-          !startsWith(github.event.workflow_run.head_branch, 'claude/argo-fix-') }}
+          !startsWith(github.event.workflow_run.head_branch, 'claude/argo-fix-') &&
+          !startsWith(github.event.workflow_run.head_branch, 'fuze/argo-fix-') }}
     runs-on: ubuntu-latest
     steps:
       - name: Open or update an idempotent @claude triage issue
@@ -71,7 +72,7 @@ jobs:
 
           # Build the issue body with printf (robust; no YAML heredoc).
           {
-            printf '@claude the deploy workflow **%s** failed on `%s` (event: `%s`).\n\n' "$WF" "$BR" "$EVENT"
+            printf '@fuze the deploy workflow **%s** failed on `%s` (event: `%s`).\n\n' "$WF" "$BR" "$EVENT"
             printf 'Run: %s\n\n' "$RUN_URL"
             printf 'This is a **deploy-path** failure (not app CI). Diagnose from the run log. '
             printf 'If it is a credential/permission problem (e.g. a token missing a scope), that is an '

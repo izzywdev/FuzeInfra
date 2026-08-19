@@ -332,6 +332,13 @@ generalSettings: {}
 # behind the alias and the client cannot compact for a swap it cannot see.
 routerSettings:
   enable_pre_call_checks: true
+  # Without this, a 400 "Credit balance is too low" from Anthropic is classified
+  # as a BadRequestError (client-side) and never triggers the fallback chain —
+  # LiteLLM only falls back on 429 / 5xx by default. One retry (= one attempt on
+  # the next model in `fallbacks`) is enough; the fallback list itself handles
+  # deeper exhaustion.
+  retry_policy:
+    BadRequestErrorRetries: 1
   fallbacks:
     - claude-opus-4-5: ["gpt-4.1", "gemini-flash-latest"]
     - claude-opus-5: ["gpt-4.1", "gemini-flash-latest"]

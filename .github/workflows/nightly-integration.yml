@@ -108,7 +108,7 @@ jobs:
           if [ -n "$existing" ]; then echo "tracking issue #$existing already open — not re-mentioning @claude"; exit 0; fi
           gh label create integration --color 1d76db --description "nightly integration tests" 2>/dev/null || true
           gh issue create --repo "$GITHUB_REPOSITORY" --label integration --title "$title" --body "$(cat <<'EOF'
-          @claude — this repo has no nightly integration suite / bounded local-up yet, so **Nightly Integration** is a no-op here. Please build it (contract-first), per the FuzeSDLC standard, landing a **DRAFT PR** (do not merge):
+          @fuze — this repo has no nightly integration suite / bounded local-up yet, so **Nightly Integration** is a no-op here. Please build it (contract-first), per the FuzeSDLC standard, landing a **DRAFT PR** (do not merge):
 
           - **devops-engineer** — vendor FuzeInfra as a submodule; wire `docker-compose.consumer-test.yml` + `versions.env` + the external-service mock matrix (MailHog / Twilio-mock / Permit-offline / Stripe-test / Prism-MSW / LocalStack); enforce no prod egress.
           - **test-engineer** — author the integration/contract suite against that bounded stack; expose it as `test:integration` (npm) or `pytest -m integration`, or declare `integrationTest` in `.fuze/manifest.json`.
@@ -137,8 +137,19 @@ jobs:
           fetch-depth: 0
       - name: Auto-fix → DRAFT PR (never auto-merge)
         uses: anthropics/claude-code-action@9d7150bc8a3dae8149739a88019d192b579ad90c  # v1.0.193
+        env:
+          # Route through LiteLLM for cross-provider failover; no provider key held here.
+          ANTHROPIC_BASE_URL: http://litellm.fuzeinfra.svc.cluster.local:4000
+          ANTHROPIC_MODEL: claude-opus-5
+          ANTHROPIC_DEFAULT_OPUS_MODEL: claude-opus-5
+          ANTHROPIC_DEFAULT_SONNET_MODEL: claude-sonnet-5
+          ANTHROPIC_DEFAULT_HAIKU_MODEL: claude-haiku-4-5
+          CLAUDE_CODE_DISABLE_1M_CONTEXT: "1"
+          CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS: "1"
+          CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
+          ANTHROPIC_AUTH_TOKEN: ${{ secrets.LITELLM_FUZE_KEY }}
         with:
-          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          anthropic_api_key: ${{ secrets.LITELLM_FUZE_KEY }}
           # github_token bypasses the OIDC→App token exchange that fails on staging runners.
           github_token: ${{ secrets.GH_TOKEN }}
           prompt: |

@@ -1,0 +1,155 @@
+# =============================================================================
+# STANDARD @fuze ISSUE HANDLER — INSTALLER TEMPLATE
+# =============================================================================
+# Canonical, replicable @fuze handler for the FuzeOne standard automation
+# stack. Install into any repo as `.github/workflows/fuze.yml`.
+#
+# @fuze routes through the shared LiteLLM gateway (not directly to Anthropic),
+# providing cross-provider fallback and centralized key custody. @claude (the
+# direct-to-Anthropic path) is kept as an explicit escape hatch.
+#
+# INSTALL:
+#   1. Copy this file to `.github/workflows/fuze.yml` in the target repo.
+#   2. Replace every __REPONAME__ with the repo's short name, lowercased
+#      (e.g. repo "FuzeFront" -> "fuzefront"). Used for the
+#      "<reponame>-expert" agent the handler starts with.
+#   3. Secrets required: LITELLM_FUZE_KEY (scoped virtual key, minted by
+#      scripts/mint-litellm-fuze-key.sh in FuzeInfra with the target repo
+#      added to the propagation list). Optional: GH_TOKEN (PAT/App token).
+#   4. RUNNER: The handler runs on the `staging` in-cluster ARC runner so it
+#      can reach the LiteLLM gateway (ClusterIP-only). If your repo does not
+#      have an ARC runner, add one (see FuzeInfra's k8s/arc/) or use
+#      ubuntu-latest with an externally-reachable LiteLLM endpoint.
+#   5. CLUSTER ACCESS (optional): only repos whose @fuze must do live cluster
+#      ops keep the cluster-access block. Delete it + KUBECONFIG env for repos
+#      that don't need it. When kept, also add the KUBE_CONFIG secret and the
+#      guard-shim step (see FuzeInfra's fuze.yml for the full version).
+#   6. Commit the matching `.claude/agents/__REPONAME__-expert.md` if it exists;
+#      if it doesn't, the handler will create it on first run.
+#
+# SECURITY: gated to TRUSTED authors (OWNER/MEMBER/COLLABORATOR). Keep that
+# gate — especially if the cluster-access block is enabled.
+# =============================================================================
+name: Fuze
+
+on:
+  issue_comment:
+    types: [created]
+  pull_request_review_comment:
+    types: [created]
+  issues:
+    types: [opened, assigned, labeled]
+  pull_request_review:
+    types: [submitted]
+
+jobs:
+  fuze:
+    concurrency:
+      group: fuze-${{ github.event.issue.number || github.event.pull_request.number }}
+      cancel-in-progress: true
+    if: |
+      (
+        (github.event_name == 'issue_comment' && contains(github.event.comment.body, '@fuze') &&
+          !contains(github.event.comment.body, 'fuze-loop-guard') &&
+          contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association)) ||
+        (github.event_name == 'pull_request_review_comment' && contains(github.event.comment.body, '@fuze') &&
+          !contains(github.event.comment.body, 'fuze-loop-guard') &&
+          contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association)) ||
+        (github.event_name == 'pull_request_review' && contains(github.event.review.body, '@fuze') &&
+          !contains(github.event.review.body, 'fuze-loop-guard') &&
+          contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.review.author_association)) ||
+        (github.event_name == 'issues' &&
+          (contains(github.event.issue.body, '@fuze') || contains(github.event.issue.title, '@fuze')) &&
+          contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.issue.author_association))
+      )
+    runs-on: staging
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+      id-token: write
+      actions: read
+    env:
+      ANTHROPIC_BASE_URL: http://litellm.fuzeinfra.svc.cluster.local:4000
+      ANTHROPIC_MODEL: claude-opus-5
+      ANTHROPIC_DEFAULT_OPUS_MODEL: claude-opus-5
+      ANTHROPIC_DEFAULT_SONNET_MODEL: claude-sonnet-5
+      ANTHROPIC_DEFAULT_HAIKU_MODEL: claude-haiku-4-5
+      CLAUDE_CODE_DISABLE_1M_CONTEXT: "1"
+      CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS: "1"
+      CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 1
+
+      # ---- OPTIONAL: cluster access (delete this block for repos that don't do
+      # live cluster ops). See FuzeInfra's fuze.yml for the full version. ----
+      # - uses: azure/setup-kubectl@<sha>
+      # - uses: azure/setup-helm@<sha>
+      # - uses: hashicorp/setup-terraform@<sha>
+      # - name: Configure kubectl
+      #   run: |
+      #     printf '%s' "${{ secrets.KUBE_CONFIG }}" | base64 -d > "$HOME/.kube/config"
+      #     echo "KUBECONFIG=$HOME/.kube/config" >> "$GITHUB_ENV"
+      # - name: Install destructive-op guard shims   # see FuzeInfra for the script
+
+      - name: Fail fast if gateway key absent
+        id: key-guard
+        env:
+          KEY: ${{ secrets.LITELLM_FUZE_KEY }}
+        run: |
+          if [ -z "$KEY" ]; then
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+            echo "::error::LITELLM_FUZE_KEY secret is empty — mint one with FuzeInfra scripts/mint-litellm-fuze-key.sh"
+            exit 0
+          fi
+          echo "ok=true" >> "$GITHUB_OUTPUT"
+
+      - name: Preflight — LiteLLM gateway reachable & key valid
+        id: preflight
+        if: steps.key-guard.outputs.ok == 'true'
+        env:
+          GATEWAY_KEY: ${{ secrets.LITELLM_FUZE_KEY }}
+        run: |
+          set -uo pipefail
+          code=$(curl -sS -o /tmp/preflight.json -w '%{http_code}' --max-time 30 \
+            -X POST "${ANTHROPIC_BASE_URL}/v1/messages" \
+            -H "Authorization: Bearer ${GATEWAY_KEY}" \
+            -H "anthropic-version: 2023-06-01" \
+            -H "content-type: application/json" \
+            -d "{\"model\":\"${ANTHROPIC_MODEL}\",\"max_tokens\":1,\"messages\":[{\"role\":\"user\",\"content\":\"ping\"}]}" \
+            2>/tmp/preflight.err) || true
+          [ -z "${code:-}" ] && code="000"
+          err=$(jq -r '.error.message // .message // empty' /tmp/preflight.json 2>/dev/null || true)
+          transport=$(tr -d '\r' < /tmp/preflight.err 2>/dev/null | grep -v '^$' | tail -1 || true)
+          [ -z "$err" ] && err="HTTP $code"
+          case "$code" in
+            200)
+              echo "ok=true" >> "$GITHUB_OUTPUT" ;;
+            *)
+              echo "ok=false" >> "$GITHUB_OUTPUT"
+              {
+                echo "reason<<GHA_EOF"
+                echo "Gateway preflight failed (HTTP $code): $err — ${transport:-no transport detail}"
+                echo "GHA_EOF"
+              } >> "$GITHUB_OUTPUT" ;;
+          esac
+
+      - name: Run Fuze
+        id: fuze
+        if: steps.key-guard.outputs.ok == 'true' && steps.preflight.outputs.ok == 'true'
+        continue-on-error: true
+        uses: anthropics/claude-code-action@9d7150bc8a3dae8149739a88019d192b579ad90c # v1.0.193
+        env:
+          ANTHROPIC_AUTH_TOKEN: ${{ secrets.LITELLM_FUZE_KEY }}
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+          # KUBECONFIG: ${{ env.KUBECONFIG }}   # uncomment if cluster block kept
+        with:
+          anthropic_api_key: ${{ secrets.LITELLM_FUZE_KEY }}
+          github_token: ${{ secrets.GH_TOKEN }}
+          claude_args: >-
+            --allowedTools "Bash,Read,Write,Edit,Glob,Grep,Task,TodoWrite"
+            --max-turns 60
+            --append-system-prompt "EXPERT-FIRST: begin every task by invoking the __REPONAME__-expert subagent (via Task) to load this repo's architecture/deploy/gotcha context before planning or coding. If `.claude/agents/__REPONAME__-expert.md` does NOT exist, FIRST create it from the repo-expert template at `.claude/templates/repo-expert.template.md` (explore the repo to fill it in), open a PR adding it, then use it for the task. CROSS-REPO HAND-OFF: if a delegated issue's REMAINING work belongs to another repo, open/comment that repo's @fuze with full context + a STATE block, post a closing note here, and CLOSE this issue (only keep it open if THIS repo still has work). End issue replies with DONE: or BLOCKED: so cross-repo monitors can key off it."
