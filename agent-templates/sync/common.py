@@ -56,6 +56,10 @@ def request(method, path, body=None, query=None, beta=MANAGED_AGENTS_BETA):
             return json.loads(raw) if raw else {}
     except urllib.error.HTTPError as e:
         detail = e.read().decode(errors="replace")
+        if e.code == 409:
+            # 409 Conflict = resource already exists; treat as idempotent success.
+            print(f"{method} {path} -> HTTP 409: {detail}")
+            return None
         raise SystemExit(f"{method} {path} -> HTTP {e.code}: {detail}")
 
 
