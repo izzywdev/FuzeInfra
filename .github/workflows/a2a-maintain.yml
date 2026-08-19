@@ -332,6 +332,32 @@ jobs:
             } >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
+          # Billing/budget errors from the provider are operator problems, not PR
+          # problems. Detect them explicitly and SKIP (green) so the PR is not
+          # blocked on something the author cannot fix. The retry_policy fix in
+          # helm/litellm/values.yaml should prevent these once Argo syncs after
+          # merge; until then, surface a loud warning rather than a red check.
+          if echo "${RESULT_MSG:-}" | grep -qiE 'credit balance|budget|billing|quota|insufficient funds|payment required'; then
+            echo "::warning::A2A maintain SKIPPED — provider billing/budget error detected. Top up the provider account or wait for the LiteLLM retry_policy fix to deploy. A2A drift is NOT being checked on this PR."
+            {
+              echo "### ⚠️ A2A maintain skipped — provider billing/budget error"
+              echo ""
+              echo "The LiteLLM gateway reached a provider that refused the request due to a"
+              echo "billing or budget limit. This is an **operator problem**, not a problem"
+              echo "with this PR."
+              echo ""
+              echo "\`\`\`"
+              echo "${RESULT_MSG:-no error message surfaced}"
+              echo "\`\`\`"
+              echo ""
+              echo "**Resolution:** top up the provider account, or wait for the"
+              echo "\`helm/litellm/values.yaml\` \`retry_policy.BadRequestErrorRetries\` fix"
+              echo "to deploy via Argo CD (it ships with the current PR)."
+              echo ""
+              echo "**Until then the repo's A2A surface is not being checked for drift.**"
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
           if [ "${CLAUDE_OUTCOME:-}" = "failure" ] || [ "${RESULT_IS_ERROR:-}" = "true" ]; then
             echo "::error::a2a-maintainer did not complete: ${RESULT_MSG:-no error message surfaced}"
             {
