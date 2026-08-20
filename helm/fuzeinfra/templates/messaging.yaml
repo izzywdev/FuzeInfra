@@ -241,6 +241,26 @@ spec:
             # authenticates is a full admin. Authentication, not authorization.
             - name: AUTH_TYPE
               value: "OAUTH2"
+            {{- if .Values.kafkaUi.oidc.debugLogging }}
+            # TEMPORARY DIAGNOSTIC — turn back off once the issue is understood.
+            #
+            # kafka-ui is Spring Security, which reports every OAuth2 failure to
+            # the user as the same opaque "Invalid credentials" regardless of
+            # cause: bad client secret, unreachable token endpoint, issuer
+            # mismatch, rejected scope. The real reason is only in the pod log,
+            # and only if this logger is raised.
+            #
+            # DEBUG, NOT TRACE, deliberately. TRACE on the oauth2 packages logs
+            # full token and client-credential values into the pod log — and pod
+            # logs ARE readable through the cluster-query workflow, whose job
+            # output is public. DEBUG carries the exception and the failing
+            # endpoint without the credential. Do not raise this to TRACE to get
+            # "a bit more detail"; that turns a diagnostic into a secret leak.
+            - name: LOGGING_LEVEL_ORG_SPRINGFRAMEWORK_SECURITY_OAUTH2_CLIENT
+              value: "DEBUG"
+            - name: LOGGING_LEVEL_ORG_SPRINGFRAMEWORK_SECURITY_WEB
+              value: "DEBUG"
+            {{- end }}
             - name: AUTH_OAUTH2_CLIENT_AUTHENTIK_CLIENTNAME
               value: {{ .Values.kafkaUi.oidc.displayName | quote }}
             - name: AUTH_OAUTH2_CLIENT_AUTHENTIK_PROVIDER

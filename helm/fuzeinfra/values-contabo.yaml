@@ -162,6 +162,9 @@ kafkaUi:
     # did not roll at all — leaving the pair mismatched in the opposite direction
     # from the one the reseal was meant to fix.
     secretRotation: "2026-08-19"
+    # TEMPORARY: on to diagnose the persistent "Invalid credentials" at the token
+    # exchange. Revert to false once the cause is known — see messaging.yaml.
+    debugLogging: true
 # Alertmanager: wire real notification receivers here. Example webhook receiver:
 # alertmanager:
 #   config:
