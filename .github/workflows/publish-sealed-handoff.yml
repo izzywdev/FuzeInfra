@@ -110,6 +110,22 @@ jobs:
             echo "::error::GH_TOKEN unset — a PAT with write access to the consumer repos is required to open the hand-off PR. The default GITHUB_TOKEN cannot reach another repository."
             exit 1
           fi
+          # Teach *git* to use gh's credentials. Without this the script clones
+          # fine and then cannot push: `gh repo clone` authenticates the clone
+          # itself through gh and leaves `origin` as a plain
+          # https://github.com/... URL, so the later `git push` falls through to
+          # git's own credential machinery, which has nothing configured on a
+          # runner where GH_TOKEN only exists in the environment. It fails with
+          #     fatal: could not read Username for 'https://github.com'
+          # NOT with a 403 — so it reads like a missing token rather than a
+          # missing credential helper, which is what made it hard to place
+          # (FuzeInfra#595). Every hand-off sealed correctly and then died here.
+          #
+          # `gh auth setup-git` writes a credential.helper that shells back to
+          # `gh auth git-credential`, so the token stays in the environment and
+          # never reaches a remote URL, a config file, or argv — the property
+          # credential-handoff.sh's header exists to guarantee.
+          gh auth setup-git
           args=(publish)
           case "${HANDOFF_ID:-}" in
             "") : ;;
