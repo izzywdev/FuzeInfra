@@ -956,6 +956,20 @@ resource "cloudflare_zero_trust_access_policy" "crit_alert_bridge_bypass" {
 # email-OTP app would block them. This more-specific host app takes precedence and
 # bypasses OTP; the handoff MCP server enforces its own bearer (HANDOFF_MCP_TOKEN),
 # which agents present via a vault credential keyed to the URL. Gated off by default.
+#
+# TRAP, hit for real by #588: flipping the gate is NOT the same as applying it.
+# handoff_mcp_access_enabled is set as a TF_VAR_* in
+# .github/workflows/terraform-plan-apply.yml, and that workflow's APPLY job triggers
+# only on push to main with `paths: ["terraform/**"]`. #588 changed the workflow file
+# and nothing else, so it matched no path, no apply ran, and these two resources were
+# never created — while every check reported green and mcp-handoff.<domain> quietly
+# kept answering 302 to the OTP login. A variable flip that touches no file under
+# terraform/ is inert. If you toggle one of these CI-side gates again, include a
+# change under terraform/ in the same PR (editing this comment counts) or dispatch
+# the workflow by hand — then verify at the edge, not in the diff:
+#   curl -sS -o /dev/null -w '%{http_code}\n' https://mcp-handoff.<domain>/mcp
+#   401 -> bypass is live and the app bearer is the gate.
+#   302 -> still behind the *.prod email-OTP wall; a machine caller cannot pass it.
 resource "cloudflare_zero_trust_access_application" "handoff_mcp" {
   count                = local.cloudflare_enabled && var.handoff_mcp_access_enabled ? 1 : 0
   account_id           = var.cloudflare_account_id
