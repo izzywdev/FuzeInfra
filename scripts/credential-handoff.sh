@@ -230,9 +230,16 @@ do_publish() {
     fi
 
     # ── Seal + PR against the consumer repo ─────────────────────────────────
-    local repo_dir="$d/repo"
-    if ! gh repo clone "$consumer" "$repo_dir" -- --depth 1 --branch "$t_branch" >/dev/null 2>&1; then
-      note "   FAIL: cannot clone $consumer (GH_TOKEN lacks access?)"; rc=1; continue
+    local repo_dir="$d/repo" clone_err
+    # Report what gh ACTUALLY said. This used to guess "GH_TOKEN lacks access?",
+    # and on 2026-08-20 that guess sent the reader after a permissions problem
+    # when the real cause was a branch name: fuzex-registration asked for `main`
+    # while FuzeX's default branch is `master`, so the ref simply did not exist
+    # (FuzeInfra#595). gh's own message distinguishes the two immediately.
+    # Safe to print: gh reports refs and HTTP status, never the token.
+    if ! clone_err="$(gh repo clone "$consumer" "$repo_dir" -- --depth 1 --branch "$t_branch" 2>&1)"; then
+      note "   FAIL: cannot clone $consumer at branch '$t_branch' — gh said: $(printf '%s' "$clone_err" | tr '\n' ' ' | sed 's/  */ /g' | cut -c1-300)"
+      rc=1; continue
     fi
     case "$t_path" in
       /*|*..*) note "   FAIL: unsafe manifestPath '$t_path'"; rc=1; continue ;;
