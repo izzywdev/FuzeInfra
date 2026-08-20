@@ -64,6 +64,16 @@ spec:
         # roll the pod when the mounted id-state changes (selfHeal syncs the ConfigMap
         # but will not restart the Deployment on its own).
         checksum/handoff-state: {{ $stateBlob | sha256sum }}
+        # roll the pod when handoff-mcp-secret is RESEALED. The chart cannot hash the
+        # secret: deploy/sealed-secrets/handoff-mcp-secret.yaml is ciphertext applied by
+        # Argo from OUTSIDE this release, so its content is invisible here — and
+        # Kubernetes does not restart a pod when a Secret it reads as env changes.
+        # A reseal without this bump leaves the pod running the OLD key indefinitely
+        # (the kafka-ui failure mode, #589). Bumping handoffMcp.secretRotation in the
+        # overlay is what makes a reseal actually reach the process. Deliberately a
+        # hand-bumped marker: there is no derivable value, and a checksum that silently
+        # cannot see what it claims to track is worse than an honest manual one.
+        checksum/handoff-secret: {{ .Values.handoffMcp.secretRotation | default "0" | toString | sha256sum }}
     spec:
       {{- with .Values.handoffMcp.imagePullSecrets }}
       imagePullSecrets:

@@ -994,6 +994,12 @@ handoffMcp:
   tag: latest
   replicas: 1
   imagePullSecrets: []
+  # Bump on EVERY reseal of deploy/sealed-secrets/handoff-mcp-secret.yaml, in the
+  # SAME commit. It feeds checksum/handoff-secret, which is the only thing that
+  # rolls the pod onto a rotated ANTHROPIC_API_KEY / HANDOFF_MCP_TOKEN: resealing
+  # only rewrites ciphertext that Argo applies from outside this release, and a
+  # running pod keeps its old env until something restarts it (#589).
+  secretRotation: "1"
   resources:
     requests: { cpu: "100m", memory: "256Mi" }
     limits:   { cpu: "500m", memory: "512Mi" }
