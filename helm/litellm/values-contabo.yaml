@@ -113,7 +113,13 @@ ingress:
 # Unlike airflow, this service IS running (replicas: 1), so once the secret
 # lands this one can actually be verified end to end.
 sso:
-  enabled: false
+  # ENABLED 2026-08-20. Preconditions met: deploy/sealed-secrets/litellm-oidc.yaml
+  # exists (sealed together with the fuzefront-secrets LITELLM_CLIENT_SECRET half),
+  # and the admin roster is within upstream's free five-user SSO cap.
+  enabled: true
+  # Bump when litellm-oidc.yaml is resealed — hashed into the pod annotation so a
+  # rotation actually restarts the pod.
+  secretRotation: "2026-08-20"
 
 # NOTE ON NODE PINNING: FuzeFront's own values-prod.yaml pins a `litellm`
 # affinity to node `fuzefront-node-2`. That node does not exist in this cluster

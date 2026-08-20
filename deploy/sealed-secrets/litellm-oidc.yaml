@@ -1,0 +1,14 @@
+---
+apiVersion: bitnami.com/v1alpha1
+kind: SealedSecret
+metadata:
+  name: litellm-oidc
+  namespace: fuzeinfra
+spec:
+  encryptedData:
+    CLIENT_SECRET: AgBXhydiN9I5AzzGKxyWTElq/qV0QBJ4cvGF0hDHCx5I0t+CaOxJmmhVlMLvKOJB9wFgxFWI0i01oWrbRDTEssUIZeX9f5rS2dI9Hi7KFRgIlZVjJBydjH8SR2JZtNreW+VpmgPIstLXHyHaKSfdq/udk/ynxw8r6JoUhh9ZFKzxBHwg10bI/Pd6Bpypp3fJbFcDaP8eTeF6Z4usP9uU1YMfWVujHfuHfbaA11vR6XwdioCo+xkEYGp+NoHiGJi8J3zT/DZGz86w7B0bGk/aKpFiaw+ssWQRFM4y9V2ZDo9YenslfbQUvFnQiYW2AbuXR/puDbtcaQ2zFNE8nMM1FBmVTcdMiXhKvI0nfR5297VLDIwTUy5TA2+5BjJvVPUuYMG3dZ77lcMQhGCsjYgxzOdCgO0sieEKCIColy/KaDSTv3VFNF+BJdvr8wxNpRDxI+e7O8rYZbIN+G/fI1h4b7uIPv/+Ek65WVgJ5j/SxtS6BwNLGlFpB8PAzNL//mkMJGhVC0wAgTb/hG7TYUNt9wV2VJHP/YNc5324nv34VMZlawaSGpc1iP99PGoi8z8OiwctZQrhW0sTq6+20Vf1BfX6Foggb88YTGY/NkRrpEsyOE4Hwn8/YaZyjoO8v9ivZBBKU8uXhqEqw9KQwNs27IGuActGTBLbvKB2tB4W9TMo8pbwfmoXodT5WUoXSotI8MrQNs5K2/rVakqj0Ge7k3Q1JY9Pr8d1eN+dxZdUaRL/KkQd9bsBBUD/4+AJKclfo6k=
+  template:
+    metadata:
+      name: litellm-oidc
+      namespace: fuzeinfra
+    type: Opaque

@@ -21,6 +21,14 @@ spec:
         # applied (ConfigMap updated, app Synced) while the running pod still
         # serves the old model list.
         checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- if .Values.sso.enabled }}
+        # checksum/config above hashes the ConfigMap only, so it does not change
+        # when litellm-oidc is resealed. Hash the sso block too: bumping
+        # sso.secretRotation is then what restarts the pod and loads the new
+        # client secret. Without this a reseal leaves the OLD secret live and the
+        # token exchange fails with an error that implicates neither side.
+        checksum/sso: {{ .Values.sso | toYaml | sha256sum }}
+        {{- end }}
     spec:
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
