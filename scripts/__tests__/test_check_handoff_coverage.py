@@ -36,7 +36,11 @@ class CoverageTest(unittest.TestCase):
             path = fh.name
         argv = ["check_handoff_coverage.py", "--registry", path]
         try:
-            cons = repos if consumers is None else consumers
+            # Shape these like the REAL `gh search code --json repository` payload.
+            # The first version of this test passed bare name lists, which is why it
+            # missed the crash CI found: the stub was easier to satisfy than gh is.
+            names = repos if consumers is None else consumers
+            cons = [{"repository": {"name": n}} for n in names]
             calls = {"n": 0}
 
             def fake_gh(*a):
@@ -113,6 +117,36 @@ class CoverageTest(unittest.TestCase):
         with self.assertRaises(SystemExit) as cm:
             self._run(registry(), ["FuzeMarket"], {"FuzeMarket": {"tier": "product"}}, consumers=[])
         self.assertEqual(cm.exception.code, 1)
+
+
+    def test_malformed_search_payload_does_not_crash(self):
+        # CI hit AttributeError: 'NoneType' has no attribute 'lower' because a --jq
+        # projection produced nulls. Entries of the wrong shape must be skipped, not
+        # dereferenced.
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
+            json.dump(registry("fuzemarket"), fh)
+            path = fh.name
+        junk = [None, {}, {"repository": None}, "nonsense",
+                {"repository": {"nameWithOwner": "izzywdev/FuzeMarket"}}]
+        calls = {"n": 0}
+
+        def fake_gh(*a):
+            calls["n"] += 1
+            return ["FuzeMarket"] if calls["n"] == 1 else junk
+
+        try:
+            with mock.patch.object(sys, "argv", ["x", "--registry", path]), \
+                 mock.patch.object(chc, "gh_json", side_effect=fake_gh), \
+                 mock.patch.object(chc, "manifest_for",
+                                   side_effect=lambda o, r: {"tier": "product"}):
+                buf = io.StringIO()
+                with redirect_stdout(buf):
+                    rc = chc.main()
+        finally:
+            os.unlink(path)
+        # nameWithOwner fallback resolves FuzeMarket, which IS covered -> pass
+        self.assertEqual(rc, 0)
+        self.assertIn("has an enabled hand-off entry", buf.getvalue())
 
 
 if __name__ == "__main__":

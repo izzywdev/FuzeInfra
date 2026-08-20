@@ -117,12 +117,23 @@ def main():
     # which is enforcement ahead of adoption -- the mistake that made gate-identifier
     # block every rollout PR. A gate nobody can satisfy gets `|| true` bolted on and
     # then protects nothing.
-    consumers = {
-        r.lower() for r in gh_json(
-            "search", "code", "fuzefront-registration", "--owner", args.org,
-            "--limit", "100", "--json", "repository",
-            "--jq", "[.[].repository.name]") or []
-    }
+    # Extract names in PYTHON, not with --jq. The first version used
+    # `--jq '[.[].repository.name]'` and crashed in CI with
+    # `AttributeError: 'NoneType' object has no attribute 'lower'` -- the jq
+    # produced nulls for entries whose shape did not match. The unit tests could
+    # not catch it because they stub gh_json, so they exercise the logic and never
+    # the gh boundary. Parsing defensively here means a schema surprise degrades to
+    # the guarded "search failed" error below instead of a traceback.
+    raw = gh_json("search", "code", "fuzefront-registration",
+                  "--owner", args.org, "--limit", "100", "--json", "repository") or []
+    consumers = set()
+    for hit in raw:
+        if not isinstance(hit, dict):
+            continue
+        repo_obj = hit.get("repository") or {}
+        name = repo_obj.get("name") or repo_obj.get("nameWithOwner", "").rpartition("/")[2]
+        if name:
+            consumers.add(name.lower())
     if not consumers:
         # Never downgrade every finding to a warning because search came back empty --
         # that turns a real outage into a quiet notice. Same reasoning as the empty-repo
