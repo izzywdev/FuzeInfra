@@ -244,6 +244,28 @@ airflow:
   adminPasswordSecret:
     name: fuzeinfra-app-credentials
     key: AIRFLOW_ADMIN_PASSWORD
+  # Authentik SSO for the Airflow UI.
+  #
+  # DELIBERATELY STILL FALSE, for two independent reasons — either one alone is
+  # enough to keep it off:
+  #
+  #   1. deploy/sealed-secrets/airflow-oidc.yaml does not exist yet. The value
+  #      has to be minted by a human, sealed TWICE (fuzefront/fuzefront-secrets
+  #      key AIRFLOW_CLIENT_SECRET for the IdP side, fuzeinfra/airflow-oidc key
+  #      CLIENT_SECRET for this side) and merged together — see
+  #      deploy/sealed-secrets/authentik-oidc-secrets.yaml.template. Enabling
+  #      first gives the webserver CreateContainerConfigError, exactly as
+  #      documented for grafana.oidc and kafkaUi.oidc.
+  #
+  #   2. `replicas: 0` above. There is no webserver pod, so an SSO login cannot
+  #      be exercised end to end even if the secret existed. Flipping this while
+  #      the service is scaled to zero would look like coverage without being
+  #      coverage.
+  #
+  # Flip to true in the same commit that lands the SealedSecret, and only once
+  # replicas is back above 0.
+  oidc:
+    enabled: false
   workerReplicas: 0 # TEMP headroom (#93): celery worker -> 0 pods
   # 4 vCPU / 8 GB node — cap concurrency and memory to stop the worker from
   # crowding out CoreDNS/Postgres under memory pressure.
