@@ -19,11 +19,12 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import check_handoff_coverage as chc  # noqa: E402
 
 
-def registry(*namespaces, disabled=()):
+def registry(*namespaces, disabled=(), source="fuzefront"):
+    src = {"namespace": source, "secretName": "fuzefront-registration", "secretKey": "token"}
     return {"handoffs": (
-        [{"id": f"{ns}-registration", "enabled": True,
+        [{"id": f"{ns}-registration", "enabled": True, "source": src,
           "target": {"namespace": ns}} for ns in namespaces]
-        + [{"id": f"{ns}-registration", "enabled": False,
+        + [{"id": f"{ns}-registration", "enabled": False, "source": src,
             "target": {"namespace": ns}} for ns in disabled]
     )}
 
@@ -147,6 +148,18 @@ class CoverageTest(unittest.TestCase):
         # nameWithOwner fallback resolves FuzeMarket, which IS covered -> pass
         self.assertEqual(rc, 0)
         self.assertIn("has an enabled hand-off entry", buf.getvalue())
+
+
+    def test_the_publisher_repo_is_not_reported_as_a_consumer(self):
+        # FuzeFront's repo references fuzefront-registration because it MINTS it.
+        # Code search cannot distinguish minting from consuming; the registry's
+        # source.namespace can.
+        rc, out = self._run(registry("fuzebi", source="fuzefront"),
+                            ["FuzeFront", "FuzeBI"],
+                            {"FuzeFront": {"tier": "product"}, "FuzeBI": {"tier": "product"}},
+                            consumers=["FuzeFront", "FuzeBI"])
+        self.assertEqual(rc, 0, "the publisher must not be demanded to have a delivery path")
+        self.assertIn("publisher of the Secret", out)
 
 
 if __name__ == "__main__":

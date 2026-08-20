@@ -94,6 +94,21 @@ def main():
         for e in registry["handoffs"]
         if e.get("enabled") and "registration" in e["id"]
     }
+    # THE PUBLISHER IS NOT A CONSUMER. FuzeFront's repo references
+    # fuzefront-registration because it CREATES the Secret -- the seed Job that mints
+    # the token lives there. Code search cannot tell "mints it" from "consumes it", so
+    # without this the platform repo is reported as a product missing its own delivery
+    # path, which is nonsense and would train readers to ignore the finding.
+    #
+    # Derived from the registry's own source.namespace values rather than hardcoding
+    # "fuzefront": if the source ever moves, the exclusion follows it instead of
+    # silently protecting the wrong repo.
+    sources = {
+        e["source"]["namespace"]
+        for e in registry["handoffs"]
+        if isinstance(e.get("source"), dict) and e["source"].get("namespace")
+    }
+
     # A DISABLED entry is deliberately NOT coverage. fuzequality is disabled because its
     # repo cannot be resolved; if that repo comes back it must be re-enabled, and this
     # check is the thing that will say so rather than letting it pass as "listed".
@@ -151,7 +166,9 @@ def main():
             continue  # not onboarded to the SDLC at all
         wanted, why = is_portal_product(mf)
         ns = repo.lower()
-        if not wanted:
+        if ns in sources:
+            skipped.append((repo, "publisher of the Secret, not a consumer"))
+        elif not wanted:
             skipped.append((repo, why))
         elif ns in covered:
             ok.append(repo)
