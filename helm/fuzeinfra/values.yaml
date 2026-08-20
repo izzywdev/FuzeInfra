@@ -388,6 +388,10 @@ kafkaUi:
     issuer: https://authentik.prod.fuzefront.com/application/o/kafka-ui/
     secretName: kafka-ui-oidc
     secretKey: CLIENT_SECRET
+    # Raise Spring Security's OAuth2 logging so a failed login reports WHY.
+    # Off by default and meant to be turned back off after diagnosis — see the
+    # TRACE warning in templates/messaging.yaml before changing the level.
+    debugLogging: false
 
 rabbitmq:
   # Source RABBITMQ_DEFAULT_PASS from a dedicated Secret instead of the
