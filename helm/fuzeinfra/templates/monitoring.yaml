@@ -277,6 +277,14 @@ spec:
         # whenever they change, so a provisioning edit reloads automatically.
         checksum/monitoring-config: {{ include (print $.Template.BasePath "/configmaps-monitoring.yaml") $ | sha256sum }}
         checksum/dashboards: {{ include (print $.Template.BasePath "/grafana-dashboards.yaml") $ | sha256sum }}
+        # Roll when the admin-credential wiring changes, including a reseal.
+        # Kubernetes does not restart a pod when a Secret changes (env is read
+        # once at start), and the chart cannot hash a SealedSecret's ciphertext
+        # because Argo applies it from outside the release. So bumping
+        # adminPasswordSecret.rotation is what actually makes a rotated password
+        # reach Grafana. Without this, a reseal silently leaves the OLD password
+        # live and the new one only takes effect at the next unrelated restart.
+        checksum/credentials: {{ .Values.grafana.adminPasswordSecret | toYaml | sha256sum }}
         {{- if .Values.grafana.persistence.enabled }}
         cluster-autoscaler.kubernetes.io/safe-to-evict: "false"
         {{- end }}

@@ -470,6 +470,10 @@ grafana:
   adminPasswordSecret:
     name: ""
     key: GRAFANA_ADMIN_PASSWORD
+    # Bump when the referenced Secret is resealed — it is hashed into
+    # checksum/credentials, which is what forces Grafana to restart and pick the
+    # new password up. Resealing alone does not roll the pod.
+    rotation: ""
   oidc:
     enabled: false
     displayName: Authentik

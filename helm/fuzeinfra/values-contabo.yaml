@@ -131,6 +131,9 @@ grafana:
   adminPasswordSecret:
     name: grafana-admin
     key: GRAFANA_ADMIN_PASSWORD
+    # Rotated 2026-08-20. Bumping this is what rolls the pod so the new password
+    # is actually loaded; resealing alone does not restart anything.
+    rotation: "2026-08-20"
   # Authentik SSO. Safe to enable: deploy/sealed-secrets/grafana-oidc.yaml is in
   # this same change, and the `grafana` provider is live in Authentik
   # (https://authentik.prod.fuzefront.com/application/o/grafana/ returns a discovery doc
@@ -236,7 +239,21 @@ backups:
     existingSecret: "fuzeinfra-backups-s3"
     lifecycleExpireDays: 30   # provider expires db/ objects after 30 days
 airflow:
-  replicas: 0 # TEMP headroom (#93): webserver/scheduler/flower -> 0 pods
+  # Restored to 1 to make the SSO login exercisable — with no webserver pod the
+  # flow cannot be tested at all, which is why the runbook lists this as a
+  # precondition for flipping oidc.enabled rather than an afterthought.
+  #
+  # workerReplicas is deliberately left at 0 below. The webserver is what serves
+  # the login; celery workers only execute DAG tasks and would add memory
+  # pressure for nothing. This node has OOM-thrashed before (#93 is the headroom
+  # ticket, and the durable nodes went down under concentrated load), so this
+  # restores the minimum needed to verify SSO, not the whole stack.
+  replicas: 1
+  oidc:
+    enabled: true
+    # Bump when deploy/sealed-secrets/airflow-oidc.yaml is resealed — see the
+    # checksum annotation in templates/airflow.yaml.
+    secretRotation: "2026-08-20"
   # Strong credential, replacing the chart default "admin". Applies on a fresh
   # metadata DB only: airflow-init runs `airflow users create ... || true`, which
   # silently no-ops for an existing user. Rotate an existing one with
@@ -264,8 +281,6 @@ airflow:
   #
   # Flip to true in the same commit that lands the SealedSecret, and only once
   # replicas is back above 0.
-  oidc:
-    enabled: false
   workerReplicas: 0 # TEMP headroom (#93): celery worker -> 0 pods
   # 4 vCPU / 8 GB node — cap concurrency and memory to stop the worker from
   # crowding out CoreDNS/Postgres under memory pressure.

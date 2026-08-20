@@ -265,7 +265,13 @@ data:
 ---
 {{- end }}
 {{- /* Example DAG shipped as a ConfigMap so the stack works out of the box.
-     For production, replace with git-sync or a baked image. */ -}}
+     For production, replace with git-sync or a baked image.
+
+     This comment closes without a trailing dash, deliberately. With one it
+     chomped the newline after the document separator above, so when oidc was
+     enabled the separator and the next document collapsed onto a single line and
+     helm lint rejected the file. The gate hid the bug: with oidc disabled that
+     separator is never emitted at all. */}}
 apiVersion: v1
 kind: ConfigMap
 metadata:
