@@ -150,6 +150,23 @@ grafana:
 kafkaUi:
   oidc:
     enabled: true
+    # Authorization, not just authentication. Until this flipped, every account
+    # that completed SSO was a full kafka-ui admin — and with
+    # DYNAMIC_CONFIG_ENABLED=true that admin could edit cluster config, produce
+    # and delete messages, and delete topics.
+    #
+    # Safe to enable HERE and only here because prod is the only environment
+    # whose Authentik `kafka-ui` provider actually grants the `groups` scope.
+    # Verified against the live discovery document on 2026-08-20:
+    #   https://authentik.prod.fuzefront.com/application/o/kafka-ui/.well-known/openid-configuration
+    #   -> scopes_supported includes "groups", claims_supported includes "groups"
+    #
+    # This is a hard cutover: once rbac.roles is non-empty, kafka-ui denies
+    # everything to anyone who matches no role. Members of fuzeinfra-admins get
+    # full access; everyone else gets nothing (see values.yaml for why there is
+    # no read-only fallback).
+    rbac:
+      enabled: true
     # Bump this whenever deploy/sealed-secrets/kafka-ui-oidc.yaml is resealed.
     #
     # It exists solely to change the checksum/oidc pod annotation, which hashes
