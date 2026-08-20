@@ -113,6 +113,12 @@ ingress:
 # Unlike airflow, this service IS running (replicas: 1), so once the secret
 # lands this one can actually be verified end to end.
 sso:
+  # PAIRED CHANGE - must merge alongside the matching FuzeFront PR. The OIDC
+  # client secret is sealed in halves (fuzefront-secrets LITELLM_CLIENT_SECRET
+  # on the IdP side, litellm-oidc CLIENT_SECRET here). Landing one without the
+  # other leaves the two ends holding different values, and the token exchange
+  # then fails as a generic "Invalid credentials" that implicates neither side.
+  #
   # ENABLED 2026-08-20. Preconditions met: deploy/sealed-secrets/litellm-oidc.yaml
   # exists (sealed together with the fuzefront-secrets LITELLM_CLIENT_SECRET half),
   # and the admin roster is within upstream's free five-user SSO cap.
