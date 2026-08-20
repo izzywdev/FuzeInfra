@@ -31,9 +31,13 @@ jobs:
           - image: agent-handoff
             context: agent-templates
             dockerfile: agent-templates/orchestration/handoff_mcp/Dockerfile
+            # Import-only smoke test, run against the built image BEFORE it is
+            # pushed. See the "Smoke test" step for why this exists.
+            smoke: 'from mcp.server.fastmcp import FastMCP; print("fastmcp import ok")'
           - image: agent-worker
             context: agent-templates/worker
             dockerfile: agent-templates/worker/Dockerfile
+            smoke: ''
     steps:
       - name: Checkout code
         uses: actions/checkout@v7
@@ -58,11 +62,39 @@ jobs:
             type=ref,event=branch
             type=raw,value=latest,enable={{is_default_branch}}
 
-      - name: Build and push image
+      # Build into the local docker daemon FIRST so the smoke test below can run
+      # against the exact image that is about to be published. Single-platform, so
+      # `load` is supported; the push step re-uses this build from cache.
+      - name: Build image (local, for the smoke test)
         uses: docker/build-push-action@v7
         with:
           context: ${{ matrix.context }}
           file: ${{ matrix.dockerfile }}
-          push: ${{ github.event_name != 'pull_request' }}
+          push: false
+          load: true
+          tags: ${{ matrix.image }}:smoke
+          labels: ${{ steps.meta.outputs.labels }}
+
+      # WHY: this workflow was green on 2026-08-20T01:52 and the image it published
+      # could not start — `mcp>=1.2.0` was unpinned, mcp 2.0.0 had just dropped
+      # mcp.server.fastmcp, and handoff-mcp sat in CrashLoopBackOff for 21h (248
+      # restarts) while every signal upstream of the cluster stayed green. A build
+      # that never executes what it built cannot tell you that. One import is enough
+      # to catch the entire class of "a dependency moved under us".
+      - name: Smoke test — the image must import its entrypoint deps
+        if: matrix.smoke != ''
+        env:
+          SMOKE: ${{ matrix.smoke }}
+        run: |
+          set -euo pipefail
+          docker run --rm --entrypoint python "${{ matrix.image }}:smoke" -c "$SMOKE"
+
+      - name: Push image
+        if: github.event_name != 'pull_request'
+        uses: docker/build-push-action@v7
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.dockerfile }}
+          push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
