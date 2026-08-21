@@ -13,12 +13,64 @@
   "elasticsearch"     (dict "svc" "fuzeinfra-elasticsearch"     "port" $root.Values.elasticsearch.port     "enabled" $root.Values.elasticsearch.enabled)
   "chromadb"          (dict "svc" "fuzeinfra-chromadb"          "port" $root.Values.chromadb.port          "enabled" $root.Values.chromadb.enabled)
 -}}
+{{- /* The Middleware below is a Traefik CRD (traefik.io/v1alpha1). It exists
+       only on the Traefik-based ingress (prod / Contabo k3s); on nginx-based
+       clusters (kind, Docker Desktop) the CRD is absent, so gate both the
+       resource and its annotation on the ingress class — same pattern as
+       neo4j-ingress.yaml. */ -}}
+{{- $traefik := eq .Values.ingress.className "traefik" }}
+{{- if $traefik }}
+# Force X-Forwarded-Proto=https for every host on this Ingress.
+#
+# TLS terminates at the Cloudflare edge and the tunnel reaches Traefik over
+# plain HTTP, so Traefik sets X-Forwarded-Proto from ITS OWN entrypoint — which
+# is http — overwriting whatever cloudflared sent. Any app that derives its
+# external URL from the request then builds http:// links.
+#
+# This is not hypothetical. Airflow had AIRFLOW__WEBSERVER__BASE_URL=https://…
+# AND ENABLE_PROXY_FIX=true and STILL sent Authentik
+#   redirect_uri=http://airflow.prod.fuzefront.com/oauth-authorized/authentik
+# which Authentik's strict redirect_uri match rejected with "Redirect URI
+# Error", making SSO login impossible. ProxyFix was working correctly; it was
+# faithfully reporting the http it was handed. BASE_URL does not help, because
+# Flask-AppBuilder builds the OAuth redirect_uri from the REQUEST scheme.
+#
+# FuzeFront hit the identical problem with Authentik's own issuer URLs and
+# fixed it the same way (authentik-forwarded-proto in authentik.yaml).
+#
+# Safe for every host here: all of them are served over HTTPS at the edge, so
+# pinning the header states the truth rather than overriding it.
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: forwarded-proto
+  labels:
+    {{- include "fuzeinfra.labels" . | nindent 4 }}
+spec:
+  headers:
+    customRequestHeaders:
+      X-Forwarded-Proto: "https"
+      # X-Forwarded-Port must be pinned TOO, and finding out why cost a round
+      # trip. With only the proto pinned, Airflow emitted
+      #   redirect_uri=https://airflow.prod.fuzefront.com:80/oauth-authorized/authentik
+      # — right scheme, but Traefik still advertised its own entrypoint port (80),
+      # Werkzeug's ProxyFix trusts X-Forwarded-Port (x_port=1 by default), and a
+      # port that is not the default for the scheme gets written into the URL
+      # explicitly. Authentik's strict redirect_uri match rejected that too.
+      # 443 is the truth at the edge, same as the proto above.
+      X-Forwarded-Port: "443"
+---
+{{- end }}
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
   name: fuzeinfra
   labels:
     {{- include "fuzeinfra.labels" . | nindent 4 }}
+  {{- if $traefik }}
+  annotations:
+    traefik.ingress.kubernetes.io/router.middlewares: {{ .Release.Namespace }}-forwarded-proto@kubernetescrd
+  {{- end }}
 spec:
   ingressClassName: {{ .Values.ingress.className }}
   {{- if .Values.ingress.tls.enabled }}
