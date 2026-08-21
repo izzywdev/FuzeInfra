@@ -37,14 +37,16 @@ runnerScaleSetName: staging
 
 # ---- Scaling ----------------------------------------------------------------
 # minRunners=0  → idle costs nothing; runners spin up on demand.
-# maxRunners    → hard cap; tune based on cluster capacity. All sets share ONE
-#                 4-vCPU/8GB CI node (fuzeinfra-ci-runner-1), so the SUM across
-#                 sets is what matters, not the per-set number. Kept at 3
-#                 because containerMode.dind is on and dind sidecars are
-#                 unbounded — that node has already been OOMed once.
+# maxRunners    → hard cap per set; tune based on cluster capacity. Runner pods
+#                 are pinned via nodeSelector fuzeinfra.io/pool=ci, so only nodes
+#                 carrying that label + taint fuzeinfra.io/ci=true:NoSchedule
+#                 accept them — raising this without labelling extra nodes is a
+#                 no-op.  Baseline is 3 (single CI node). Temporarily raised to 5
+#                 while extra elastic nodes are in the cluster (until 2026-08-30);
+#                 revert to 3 when the extra nodes are released.
 # Overridden per set by argocd/applications/arc-runners.yaml.
 minRunners: 0
-maxRunners: 3
+maxRunners: 5
 
 # ---- Runner pod spec --------------------------------------------------------
 template:
