@@ -144,6 +144,10 @@ resource "null_resource" "provision" {
       "node-taint:",
       "  - node-role.kubernetes.io/control-plane=:PreferNoSchedule",
       "KCFG",
+      # Prefer IPv4 over IPv6 in glibc address selection (RFC 6724 §10.3).
+      # Fixes GHCR pulls TCP-reset on Contabo IPv6 CDN paths (FuzeInfra#616).
+      # Written before k3s so containerd inherits the preference from first boot.
+      "printf 'precedence ::ffff:0:0/96  100\\n' > /etc/gai.conf",
       "if ! command -v k3s &>/dev/null; then",
       "  curl -sfL https://get.k3s.io | INSTALL_K3S_EXEC='--tls-san ${local.server_ip} --node-taint node-role.kubernetes.io/control-plane=:PreferNoSchedule' sh -",
       "else",
