@@ -27,6 +27,7 @@ import json
 import subprocess
 import sys
 import urllib.error
+import urllib.parse
 import urllib.request
 
 TIMEOUT = 6
@@ -52,8 +53,36 @@ def kget(*args: str) -> dict:
     return json.loads(sh("kubectl", *args, "-o", "json"))
 
 
+# urlopen() honours every scheme urllib knows, including file:// and ftp://. Both
+# URLs this script opens are built from values it does not control — one from
+# kubectl-discovered Service names, one from the --portal-base argument — so
+# "https://..." is a convention here, not a guarantee. A --portal-base of
+# file:///etc/shadow would be read and its first 4096 bytes printed into a CI log.
+#
+# Pin the scheme at the one place that opens a socket, so no call site can opt out
+# by construction. Flagged by Semgrep as
+# python.lang.security.audit.dynamic-urllib-use-detected on both call sites; this
+# is the fix, not a nosem.
+_ALLOWED_SCHEMES = ("http", "https")
+
+
+def _require_http(url: str) -> str:
+    """Return url if it is http(s); raise ValueError otherwise."""
+    scheme = urllib.parse.urlsplit(url).scheme.lower()
+    if scheme not in _ALLOWED_SCHEMES:
+        raise ValueError(
+            f"refusing to open {scheme or '<no>'}:// URL — only "
+            f"{'/'.join(_ALLOWED_SCHEMES)} are allowed: {url!r}"
+        )
+    return url
+
+
 def probe(url: str) -> tuple[int | None, str, str]:
     """(status, body_prefix, error). Never raises — an unreachable service is data."""
+    try:
+        _require_http(url)
+    except ValueError as e:
+        return None, "", str(e)
     req = urllib.request.Request(url, headers={"User-Agent": "prod-conformance/1"})
     try:
         with urllib.request.urlopen(req, timeout=TIMEOUT) as r:
@@ -186,7 +215,11 @@ def portal(base: str, token: str) -> tuple[list[dict], str]:
     if not token:
         return [], ("PORTAL_READ_TOKEN is unset, so registration/activation/nav could not "
                     "be read. This is UNVERIFIED, not zero.")
-    req = urllib.request.Request(base + "/api/apps",
+    try:
+        url = _require_http(base + "/api/apps")
+    except ValueError as e:
+        return [], f"portal query refused: {e}"
+    req = urllib.request.Request(url,
                                  headers={"Authorization": f"Bearer {token}"})
     try:
         with urllib.request.urlopen(req, timeout=TIMEOUT) as r:
