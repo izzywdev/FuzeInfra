@@ -1,6 +1,49 @@
+# `[extend] useDefault = true` is load-bearing. Without it, a .gitleaks.toml that
+# declares no [[rules]] of its own loads ZERO rules, and gitleaks reports
+# "no leaks found" on a tree containing live credentials — the gate is green
+# because it is looking for nothing, not because the tree is clean.
+#
+# This file was in exactly that state. Verified with gitleaks 8.24.3 against a
+# repo holding a planted AWS access key: with this config and no [extend],
+# "no leaks found"; with the same config plus these two lines, the key is found.
+#
+# Never delete these two lines to silence a finding. Narrow the allowlist below
+# instead, and prove the narrowed config still fails on a real secret.
+[extend]
+useDefault = true
+
 [allowlist]
   description = "SealedSecrets are encrypted ciphertext — not plaintext secrets"
   paths = [
     "deploy/sealed-secrets/",
     ".gitleaks.toml",
+    # SealedSecret ciphertext — kubeseal output, encrypted. These are where the
+    # default rules actually match in this repo, found by rescanning full history
+    # with the rules on: 5 in the autoscaler CA provider, 1 in the Argo CD GitHub
+    # App sealed secret. Listed because they were measured, not assumed.
+    '''argocd/cluster-config/.*\.sealed\.yaml''',
+    '''templates/autoscaler/sealed-secret-.*\.yaml''',
   ]
+
+# DELIBERATELY NOT ALLOWLISTED — see the PR that introduced this block.
+#
+# Turning the default rules back on surfaces four matches in this repo that have
+# never been reviewed by a human, because until now nothing could see them:
+#
+#   runners/arc/github-secret.yaml:42          private-key
+#   helm/fuzeinfra/values-local.yaml:84        curl-auth-header
+#   helm/fuzeinfra/values.yaml                 generic-api-key
+#   docs/consuming-repos/CUSTOM_DOMAINS.md:574 curl-auth-header
+#
+# Suppressing them here would recreate the exact bug this file is fixing: a
+# green gate that is green because it was told not to look. They are left
+# reporting on purpose. The push-to-main run will be red until each is either
+# confirmed a placeholder and allowlisted by exact path with a reason, or
+# confirmed real, rotated, and purged from history.
+#
+# The private-key match is the one that matters. The file is tracked at HEAD,
+# is not gitignored, is not a SealedSecret, has no Helm templating, and holds
+# one PEM header in 47 lines. It arrived in a `docs:` commit alongside five
+# placeholder-looking markers, which is consistent with a runbook template —
+# but "consistent with" is not "verified", and a GitHub App private key for the
+# ARC runners is not something to clear on a plausible story.
