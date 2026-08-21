@@ -31,9 +31,18 @@ jobs:
           - image: agent-handoff
             context: agent-templates
             dockerfile: agent-templates/orchestration/handoff_mcp/Dockerfile
-            # Import-only smoke test, run against the built image BEFORE it is
-            # pushed. See the "Smoke test" step for why this exists.
-            smoke: 'from mcp.server.fastmcp import FastMCP; print("fastmcp import ok")'
+            # Smoke test run against the built image BEFORE it is pushed. See
+            # the "Smoke test" step for why this exists.
+            #
+            # It BUILDS THE APP; it is deliberately not import-only. The
+            # import-only version of this check passed a green build whose
+            # server then died at boot with
+            #   AttributeError: 'Starlette' object has no attribute 'middleware'
+            # because the failure is in build_app(), not at import. HANDOFF_MCP_TOKEN
+            # is set so the bearer-middleware branch — the authentication gate, and
+            # the only gate now that Cloudflare Access is bypassed for this host —
+            # is the code path actually exercised.
+            smoke: 'import os; os.environ["HANDOFF_MCP_TOKEN"]="smoke"; from handoff_mcp.server import build_app; app=build_app(); assert app is not None; print("build_app ok")'
           - image: agent-worker
             context: agent-templates/worker
             dockerfile: agent-templates/worker/Dockerfile
@@ -81,7 +90,7 @@ jobs:
       # restarts) while every signal upstream of the cluster stayed green. A build
       # that never executes what it built cannot tell you that. One import is enough
       # to catch the entire class of "a dependency moved under us".
-      - name: Smoke test — the image must import its entrypoint deps
+      - name: Smoke test — the image must build its app, not merely import
         if: matrix.smoke != ''
         env:
           SMOKE: ${{ matrix.smoke }}

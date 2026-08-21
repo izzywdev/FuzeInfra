@@ -13,5 +13,8 @@
 # Moving to mcp 2.x is a real port (FastMCP became the separate `fastmcp`
 # distribution), not a version bump. Do it deliberately, not by resolution order.
 mcp>=1.9,<2
-uvicorn>=0.30
-starlette>=0.37
+# Same ceiling discipline as mcp above, and for the same reason: an unpinned
+# starlette floor let a major land that removed Starlette.middleware(), which
+# crashed build_app() on every boot even after the mcp pin fixed the import.
+uvicorn>=0.30,<1
+starlette>=0.37,<1
