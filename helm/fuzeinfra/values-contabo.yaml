@@ -710,3 +710,10 @@ serviceChromaCollections:
         app.kubernetes.io/name: fuzequality
     collections:
       - fuzequality_ready
+
+# Enable IPv4-preference node configurator on Contabo — fixes GHCR pulls being
+# TCP-reset over IPv6 CDN paths (FuzeInfra#616). Uses busybox from Docker Hub
+# so the DaemonSet itself never touches GHCR.
+nodeConfigurator:
+  preferIPv4:
+    enabled: true

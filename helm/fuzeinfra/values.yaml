@@ -743,6 +743,15 @@ nodeExporter:
   image: prom/node-exporter:latest
   port: 9100
 
+# Node Configurator DaemonSet — writes /etc/gai.conf on every node.
+# Disabled by default; enable in values-contabo.yaml for prod.
+# Uses docker.io/busybox (not GHCR) so the DaemonSet itself is not affected
+# by GHCR pull failures on nodes that haven't been patched yet.
+nodeConfigurator:
+  preferIPv4:
+    enabled: false
+  image: docker.io/busybox:1.36.1
+
 kubeStateMetrics:
   enabled: true
   image: registry.k8s.io/kube-state-metrics/kube-state-metrics:v2.10.1

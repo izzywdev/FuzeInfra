@@ -1,0 +1,78 @@
+{{- /* ============= Node Configurator DaemonSet ======================== */ -}}
+{{- /* Writes /etc/gai.conf on every cluster node to prefer IPv4 over IPv6 when
+       both A and AAAA records exist for a host.  This fixes GHCR image pulls
+       being TCP-reset mid-copy on Contabo's IPv6 CDN path (FuzeInfra#616).
+       Disabled by default; enable via nodeConfigurator.preferIPv4.enabled. */ -}}
+{{- if .Values.nodeConfigurator.preferIPv4.enabled }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: fuzeinfra-gai-conf
+  labels:
+    {{- include "fuzeinfra.labels" . | nindent 4 }}
+data:
+  gai.conf: |
+    # Prefer IPv4 (::ffff:x.x.x.x mapped) over native IPv6 when both A and AAAA
+    # records exist. Precedence 100 beats the RFC 6724 default of 40 for native
+    # IPv6 (::1/128 = 50, 2000::/3 = 40) so getaddrinfo returns IPv4 first.
+    # Applied cluster-wide to fix GHCR pulls TCP-reset over Contabo IPv6 CDN.
+    # See: FuzeInfra#616, RFC 6724 §10.3.
+    precedence ::ffff:0:0/96  100
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: fuzeinfra-node-configurator
+  labels:
+    {{- include "fuzeinfra.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "fuzeinfra.selectorLabels" (dict "component" "node-configurator" "root" $) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "fuzeinfra.labels" . | nindent 8 }}
+        {{- include "fuzeinfra.selectorLabels" (dict "component" "node-configurator" "root" $) | nindent 8 }}
+      annotations:
+        checksum/config: {{ .Values.nodeConfigurator.preferIPv4.enabled | toString | sha256sum }}
+    spec:
+      tolerations:
+        - operator: Exists
+      initContainers:
+        - name: write-gai-conf
+          image: {{ .Values.nodeConfigurator.image }}
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            privileged: true
+          command:
+            - sh
+            - -c
+            - cp /config/gai.conf /host-etc/gai.conf && echo "gai.conf written"
+          volumeMounts:
+            - name: host-etc
+              mountPath: /host-etc
+            - name: gai-conf
+              mountPath: /config
+              readOnly: true
+      containers:
+        - name: pause
+          image: {{ .Values.nodeConfigurator.image }}
+          imagePullPolicy: IfNotPresent
+          command: ["sh", "-c", "while true; do sleep 3600; done"]
+          resources:
+            requests:
+              cpu: 1m
+              memory: 4Mi
+            limits:
+              cpu: 10m
+              memory: 8Mi
+      volumes:
+        - name: host-etc
+          hostPath:
+            path: /etc
+        - name: gai-conf
+          configMap:
+            name: fuzeinfra-gai-conf
+{{- end }}
