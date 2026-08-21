@@ -117,3 +117,42 @@ class TestStrictFires(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class UrlSchemeGuard(unittest.TestCase):
+    """urlopen() honours file:// and ftp://. Both URLs this script opens are built
+    from values it does not control, so the scheme is pinned at the one place that
+    opens a socket. These tests assert the guard REFUSES, not merely that http
+    still works — a guard only proven on the happy path is not proven."""
+
+    def test_rejects_file_scheme(self):
+        with self.assertRaises(ValueError) as cm:
+            pc._require_http("file:///etc/shadow")
+        self.assertIn("file", str(cm.exception))
+
+    def test_rejects_ftp_and_gopher(self):
+        for url in ("ftp://example.invalid/x", "gopher://example.invalid/x"):
+            with self.assertRaises(ValueError):
+                pc._require_http(url)
+
+    def test_rejects_scheme_relative_and_bare_path(self):
+        for url in ("//example.invalid/x", "/etc/shadow"):
+            with self.assertRaises(ValueError):
+                pc._require_http(url)
+
+    def test_allows_http_and_https_case_insensitively(self):
+        for url in ("http://x.invalid/h", "HTTPS://x.invalid/h"):
+            self.assertEqual(pc._require_http(url), url)
+
+    def test_probe_returns_the_refusal_as_data_and_does_not_raise(self):
+        # probe()'s contract is that it never raises — an unreachable service is data.
+        # A refused scheme must follow that contract too, not become the one exception.
+        status, body, err = pc.probe("file:///etc/shadow")
+        self.assertIsNone(status)
+        self.assertEqual(body, "")
+        self.assertIn("refusing to open", err)
+
+    def test_portal_refuses_non_http_base_via_its_reason_channel(self):
+        apps, reason = pc.portal("file:///etc", "a-token")
+        self.assertEqual(apps, [])
+        self.assertIn("refused", reason)
