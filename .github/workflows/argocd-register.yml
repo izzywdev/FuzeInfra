@@ -42,7 +42,7 @@ on:
         default: main
         type: string
       path:
-        description: "Path in the consumer repo holding the Argo Application/AppProject manifests"
+        description: "Path in the consumer repo holding the Argo Application manifests (AppProjects are skipped — they are FuzeInfra-owned)"
         required: false
         default: deploy/argocd
         type: string
@@ -159,7 +159,25 @@ jobs:
             exit 1
           fi
           echo "Registering Argo manifests from $DIR (repo: $REPO)..."
-          kubectl apply -f "$DIR/"
+          # AppProjects are the destination/security boundary and are OWNED BY
+          # FuzeInfra — they must not be overwritten by a consumer repo. Filter
+          # them out so a consumer's project.yaml cannot silently widen its own
+          # permissions (the issue-#625 class of drift). Only kind: Application
+          # (and ApplicationSet) are registered by consumers.
+          SKIPPED=0
+          for manifest in "$DIR"/*.yaml "$DIR"/*.yml; do
+            [ -f "$manifest" ] || continue
+            kind=$(grep -m1 '^kind:' "$manifest" 2>/dev/null | awk '{print $2}')
+            if [ "$kind" = "AppProject" ]; then
+              echo "  SKIP $manifest (AppProject — FuzeInfra-owned; consumer must not overwrite)"
+              SKIPPED=$(( SKIPPED + 1 ))
+            else
+              kubectl apply -f "$manifest"
+            fi
+          done
+          if [ "$SKIPPED" -gt 0 ]; then
+            echo "::warning::$SKIPPED AppProject file(s) skipped — AppProjects are FuzeInfra-owned. Remove them from the consumer repo's deploy/argocd/ directory."
+          fi
           echo ""
           echo "Done. ArgoCD now owns these Applications and will self-sync future"
           echo "changes to deploy/argocd — do not re-run this for ordinary edits."
