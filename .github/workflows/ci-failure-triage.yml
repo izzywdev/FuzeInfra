@@ -45,7 +45,7 @@ jobs:
           !startsWith(github.event.workflow_run.head_branch, 'fuze/argo-fix-') }}
     runs-on: ubuntu-latest
     steps:
-      - name: Open or update an idempotent @claude triage issue
+      - name: Open or update an idempotent @fuze triage issue
         env:
           # Use the PAT, not the default GITHUB_TOKEN. GitHub deliberately does
           # NOT re-dispatch workflow events (here: `issues: opened`) for actions
