@@ -174,10 +174,13 @@ func Decide(createdDate, cancelDate, now time.Time, releaseWindow, billingPeriod
 
 // Summary totals a Run's outcome for logging/observability.
 type Summary struct {
-	Checked  int
-	Released int
-	Kept     int
-	Errors   int
+	Checked        int
+	Released       int
+	Kept           int
+	Errors         int
+	OrphansDeleted int
+	OrphansKept    int
+	OrphanErrors   int
 }
 
 // Run executes one reaper pass: list elastic instances, decide + act on
@@ -251,6 +254,15 @@ func (r *Reaper) Run(ctx context.Context) (Summary, error) {
 	}
 
 	log.Printf("reaper: summary checked=%d released=%d kept=%d errors=%d", summary.Checked, summary.Released, summary.Kept, summary.Errors)
+
+	orphans, orphanErr := r.SweepOrphans(ctx)
+	if orphanErr != nil {
+		log.Printf("reaper: orphan sweep failed (non-fatal): %v", orphanErr)
+	} else {
+		summary.OrphansDeleted = orphans.Deleted
+		summary.OrphansKept = orphans.Kept
+		summary.OrphanErrors = orphans.Errors
+	}
 	return summary, nil
 }
 
@@ -342,6 +354,73 @@ func (r *Reaper) release(ctx context.Context, node *corev1.Node, inst contabo.In
 	}
 	log.Printf("reaper: canceled contabo instance %d (%s) — terminates at end of billing period, will NOT renew", inst.ID, inst.Name)
 	return nil
+}
+
+// OrphanSummary totals a SweepOrphans pass.
+type OrphanSummary struct {
+	Checked int
+	Deleted int
+	Kept    int
+	Errors  int
+}
+
+// SweepOrphans deletes k8s Node objects for elastic nodes (label
+// fuzeinfra.io/pool=elastic) that are NotReady AND have no matching
+// Contabo instance. This handles the failure mode where Contabo terminates
+// a VPS at billing-period end but the k8s Node object was never removed.
+//
+// The main Run() loop can't handle this: its fail-safe skips NotReady nodes
+// (correctly refusing to cancel an instance that may only be rebooting).
+// Once the VPS is confirmed gone from Contabo entirely, that fail-safe no
+// longer applies — there's nothing to cancel, just a zombie Node object
+// attracting unschedulable pods.
+//
+// SweepOrphans is conservative: it only deletes when BOTH conditions hold
+// (NotReady AND no Contabo instance). Ready nodes are never touched, and
+// nodes with a still-present Contabo instance are never deleted regardless
+// of Ready status.
+func (r *Reaper) SweepOrphans(ctx context.Context) (OrphanSummary, error) {
+	instances, err := r.Contabo.ListByTag(ctx, r.Cfg.ElasticTag)
+	if err != nil {
+		return OrphanSummary{}, fmt.Errorf("orphan sweep: list elastic instances: %w", err)
+	}
+	contaboNames := make(map[string]struct{}, len(instances))
+	for _, inst := range instances {
+		contaboNames[inst.Name] = struct{}{}
+	}
+
+	nodeList, err := r.K8s.CoreV1().Nodes().List(ctx, metav1.ListOptions{
+		LabelSelector: elasticPoolLabel + "=" + elasticPoolValue,
+	})
+	if err != nil {
+		return OrphanSummary{}, fmt.Errorf("orphan sweep: list elastic nodes: %w", err)
+	}
+
+	summary := OrphanSummary{Checked: len(nodeList.Items)}
+	for _, node := range nodeList.Items {
+		node := node
+		if isNodeReady(&node) {
+			log.Printf("reaper orphan-sweep: node %q is Ready — skipping (only NotReady nodes qualify)", node.Name)
+			summary.Kept++
+			continue
+		}
+		if _, exists := contaboNames[node.Name]; exists {
+			log.Printf("reaper orphan-sweep: node %q is NotReady but Contabo instance still exists — skipping (likely transitioning, not terminated)", node.Name)
+			summary.Kept++
+			continue
+		}
+		log.Printf("reaper orphan-sweep: node %q is NotReady and has no matching Contabo instance — deleting zombie Node object", node.Name)
+		if err := r.K8s.CoreV1().Nodes().Delete(ctx, node.Name, metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
+			log.Printf("reaper orphan-sweep: ERROR deleting node %q: %v", node.Name, err)
+			summary.Errors++
+			continue
+		}
+		log.Printf("reaper orphan-sweep: deleted zombie Node %q", node.Name)
+		summary.Deleted++
+	}
+
+	log.Printf("reaper orphan-sweep: checked=%d deleted=%d kept=%d errors=%d", summary.Checked, summary.Deleted, summary.Kept, summary.Errors)
+	return summary, nil
 }
 
 // cordon sets node.Spec.Unschedulable=true via a merge patch, no-op if

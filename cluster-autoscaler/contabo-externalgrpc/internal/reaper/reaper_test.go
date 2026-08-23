@@ -456,6 +456,169 @@ func TestRun_UnknownCreatedDateIsKeptNotCanceled(t *testing.T) {
 	}
 }
 
+// --- SweepOrphans tests -------------------------------------------------------
+
+func notReadyElasticNode(name string) *corev1.Node {
+	return &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:   name,
+			Labels: map[string]string{elasticPoolLabel: elasticPoolValue},
+		},
+		Status: corev1.NodeStatus{
+			Conditions: []corev1.NodeCondition{
+				{Type: corev1.NodeReady, Status: corev1.ConditionFalse},
+			},
+		},
+	}
+}
+
+// TestSweepOrphans_ZombieNodeDeletedWhenContaboInstanceGone is the core case:
+// a NotReady elastic node with no matching Contabo instance must be deleted.
+// This is exactly what happened when billing-period-expired VPS nodes left
+// k8s Node objects behind with no cleanup mechanism.
+func TestSweepOrphans_ZombieNodeDeletedWhenContaboInstanceGone(t *testing.T) {
+	node := notReadyElasticNode("fuzeinfra-elastic-79c10ab3")
+	fc := &fakeContabo{instances: []contabo.Instance{}} // Contabo has no elastic instances
+	k8s := k8sfake.NewSimpleClientset(node)
+
+	r := &Reaper{
+		Contabo: fc,
+		K8s:     k8s,
+		Cfg:     DefaultConfig(),
+		Now:     time.Now,
+	}
+
+	summary, err := r.SweepOrphans(context.Background())
+	if err != nil {
+		t.Fatalf("SweepOrphans returned error: %v", err)
+	}
+	if summary.Deleted != 1 || summary.Kept != 0 || summary.Errors != 0 {
+		t.Fatalf("summary = %+v, want Deleted=1 Kept=0 Errors=0", summary)
+	}
+	_, getErr := k8s.CoreV1().Nodes().Get(context.Background(), "fuzeinfra-elastic-79c10ab3", metav1.GetOptions{})
+	if getErr == nil {
+		t.Fatal("expected the zombie Node to have been deleted, but it still exists")
+	}
+}
+
+// TestSweepOrphans_ReadyNodeIsNeverDeleted verifies the safety rail: a Ready
+// elastic node must never be deleted by the orphan sweep, even if there is
+// no matching Contabo instance in the listing (e.g. a brief API glitch).
+func TestSweepOrphans_ReadyNodeIsNeverDeleted(t *testing.T) {
+	node := readyElasticNode("fuzeinfra-elastic-abc")
+	fc := &fakeContabo{instances: []contabo.Instance{}} // no Contabo instances
+	k8s := k8sfake.NewSimpleClientset(node)
+
+	r := &Reaper{Contabo: fc, K8s: k8s, Cfg: DefaultConfig(), Now: time.Now}
+
+	summary, err := r.SweepOrphans(context.Background())
+	if err != nil {
+		t.Fatalf("SweepOrphans returned error: %v", err)
+	}
+	if summary.Deleted != 0 || summary.Kept != 1 {
+		t.Fatalf("summary = %+v, want Deleted=0 Kept=1 for a Ready node", summary)
+	}
+	if _, getErr := k8s.CoreV1().Nodes().Get(context.Background(), "fuzeinfra-elastic-abc", metav1.GetOptions{}); getErr != nil {
+		t.Fatalf("Ready node must NOT be deleted, but Get returned: %v", getErr)
+	}
+}
+
+// TestSweepOrphans_NotReadyNodeWithLiveContaboInstanceIsKept verifies that a
+// NotReady node whose Contabo VPS still exists is not deleted — it may be
+// rebooting, mid-join, or merely flapping. Deletion must only happen when
+// Contabo confirms the instance is completely gone.
+func TestSweepOrphans_NotReadyNodeWithLiveContaboInstanceIsKept(t *testing.T) {
+	node := notReadyElasticNode("fuzeinfra-elastic-918c8556")
+	inst := contabo.Instance{ID: 999, Name: "fuzeinfra-elastic-918c8556", Status: "running"}
+	fc := &fakeContabo{instances: []contabo.Instance{inst}}
+	k8s := k8sfake.NewSimpleClientset(node)
+
+	r := &Reaper{Contabo: fc, K8s: k8s, Cfg: DefaultConfig(), Now: time.Now}
+
+	summary, err := r.SweepOrphans(context.Background())
+	if err != nil {
+		t.Fatalf("SweepOrphans returned error: %v", err)
+	}
+	if summary.Deleted != 0 || summary.Kept != 1 {
+		t.Fatalf("summary = %+v, want Deleted=0 Kept=1 when Contabo instance still exists", summary)
+	}
+	if _, getErr := k8s.CoreV1().Nodes().Get(context.Background(), "fuzeinfra-elastic-918c8556", metav1.GetOptions{}); getErr != nil {
+		t.Fatalf("node with live Contabo instance must NOT be deleted, but Get returned: %v", getErr)
+	}
+}
+
+// TestSweepOrphans_MultipleOrphansAllDeleted verifies that when there are
+// several zombie nodes (as in the Aug 2026 incident: 5 orphaned nodes after
+// elastic fleet billing expired), all are deleted in a single sweep pass.
+func TestSweepOrphans_MultipleOrphansAllDeleted(t *testing.T) {
+	names := []string{
+		"fuzeinfra-elastic-0",
+		"fuzeinfra-elastic-57543f68",
+		"fuzeinfra-elastic-5bb066d5",
+		"fuzeinfra-elastic-79c10ab3",
+		"fuzeinfra-elastic-918c8556",
+	}
+	var objs []interface{}
+	for _, n := range names {
+		node := notReadyElasticNode(n)
+		objs = append(objs, node)
+	}
+	objs = append(objs, readyElasticNode("fuzeinfra-ci-runner-1")) // must survive
+
+	fc := &fakeContabo{instances: []contabo.Instance{}}
+	k8s := k8sfake.NewSimpleClientset()
+	for _, o := range objs {
+		if n, ok := o.(*corev1.Node); ok {
+			if _, err := k8s.CoreV1().Nodes().Create(context.Background(), n, metav1.CreateOptions{}); err != nil {
+				t.Fatalf("setup: create node: %v", err)
+			}
+		}
+	}
+
+	r := &Reaper{Contabo: fc, K8s: k8s, Cfg: DefaultConfig(), Now: time.Now}
+
+	summary, err := r.SweepOrphans(context.Background())
+	if err != nil {
+		t.Fatalf("SweepOrphans returned error: %v", err)
+	}
+	if summary.Deleted != 5 || summary.Kept != 1 || summary.Errors != 0 {
+		t.Fatalf("summary = %+v, want Deleted=5 Kept=1 Errors=0", summary)
+	}
+	// Verify zombies are gone.
+	for _, n := range names {
+		if _, getErr := k8s.CoreV1().Nodes().Get(context.Background(), n, metav1.GetOptions{}); getErr == nil {
+			t.Errorf("zombie node %q should have been deleted but still exists", n)
+		}
+	}
+	// Verify the Ready (CI) node survived.
+	if _, getErr := k8s.CoreV1().Nodes().Get(context.Background(), "fuzeinfra-ci-runner-1", metav1.GetOptions{}); getErr != nil {
+		t.Fatalf("Ready CI node should NOT have been deleted: %v", getErr)
+	}
+}
+
+// TestSweepOrphans_RunIntegration verifies that Run() calls SweepOrphans and
+// reports orphan counts in the summary.
+func TestSweepOrphans_RunIntegration(t *testing.T) {
+	zombie := notReadyElasticNode("fuzeinfra-elastic-dead")
+	fc := &fakeContabo{instances: []contabo.Instance{}}
+	k8s := k8sfake.NewSimpleClientset(zombie)
+
+	r := &Reaper{
+		Contabo: fc,
+		K8s:     k8s,
+		Cfg:     Config{ReleaseWindow: testReleaseWindow, BillingPeriod: testBillingPeriod, ElasticTag: "fuzeinfra-elastic", EvictionTimeout: 5 * time.Second},
+		Now:     time.Now,
+	}
+
+	summary, err := r.Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	if summary.OrphansDeleted != 1 || summary.OrphanErrors != 0 {
+		t.Fatalf("summary.OrphansDeleted = %d, OrphanErrors = %d; want 1, 0", summary.OrphansDeleted, summary.OrphanErrors)
+	}
+}
+
 func TestRun_ListByTagErrorPropagates(t *testing.T) {
 	fc := &fakeContabo{listErr: errors.New("contabo API down")}
 	k8s := k8sfake.NewSimpleClientset()
