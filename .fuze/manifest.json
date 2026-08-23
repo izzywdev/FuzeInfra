@@ -62,6 +62,24 @@
   },
   "dependsOn": [],
   "providesTo": [],
+  "mcp": {
+    "enabled": true,
+    "transport": "streamable-http",
+    "entryServer": "handoff-mcp",
+    "servers": [
+      {
+        "name": "handoff-mcp",
+        "transport": "streamable-http",
+        "entry": "agent-templates/orchestration/handoff_mcp/server.py",
+        "image": "ghcr.io/izzywdev/fuzeinfra/agent-handoff",
+        "deployment": "helm/fuzeinfra/templates/handoff-mcp.yaml",
+        "endpoints": {
+          "mcp": "/mcp"
+        }
+      }
+    ],
+    "note": "ADDED 2026-08-23. This block did not exist, and its absence read to mcp-maintain's preflight exactly like enabled:false — a skip, reported green, about a surface that has been serving in production. FuzeInfra runs the handoff MCP server: agent-templates/orchestration/handoff_mcp/server.py (FastMCP, 7 @mcp.tool functions: spawn_agent, resume_session, ask_agent, approve, memory_write, memory_read, reach_human), built as ghcr.io/izzywdev/fuzeinfra/agent-handoff and deployed by helm/fuzeinfra/templates/handoff-mcp.yaml as the `handoff-mcp` Deployment + Service (:8000) + Ingress on mcp-handoff.<domain>. helm/fuzeinfra/values-contabo.yaml sets handoffMcp.enabled:true, and the pod was observed Running in production on 2026-08-21 (cluster-query run 32475207623). NOT THE GATEWAY DIALECT, and deliberately so: this is NOT the shared OpenAPI->MCP gateway. It is FuzeInfra's own hand-written server with its own image, it projects no OpenAPI document, and there is no contracts/openapi.yaml in this repo for a gateway to project — so it carries `entry` (the server code) plus `image`/`deployment`/`endpoints`, and no `spec`/`overrides`/`implementation`. Transport is streamable-HTTP (server.py builds mcp.streamable_http_app() behind uvicorn and a HANDOFF_MCP_TOKEN bearer middleware), NOT stdio: the module docstring's `python server.py` line is the same process, served over HTTP. `enabled:true` MIRRORS THE HELM GATE — IT IS NOT A CLAIM THAT THE SERVICE WORKS. values-contabo.yaml itself spells out that it does not, end to end: helm/fuzeinfra/files/handoff-state/*.json are still `{}` placeholders because the Provision Managed Agents workflow fails on Anthropic credit (run 32322608863), so the server starts, serves, and fails every tool call with \"unknown role\"; and the Cloudflare Access bypass in front of mcp-handoff.prod.fuzefront.com may still 302 machine callers into an email-OTP login. A surface that is real, reachable and broken is precisely what this manifest must stop hiding. WHY THE PREFLIGHT NOW GOES RED, and why that is the point: mcp-maintain's preflight keys off exactly this `enabled` flag, so an absent block made the check SKIP and report green. With enabled:true it runs and fails for want of LITELLM_FUZE_KEY. That red is the true state of an unmaintained live surface, NOT a regression; automated key provisioning is in flight. `toolCount`/`irreversibleTools` are not declared because nothing here enumerated the surface from a running server; mcp-maintainer fills them in from a real run. Note that spawn_agent, reach_human and memory_write are all externally-visible or irreversible on their face and will need explicit classification."
+  },
   "a2a": {
     "enabled": false,
     "servingRoles": [
