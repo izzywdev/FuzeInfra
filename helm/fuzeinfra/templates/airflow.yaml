@@ -24,8 +24,13 @@ referenced via $(VAR) interpolation to build the SQLAlchemy/Celery URLs.
 - name: AIRFLOW__CORE__FERNET_KEY
   valueFrom:
     secretKeyRef:
+      {{- with .Values.credentials.airflow.fernetKeySecret }}
+      name: {{ .name }}
+      key: {{ .key }}
+      {{- else }}
       name: {{ include "fuzeinfra.secretName" . }}
       key: AIRFLOW_FERNET_KEY
+      {{- end }}
 - name: AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION
   value: "true"
 - name: AIRFLOW__CORE__LOAD_EXAMPLES

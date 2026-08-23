@@ -58,9 +58,17 @@ credentials:
   airflow:
     adminUser: admin
     adminPassword: admin
-    # Fernet key for Airflow connection encryption. Generate a real one with:
+    # LOCAL DEV ONLY — never use this placeholder in any real environment.
+    # For prod/staging: set fernetKeySecret (below) pointing at a SealedSecret
+    # and leave fernetKey as the empty string so secrets.yaml omits the key entirely.
+    # Generate a real key:
     #   python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
     fernetKey: "Zp9p8x0Q3y0sJpQ8m2nq3l4F6tH9wXyZ1aB2cD3eF4="
+    # When set, AIRFLOW__CORE__FERNET_KEY is sourced from this Secret instead
+    # of fuzeinfra-secrets.  Set in prod via values-contabo.yaml + SealedSecret.
+    fernetKeySecret: {}
+    #  name: fuzeinfra-app-credentials
+    #  key: AIRFLOW_FERNET_KEY
   cloudflare:
     # Tunnel token from the Cloudflare Zero Trust dashboard. Required only when
     # cloudflareTunnel.enabled=true. Prefer supplying via an existing Secret.
