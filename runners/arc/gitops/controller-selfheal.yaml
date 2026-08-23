@@ -16,12 +16,12 @@
 #   2. CI NODE LOST ITS POOL LABEL (2026-07-27) — runner pods hard-select
 #      `fuzeinfra.io/pool: ci` (runners/arc/runner-scale-set-values.yaml), and
 #      the node label is set by k3s `--node-label` at AGENT REGISTRATION ONLY
-#      (modules/contabo-k3s-node/cloud-init.tftpl). A manual `kubectl label`
-#      therefore sticks permanently and Terraform never reconciles it — all 8
-#      scale sets sat Pending for 11h. A controller restart CANNOT fix this, so
-#      the script detects it, emits CRIT (routed to this repo by the
-#      fuzeinfra.io/owner-repo namespace annotation — docs/crit-log-autofix.md)
-#      and deliberately SKIPS the restart.
+#      (modules/contabo-k3s-node/cloud-init.tftpl). All 8 scale sets sat Pending
+#      for 11h. A controller restart CANNOT fix this. The watchdog now auto-
+#      repairs the label + taint on any node in CI_NODES when the label is absent,
+#      then emits CRIT (routed by the fuzeinfra.io/owner-repo ns annotation —
+#      docs/crit-log-autofix.md) and SKIPS the controller restart (the next run
+#      will see the node and can restart if needed).
 #
 #   3. ONE SCALE SET'S LISTENER WEDGED ON A DEAD NODE (2026-08-02) — each scale
 #      set has its own per-repo AutoscalingListener Pod in arc-systems
@@ -57,8 +57,10 @@ kind: ClusterRole
 metadata: {name: arc-selfheal}
 rules:
   - {apiGroups: ["actions.github.com"], resources: ["ephemeralrunners"], verbs: ["get","list"]}
-  # Read-only node access for the pool-label check (check 1).
-  - {apiGroups: [""], resources: ["nodes"], verbs: ["get","list"]}
+  # Node patch access for check 1: auto-repair missing fuzeinfra.io/pool=ci label
+  # and the fuzeinfra.io/ci=true:NoSchedule taint when they are absent from the
+  # expected CI node(s). CRIT is still emitted so the incident is visible in logs.
+  - {apiGroups: [""], resources: ["nodes"], verbs: ["get","list","patch"]}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -132,14 +134,42 @@ spec:
                   crit=0
 
                   # ---- check 1: a schedulable node carries fuzeinfra.io/pool=ci ----
+                  # CI_NODES: nodes that SHOULD carry the label. k3s applies --node-label
+                  # only at agent registration and Terraform never reconciles it, so the
+                  # label can go missing after a VLAN cutover / node reinstall. This list
+                  # stays in sync with runners/arc/runner-scale-set-values.yaml (which pins
+                  # the scale sets to fuzeinfra.io/pool: ci via nodeSelector). Add a space-
+                  # separated entry if a second durable CI node is ever enrolled.
+                  CI_NODES="fuzeinfra-ci-runner-1"
+
                   nodes=$(kubectl get nodes -l fuzeinfra.io/pool=ci \
                     -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.spec.unschedulable}{"\n"}{end}' 2>/dev/null)
                   total=$(printf '%s\n' "$nodes" | awk 'NF' | wc -l | tr -d ' ')
                   sched=$(printf '%s\n' "$nodes" | awk 'NF && $2!="true"' | wc -l | tr -d ' ')
 
                   if [ "$total" -eq 0 ]; then
-                    echo "CRIT ARC ci-pool: no node carries the label fuzeinfra.io/pool=ci, so every runner pod will stay Pending forever. k3s applies --node-label only at agent registration, so Terraform will NOT reconcile this - relabel by hand: kubectl label node <ci-node> fuzeinfra.io/pool=ci --overwrite"
+                    echo "CRIT ARC ci-pool: no node carries fuzeinfra.io/pool=ci — attempting auto-repair on: $CI_NODES"
                     crit=1
+                    for _node in $CI_NODES; do
+                      if kubectl get node "$_node" >/dev/null 2>&1; then
+                        # Restore the pool label
+                        if kubectl label node "$_node" fuzeinfra.io/pool=ci --overwrite 2>/dev/null; then
+                          echo "AUTO-FIXED label: kubectl label node $_node fuzeinfra.io/pool=ci --overwrite"
+                        else
+                          echo "WARN: could not label node $_node — may need manual: kubectl label node $_node fuzeinfra.io/pool=ci --overwrite"
+                        fi
+                        # Restore the CI taint (NoSchedule keeps non-CI workloads off this node)
+                        if ! kubectl get node "$_node" -o jsonpath='{.spec.taints}' 2>/dev/null | grep -q 'fuzeinfra.io/ci'; then
+                          if kubectl taint node "$_node" fuzeinfra.io/ci=true:NoSchedule --overwrite 2>/dev/null; then
+                            echo "AUTO-FIXED taint: kubectl taint node $_node fuzeinfra.io/ci=true:NoSchedule --overwrite"
+                          else
+                            echo "WARN: could not taint node $_node — may need manual: kubectl taint node $_node fuzeinfra.io/ci=true:NoSchedule --overwrite"
+                          fi
+                        fi
+                      else
+                        echo "WARN: expected CI node $_node not found in cluster — cannot auto-repair"
+                      fi
+                    done
                   elif [ "$sched" -eq 0 ]; then
                     echo "CRIT ARC ci-pool: all $total node(s) labelled fuzeinfra.io/pool=ci are cordoned; runner pods cannot schedule. Uncordon one or add CI capacity."
                     crit=1
@@ -157,9 +187,9 @@ spec:
                   if [ "$pend" -gt 0 ] && [ "$run" -eq 0 ]; then
                     if [ "$crit" -eq 1 ]; then
                       # Restarting the controller cannot schedule a pod onto a pool
-                      # with no schedulable node; doing it anyway would mask the real
-                      # cause behind 15-minutely controller churn.
-                      echo "runners stuck, but the CI pool above is the cause - NOT restarting the controller"
+                      # with no schedulable node; the label auto-repair above already
+                      # fired, so the next cron run will see the node and try a restart.
+                      echo "runners stuck, but the CI pool above is the cause - NOT restarting the controller (auto-repair attempted above)"
                     else
                       echo "STUCK detected -> restarting ARC controller"
                       kubectl -n arc-systems rollout restart deployment/arc-controller-gha-rs-controller
