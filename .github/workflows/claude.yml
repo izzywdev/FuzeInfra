@@ -23,8 +23,9 @@ name: Claude (DISABLED — replaced by fuze.yml)
 # SECURITY: because it now holds prod cluster creds + a PAT, the job is gated to
 # TRUSTED authors only (author_association in OWNER/MEMBER/COLLABORATOR). An
 # untrusted user commenting "@claude" must NOT be able to drive cluster ops.
-on: {}
-# Triggers disabled — replaced by fuze.yml. Restore the block below to re-enable:
+on:
+  workflow_dispatch:  # Manual-only. Effectively disabled — all automated triggers replaced by fuze.yml.
+# To re-enable automated triggers, restore the block below (and remove the workflow_dispatch line):
 # on:
 #   issue_comment:
 #     types: [created]
