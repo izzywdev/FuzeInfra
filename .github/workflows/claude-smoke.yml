@@ -1,6 +1,6 @@
-name: Claude handler smoke check
+name: Fuze handler smoke check
 
-# Guardrail #4 (issue #169): proves the @claude handler still does REAL work.
+# Guardrail #4 (issue #169): proves the @fuze handler still does REAL work.
 # The #169 breakage (bad action SHA → e2e suite ran → "Claude finished ... in 0s",
 # no branch, compare 404) passed every static check — only *exercising* the handler
 # catches it. Run on a schedule + manually.
@@ -10,7 +10,7 @@ on:
   workflow_dispatch:
     inputs:
       issue_number:
-        description: "Sandbox issue number to mention @claude on"
+        description: "Sandbox issue number to mention @fuze on"
         required: true
         default: "171"          # issue #171 = dedicated claude-smoke sandbox issue
 
@@ -21,7 +21,7 @@ jobs:
   smoke:
     runs-on: ubuntu-latest
     steps:
-      - name: Post @claude mention
+      - name: Post @fuze mention
         id: post
         env:
           # Must use GH_TOKEN (admin PAT, posts as izzywdev/OWNER), NOT GITHUB_TOKEN.
@@ -31,7 +31,7 @@ jobs:
           ISSUE: ${{ github.event.inputs.issue_number || '171' }}
           REPO: ${{ github.repository }}
         run: |
-          BODY="@claude smoke check — please reply 'ack' with a one-line status. (run ${{ github.run_id }})"
+          BODY="@fuze smoke check — please reply 'ack' with a one-line status. (run ${{ github.run_id }})"
           gh api "repos/$REPO/issues/$ISSUE/comments" -f body="$BODY" --jq .id > mention_id.txt
           echo "since=$(date -u +%FT%TZ)" >> "$GITHUB_OUTPUT"
 
@@ -46,9 +46,9 @@ jobs:
           SINCE: ${{ steps.post.outputs.since }}
         run: |
           set -euo pipefail
-          # Grab comments authored by the bot after we posted the mention.
+          # Grab any comment posted after we posted the mention (fuze.yml posts as the PAT user).
           REPLY=$(gh api "repos/$REPO/issues/$ISSUE/comments" \
-            --jq "[.[] | select(.created_at > \"$SINCE\") | select(.user.login|test(\"claude|github-actions\")) | .body] | last // \"\"")
+            --jq "[.[] | select(.created_at > \"$SINCE\")] | last | .body // \"\"")
           echo "Handler reply: $REPLY"
           if [ -z "$REPLY" ]; then
             echo "::error::No handler reply within the wait window — handler may be broken (0s regression)."; exit 1
