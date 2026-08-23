@@ -1,4 +1,4 @@
-# Argo CD AppProject for the FuzeAgent consumer — OWNED BY FuzeInfra.
+# Argo CD AppProject for the FuzeSocial consumer — OWNED BY FuzeInfra.
 #
 # ISOLATION BOUNDARY (FuzeInfra#99): consumer apps must NOT be able to deploy into
 # FuzeInfra's own `fuzeinfra` namespace. A consumer that grants itself the
@@ -9,23 +9,24 @@
 # GOVERNANCE RULE: FuzeInfra owns AppProjects (the destination/security boundary);
 # consumers only create Applications WITHIN their assigned, restricted project.
 # Consumers consume FuzeInfra services via in-cluster service DNS (cross-namespace
-# networking) — that needs NO Argo destination into `fuzeinfra`. FuzeAgent is
-# additionally self-contained (namespaced pgvector-Postgres/RabbitMQ/Redis).
+# networking) — that needs NO Argo destination into `fuzeinfra`.
+#
+# NOTE: FuzeSocial previously self-managed its AppProject (no FuzeInfra counterpart).
+# This file closes that gap per the governance model. The consumer-side project.yaml
+# should be removed from the FuzeSocial repo — it will be overwritten by
+# argocd-register if not filtered (see .github/workflows/argocd-register.yml).
 apiVersion: argoproj.io/v1alpha1
 kind: AppProject
 metadata:
-  name: fuzeagent
+  name: fuzesocial
   namespace: argocd
 spec:
-  description: FuzeAgent product (consumer of FuzeInfra) — may deploy ONLY into its own namespace.
+  description: FuzeSocial product (consumer of FuzeInfra) — may deploy ONLY into its own namespace.
   sourceRepos:
-    - https://github.com/izzywdev/FuzeAgent.git
+    - https://github.com/izzywdev/FuzeSocial.git
   destinations:
     # The product's workloads.
-    - namespace: fuzeagent
-      server: https://kubernetes.default.svc
-    # The app-of-apps creates child Application objects here.
-    - namespace: argocd
+    - namespace: fuzesocial
       server: https://kubernetes.default.svc
     # NOTE: `fuzeinfra` is deliberately NOT a destination — that is FuzeInfra's
     # namespace. A consumer that needs an infra service consumes it via DNS, it
