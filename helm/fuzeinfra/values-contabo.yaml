@@ -286,6 +286,14 @@ airflow:
   adminPasswordSecret:
     name: fuzeinfra-app-credentials
     key: AIRFLOW_ADMIN_PASSWORD
+  # Real Fernet key for connection-credential encryption. A human operator must:
+  #   1. python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+  #   2. seal it: scripts/seal-secret.sh fuzeinfra fuzeinfra-app-credentials AIRFLOW_FERNET_KEY <value>
+  #   3. commit deploy/sealed-secrets/fuzeinfra-app-credentials.yaml (or whichever SealedSecret holds it)
+  # After any key rotation: airflow connections rotate-fernet-key (if connections exist)
+  fernetKeySecret:
+    name: fuzeinfra-app-credentials
+    key: AIRFLOW_FERNET_KEY
   # Authentik SSO for the Airflow UI.
   #
   # DELIBERATELY STILL FALSE, for two independent reasons — either one alone is

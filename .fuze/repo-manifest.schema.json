@@ -231,8 +231,12 @@
     "platformAuth": {
       "type": "object",
       "additionalProperties": false,
-      "description": "NEW BLOCK \u2014 no repo declares it yet, and that is the point: it gates the platform-auth capability. Consume @fuzefront/auth (published as @izzywdev/fuzefront-auth) rather than a bespoke verifier. A product NEVER calls Permit directly; it knows exactly one thing, the base URL of FuzeFront's Security API.",
+      "description": "NEW BLOCK. Consume @fuzefront/auth (published as @izzywdev/fuzefront-auth) rather than a bespoke verifier. A product NEVER calls Permit directly; it knows exactly one thing, the base URL of FuzeFront's Security API. gate-platform-auth ENFORCES BY DEFAULT \u2014 this block is how a repo opts OUT, not how it opts in.",
       "properties": {
+        "enforce": {
+          "type": "boolean",
+          "description": "Ratchet for gate-platform-auth, and it is OPT-OUT: absent means ENFORCING. Set false only to silence the gate while a repo migrates, and only together with `reason` \u2014 an `enforce: false` with no reason is ignored and the gate enforces anyway, because an undocumented opt-out is indistinguishable from an oversight. The earlier opt-in shape was chosen to avoid redding the fleet on pre-existing violations, but that is how gate-identifier reached zero adoption across 21 repos: a check nobody enabled is indistinguishable from a check that does not exist. What actually prevents a `|| true` is visibility, not coldness \u2014 an `enforce: false` naming a repo and a reason is greppable and countable; `|| true` in a workflow is neither."
+        },
         "mode": {
           "enum": [
             "federated-jwks",
@@ -251,6 +255,10 @@
         },
         "note": {
           "type": "string"
+        },
+        "reason": {
+          "type": "string",
+          "description": "REQUIRED when enforce is false. What blocks adoption and who owns closing it. This is the whole cost of the escape hatch: the opt-out must read as debt someone wrote down, not as a setting someone left alone."
         }
       }
     },
