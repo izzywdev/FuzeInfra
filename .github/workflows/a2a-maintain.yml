@@ -97,7 +97,7 @@ jobs:
     if: >-
       ${{ !startsWith(github.event.pull_request.head.ref, 'a2a-maintain/')
           && github.event.pull_request.head.repo.full_name == github.repository }}
-    runs-on: ubuntu-latest
+    runs-on: staging
     steps:
       - name: Skip if gateway key absent
         id: guard
