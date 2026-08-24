@@ -675,6 +675,36 @@
         }
       }
     },
+    "dataTier": {
+      "type": "array",
+      "description": "Declarative data-tier provisioning request (the IaC hand-off to FuzeInfra). FuzeInfra's reconciler consumes each entry: it ensures the per-service role exists AND is GRANTED the declared privileges on the declared database, then VERIFIES the role can actually read/write it (fail-loud if a role can auth but not access its DB). Replaces the old ad-hoc '@claude please provision' request (governance/shared-cluster-deploy.md §5). Every store the product's role authenticates to MUST be declared here, with the exact database name the app uses — a role granted on the wrong db name is the classic silent-empty-data bug.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["store", "database", "role"],
+        "properties": {
+          "store": { "enum": ["postgres", "mongo", "redis", "neo4j", "chroma"], "description": "Shared datastore this role needs access in." },
+          "database": { "type": "string", "description": "The exact database/keyspace name the app reads/writes (e.g. robot_catalog). The role MUST be granted on THIS name; provisioning verifies it." },
+          "role": { "type": "string", "description": "The per-service role/user (e.g. mendys)." },
+          "privileges": { "enum": ["readWrite", "read", "admin"], "default": "readWrite", "description": "Privilege level to grant the role on `database`." },
+          "authSource": { "type": "string", "description": "Mongo authSource db the role authenticates against (e.g. admin), when it differs from `database`." }
+        }
+      }
+    },
+    "egress": {
+      "type": "array",
+      "description": "External hosts the product's pods need outbound HTTPS to. The shared cluster is egress-restricted (HTTP-only behind the Cloudflare tunnel; no default outbound to third-party APIs), so every external dependency MUST be declared here. FuzeInfra's reconciler turns these into namespace egress allow-rules (NetworkPolicy / egress gateway). Declare each third-party API explicitly (e.g. LLM providers).",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["host"],
+        "properties": {
+          "host": { "type": "string", "description": "FQDN, e.g. api.openai.com." },
+          "port": { "type": "integer", "default": 443, "description": "Destination port (default 443)." },
+          "reason": { "type": "string", "description": "Why the product needs it (e.g. 'AI keyword generation')." }
+        }
+      }
+    },
     "dependsOn": {
       "type": "array",
       "description": "Product-to-product dependencies this repo consumes beyond the spine (e.g. FuzeService dependsOn FuzeContact, FuzeBI).",
