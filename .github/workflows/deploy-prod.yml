@@ -56,13 +56,21 @@ jobs:
       - name: Helm lint (contabo values)
         run: helm lint helm/fuzeinfra -f helm/fuzeinfra/values-contabo.yaml
 
+      - name: Install kubeconform
+        run: |
+          if ! command -v kubeconform &>/dev/null; then
+            curl -sSLo /tmp/kubeconform.tar.gz \
+              https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz
+            tar -xzf /tmp/kubeconform.tar.gz -C /tmp
+            sudo install /tmp/kubeconform /usr/local/bin/kubeconform
+          fi
+
       - name: Helm template + kubeconform
         run: |
           helm template fuzeinfra helm/fuzeinfra \
             -f helm/fuzeinfra/values-contabo.yaml \
             --namespace fuzeinfra \
-            | kubeconform -strict -ignore-missing-schemas || true
-        continue-on-error: true   # kubeconform may not be pre-installed; lint above is the gate
+            | kubeconform -strict -ignore-missing-schemas
 
       # Trigger an immediate ArgoCD sync via kubectl patch.
       # Requires KUBE_CONFIG secret (set by `terraform apply` in terraform/contabo/).
