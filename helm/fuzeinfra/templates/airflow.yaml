@@ -24,8 +24,13 @@ referenced via $(VAR) interpolation to build the SQLAlchemy/Celery URLs.
 - name: AIRFLOW__CORE__FERNET_KEY
   valueFrom:
     secretKeyRef:
+      {{- with .Values.credentials.airflow.fernetKeySecret }}
+      name: {{ .name }}
+      key: {{ .key }}
+      {{- else }}
       name: {{ include "fuzeinfra.secretName" . }}
       key: AIRFLOW_FERNET_KEY
+      {{- end }}
 - name: AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION
   value: "true"
 - name: AIRFLOW__CORE__LOAD_EXAMPLES
@@ -133,11 +138,23 @@ spec:
             secretKeyRef:
               name: {{ include "fuzeinfra.secretName" . }}
               key: AIRFLOW_ADMIN_USER
+        # Chart default for this is the literal "admin". See the rabbitmq note in
+        # messaging.yaml for why this uses a dedicated Secret.
+        #
+        # CAVEAT: the init below runs `airflow users create ... || true`, which
+        # silently succeeds when the user already exists. So changing this does
+        # NOT rotate an existing admin — that needs `airflow users reset-password`
+        # or a fresh metadata DB. It does set a strong password on first init.
         - name: AIRFLOW_ADMIN_PASSWORD
           valueFrom:
             secretKeyRef:
+              {{- with .Values.airflow.adminPasswordSecret }}
+              name: {{ .name | default (include "fuzeinfra.secretName" $) }}
+              key: {{ .key | default "AIRFLOW_ADMIN_PASSWORD" }}
+              {{- else }}
               name: {{ include "fuzeinfra.secretName" . }}
               key: AIRFLOW_ADMIN_PASSWORD
+              {{- end }}
       command:
         - bash
         - -c
@@ -177,8 +194,89 @@ spec:
 {{- end -}}
 
 {{- if .Values.airflow.enabled }}
+{{- if .Values.airflow.oidc.enabled }}
+{{- /* ===================== Airflow webserver_config.py =====================
+  Flask-AppBuilder configuration for the webserver, mounted over the copy the
+  apache/airflow image ships at $AIRFLOW_HOME/webserver_config.py.
+
+  WHY A FILE AND NOT ENV VARS: FAB's auth settings (AUTH_TYPE, OAUTH_PROVIDERS,
+  AUTH_ROLES_MAPPING) are read from this Python module, not from AIRFLOW__*
+  environment variables. There is no env-var equivalent — the OAUTH_PROVIDERS
+  value is a list of dicts.
+
+  The client secret is deliberately NOT rendered here. This is a ConfigMap: its
+  contents are readable by anything with get on ConfigMaps in the namespace, and
+  it is committed-shaped output. The module reads it from the environment at
+  import time instead, and the env var comes from a secretKeyRef.
+*/ -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: fuzeinfra-airflow-webserver-config
+  labels:
+    {{- include "fuzeinfra.labels" . | nindent 4 }}
+data:
+  webserver_config.py: |
+    import os
+
+    from flask_appbuilder.const import AUTH_OAUTH
+
+    # Airflow's own default; kept because mounting this file replaces the
+    # image's copy wholesale rather than extending it.
+    basedir = os.path.abspath(os.path.dirname(__file__))
+    WTF_CSRF_ENABLED = True
+
+    AUTH_TYPE = AUTH_OAUTH
+
+    # Users are created on first successful login. Grafana needs the same thing
+    # for the same reason — there is no pre-provisioning step, so a login that
+    # cannot create its user simply fails.
+    AUTH_USER_REGISTRATION = True
+    AUTH_USER_REGISTRATION_ROLE = {{ .Values.airflow.oidc.registrationRole | default "Public" | quote }}
+
+    # Re-evaluate roles from the token on EVERY login, so removing someone from
+    # the group in Authentik actually demotes them. Without this a user keeps
+    # whatever role they were first granted, forever.
+    AUTH_ROLES_SYNC_AT_LOGIN = True
+
+    # Keys are matched against `role_keys`, which FAB's authentik branch fills
+    # from the `groups` claim of the ID token.
+    AUTH_ROLES_MAPPING = {
+        {{ .Values.airflow.oidc.adminGroup | quote }}: ["Admin"],
+    }
+
+    OAUTH_PROVIDERS = [
+        {
+            "name": {{ .Values.airflow.oidc.providerName | quote }},
+            "icon": "fa-key",
+            "token_key": "access_token",
+            "remote_app": {
+                "client_id": {{ .Values.airflow.oidc.clientId | quote }},
+                # Read from the environment, sourced from a Secret. Never
+                # rendered into this ConfigMap.
+                "client_secret": os.environ.get("AIRFLOW_OIDC_CLIENT_SECRET", ""),
+                # Authlib fetches this once and derives authorization_endpoint,
+                # token_endpoint and jwks_uri from it.
+                "server_metadata_url": "{{ .Values.airflow.oidc.issuer }}.well-known/openid-configuration",
+                "api_base_url": {{ .Values.airflow.oidc.issuer | quote }},
+                # `groups` is a custom scope on the Authentik provider. Without
+                # it the ID token carries no groups claim, AUTH_ROLES_MAPPING
+                # matches nothing, and every login lands on
+                # AUTH_USER_REGISTRATION_ROLE.
+                "client_kwargs": {"scope": "openid email profile groups"},
+            },
+        }
+    ]
+---
+{{- end }}
 {{- /* Example DAG shipped as a ConfigMap so the stack works out of the box.
-     For production, replace with git-sync or a baked image. */ -}}
+     For production, replace with git-sync or a baked image.
+
+     This comment closes without a trailing dash, deliberately. With one it
+     chomped the newline after the document separator above, so when oidc was
+     enabled the separator and the next document collapsed onto a single line and
+     helm lint rejected the file. The gate hid the bug: with oidc disabled that
+     separator is never emitted at all. */}}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -276,6 +374,15 @@ spec:
       {{- include "fuzeinfra.selectorLabels" (dict "component" "airflow-webserver" "root" $) | nindent 6 }}
   template:
     metadata:
+      {{- if .Values.airflow.oidc.enabled }}
+      annotations:
+        # Roll the pod whenever the OIDC wiring changes. webserver_config.py is
+        # imported once at gunicorn start; a ConfigMap edit alone changes
+        # nothing in the Deployment spec, so Argo would have no reason to
+        # restart the webserver and it would keep serving the old auth config.
+        # Same failure mode kafka-ui hit with its cached discovery document.
+        checksum/oidc: {{ .Values.airflow.oidc | toYaml | sha256sum }}
+      {{- end }}
       labels:
         {{- include "fuzeinfra.labels" . | nindent 8 }}
         {{- include "fuzeinfra.selectorLabels" (dict "component" "airflow-webserver" "root" $) | nindent 8 }}
@@ -294,12 +401,39 @@ spec:
             {{- include "fuzeinfra.airflowEnv" . | nindent 12 }}
             - name: AIRFLOW__WEBSERVER__EXPOSE_CONFIG
               value: "true"
+            {{- if .Values.airflow.oidc.enabled }}
+            # ---- Authentik SSO (Flask-AppBuilder AUTH_OAUTH) -----------------
+            # BASE_URL and ENABLE_PROXY_FIX are NOT optional here. Airflow sits
+            # behind the Cloudflare Tunnel -> Traefik, so the request reaching
+            # gunicorn is plain HTTP; without these, FAB builds the OAuth
+            # redirect_uri as http://... and Authentik's strict redirect_uri
+            # match rejects it. Setting BASE_URL alone is not enough — Flask
+            # still derives the external scheme from the request unless the
+            # X-Forwarded-* headers are trusted.
+            - name: AIRFLOW__WEBSERVER__BASE_URL
+              value: "https://{{ include "fuzeinfra.host" (dict "root" . "sub" "airflow") }}"
+            - name: AIRFLOW__WEBSERVER__ENABLE_PROXY_FIX
+              value: "true"
+            - name: AIRFLOW_OIDC_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.airflow.oidc.secretName }}
+                  key: {{ .Values.airflow.oidc.secretKey }}
+            {{- end }}
           ports:
             - containerPort: 8080
               name: http
           volumeMounts:
             - name: dags
               mountPath: /opt/airflow/dags
+            {{- if .Values.airflow.oidc.enabled }}
+            # subPath, so only this one file is replaced. A directory mount at
+            # /opt/airflow would shadow dags/, logs/ and the rest of AIRFLOW_HOME.
+            - name: webserver-config
+              mountPath: /opt/airflow/webserver_config.py
+              subPath: webserver_config.py
+              readOnly: true
+            {{- end }}
           readinessProbe:
             httpGet:
               path: /health
@@ -309,6 +443,11 @@ spec:
             failureThreshold: 12
       volumes:
         {{- include "fuzeinfra.dagVolumes" . | nindent 8 }}
+        {{- if .Values.airflow.oidc.enabled }}
+        - name: webserver-config
+          configMap:
+            name: fuzeinfra-airflow-webserver-config
+        {{- end }}
 ---
 {{- /* ===================== Airflow Scheduler ===================== */}}
 apiVersion: apps/v1

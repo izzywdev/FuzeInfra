@@ -222,7 +222,7 @@ jobs:
         # account-level outage (warn, stay green) from a real agent failure (red),
         # which the action itself cannot.
         continue-on-error: true
-        uses: anthropics/claude-code-action@6b082c41935b4c8a3b8b0ef85ba4ba4d9eeb8975  # v1
+        uses: anthropics/claude-code-action@9d7150bc8a3dae8149739a88019d192b579ad90c  # v1
         env:
           # LiteLLM authenticates `Authorization: Bearer`, so the key has to travel in
           # ANTHROPIC_AUTH_TOKEN — the action does not read that variable itself, which
@@ -233,6 +233,8 @@ jobs:
           ANTHROPIC_AUTH_TOKEN: ${{ secrets.LITELLM_CI_KEY || secrets.LITELLM_MASTER_KEY }}
         with:
           anthropic_api_key: ${{ secrets.LITELLM_CI_KEY || secrets.LITELLM_MASTER_KEY }}
+          # github_token bypasses the OIDC→App token exchange that fails on staging runners.
+          github_token: ${{ secrets.GH_TOKEN }}
           prompt: |
             You are the **a2a-maintainer** for this repo (follow `.claude/agents/a2a-maintainer.md`
             exactly — same scope, boundaries, and done-contract). This is an automated CI run on
@@ -325,6 +327,32 @@ jobs:
               echo "Note this is **not** a single-provider outage: the gateway fails over Anthropic →"
               echo "OpenAI → Gemini on its own, so reaching this message means the gateway itself is"
               echo "unreachable or every hop was exhausted."
+              echo ""
+              echo "**Until then the repo's A2A surface is not being checked for drift.**"
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          # Billing/budget errors from the provider are operator problems, not PR
+          # problems. Detect them explicitly and SKIP (green) so the PR is not
+          # blocked on something the author cannot fix. The retry_policy fix in
+          # helm/litellm/values.yaml should prevent these once Argo syncs after
+          # merge; until then, surface a loud warning rather than a red check.
+          if echo "${RESULT_MSG:-}" | grep -qiE 'credit balance|budget|billing|quota|insufficient funds|payment required'; then
+            echo "::warning::A2A maintain SKIPPED — provider billing/budget error detected. Top up the provider account or wait for the LiteLLM retry_policy fix to deploy. A2A drift is NOT being checked on this PR."
+            {
+              echo "### ⚠️ A2A maintain skipped — provider billing/budget error"
+              echo ""
+              echo "The LiteLLM gateway reached a provider that refused the request due to a"
+              echo "billing or budget limit. This is an **operator problem**, not a problem"
+              echo "with this PR."
+              echo ""
+              echo "\`\`\`"
+              echo "${RESULT_MSG:-no error message surfaced}"
+              echo "\`\`\`"
+              echo ""
+              echo "**Resolution:** top up the provider account, or wait for the"
+              echo "\`helm/litellm/values.yaml\` \`retry_policy.BadRequestErrorRetries\` fix"
+              echo "to deploy via Argo CD (it ships with the current PR)."
               echo ""
               echo "**Until then the repo's A2A surface is not being checked for drift.**"
             } >> "$GITHUB_STEP_SUMMARY"

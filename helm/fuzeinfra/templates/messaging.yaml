@@ -165,6 +165,72 @@ spec:
 
 {{- /* ===================== Kafka UI ===================== */ -}}
 {{- if and .Values.kafkaUi.enabled .Values.kafka.enabled }}
+{{- $kui := .Values.kafkaUi }}
+{{- /*
+  The cluster's display name. kafka-ui RBAC is cluster-scoped: every role except
+  an APPLICATIONCONFIG-only one is filtered by `clusters`, matched against this
+  exact string (AccessControlService#filterCluster at v0.7.2). If the role's
+  cluster list and KAFKA_CLUSTERS_0_NAME ever drift apart, every permission in
+  the role silently stops applying and admins are locked out. One variable, used
+  in both places, so they cannot drift.
+*/ -}}
+{{- $clusterName := "local" }}
+{{- $rbacEnabled := and $kui.oidc.enabled (dig "rbac" "enabled" false $kui.oidc) }}
+{{- $rbacMountDir := "/etc/kafka-ui/rbac" }}
+{{- $rbacConfig := "" }}
+{{- if $rbacEnabled }}
+{{- $rbac := $kui.oidc.rbac }}
+{{- /*
+  The `rbac.roles` document, built here rather than hand-written so the ConfigMap
+  and the pod's checksum annotation are provably the same bytes.
+
+  Shape is dictated by v0.7.2's model classes, NOT by the current upstream docs
+  (the project moved to kafbat/kafka-ui and its schema has since grown):
+    - Subject.provider  -> model/rbac/provider/Provider: OAUTH is the generic
+      OIDC provider, which is what AUTH_OAUTH2_CLIENT_AUTHENTIK_PROVIDER=oauth
+      selects.
+    - Subject.type      -> OauthAuthorityExtractor at v0.7.2 understands exactly
+      TWO types for the generic OAUTH provider: "user" (matched on the principal
+      name) and "role" (matched against the claim named by `roles-field`). There
+      is NO "group" subject type on this provider in this version, so an
+      Authentik GROUP is expressed as type: role over the `groups` claim.
+    - Permission.resource -> model/rbac/Resource: applicationconfig,
+      clusterconfig, topic, consumer, schema, connect, ksql, acl, audit.
+      "all" is expanded to every action of that resource by Permission#transform.
+    - Permission.value  -> required for every resource EXCEPT ksql,
+      clusterconfig, applicationconfig, acl and audit (Permission#validate throws
+      on startup otherwise). It is a REGEX, matched with Matcher#matches.
+*/ -}}
+{{- $rbacConfig = toYaml (dict "rbac" (dict "roles" (list (dict
+      "name" $rbac.adminRoleName
+      "clusters" (list $clusterName)
+      "subjects" (list (dict "provider" "oauth" "type" "role" "value" $rbac.adminGroup))
+      "permissions" (list
+        (dict "resource" "applicationconfig" "actions" (list "all"))
+        (dict "resource" "clusterconfig"     "actions" (list "all"))
+        (dict "resource" "topic"    "value" ".*" "actions" (list "all"))
+        (dict "resource" "consumer" "value" ".*" "actions" (list "all"))
+        (dict "resource" "schema"   "value" ".*" "actions" (list "all"))
+        (dict "resource" "connect"  "value" ".*" "actions" (list "all"))
+        (dict "resource" "ksql"  "actions" (list "all"))
+        (dict "resource" "acl"   "actions" (list "all"))
+        (dict "resource" "audit" "actions" (list "all"))
+      )
+    )))) }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: fuzeinfra-kafka-ui-rbac
+  labels:
+    {{- include "fuzeinfra.labels" . | nindent 4 }}
+data:
+  # Loaded as an ADDITIONAL Spring config location (see JAVA_OPTS below), which
+  # is layered on top of the image's own application.yml rather than replacing
+  # it. Contains no credentials — the client secret stays in the SealedSecret.
+  rbac.yaml: |
+{{ $rbacConfig | indent 4 }}
+{{- end }}
 ---
 apiVersion: v1
 kind: Service
@@ -194,6 +260,37 @@ spec:
       {{- include "fuzeinfra.selectorLabels" (dict "component" "kafka-ui" "root" $) | nindent 6 }}
   template:
     metadata:
+      {{- if .Values.kafkaUi.oidc.enabled }}
+      annotations:
+        # Roll the pod whenever the OIDC wiring changes.
+        #
+        # kafka-ui is Spring Security, which fetches the issuer's discovery
+        # document ONCE at startup and caches it for the life of the process. It
+        # therefore keeps using whatever endpoints it saw when it booted, even
+        # after the IdP starts advertising different ones — and nothing in this
+        # Deployment changes, so Argo has no reason to restart it.
+        #
+        # That is not hypothetical: after the IdP was fixed to advertise https://
+        # issuers instead of http://, Grafana recovered immediately (it is
+        # configured with explicit URLs, no discovery) while kafka-ui kept failing
+        # with "Invalid credentials" because it was still holding the stale http://
+        # endpoints from its previous start.
+        #
+        # Hashing the OIDC block means any future change to the issuer, client id
+        # or secret reference forces a fresh discovery fetch.
+        checksum/oidc: {{ .Values.kafkaUi.oidc | toYaml | sha256sum }}
+        {{- if $rbacEnabled }}
+        # Same reasoning, one layer down: the rbac.yaml ConfigMap is mounted as a
+        # file and read ONCE by Spring at startup. Kubernetes updates the mounted
+        # file in place and never restarts the pod for it, so a permission change
+        # committed to git would sync cleanly in Argo and have no effect on the
+        # running process — the failure mode this repo has been bitten by
+        # repeatedly. Hashing the RENDERED document (not the values block) means
+        # any change to the roles, the matched group or the cluster name rolls
+        # the pod.
+        checksum/rbac: {{ $rbacConfig | sha256sum }}
+        {{- end }}
+      {{- end }}
       labels:
         {{- include "fuzeinfra.labels" . | nindent 8 }}
         {{- include "fuzeinfra.selectorLabels" (dict "component" "kafka-ui" "root" $) | nindent 8 }}
@@ -204,7 +301,7 @@ spec:
           imagePullPolicy: {{ include "fuzeinfra.pullPolicy" . }}
           env:
             - name: KAFKA_CLUSTERS_0_NAME
-              value: "local"
+              value: {{ $clusterName | quote }}
             # KRaft mode: bootstrap servers only, no ZooKeeper.
             - name: KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS
               value: "fuzeinfra-kafka:9092"
@@ -217,10 +314,37 @@ spec:
             # DYNAMIC_CONFIG_ENABLED=true that is write-capable. Until this is
             # on, the Cloudflare Access wall is the ONLY thing gating it.
             #
+            {{- if $rbacEnabled }}
+            # Authorization is configured below (kafkaUi.oidc.rbac): only members
+            # of the Authentik admin group get a role, and kafka-ui denies
+            # everything to a user who matches no role.
+            {{- else }}
             # NOTE: kafka-ui has no role model configured here, so every user who
             # authenticates is a full admin. Authentication, not authorization.
+            # Set kafkaUi.oidc.rbac.enabled to change that.
+            {{- end }}
             - name: AUTH_TYPE
               value: "OAUTH2"
+            {{- if .Values.kafkaUi.oidc.debugLogging }}
+            # TEMPORARY DIAGNOSTIC — turn back off once the issue is understood.
+            #
+            # kafka-ui is Spring Security, which reports every OAuth2 failure to
+            # the user as the same opaque "Invalid credentials" regardless of
+            # cause: bad client secret, unreachable token endpoint, issuer
+            # mismatch, rejected scope. The real reason is only in the pod log,
+            # and only if this logger is raised.
+            #
+            # DEBUG, NOT TRACE, deliberately. TRACE on the oauth2 packages logs
+            # full token and client-credential values into the pod log — and pod
+            # logs ARE readable through the cluster-query workflow, whose job
+            # output is public. DEBUG carries the exception and the failing
+            # endpoint without the credential. Do not raise this to TRACE to get
+            # "a bit more detail"; that turns a diagnostic into a secret leak.
+            - name: LOGGING_LEVEL_ORG_SPRINGFRAMEWORK_SECURITY_OAUTH2_CLIENT
+              value: "DEBUG"
+            - name: LOGGING_LEVEL_ORG_SPRINGFRAMEWORK_SECURITY_WEB
+              value: "DEBUG"
+            {{- end }}
             - name: AUTH_OAUTH2_CLIENT_AUTHENTIK_CLIENTNAME
               value: {{ .Values.kafkaUi.oidc.displayName | quote }}
             - name: AUTH_OAUTH2_CLIENT_AUTHENTIK_PROVIDER
@@ -234,8 +358,47 @@ spec:
                   key: {{ .Values.kafkaUi.oidc.secretKey }}
             - name: AUTH_OAUTH2_CLIENT_AUTHENTIK_ISSUERURI
               value: {{ .Values.kafkaUi.oidc.issuer | quote }}
+            # Granting `groups` on the Authentik provider is NOT enough — the
+            # client has to request it. This list is what kafka-ui sends as
+            # `scope` on the authorization request; anything not in it is not in
+            # the token no matter what the provider is willing to release.
             - name: AUTH_OAUTH2_CLIENT_AUTHENTIK_SCOPE
-              value: "openid,email,profile"
+              value: {{ join "," (dig "scopes" (list "openid" "email" "profile" "groups") $kui.oidc) | quote }}
+            {{- if $rbacEnabled }}
+            # Two Spring properties that cannot be expressed as ordinary env vars
+            # and are therefore passed as JVM system properties. The image's CMD
+            # is `java ... $JAVA_OPTS -jar kafka-ui-api.jar`, so JAVA_OPTS is the
+            # supported injection point.
+            #
+            # Why not env vars: both canonical property names contain hyphens
+            # inside a path segment (`additional-location`, `custom-params`,
+            # `roles-field`). Spring can recover those from an env var only via
+            # relaxed-binding name reconstruction, and upstream's documented form
+            # (AUTH_OAUTH2_CLIENT_<ID>_CUSTOM-PARAMS_ROLES-FIELD) relies on a
+            # literal hyphen surviving the container runtime. A `-D` is the exact
+            # property name with no reconstruction step.
+            #
+            # This matters because one of the two fails OPEN. If the roles file
+            # never loads, `rbac.roles` is empty, and v0.7.2 enables RBAC purely
+            # by observing that the list is non-empty (AccessControlService#init)
+            # — an unloaded file means RBAC quietly switches itself off and every
+            # authenticated user is a full admin again, which is precisely the
+            # state this config exists to end. With `-D` a missing file is a
+            # startup failure instead: loud, and visible in the readiness probe.
+            #
+            # `roles-field` is what makes the extractor applicable at all:
+            # OauthAuthorityExtractor#isApplicable returns false when the custom
+            # param is absent, so without it no groups are ever extracted.
+            #
+            # The `authentik` segment is the OAuth2 registration id and must stay
+            # identical to the AUTH_OAUTH2_CLIENT_AUTHENTIK_ prefix above and to
+            # the /login/oauth2/code/authentik redirect path below; a mismatch
+            # attaches the param to a client registration that does not exist.
+            - name: JAVA_OPTS
+              value: >-
+                -Dspring.config.additional-location=file:{{ $rbacMountDir }}/rbac.yaml
+                -Dauth.oauth2.client.authentik.custom-params.roles-field={{ $kui.oidc.rbac.rolesClaim }}
+            {{- end }}
             # Must match a redirect_uri on the Authentik provider exactly. The
             # trailing path segment is the registration id ("authentik"), which
             # is derived from the AUTH_OAUTH2_CLIENT_<ID>_ prefix above.
@@ -252,6 +415,22 @@ spec:
             initialDelaySeconds: 20
             periodSeconds: 15
             failureThreshold: 10
+          {{- if $rbacEnabled }}
+          volumeMounts:
+            - name: rbac-config
+              mountPath: {{ $rbacMountDir }}
+              readOnly: true
+          {{- end }}
+      {{- if $rbacEnabled }}
+      volumes:
+        # Deliberately NOT /etc/kafkaui. That directory is created writable by
+        # the image for dynamic config (uploaded certificates, DYNAMIC_CONFIG's
+        # own persisted file); mounting a read-only ConfigMap over it would break
+        # the feature this RBAC model exists to constrain.
+        - name: rbac-config
+          configMap:
+            name: fuzeinfra-kafka-ui-rbac
+      {{- end }}
 {{- end }}
 
 {{- /* ===================== RabbitMQ ===================== */ -}}
@@ -305,11 +484,25 @@ spec:
                 secretKeyRef:
                   name: {{ include "fuzeinfra.secretName" . }}
                   key: RABBITMQ_USER
+            # Chart default for this is the literal "admin123". Override with a
+            # dedicated Secret rather than resealing fuzeinfra-secrets, which also
+            # carries the live Postgres/Mongo/Neo4j credentials.
+            #
+            # CAVEAT, because this is easy to get wrong: RABBITMQ_DEFAULT_PASS is
+            # only honoured on FIRST boot against an empty mnesia. Pointing this at
+            # a new Secret does NOT rotate an existing broker's user — that needs
+            # `rabbitmqctl change_password` or a wiped volume. It does guarantee a
+            # strong credential whenever the broker is initialised fresh.
             - name: RABBITMQ_DEFAULT_PASS
               valueFrom:
                 secretKeyRef:
+                  {{- with .Values.rabbitmq.passwordSecret }}
+                  name: {{ .name | default (include "fuzeinfra.secretName" $) }}
+                  key: {{ .key | default "RABBITMQ_PASSWORD" }}
+                  {{- else }}
                   name: {{ include "fuzeinfra.secretName" . }}
                   key: RABBITMQ_PASSWORD
+                  {{- end }}
           ports:
             - containerPort: 5672
               name: amqp

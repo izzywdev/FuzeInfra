@@ -78,7 +78,7 @@ spec:
           - name: runnerScaleSetName
             value: "staging"
           - name: maxRunners
-            value: "3"
+            value: "5"
           - name: minRunners
             value: "0"
     - repoURL: https://github.com/izzywdev/FuzeInfra.git
@@ -145,7 +145,7 @@ spec:
           - name: runnerScaleSetName
             value: "mendysrobotics"
           - name: maxRunners
-            value: "3"
+            value: "5"
           - name: minRunners
             value: "0"
     - repoURL: https://github.com/izzywdev/FuzeInfra.git
@@ -212,7 +212,7 @@ spec:
           - name: runnerScaleSetName
             value: "fuzehub"
           - name: maxRunners
-            value: "3"
+            value: "5"
           - name: minRunners
             value: "0"
     - repoURL: https://github.com/izzywdev/FuzeInfra.git
@@ -279,7 +279,7 @@ spec:
           - name: runnerScaleSetName
             value: "fuzesales"
           - name: maxRunners
-            value: "3"
+            value: "5"
           - name: minRunners
             value: "0"
     - repoURL: https://github.com/izzywdev/FuzeInfra.git
@@ -346,7 +346,7 @@ spec:
           - name: runnerScaleSetName
             value: "fuzesocial"
           - name: maxRunners
-            value: "3"
+            value: "5"
           - name: minRunners
             value: "0"
     - repoURL: https://github.com/izzywdev/FuzeInfra.git
@@ -413,7 +413,7 @@ spec:
           - name: runnerScaleSetName
             value: "fuzecontact"
           - name: maxRunners
-            value: "3"
+            value: "5"
           - name: minRunners
             value: "0"
     - repoURL: https://github.com/izzywdev/FuzeInfra.git
@@ -480,7 +480,7 @@ spec:
           - name: runnerScaleSetName
             value: "fuzeservice"
           - name: maxRunners
-            value: "3"
+            value: "5"
           - name: minRunners
             value: "0"
     - repoURL: https://github.com/izzywdev/FuzeInfra.git
@@ -549,7 +549,7 @@ spec:
           - name: runnerScaleSetName
             value: "fuzepicker"
           - name: maxRunners
-            value: "3"
+            value: "5"
           - name: minRunners
             value: "0"
     - repoURL: https://github.com/izzywdev/FuzeInfra.git
@@ -616,7 +616,7 @@ spec:
           - name: runnerScaleSetName
             value: "fuzemarket"
           - name: maxRunners
-            value: "3"
+            value: "5"
           - name: minRunners
             value: "0"
     - repoURL: https://github.com/izzywdev/FuzeInfra.git
@@ -682,7 +682,7 @@ spec:
           - name: runnerScaleSetName
             value: "fuzesdlc"
           - name: maxRunners
-            value: "3"
+            value: "5"
           - name: minRunners
             value: "0"
     - repoURL: https://github.com/izzywdev/FuzeInfra.git
@@ -739,7 +739,7 @@ spec:
           - name: runnerScaleSetName
             value: "fuzefront"
           - name: maxRunners
-            value: "3"
+            value: "5"
           - name: minRunners
             value: "0"
     - repoURL: https://github.com/izzywdev/FuzeInfra.git
@@ -796,7 +796,7 @@ spec:
           - name: runnerScaleSetName
             value: "fuzeagent"
           - name: maxRunners
-            value: "3"
+            value: "5"
           - name: minRunners
             value: "0"
     - repoURL: https://github.com/izzywdev/FuzeInfra.git
@@ -853,7 +853,7 @@ spec:
           - name: runnerScaleSetName
             value: "fuzeplan"
           - name: maxRunners
-            value: "3"
+            value: "5"
           - name: minRunners
             value: "0"
     - repoURL: https://github.com/izzywdev/FuzeInfra.git
@@ -910,7 +910,7 @@ spec:
           - name: runnerScaleSetName
             value: "fuzedeploy"
           - name: maxRunners
-            value: "3"
+            value: "5"
           - name: minRunners
             value: "0"
     - repoURL: https://github.com/izzywdev/FuzeInfra.git
@@ -967,7 +967,7 @@ spec:
           - name: runnerScaleSetName
             value: "fuzebi"
           - name: maxRunners
-            value: "3"
+            value: "5"
           - name: minRunners
             value: "0"
     - repoURL: https://github.com/izzywdev/FuzeInfra.git
@@ -1024,7 +1024,7 @@ spec:
           - name: runnerScaleSetName
             value: "fuzeexecutive"
           - name: maxRunners
-            value: "3"
+            value: "5"
           - name: minRunners
             value: "0"
     - repoURL: https://github.com/izzywdev/FuzeInfra.git
@@ -1081,7 +1081,7 @@ spec:
           - name: runnerScaleSetName
             value: "fuzefinance"
           - name: maxRunners
-            value: "3"
+            value: "5"
           - name: minRunners
             value: "0"
     - repoURL: https://github.com/izzywdev/FuzeInfra.git
@@ -1138,7 +1138,7 @@ spec:
           - name: runnerScaleSetName
             value: "fuzecall"
           - name: maxRunners
-            value: "3"
+            value: "5"
           - name: minRunners
             value: "0"
     - repoURL: https://github.com/izzywdev/FuzeInfra.git
@@ -1195,7 +1195,7 @@ spec:
           - name: runnerScaleSetName
             value: "fuzekeys"
           - name: maxRunners
-            value: "3"
+            value: "5"
           - name: minRunners
             value: "0"
     - repoURL: https://github.com/izzywdev/FuzeInfra.git
@@ -1252,7 +1252,7 @@ spec:
           - name: runnerScaleSetName
             value: "fuzex"
           - name: maxRunners
-            value: "3"
+            value: "5"
           - name: minRunners
             value: "0"
     - repoURL: https://github.com/izzywdev/FuzeInfra.git
@@ -1309,7 +1309,7 @@ spec:
           - name: runnerScaleSetName
             value: "fuzemerchandize"
           - name: maxRunners
-            value: "3"
+            value: "5"
           - name: minRunners
             value: "0"
     - repoURL: https://github.com/izzywdev/FuzeInfra.git
@@ -1375,7 +1375,7 @@ spec:
           - name: runnerScaleSetName
             value: "mendysroboticswp"
           - name: maxRunners
-            value: "3"
+            value: "5"
           - name: minRunners
             value: "0"
     - repoURL: https://github.com/izzywdev/FuzeInfra.git

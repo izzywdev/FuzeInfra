@@ -48,9 +48,12 @@ spec:
   # namespaced objects (Deployment/Service/Ingress/ConfigMap/SealedSecret); the
   # wildcard is kept so the `CreateNamespace=true` sync option can materialize the
   # namespace without an InvalidSpecError on first sync.
+  # Namespace is the only cluster-scoped resource these workloads need
+  # (CreateNamespace=true sync option). ClusterRole/ClusterRoleBinding/CRD
+  # are blocked — consumers must not be able to modify cluster-level security.
   clusterResourceWhitelist:
-    - group: "*"
-      kind: "*"
+    - group: ''
+      kind: Namespace
   namespaceResourceWhitelist:
     - group: "*"
       kind: "*"

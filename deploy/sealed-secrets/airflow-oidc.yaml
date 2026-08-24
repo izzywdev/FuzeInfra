@@ -1,0 +1,14 @@
+---
+apiVersion: bitnami.com/v1alpha1
+kind: SealedSecret
+metadata:
+  name: airflow-oidc
+  namespace: fuzeinfra
+spec:
+  encryptedData:
+    CLIENT_SECRET: AgAHdQzQwIhID/Pyz5H6S/C4bTG4GZ/N3InfZ+tm6jx7rbWHVBHSWoJrBiEuCcSRgo5zILpuzOYRb5XZTfzXoAWizabzKIDol4Bfg7tFz/mDc8l6G1BpsYqrWwi4TUCjimx51vcF03QqwuCAqILnmoIQDUIaTOpwT1pXKXiMHc6eaAMYSBuihGwNevMzsctHTDKiHmn53GVMBCdUPRjj3GzraDRcAzvxMqGpHfPgnWbaJWPTcmWvNFI4UKzc6cs4pWRHhv+EZH56AdNb/BM8jeWTLvmxYL5oYjXAgxJOAFvRRNi/Djm0LY9PH7e1Urd+tj4ETTUgt1LNTzkkvy0krl4swHOAv0X2QUJ0zoDw1ZO62Pf7/KTI8AktBN6TeBG5RzDwR+d3FE1ZL5Bmlq0mbdU7ZPNlxg/U0FpEmVOddn0MLDtKlPetvIwvA+tV1+flTg4t4rgf+VPFxNxhdwsWRD/UmNuBOWyuPg+sHQrtGKn4Y6hiWwXqtrcCu3U1KXqQHGTn4BQzBcdJwUWf69+d4fCA9Iw1nJEj7tFG9IYiQNaBeszrI+8ssYiGPajdf839W9lTjTJMzk0o8c4eqWngKQ2Vi1ZIJwjwMra6PQoNEkA8Kz4mXkUoszfbZcTP2XIwM9Jn8jTiZHdDSk5+n5iTiwnhesz59zkPV3FO7+Czqj1lsTng+GjXR8wpioaja09esw3btGkLQZATEkwxfsZCXzqfK2nyt9zq6CuMaETGEtMTziuy531QYWxA5/GCDKs=
+  template:
+    metadata:
+      name: airflow-oidc
+      namespace: fuzeinfra
+    type: Opaque

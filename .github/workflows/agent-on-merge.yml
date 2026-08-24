@@ -16,6 +16,19 @@ on:
         description: "PR number to review (context for the agents)"
         required: false
 
+# Serialize every run of this workflow (regardless of trigger). `provision.py` does a
+# list-then-create against the Managed Agents vault/credential API to stay idempotent;
+# that check is only race-free against a SINGLE concurrent caller. Two `refresh` runs
+# overlapping (e.g. two PRs merged back-to-back, or a manual re-dispatch racing a merge)
+# can both list "credential missing" before either POST lands, so both POST and the loser
+# gets a 409 even though the resource is genuinely new from its own point of view. Queue
+# instead of cancelling in-progress runs: a cancelled provisioning run can leave the vault
+# half-populated. See the "Provision" step below for the (separate, deterministic) 409
+# root cause that this alone does not fix.
+concurrency:
+  group: agent-on-merge-provision
+  cancel-in-progress: false
+
 permissions:
   contents: read
 
@@ -33,9 +46,28 @@ jobs:
           if [ -z "${MA_KEY}" ]; then
             echo "::notice::MANAGED_AGENTS_API_KEY not set — skipping (agents not provisionable). See agent-templates/PORTING-TO-FUZEAGENT.md."
             echo "ok=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "ok=true" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
+          # Validate the key by probing /v1/environments. A 401/403 means the key
+          # is stale or not entitled for the Managed Agents beta — treat it the same
+          # as unset so the job skips cleanly rather than failing with an unhelpful
+          # Python traceback. Rotate at https://console.anthropic.com/settings/keys.
+          http_code=$(curl -s -o /dev/null -w "%{http_code}" \
+            -H "x-api-key: ${MA_KEY}" \
+            -H "anthropic-version: 2023-06-01" \
+            -H "anthropic-beta: managed-agents-2026-04-01" \
+            "https://api.anthropic.com/v1/environments")
+          if [ "$http_code" = "401" ] || [ "$http_code" = "403" ]; then
+            echo "::warning::MANAGED_AGENTS_API_KEY returned HTTP ${http_code} from the Managed Agents API — key is stale or not entitled. Skipping. Rotate it at https://console.anthropic.com/settings/keys and update the MANAGED_AGENTS_API_KEY repo secret."
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ "$http_code" != "200" ]; then
+            echo "::warning::Managed Agents API probe returned unexpected HTTP ${http_code} — skipping to avoid a misleading failure."
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "ok=true" >> "$GITHUB_OUTPUT"
 
       - name: Checkout
         if: steps.guard.outputs.ok == 'true'
@@ -59,6 +91,7 @@ jobs:
           GITHUB_MCP_URL: ${{ secrets.GH_MCP_URL }}
           GITHUB_MCP_TOKEN: ${{ secrets.GH_MCP_TOKEN }}
           HANDOFF_MCP_URL: ${{ secrets.HANDOFF_MCP_URL }}
+          HANDOFF_MCP_TOKEN: ${{ secrets.HANDOFF_MCP_TOKEN }}
           ATLASSIAN_MCP_URL: ${{ secrets.ATLASSIAN_MCP_URL }}
           SLACK_MCP_URL: ${{ secrets.SLACK_MCP_URL }}
           STRIPE_MCP_URL: ${{ secrets.STRIPE_MCP_URL }}
@@ -68,7 +101,20 @@ jobs:
           PR: ${{ github.event.pull_request.number || github.event.inputs.pr }}
         run: |
           set -euo pipefail
-          python providers/provision.py --provider anthropic
+          # Run provisioning; treat HTTP 409 (resource already exists) as idempotent success.
+          # Root fix: ensure_vault in adapter.py now wraps the credential POST in try/except
+          # to swallow 409 (merged in FuzeSDLC PR #125 + this PR). This --no-vault retry is
+          # defense-in-depth for the transition window. Any other error still exits 1.
+          provision_out=$(python providers/provision.py --provider anthropic 2>&1) && provision_ok=true || provision_ok=false
+          echo "$provision_out"
+          if [ "$provision_ok" = "false" ]; then
+            if echo "$provision_out" | grep -q "HTTP 409"; then
+              echo "::notice::Provisioning hit HTTP 409 (vault credential pre-provisioned) — re-running with --no-vault to write agent-ids.json."
+              python providers/provision.py --provider anthropic --no-vault
+            else
+              exit 1
+            fi
+          fi
           for role in openapi-maintainer mcp-engineer mobile-engineer; do
             python sync/launch_session.py --role "$role" --auto allow \
               --prompt "PR #${PR} just merged to main. If it changes your surface, update it and open a PR; otherwise report no change. Do NOT touch prod directly — open PRs only."

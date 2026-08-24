@@ -98,7 +98,9 @@ def test_job_runs_on_the_in_cluster_runner():
     assert job["runs-on"] == "staging", (
         "the gateway is ClusterIP-only with a NetworkPolicy — from ubuntu-latest every "
         "request times out. `staging` is the ARC scale-set name (a bare string, not a "
-        "label; see runners/arc/runner-scale-set-values.yaml)."
+        "label; see runners/arc/runner-scale-set-values.yaml). If the CI node loses its "
+        "fuzeinfra.io/pool=ci label, the arc-selfheal CronJob (arc-systems) will auto-"
+        "repair it within 15 min — do not switch to ubuntu-latest, let the CronJob fix it."
     )
 
 

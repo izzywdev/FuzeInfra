@@ -1,19 +1,21 @@
 name: Provision Managed Agents
 
-# Creates/updates every environment + agent (+ vaults, memory) idempotently for the
-# selected provider and uploads the id state (agent-ids/environment-ids/vault-ids/
-# memory-ids.json) as an artifact — that state becomes the `handoff-state` ConfigMap
-# the handoff MCP server mounts.
+# LOCAL reusable workflow, stamped into a roles-repo by sdlc-bootstrap (canonical copy lives
+# in FuzeSDLC/workflow-templates and is kept current by governance-sync). Its caller is the
+# stamped provision-sync.yml, which invokes it via `uses: ./.github/workflows/provision.yml`
+# — deliberately LOCAL, since a cross-repo `uses:` into a private FuzeSDLC fails to resolve
+# unless the hub's Actions access setting allows it, reddening the whole run.
 #
-# Two ways in:
-#   - workflow_dispatch: manual "provision everything now" (choose provider / dry-run).
-#   - workflow_call: reusable — provision-sync.yml calls this per provider on merge so
-#     agent-definition changes reconcile into their deployed counterparts automatically.
+# Creates/updates every environment +
+# agent (+ vaults, memory, coordinators) idempotently for the selected provider from the
+# CALLER repo's agent-templates/ tree, and uploads the id state (agent-ids/environment-ids/
+# vault-ids/memory-ids.json) as an artifact — that state becomes the `handoff-state`
+# ConfigMap the handoff MCP server mounts.
 #
+
 # Requires a Managed-Agents-entitled key as MANAGED_AGENTS_API_KEY (a Console API key
 # with the managed-agents beta — NOT a Claude Code token) + the MCP URLs/tokens the role
-# manifests reference. If the key is absent the job SKIPS (does not fail). Slated to
-# move to FuzeAgent.
+# manifests reference. If the key is absent the job SKIPS (does not fail).
 
 on:
   workflow_dispatch:
@@ -56,23 +58,34 @@ jobs:
           fi
 
       - if: steps.guard.outputs.ok == 'true'
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
 
-      - if: steps.guard.outputs.ok == 'true'
-        uses: actions/setup-python@v7
+      - name: Guard — repo has an agent-templates tree
+        id: haveframework
+        if: steps.guard.outputs.ok == 'true'
+        run: |
+          if [ -f agent-templates/providers/provision.py ]; then
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::no agent-templates/providers/provision.py in this repo — nothing to provision."
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - if: steps.guard.outputs.ok == 'true' && steps.haveframework.outputs.ok == 'true'
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5
         with:
           python-version: "3.12"
 
-      - if: steps.guard.outputs.ok == 'true'
+      - if: steps.guard.outputs.ok == 'true' && steps.haveframework.outputs.ok == 'true'
         run: pip install --quiet jsonschema requests
 
       - name: Validate manifests
-        if: steps.guard.outputs.ok == 'true'
+        if: steps.guard.outputs.ok == 'true' && steps.haveframework.outputs.ok == 'true'
         working-directory: agent-templates
         run: python sync/validate.py
 
       - name: Provision (${{ inputs.provider }})
-        if: steps.guard.outputs.ok == 'true'
+        if: steps.guard.outputs.ok == 'true' && steps.haveframework.outputs.ok == 'true'
         working-directory: agent-templates
         env:
           ANTHROPIC_API_KEY: ${{ secrets.MANAGED_AGENTS_API_KEY }}
@@ -98,8 +111,8 @@ jobs:
           fi
 
       - name: Upload id state (for the handoff-state ConfigMap)
-        if: steps.guard.outputs.ok == 'true' && inputs.dry_run != true
-        uses: actions/upload-artifact@v7
+        if: steps.guard.outputs.ok == 'true' && steps.haveframework.outputs.ok == 'true' && inputs.dry_run != true
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
         with:
           name: managed-agents-state-${{ inputs.provider }}
           path: agent-templates/sync/.state/*.json

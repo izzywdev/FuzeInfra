@@ -1,3 +1,20 @@
-mcp>=1.2.0
-uvicorn>=0.30
-starlette>=0.37
+# PIN THE MAJOR. `mcp>=1.2.0` (unpinned) is what put handoff-mcp in
+# CrashLoopBackOff for 21h / 248 restarts on 2026-08-19..20:
+#
+#   ModuleNotFoundError: No module named 'mcp.server.fastmcp'
+#
+# mcp 2.0.0 removed the `mcp/server/fastmcp/` package outright (verified against
+# both wheels: 1.9.4 ships 19 files under that path, 2.0.0 ships zero). server.py
+# imports `from mcp.server.fastmcp import FastMCP`, so the first image built after
+# 2.0.0 was published resolved to it and could no longer start. Nothing in this
+# repo changed — an unpinned floor let an upstream major land in a green build,
+# and the build stayed green because it never runs the server it just built.
+#
+# Moving to mcp 2.x is a real port (FastMCP became the separate `fastmcp`
+# distribution), not a version bump. Do it deliberately, not by resolution order.
+mcp>=1.9,<2
+# Same ceiling discipline as mcp above, and for the same reason: an unpinned
+# starlette floor let a major land that removed Starlette.middleware(), which
+# crashed build_app() on every boot even after the mcp pin fixed the import.
+uvicorn>=0.30,<1
+starlette>=0.37,<1

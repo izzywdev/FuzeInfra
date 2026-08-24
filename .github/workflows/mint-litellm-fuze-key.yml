@@ -1,0 +1,81 @@
+name: Mint LITELLM_FUZE_KEY
+
+# One-shot operator workflow: mints (or re-mints) the LiteLLM virtual key
+# used by the @fuze handler and distributes it to the fleet via FuzeSDLC.
+#
+# Runs on the in-cluster `staging` ARC runner so it can reach LiteLLM at
+# http://litellm.fuzeinfra.svc.cluster.local:4000 without a port-forward.
+#
+# Write targets:
+#   izzywdev/FuzeInfra  — fuze.yml reads LITELLM_FUZE_KEY directly from here
+#   izzywdev/FuzeSDLC   — provision_secrets.py (FuzeSDLC#181) distributes it
+#                         to every repo declaring a2a.enabled or mcp.enabled
+#
+# Prerequisites (secrets that must already exist in the repo):
+#   LITELLM_MASTER_KEY  — LiteLLM admin key (in the litellm-secret k8s Secret;
+#                         also stored as a GH secret for workflows that need it)
+#   GH_TOKEN            — PAT with secrets:write on FuzeInfra + FuzeSDLC
+#
+# If the `fuze-handler` alias already exists in LiteLLM, delete it first:
+#   LiteLLM admin UI → Keys → fuze-handler → Delete
+# or pass --alias with a different name and update fuze.yml accordingly.
+on:
+  workflow_dispatch:
+    inputs:
+      alias:
+        description: 'Key alias (default: fuze-handler). Change only to rotate without deleting the old key first.'
+        required: false
+        default: 'fuze-handler'
+      budget:
+        description: 'Max spend in USD before the key is refused (default: 100)'
+        required: false
+        default: '100'
+      window:
+        description: 'Budget reset window, LiteLLM duration string (default: 30d)'
+        required: false
+        default: '30d'
+
+permissions:
+  contents: read
+
+jobs:
+  mint:
+    name: Mint fuze-handler key
+    runs-on: staging
+    environment: fuzeinfra-ops
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Mint key and distribute to fleet
+        env:
+          LITELLM_MASTER_KEY: ${{ secrets.LITELLM_MASTER_KEY }}
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+          LITELLM_BASE_URL: http://litellm.fuzeinfra.svc.cluster.local:4000
+          ALIAS: ${{ inputs.alias }}
+          BUDGET: ${{ inputs.budget }}
+          WINDOW: ${{ inputs.window }}
+        run: |
+          set -euo pipefail
+
+          # Mint the virtual key (key printed to stdout; diagnostics to stderr).
+          # Mask immediately — the plaintext must never appear in logs or argv.
+          KEY=$(bash scripts/mint-litellm-fuze-key.sh \
+            --alias  "$ALIAS"  \
+            --budget "$BUDGET" \
+            --window "$WINDOW" \
+            --base-url "$LITELLM_BASE_URL")
+          echo "::add-mask::$KEY"
+
+          # 1. Register on this repo so fuze.yml can use it directly.
+          #    FuzeInfra has a2a.enabled=false so the fleet provisioner skips it.
+          printf '%s' "$KEY" | gh secret set LITELLM_FUZE_KEY \
+            --repo izzywdev/FuzeInfra
+          echo "::notice::LITELLM_FUZE_KEY written to izzywdev/FuzeInfra"
+
+          # 2. Hand off to the fleet provisioner (FuzeSDLC#181).
+          #    provision_secrets.py distributes LITELLM_FUZE_KEY to every repo
+          #    whose .fuze/manifest.json declares a2a.enabled or mcp.enabled.
+          printf '%s' "$KEY" | gh secret set LITELLM_FUZE_KEY \
+            --repo izzywdev/FuzeSDLC
+          echo "::notice::LITELLM_FUZE_KEY handed off to izzywdev/FuzeSDLC fleet provisioner"

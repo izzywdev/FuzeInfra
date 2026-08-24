@@ -17,6 +17,12 @@
 
 locals {
   cloudflare_enabled = var.cloudflare_api_token != ""
+
+  # Gate for the Google Access IdP and the two policies that reference it. Both
+  # halves of the credential must be present: a half-wired IdP plans a DESTROY of
+  # the IdP AND its policies, which silently drops the admin plane to email-OTP
+  # only rather than failing loudly.
+  google_idp_enabled = var.cloudflare_api_token != "" && var.google_access_client_id != "" && var.google_access_client_secret != ""
   prod_domain        = "${var.prod_subdomain}.${var.zone_name}"
 
   # Public vanity hosts served directly by the FuzeFront platform.
@@ -26,11 +32,22 @@ locals {
   # chart sets its Traefik Ingress host to match (className traefik, TLS off,
   # CF terminates edge TLS). Adding a future public host is a one-line edit.
   #
-  # NOTE: `auth` (auth.fuzefront.com) was retired — FuzeFront now hides its
-  # Authentik IdP behind app.fuzefront.com/api/auth/idp/* (reverse-proxied
-  # in-cluster, see izzywdev/FuzeFront#247), so no public IdP host is needed.
-  # The DNS record was removed from config in #268; this PR triggers the apply
-  # that destroys cloudflare_record.vanity["auth"] from Terraform state.
+  # NOTE: `auth` (auth.fuzefront.com) is deliberately absent and must STAY absent.
+  # The IdP is no longer published: Authentik is served at authentik.<prod domain>
+  # INSIDE the *.prod Access wall (var.authentik_host), reachable only after a
+  # Google login, with just its OIDC protocol paths bypassed — see
+  # cloudflare_zero_trust_access_application.authentik_oidc_endpoints.
+  #
+  # Re-adding `auth` here would republish the IdP to the internet. It was possible
+  # to remove only because Access stopped using Authentik as its identity provider;
+  # putting that back would reintroduce the circular dependency.
+  #
+  # Caveat worth knowing: removing the record does not by itself make the host
+  # unreachable. The zone has a wildcard, so auth.fuzefront.com continued to
+  # resolve to the Cloudflare edge after cloudflare_record.vanity["auth"] was
+  # destroyed (verified: an arbitrary name under the zone resolves to the same
+  # anycast IPs). Reachability of the IdP is therefore governed by the Access apps
+  # and by FuzeFront's Ingress hostnames, not by the presence of this record.
   #
   # `plan` = FuzePlan (plan.fuzefront.com). FuzeFront's portal loads FuzePlan's
   # module-federation remoteEntry.js from here, so it must be public (outside the
@@ -320,40 +337,40 @@ resource "cloudflare_zero_trust_access_policy" "public_app_bypass" {
 }
 
 # ---------------------------------------------------------------------------
-# Authentik as a Cloudflare Access identity provider (OIDC).
+# Google as the Cloudflare Access identity provider.
 #
-# Authentik is the platform IdP, deployed by izzywdev/FuzeFront into the
-# `fuzefront` namespace and served at auth.fuzefront.com — a PUBLIC vanity host
-# (see local.public_vanity_hosts), deliberately OUTSIDE the *.prod Access wall.
-# That placement is load-bearing: if the IdP sat behind the wall it authenticates,
-# logging in would require already being logged in.
+# Google is the ROOT credential for the entire admin plane. It authenticates you
+# to Cloudflare Access (this resource), and SEPARATELY it authenticates you into
+# Authentik, which in turn authenticates every internal service that speaks OIDC.
+# One human credential; two independent consumers of it.
 #
-# The matching OIDC provider (client_id "cloudflare-access") is defined
-# declaratively as an Authentik blueprint in the FuzeFront repo at
-# deploy/helm/fuzefront/authentik/blueprints/provider-oidc-cloudflare-access.yaml.
-# Its redirect URI must be https://fuzefront.cloudflareaccess.com/cdn-cgi/access/callback.
+# WHY NOT AUTHENTIK HERE — it used to be, and it was backwards:
+# Authentik runs INSIDE the cluster this wall protects, on FuzeInfra's own
+# Postgres and Redis. Using it as the Access IdP made the network gate depend on
+# the very thing it gates, and it forced auth.fuzefront.com to be published to
+# the internet, because an IdP sitting behind the wall it authenticates cannot be
+# reached in order to log in. Google is external, so the wall no longer depends
+# on the cluster at all — and that is precisely what lets Authentik move BEHIND
+# the wall (see local.public_vanity_hosts and var.authentik_host).
 #
-# TOKEN SCOPE: this resource needs "Access: Organizations, Identity Providers,
-# and Groups > Edit" on the Cloudflare API token, ON TOP of the scopes the rest
-# of this file needs. A missing Access scope plans CLEAN and fails only at apply
-# with a generic "Authentication error (10000)" — see docs/TERRAFORM_CD.md.
+# TOKEN SCOPE: needs "Access: Organizations, Identity Providers, and Groups >
+# Edit" on the Cloudflare API token, on top of every other scope this file needs.
+# A missing Access scope plans CLEAN and fails only at apply, with a generic
+# "Authentication error (10000)" — see docs/TERRAFORM_CD.md.
 #
 # The `!= ""` guard follows the crit_bridge_token convention: a count-gated
-# resource whose secret is unwired plans a DESTROY, not a no-op. Wire
-# TF_VAR_authentik_access_client_secret in the CD workflow BEFORE merging.
-resource "cloudflare_zero_trust_access_identity_provider" "authentik" {
-  count      = local.cloudflare_enabled && var.authentik_access_client_secret != "" ? 1 : 0
+# resource whose secret is unwired plans a DESTROY, not a no-op. Wire both
+# TF_VAR_google_access_client_id and _secret in the CD workflow BEFORE merging,
+# or the apply silently drops the whole admin plane to email-OTP only.
+resource "cloudflare_zero_trust_access_identity_provider" "google" {
+  count      = local.google_idp_enabled ? 1 : 0
   account_id = var.cloudflare_account_id
-  name       = "Authentik"
-  type       = "oidc"
+  name       = "Google"
+  type       = "google"
 
   config {
-    client_id     = "cloudflare-access"
-    client_secret = var.authentik_access_client_secret
-    auth_url      = "https://${var.authentik_host}/application/o/authorize/"
-    token_url     = "https://${var.authentik_host}/application/o/token/"
-    certs_url     = "https://${var.authentik_host}/application/o/cloudflare-access/jwks/"
-    scopes        = ["openid", "email", "profile"]
+    client_id     = var.google_access_client_id
+    client_secret = var.google_access_client_secret
   }
 }
 
@@ -370,20 +387,35 @@ resource "cloudflare_zero_trust_access_application" "admin_services" {
   app_launcher_visible = false
 }
 
-# Preferred login path: Authentik (which in turn federates Google/Gmail).
-# `require email` keeps the existing allowlist posture — passing Authentik is
-# necessary but not sufficient, so onboarding a user in Authentik does not by
-# itself grant infra-admin access.
-resource "cloudflare_zero_trust_access_policy" "admin_authentik" {
-  count          = local.cloudflare_enabled && var.authentik_access_client_secret != "" ? 1 : 0
+# Preferred login path: Google.
+#
+# THE TWO-BLOCK SHAPE IS LOAD-BEARING — do not collapse it into one block.
+#   include { login_method } = HOW you authenticated (necessary, NOT sufficient)
+#   require { email }        = WHO you are           (the actual allowlist)
+#
+# `include` is OR-semantics; `require` is AND-semantics. Moving the email list
+# into `include` would mean "authenticated via Google OR on the list" — i.e.
+# every Google account on the internet gets in. `email_domain = ["gmail.com"]`
+# would likewise admit all of Gmail, and `gsuite {}` matches Workspace GROUP
+# addresses, which a consumer gmail.com identity has none of. `email` (or
+# `email_list`) is the only primitive that expresses "these specific people".
+#
+# This carries more weight than it appears to. For most hosts behind this wall —
+# Prometheus, Alertmanager, Mongo Express, ChromaDB, LiteLLM — Cloudflare Access
+# is the ENTIRE authorization layer; there is no second gate underneath. And
+# Authentik itself does not restrict enrollment, so any Google identity that
+# reaches it is provisioned as a real user. This block is what stands between
+# that and the internet.
+resource "cloudflare_zero_trust_access_policy" "admin_google" {
+  count          = local.google_idp_enabled ? 1 : 0
   account_id     = var.cloudflare_account_id
   application_id = cloudflare_zero_trust_access_application.admin_services[0].id
-  name           = "Admin via Authentik"
+  name           = "Admin via Google"
   precedence     = 1
   decision       = "allow"
 
   include {
-    login_method = [cloudflare_zero_trust_access_identity_provider.authentik[0].id]
+    login_method = [cloudflare_zero_trust_access_identity_provider.google[0].id]
   }
 
   require {
@@ -393,12 +425,15 @@ resource "cloudflare_zero_trust_access_policy" "admin_authentik" {
 
 # BREAK-GLASS — do not remove.
 #
-# Authentik depends on FuzeInfra's own Postgres and Redis. If those degrade (it
-# has happened: the durable-node OOM and the Longhorn storage-revert incident),
-# an Authentik-only wall locks us out of Grafana, Prometheus and ArgoCD — exactly
-# the tools needed to diagnose the outage. Email OTP is the independent path in.
-# Kept at lower precedence so Authentik is tried first, and `allowed_idps` is
-# deliberately NOT set on the applications so both methods stay selectable.
+# Email OTP is the only login path that depends on neither Google nor this
+# cluster. Google is external so it survives a cluster outage, but it is still a
+# single third party that can lock you out (account lockout, consent revoked, a
+# billing or policy action). OTP is delivered by Cloudflare itself, so it is
+# independent of both.
+#
+# Kept at lower precedence so Google is tried first, and `allowed_idps` is
+# deliberately NOT set on the applications so both methods stay selectable on the
+# Access login page.
 resource "cloudflare_zero_trust_access_policy" "admin_email_otp" {
   count          = local.cloudflare_enabled ? 1 : 0
   account_id     = var.cloudflare_account_id
@@ -431,16 +466,16 @@ resource "cloudflare_zero_trust_access_application" "app_launcher" {
   }
 }
 
-resource "cloudflare_zero_trust_access_policy" "app_launcher_authentik" {
-  count          = local.cloudflare_enabled && var.authentik_access_client_secret != "" ? 1 : 0
+resource "cloudflare_zero_trust_access_policy" "app_launcher_google" {
+  count          = local.google_idp_enabled ? 1 : 0
   account_id     = var.cloudflare_account_id
   application_id = cloudflare_zero_trust_access_application.app_launcher[0].id
-  name           = "Admin via Authentik"
+  name           = "Admin via Google"
   precedence     = 1
   decision       = "allow"
 
   include {
-    login_method = [cloudflare_zero_trust_access_identity_provider.authentik[0].id]
+    login_method = [cloudflare_zero_trust_access_identity_provider.google[0].id]
   }
 
   require {
@@ -518,6 +553,67 @@ resource "cloudflare_zero_trust_access_policy" "sealed_secrets_cert_bypass" {
   account_id     = var.cloudflare_account_id
   application_id = cloudflare_zero_trust_access_application.sealed_secrets_cert[0].id
   name           = "Bypass — Sealed Secrets public cert"
+  precedence     = 1
+  decision       = "bypass"
+
+  include {
+    everyone = true
+  }
+}
+
+# ---------------------------------------------------------------------------
+# The OIDC PROTOCOL surface of Authentik, and only that, bypasses Access.
+#
+# Authentik now lives at authentik.<prod domain>, inside the *.prod wildcard
+# Access app — so by default EVERY path on it is gated, which was verified
+# against prod: /application/o/token/ returned a 302 to the Access login page
+# instead of JSON. That breaks OIDC, because OIDC is two protocols, not one:
+#
+#   FRONT channel  /application/o/authorize/   the BROWSER is redirected here
+#   BACK  channel  /application/o/token/       the SERVICE calls this itself
+#                  /application/o/<app>/jwks/
+#                  /application/o/userinfo/
+#                  .../.well-known/openid-configuration
+#
+# Back-channel calls come from Grafana, ArgoCD and Kafka UI processes. They carry
+# no Access cookie and cannot obtain one, so Access turns every token exchange
+# into an HTML redirect and login fails after the user has already authenticated.
+#
+# WHY BYPASSING THIS IS NOT A HOLE:
+# These are the standard, deliberately-public endpoints of every IdP on the
+# internet — Google's, Okta's, Auth0's token endpoints are all unauthenticated.
+# Each is protected by its own credential, not by network position:
+#   /token/     requires client_id + client_secret
+#   /userinfo/  requires a bearer token
+#   /jwks/      serves PUBLIC keys; publishing them is the point
+#   /authorize/ hands back nothing without an authenticated Authentik session
+#
+# What stays behind the wall is everything that matters: the admin interface
+# (/if/admin/), the flow/login UI (/flows/, /if/flow/), and the whole rest of the
+# host. An attacker who reaches /authorize/ is bounced to the login flow, which
+# is NOT bypassed, so they cannot authenticate. A legitimate admin already holds
+# an Access cookie for *.prod from the Google login, so they pass into the flow
+# UI silently — one visible login, not two.
+#
+# Scoped by PATH PREFIX. Cloudflare matches the most specific app by domain+path,
+# so this takes precedence over the *.prod wildcard for /application/o only.
+# Do NOT widen the path: dropping the /application/o suffix would publish the
+# admin UI.
+resource "cloudflare_zero_trust_access_application" "authentik_oidc_endpoints" {
+  count                = local.cloudflare_enabled ? 1 : 0
+  account_id           = var.cloudflare_account_id
+  name                 = "Authentik OIDC protocol endpoints (public)"
+  domain               = "${var.authentik_host}/application/o"
+  type                 = "self_hosted"
+  session_duration     = "0s"
+  app_launcher_visible = false
+}
+
+resource "cloudflare_zero_trust_access_policy" "authentik_oidc_endpoints_bypass" {
+  count          = local.cloudflare_enabled ? 1 : 0
+  account_id     = var.cloudflare_account_id
+  application_id = cloudflare_zero_trust_access_application.authentik_oidc_endpoints[0].id
+  name           = "Bypass — Authentik OIDC protocol endpoints"
   precedence     = 1
   decision       = "bypass"
 
@@ -665,11 +761,15 @@ locals {
 
   # Tiles whose target is NOT https://<key>.<prod_domain><path>.
   #
-  # The Authentik admin UI is ALSO served at authentik.prod.fuzefront.com, but
-  # pointing the tile there is a trap now that Cloudflare Access authenticates
-  # against Authentik: reaching the IdP admin would require an Access session
-  # that only the IdP can issue. auth.fuzefront.com is a public vanity host
-  # outside the wildcard (Authentik owns its own auth), so it always resolves.
+  # The Authentik tile needs an override only for its PATH (/if/admin/), not its
+  # host — var.authentik_host is now authentik.<prod domain>, which is what the
+  # default would already produce.
+  #
+  # It used to point at the public auth.fuzefront.com, because while Cloudflare
+  # Access authenticated AGAINST Authentik, reaching the IdP admin behind the wall
+  # would have required an Access session only the IdP could issue. Access now
+  # authenticates with Google, so that circularity is gone and the admin UI is
+  # correctly gated by the *.prod wildcard like every other admin surface.
   launcher_url_overrides = {
     "authentik" = "https://${var.authentik_host}/if/admin/"
   }
@@ -738,6 +838,11 @@ locals {
     cloudflare_zero_trust_access_application.sealed_secrets_cert[*].id,
     cloudflare_zero_trust_access_application.crit_alert_bridge[*].id,
     cloudflare_zero_trust_access_application.handoff_mcp[*].id,
+    # Path-scoped, launcher-invisible, but it lives on authentik.<prod> which IS
+    # in local.launcher_hosts (the `authentik` tile) — so without this entry the
+    # reconciler would treat it as a deletion candidate and silently re-break the
+    # OIDC back channel.
+    cloudflare_zero_trust_access_application.authentik_oidc_endpoints[*].id,
   )
 }
 
@@ -851,6 +956,20 @@ resource "cloudflare_zero_trust_access_policy" "crit_alert_bridge_bypass" {
 # email-OTP app would block them. This more-specific host app takes precedence and
 # bypasses OTP; the handoff MCP server enforces its own bearer (HANDOFF_MCP_TOKEN),
 # which agents present via a vault credential keyed to the URL. Gated off by default.
+#
+# TRAP, hit for real by #588: flipping the gate is NOT the same as applying it.
+# handoff_mcp_access_enabled is set as a TF_VAR_* in
+# .github/workflows/terraform-plan-apply.yml, and that workflow's APPLY job triggers
+# only on push to main with `paths: ["terraform/**"]`. #588 changed the workflow file
+# and nothing else, so it matched no path, no apply ran, and these two resources were
+# never created — while every check reported green and mcp-handoff.<domain> quietly
+# kept answering 302 to the OTP login. A variable flip that touches no file under
+# terraform/ is inert. If you toggle one of these CI-side gates again, include a
+# change under terraform/ in the same PR (editing this comment counts) or dispatch
+# the workflow by hand — then verify at the edge, not in the diff:
+#   curl -sS -o /dev/null -w '%{http_code}\n' https://mcp-handoff.<domain>/mcp
+#   401 -> bypass is live and the app bearer is the gate.
+#   302 -> still behind the *.prod email-OTP wall; a machine caller cannot pass it.
 resource "cloudflare_zero_trust_access_application" "handoff_mcp" {
   count                = local.cloudflare_enabled && var.handoff_mcp_access_enabled ? 1 : 0
   account_id           = var.cloudflare_account_id

@@ -249,16 +249,30 @@ def build_app():
     Access app), so this app-level bearer is the gate.
     """
     from starlette.responses import JSONResponse
+    from starlette.middleware.base import BaseHTTPMiddleware
     app = mcp.streamable_http_app()
     token = os.environ.get("HANDOFF_MCP_TOKEN")
     if token:
         expected = f"Bearer {token}"
 
-        @app.middleware("http")
+        # add_middleware(BaseHTTPMiddleware, dispatch=...) — NOT the
+        # `@app.middleware("http")` decorator. mcp.streamable_http_app() returns a
+        # bare **Starlette** app, not FastAPI, and newer Starlette dropped the
+        # decorator: `AttributeError: 'Starlette' object has no attribute
+        # 'middleware'`. That crashed build_app() on every boot (174 restarts),
+        # and `starlette>=0.37` with no ceiling is what let it land — the same
+        # unpinned-floor bug as mcp>=1.2.0 in the line above this fix.
+        #
+        # This middleware IS the authentication gate. Cloudflare Access is
+        # BYPASSED for this hostname (a more-specific Access app, #606), so the
+        # bearer check below is the only thing between the internet and a server
+        # that mints sessions with our ANTHROPIC_API_KEY. It must register.
         async def _require_bearer(request, call_next):  # noqa: ANN001
             if request.headers.get("authorization") != expected:
                 return JSONResponse({"error": "unauthorized"}, status_code=401)
             return await call_next(request)
+
+        app.add_middleware(BaseHTTPMiddleware, dispatch=_require_bearer)
     else:
         import sys as _sys
         print("WARNING: HANDOFF_MCP_TOKEN not set — the handoff MCP is UNAUTHENTICATED.", file=_sys.stderr)

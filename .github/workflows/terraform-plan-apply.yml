@@ -92,16 +92,23 @@ env:
   # crit-alert bridge token — MUST be wired, else the plan sees crit_bridge_token=""
   # and DESTROYS the crit-bridge CF worker/route/secret (count gates on it != "").
   TF_VAR_crit_bridge_token: ${{ secrets.CRIT_BRIDGE_TOKEN }}
-  # Authentik OIDC client secret for the Cloudflare Access identity provider.
-  # Same count-gate hazard as crit_bridge_token above: if this stops being wired,
-  # the plan DESTROYS the Access IdP and its policies, dropping every admin UI
-  # back to email-OTP-only. Must equal AUTHENTIK_CF_ACCESS_CLIENT_SECRET in the
-  # fuzefront-secrets SealedSecret (izzywdev/FuzeFront).
-  TF_VAR_authentik_access_client_secret: ${{ secrets.AUTHENTIK_CF_ACCESS_CLIENT_SECRET }}
+  # Google OAuth client for the Cloudflare Access identity provider. BOTH halves
+  # must be wired: same count-gate hazard as crit_bridge_token above — if either
+  # stops being passed, the plan DESTROYS the Access IdP and its two policies,
+  # silently dropping every admin UI back to email-OTP-only rather than failing.
+  #
+  # This is a SEPARATE OAuth client from the GOOGLE_CLIENT_ID/SECRET that
+  # FuzeFront's Authentik and security-service use. Same Google account, different
+  # client and redirect URI; do not cross-wire them.
+  TF_VAR_google_access_client_id: ${{ secrets.GOOGLE_ACCESS_CLIENT_ID }}
+  TF_VAR_google_access_client_secret: ${{ secrets.GOOGLE_ACCESS_CLIENT_SECRET }}
   TF_VAR_k3s_node_token: ${{ secrets.K3S_NODE_TOKEN }}
   TF_VAR_ci_worker_count: "1"
   # CF token now has Zone/Custom Hostnames:Edit — re-enabled after token fix
   TF_VAR_saas_custom_hostnames_enabled: "true"
+  # Handoff MCP — more-specific CF Access bypass app for mcp-handoff.<domain>
+  # so Anthropic Managed Agents (machine, non-interactive) skip email-OTP.
+  TF_VAR_handoff_mcp_access_enabled: "true"
   # mendysrobotics.com zone ID — gates all mendys DNS + Access resources.
   # Default empty string disables those resources; set the secret to enable.
   TF_VAR_mendysrobotics_zone_id: ${{ secrets.MENDYSROBOTICS_ZONE_ID }}
@@ -283,7 +290,7 @@ jobs:
           echo "Resolved PR #$PR, reviewed plan keyed by head SHA $HEAD_SHA"
 
       - name: Download the reviewed plan
-        uses: dawidd6/action-download-artifact@b6e2e70617bc3265edd6dab6c906732b2f1ae151 # v21
+        uses: dawidd6/action-download-artifact@57aa996fc1713cc1579039614f4645a7f4841fd4 # v23
         with:
           name: tfplan-${{ steps.pr.outputs.head_sha }}
           # The plan was produced by a different workflow run (the PR check).

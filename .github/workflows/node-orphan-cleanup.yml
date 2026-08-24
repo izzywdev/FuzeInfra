@@ -1,0 +1,154 @@
+name: node-orphan-cleanup
+
+# Detects and removes orphaned k8s Node objects for elastic nodes whose
+# Contabo VPS has already been terminated (billing period expired or manually
+# deleted) but whose Node object was never cleaned up.
+#
+# Orphaned nodes attract ARC runner pod scheduling, causing a thundering-herd
+# of Pending pods on the surviving CI node.  This workflow is the manual escape
+# hatch for that scenario; the reaper's SweepOrphans() pass (runs hourly via
+# the CronJob) handles it automatically going forward.
+#
+# SAFE DEFAULT: mode=list only enumerates candidates — no mutations.
+# Use mode=delete with confirm=DELETE-ORPHANS to actually remove them.
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'list = show orphaned nodes (safe, no mutations); delete = kubectl delete node for each'
+        type: choice
+        options: [list, delete]
+        default: list
+        required: true
+      confirm:
+        description: 'For mode=delete ONLY: type DELETE-ORPHANS to proceed. Ignored in list mode.'
+        default: ''
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Setup kubectl
+        run: |
+          mkdir -p ~/.kube
+          echo "${{ secrets.KUBE_CONFIG }}" | base64 -d > ~/.kube/config
+          chmod 600 ~/.kube/config
+
+      - name: Get Contabo elastic instances
+        id: contabo
+        env:
+          CID: ${{ secrets.CONTABO_CLIENT_ID }}
+          CSEC: ${{ secrets.CONTABO_CLIENT_SECRET }}
+          CUSER: ${{ secrets.CONTABO_API_USER }}
+          CPASS: ${{ secrets.CONTABO_API_PASSWORD }}
+        run: |
+          set -euo pipefail
+          for v in CID CSEC CUSER CPASS; do
+            eval "val=\${$v}"; [ -n "$val" ] || { echo "::error::secret $v is empty"; exit 1; }
+          done
+          TOK=$(curl -sS -X POST -H "Content-Type: application/x-www-form-urlencoded" \
+            "https://auth.contabo.com/auth/realms/contabo/protocol/openid-connect/token" \
+            --data-urlencode "client_id=${CID}" --data-urlencode "client_secret=${CSEC}" \
+            --data-urlencode "username=${CUSER}" --data-urlencode "password=${CPASS}" \
+            --data-urlencode "grant_type=password" | jq -r .access_token)
+          [ -n "$TOK" ] && [ "$TOK" != "null" ] || { echo "::error::Contabo auth failed"; exit 1; }
+
+          # Paginate all instances; collect displayNames of elastic ones.
+          page=1; : > /tmp/contabo-elastic-names.txt
+          while :; do
+            RESP=$(curl -sS -H "Authorization: Bearer $TOK" \
+              -H "x-request-id: $(cat /proc/sys/kernel/random/uuid)" \
+              "https://api.contabo.com/v1/compute/instances?size=100&page=${page}")
+            n=$(echo "$RESP" | jq '.data | length')
+            [ "$n" -gt 0 ] || break
+            echo "$RESP" | jq -r '.data[] | select(.displayName | startswith("fuzeinfra-elastic")) | .displayName' >> /tmp/contabo-elastic-names.txt || true
+            page=$((page+1)); [ "$page" -gt 30 ] && { echo "::warning::page cap hit"; break; }
+          done
+          echo "Contabo elastic instances still live:"
+          cat /tmp/contabo-elastic-names.txt || echo "(none)"
+
+      - name: Find orphaned k8s Node objects
+        id: find
+        run: |
+          set -euo pipefail
+          : > /tmp/orphans.txt
+
+          # All elastic k8s nodes (by pool label).
+          NODES=$(kubectl get nodes -l 'fuzeinfra.io/pool=elastic' \
+            -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{range .status.conditions[?(@.type=="Ready")]}{.status}{end}{"\n"}{end}' 2>/dev/null || true)
+
+          echo "=== Elastic k8s nodes ==="
+          echo "${NODES:-  (none)}"
+
+          while IFS=$'\t' read -r NAME READY; do
+            [ -n "$NAME" ] || continue
+            if [ "$READY" = "True" ]; then
+              echo "KEEP  $NAME (Ready — never an orphan candidate)"
+              continue
+            fi
+            if grep -qxF "$NAME" /tmp/contabo-elastic-names.txt 2>/dev/null; then
+              echo "KEEP  $NAME (NotReady but Contabo instance still exists — may be rebooting)"
+              continue
+            fi
+            echo "ORPHAN $NAME (NotReady + no Contabo instance)"
+            echo "$NAME" >> /tmp/orphans.txt
+          done <<< "$NODES"
+
+          COUNT=$(grep -c . /tmp/orphans.txt || true)
+          echo "orphan_count=$COUNT" >> "$GITHUB_OUTPUT"
+          echo "=== Orphan candidates ($COUNT) ==="
+          cat /tmp/orphans.txt || echo "(none)"
+
+          {
+            echo "## node-orphan-cleanup"
+            echo "| Node | Action |"
+            echo "| ---- | ------ |"
+            if [ "$COUNT" -gt 0 ]; then
+              while read -r N; do echo "| \`$N\` | 🗑 delete |"; done < /tmp/orphans.txt
+            else
+              echo "| — | no orphans found |"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Delete orphaned nodes (mode=delete only)
+        if: ${{ inputs.mode == 'delete' }}
+        env:
+          MODE: ${{ inputs.mode }}
+          CONFIRM: ${{ inputs.confirm }}
+          ORPHAN_COUNT: ${{ steps.find.outputs.orphan_count }}
+        run: |
+          set -euo pipefail
+          [ "$CONFIRM" = "DELETE-ORPHANS" ] || { echo "::error::mode=delete requires confirm=DELETE-ORPHANS"; exit 1; }
+          if [ "$ORPHAN_COUNT" -eq 0 ]; then
+            echo "No orphans to delete — nothing to do."
+            exit 0
+          fi
+
+          OK=0; ERR=0
+          while read -r NAME; do
+            [ -n "$NAME" ] || continue
+            echo "Deleting orphan node: $NAME"
+            if kubectl delete node "$NAME" --ignore-not-found; then
+              echo "  ✓ deleted $NAME"
+              OK=$((OK+1))
+            else
+              echo "  ✗ failed to delete $NAME"
+              ERR=$((ERR+1))
+            fi
+          done < /tmp/orphans.txt
+
+          echo "=== delete complete: ok=${OK} err=${ERR} ==="
+          echo "- Deleted OK: **$OK**, errors: **$ERR**" >> "$GITHUB_STEP_SUMMARY"
+          [ "$ERR" -eq 0 ] || { echo "::error::$ERR node deletions failed"; exit 1; }
+
+      - name: Post-cleanup node status
+        if: ${{ inputs.mode == 'delete' }}
+        run: |
+          echo "=== All nodes (fuzeinfra.io/pool=elastic) after cleanup ==="
+          kubectl get nodes -l 'fuzeinfra.io/pool=elastic' -o wide 2>/dev/null || echo "(none remaining)"
+          echo "=== ARC runner pods (arc-runners namespace) ==="
+          kubectl -n arc-runners get pods -o wide 2>/dev/null || echo "(none)"

@@ -42,7 +42,7 @@ on:
         default: main
         type: string
       path:
-        description: "Path in the consumer repo holding the Argo Application/AppProject manifests"
+        description: "Path in the consumer repo holding the Argo Application manifests (AppProjects are skipped — they are FuzeInfra-owned)"
         required: false
         default: deploy/argocd
         type: string
@@ -71,6 +71,47 @@ jobs:
           echo "Extracted inline argocd bundle from ${{ github.event.client_payload.repo }}"
 
       # --- Git checkout mode (workflow_dispatch or public repo) ----------------
+      #
+      # TOKEN MUST BE GH_TOKEN, NOT GITHUB_TOKEN. The built-in GITHUB_TOKEN is
+      # scoped to THIS repository (FuzeInfra) and cannot read any other private
+      # repo, so this step failed for every private consumer with a message that
+      # reads like the repo does not exist:
+      #
+      #   remote: Repository not found.
+      #   fatal: repository 'https://github.com/izzywdev/FuzeFinance/' not found
+      #
+      # "Repository not found" is what GitHub returns for BOTH "absent" and
+      # "present but this token cannot see it" -- it deliberately does not leak
+      # the existence of private repos. So the message sends the reader looking
+      # for a deleted repo when the repo is fine and the TOKEN is wrong. Verified
+      # on FuzeFinance, FuzeExecutive and FuzeBI (runs 41-43), all three of which
+      # exist and had their manifests on main at the time.
+      #
+      # This made the file's own header untrue in practice: it offers
+      # workflow_dispatch "for public repos or manual onboarding" and
+      # repository_dispatch "for private repos", but NOT ONE consumer repo in the
+      # family implements the repository_dispatch side (measured: zero workflows
+      # anywhere send event_type argocd-register). So for every private consumer
+      # the documented path did not exist and the available path could not work.
+      # Registration for private repos had therefore never succeeded by either
+      # route.
+      #
+      # GH_TOKEN is the cross-repo token this repo already uses in 49 places, and
+      # publish-sealed-handoff.yml demonstrably clones and pushes to these same
+      # private consumer repos with it.
+      - name: Guard GH_TOKEN is present
+        if: github.event_name == 'workflow_dispatch' || github.event.client_payload.argocd_bundle == ''
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+        run: |
+          # Fail loudly and specifically. Without this the run dies later at
+          # "Repository not found", which names the wrong problem.
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "::error title=argocd-register::GH_TOKEN is not set. The built-in GITHUB_TOKEN cannot read another private repo; a cross-repo token is required to check out the consumer's deploy/argocd manifests." >&2
+            exit 1
+          fi
+          echo "GH_TOKEN present."
+
       - name: Check out consumer argo manifests (git checkout mode)
         if: github.event_name == 'workflow_dispatch' || github.event.client_payload.argocd_bundle == ''
         uses: actions/checkout@v7
@@ -78,7 +119,7 @@ jobs:
           repository: ${{ github.event.client_payload.repo || inputs.repo }}
           ref: ${{ github.event.client_payload.ref || inputs.ref || 'main' }}
           path: consumer
-          token: ${{ secrets.GITHUB_TOKEN }}
+          token: ${{ secrets.GH_TOKEN }}
           sparse-checkout: |
             ${{ inputs.path || 'deploy/argocd' }}
 
@@ -118,7 +159,25 @@ jobs:
             exit 1
           fi
           echo "Registering Argo manifests from $DIR (repo: $REPO)..."
-          kubectl apply -f "$DIR/"
+          # AppProjects are the destination/security boundary and are OWNED BY
+          # FuzeInfra — they must not be overwritten by a consumer repo. Filter
+          # them out so a consumer's project.yaml cannot silently widen its own
+          # permissions (the issue-#625 class of drift). Only kind: Application
+          # (and ApplicationSet) are registered by consumers.
+          SKIPPED=0
+          for manifest in "$DIR"/*.yaml "$DIR"/*.yml; do
+            [ -f "$manifest" ] || continue
+            kind=$(grep -m1 '^kind:' "$manifest" 2>/dev/null | awk '{print $2}')
+            if [ "$kind" = "AppProject" ]; then
+              echo "  SKIP $manifest (AppProject — FuzeInfra-owned; consumer must not overwrite)"
+              SKIPPED=$(( SKIPPED + 1 ))
+            else
+              kubectl apply -f "$manifest"
+            fi
+          done
+          if [ "$SKIPPED" -gt 0 ]; then
+            echo "::warning::$SKIPPED AppProject file(s) skipped — AppProjects are FuzeInfra-owned. Remove them from the consumer repo's deploy/argocd/ directory."
+          fi
           echo ""
           echo "Done. ArgoCD now owns these Applications and will self-sync future"
           echo "changes to deploy/argocd — do not re-run this for ordinary edits."

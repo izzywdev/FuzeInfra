@@ -10,11 +10,12 @@ spec:
   destinations:
     - namespace: fuzecall
       server: https://kubernetes.default.svc
-    - namespace: argocd
-      server: https://kubernetes.default.svc
+  # Namespace is the only cluster-scoped resource these workloads need
+  # (CreateNamespace=true sync option). ClusterRole/ClusterRoleBinding/CRD
+  # are blocked — consumers must not be able to modify cluster-level security.
   clusterResourceWhitelist:
-    - group: "*"
-      kind: "*"
+    - group: ''
+      kind: Namespace
   namespaceResourceWhitelist:
     - group: "*"
       kind: "*"

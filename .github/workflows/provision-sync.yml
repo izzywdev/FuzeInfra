@@ -1,15 +1,21 @@
 name: Sync Managed Agents on merge
 
-# Reconcile agent-definition changes into their DEPLOYED counterparts (agents +
-# environments + vaults + memory) on every merge to main that touches a definition,
-# for each provider the fleet is deployed to. Idempotent: providers/provision.py only
-# updates an agent/environment when its config actually changed (a no-op otherwise), so
-# unchanged definitions are left alone and changed ones get a new version.
+# Per-repo caller (stamped by sdlc-bootstrap, ONLY for repos that declare `roles` in
+# .fuze/manifest.json). Reconciles agent-definition changes into their DEPLOYED
+# counterparts (agents + environments + vaults + memory + coordinators) on every merge to
+# main that touches a definition, for each provider the fleet is deployed to. Idempotent:
+# providers/provision.py only updates a resource when its config actually changed.
 #
 # Editing a persona (.claude/agents/*.md) changes the agent `system` -> re-synced.
 # Editing a role.json (tools/policies/mcp/env) -> re-synced. Adding a role -> created.
-# (Removals are NOT pruned here — archiving an orphaned agent is a separate, deliberate
-# step; provisioning only creates/updates.)
+# Removals are NOT pruned (archiving an orphaned agent is a separate, deliberate step).
+#
+# Calls the LOCAL provision.yml (also stamped by the bootstrapper) rather than a cross-repo
+# reusable: a `uses:` into a PRIVATE FuzeSDLC fails to RESOLVE unless the hub's Actions
+# access setting allows it, and that failure reds the whole run. Local = no such coupling.
+#
+# Requires MANAGED_AGENTS_API_KEY (Console key with the managed-agents beta) + the MCP
+# URLs the role manifests reference. Absent key -> the reusable workflow SKIPS (no fail).
 
 on:
   push:
@@ -23,8 +29,6 @@ on:
       - "agent-templates/providers/**"
       - "agent-templates/sync/**"
       - ".claude/agents/**"
-      - ".github/workflows/provision.yml"
-      - ".github/workflows/provision-sync.yml"
 
 permissions:
   contents: read
@@ -34,8 +38,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Providers the agents are deployed to. Add "openai" / "hermes" once their
-        # providers/<name>/adapter.py is implemented (they are stubs today).
+        # Providers the agents are deployed to. Add "openai"/"hermes" once their
+        # providers/<name>/adapter.py is implemented (stubs today).
         provider: [anthropic]
     uses: ./.github/workflows/provision.yml
     secrets: inherit

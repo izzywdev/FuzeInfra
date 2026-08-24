@@ -206,7 +206,14 @@ jobs:
         id: claude
         if: steps.suppress.outputs.skip != 'true'
         env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          # Route through LiteLLM for cross-provider failover; no provider key held here.
+          ANTHROPIC_BASE_URL: http://litellm.fuzeinfra.svc.cluster.local:4000
+          ANTHROPIC_AUTH_TOKEN: ${{ secrets.LITELLM_FUZE_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.LITELLM_FUZE_KEY }}
+          ANTHROPIC_MODEL: claude-opus-5
+          CLAUDE_CODE_DISABLE_1M_CONTEXT: "1"
+          CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS: "1"
+          CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
           ALERT_SUMMARY: ${{ github.event.client_payload.summary }}
           ALERT_DESC: ${{ github.event.client_payload.description }}
           ALERT_LABELS: ${{ github.event.client_payload.labels }}
@@ -264,7 +271,7 @@ jobs:
 
           if [ "$ACTION" = "fix" ]; then
             SUMMARY=$(python3 -c "import json; print(json.loads(open('/tmp/claude_result.json').read()).get('summary','Fix CRIT error'))")
-            BRANCH="claude-crit-fix-$(date +%Y%m%d-%H%M%S)"
+            BRANCH="fuze/crit-fix-$(date +%Y%m%d-%H%M%S)"
 
             git config user.email "claude-autofix@fuzeinfra"
             git config user.name "Claude Auto-Fix"
@@ -347,7 +354,7 @@ jobs:
                 echo ""; echo "---"
                 echo "**Origin:** ${{ github.repository }}#${TRACK_NUM} (FuzeInfra crit-alert auto-triage)."
                 echo ""
-                echo "@claude please investigate and fix the root cause in this repo, open a PR, and report back here when triggered, fixed, and deployed."
+                echo "@fuze please investigate and fix the root cause in this repo, open a PR, and report back here when triggered, fixed, and deployed."
               } > /tmp/handoff_body.md
               gh label create crit-autofix --color e11d48 \
                 --description "Handed off from FuzeInfra CRIT auto-fix" --repo "$OWNER_REPO" 2>/dev/null || true
@@ -359,7 +366,7 @@ jobs:
 
               # 3) Cross-link + close the FuzeInfra tracking issue
               gh issue comment "$TRACK_NUM" --repo "${{ github.repository }}" \
-                --body "🤝 Handed off to ${OWNER_REPO}: ${FF_URL} — that repo's @claude process will fix + deploy. Closing here; tracking continues in the linked issue." 2>/dev/null || true
+                --body "🤝 Handed off to ${OWNER_REPO}: ${FF_URL} — that repo's @fuze handler will diagnose and fix. Closing here; tracking continues in the linked issue." 2>/dev/null || true
               gh issue close "$TRACK_NUM" --repo "${{ github.repository }}" --reason "not planned" 2>/dev/null || true
 
               echo "::notice::handed off ${TRACK_URL} → ${FF_URL}"

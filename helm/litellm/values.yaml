@@ -332,6 +332,13 @@ generalSettings: {}
 # behind the alias and the client cannot compact for a swap it cannot see.
 routerSettings:
   enable_pre_call_checks: true
+  # Without this, a 400 "Credit balance is too low" from Anthropic is classified
+  # as a BadRequestError (client-side) and never triggers the fallback chain —
+  # LiteLLM only falls back on 429 / 5xx by default. One retry (= one attempt on
+  # the next model in `fallbacks`) is enough; the fallback list itself handles
+  # deeper exhaustion.
+  retry_policy:
+    BadRequestErrorRetries: 1
   fallbacks:
     - claude-opus-4-5: ["gpt-4.1", "gemini-flash-latest"]
     - claude-opus-5: ["gpt-4.1", "gemini-flash-latest"]
@@ -378,3 +385,51 @@ ingress:
   # Rendered host is "<subdomain>.<domain>". domain MUST be set when enabled.
   subdomain: litellm
   domain: ""
+
+# -----------------------------------------------------------------------------
+# Authentik SSO for the ADMIN UI (LiteLLM "generic" OIDC provider).
+#
+# Off by default, same gate as grafana.oidc / kafkaUi.oidc / airflow.oidc in the
+# fuzeinfra chart: enabling without the SealedSecret named below present in the
+# namespace yields CreateContainerConfigError. Flip on in the SAME commit that
+# lands deploy/sealed-secrets/litellm-oidc.yaml.
+#
+# ── READ THIS BEFORE ENABLING: THERE IS A USER CAP ──────────────────────────
+# LiteLLM SSO is an Enterprise feature that upstream made free for up to FIVE
+# users as of v1.76.0 (docs.litellm.ai/docs/proxy/admin_ui_sso). The image tag
+# here is the moving `main-stable`, which is well past that, so the capability
+# is present — but the cap is a LICENCE cap, not a technical one. A sixth admin
+# is a commercial decision, not a values change. If the admin plane outgrows
+# five people, either buy the licence or leave this off and keep relying on
+# Cloudflare Access. Do not "fix" a sixth-user failure by patching around it.
+#
+# ── WHAT THIS DOES AND DOES NOT COVER ────────────────────────────────────────
+# The UI only. LITELLM_MASTER_KEY remains required on every API call, so machine
+# callers (/chat/completions, /embeddings) are completely unaffected — and that
+# matters here, because this host serves the API and the UI on ONE port with no
+# path split. SSO is therefore an ADDITIONAL identity layer on the console, not
+# a replacement for the master key, and not a substitute for the Cloudflare
+# Access wall in front of the hostname.
+#
+# Break-glass: LiteLLM keeps username/password reachable at /fallback/login once
+# SSO is on. Same rationale as Grafana's retained GF_SECURITY_ADMIN_PASSWORD.
+sso:
+  enabled: false
+  clientId: litellm
+  # Authentik serves authorize/, token/ and userinfo/ at the /application/o/
+  # ROOT — they are NOT per-application. Only `issuer` and `jwks_uri` carry the
+  # application slug. This is the same trap documented at length on grafana.oidc
+  # in helm/fuzeinfra/values.yaml: deriving these from the per-app path yields a
+  # 404 on the first redirect. LiteLLM takes the three endpoints explicitly
+  # rather than discovering them, so the shared base is what belongs here.
+  endpointBase: https://authentik.prod.fuzefront.com/application/o
+  # PROXY_BASE_URL. Load-bearing: LiteLLM builds its redirect_uri as
+  # "<proxyBaseUrl>/sso/callback", and Authentik matches redirect URIs strictly.
+  # It must be the EXTERNAL https host, not the in-cluster service, because the
+  # browser is what follows it.
+  proxyBaseUrl: https://litellm.prod.fuzefront.com
+  # GENERIC_SCOPE. `groups` is included so the ID token carries group membership
+  # for any future role mapping; LiteLLM does not require it today.
+  scope: "openid profile email groups"
+  secretName: litellm-oidc
+  secretKey: CLIENT_SECRET

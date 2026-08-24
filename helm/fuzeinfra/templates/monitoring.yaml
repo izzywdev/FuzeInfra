@@ -90,6 +90,8 @@ spec:
             - '--config.file=/etc/prometheus/prometheus.yml'
             - '--storage.tsdb.path=/prometheus'
             - '--web.enable-lifecycle'
+            - '--storage.tsdb.retention.time={{ .Values.prometheus.retention.time | default "15d" }}'
+            - '--storage.tsdb.retention.size={{ .Values.prometheus.retention.size | default "15GB" }}'
           ports:
             - containerPort: 9090
               name: http
@@ -275,6 +277,14 @@ spec:
         # whenever they change, so a provisioning edit reloads automatically.
         checksum/monitoring-config: {{ include (print $.Template.BasePath "/configmaps-monitoring.yaml") $ | sha256sum }}
         checksum/dashboards: {{ include (print $.Template.BasePath "/grafana-dashboards.yaml") $ | sha256sum }}
+        # Roll when the admin-credential wiring changes, including a reseal.
+        # Kubernetes does not restart a pod when a Secret changes (env is read
+        # once at start), and the chart cannot hash a SealedSecret's ciphertext
+        # because Argo applies it from outside the release. So bumping
+        # adminPasswordSecret.rotation is what actually makes a rotated password
+        # reach Grafana. Without this, a reseal silently leaves the OLD password
+        # live and the new one only takes effect at the next unrelated restart.
+        checksum/credentials: {{ .Values.grafana.adminPasswordSecret | toYaml | sha256sum }}
         {{- if .Values.grafana.persistence.enabled }}
         cluster-autoscaler.kubernetes.io/safe-to-evict: "false"
         {{- end }}
@@ -304,11 +314,28 @@ spec:
           image: {{ .Values.grafana.image }}
           imagePullPolicy: {{ include "fuzeinfra.pullPolicy" . }}
           env:
+            # Local break-glass admin password. Sourced from a dedicated Secret
+            # when adminPasswordSecret.name is set, else from the chart-managed
+            # fuzeinfra-secrets.
+            #
+            # The override exists because the chart default for this value is the
+            # literal string "admin", and no environment overrode it — so prod was
+            # rendering GRAFANA_ADMIN_PASSWORD: "admin" behind nothing but the
+            # Cloudflare Access wall. Rotating it via fuzeinfra-secrets would mean
+            # resealing that whole Secret, which also carries the Postgres, Mongo
+            # and Neo4j passwords those live datastores are already using — a
+            # coordinated credential rotation, not a config change. A separate
+            # Secret keeps this fix contained and reversible.
             - name: GF_SECURITY_ADMIN_PASSWORD
               valueFrom:
                 secretKeyRef:
+                  {{- with .Values.grafana.adminPasswordSecret }}
+                  name: {{ .name | default (include "fuzeinfra.secretName" $) }}
+                  key: {{ .key | default "GRAFANA_ADMIN_PASSWORD" }}
+                  {{- else }}
                   name: {{ include "fuzeinfra.secretName" . }}
                   key: GRAFANA_ADMIN_PASSWORD
+                  {{- end }}
             - name: GF_USERS_ALLOW_SIGN_UP
               value: "false"
             - name: GF_FEATURE_TOGGLES_DASHBOARDNEWLAYOUTS
@@ -363,8 +390,12 @@ spec:
               value: "true"
             - name: GF_AUTH_GENERIC_OAUTH_ROLE_ATTRIBUTE_PATH
               value: {{ .Values.grafana.oidc.roleAttributePath | quote }}
-            # Fail closed: a token with no matching group gets no role rather
-            # than silently inheriting the default (Viewer).
+            # Fail closed — but ONLY in combination with a roleAttributePath that
+            # has no fallback branch. STRICT rejects a login when the JMESPath
+            # yields NO role; it cannot help if the expression always returns
+            # something. An earlier `... && 'Admin' || 'Viewer'` path always
+            # returned a role, so this flag was inert and a groupless token was
+            # auto-provisioned as a Viewer. Keep both halves or neither works.
             - name: GF_AUTH_GENERIC_OAUTH_ROLE_ATTRIBUTE_STRICT
               value: "true"
             {{- end }}

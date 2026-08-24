@@ -1,0 +1,82 @@
+name: prod-conformance
+
+# Regenerates the production truth table that docs/planning/production-conformance.md
+# (FuzeFront) records by hand. Ten properties per product, measured, never inferred from
+# repository contents.
+#
+# RUNS IN-CLUSTER, ON PURPOSE. `runs-on: staging` is an ARC runner inside this cluster, so
+# it reaches every product by its ClusterIP Service DNS name. No product needs a public
+# hostname for this to work — which matters, because probing from outside would have
+# required exactly the per-product public ingress the ingress policy is trying to retire.
+# A measurement tool must not create a reason to keep the thing it measures.
+#
+# The portal column needs a credential (every /api/apps read path is authenticated). When
+# PORTAL_READ_TOKEN is unset the column reads UNVERIFIED and says why — it does NOT read
+# zero. "No apps registered" and "could not ask" must never render the same.
+
+on:
+  workflow_dispatch:
+    inputs:
+      strict:
+        description: 'Fail the run when a deployed product serves no health endpoint'
+        type: boolean
+        default: false
+  schedule:
+    # 06:17 UTC — off the :00 herd, before the working day, after the nightly deploys.
+    - cron: '17 6 * * *'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: prod-conformance
+  cancel-in-progress: false
+
+jobs:
+  probe:
+    runs-on: staging
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      # `runs-on: staging` is self-hosted and does NOT ship kubectl (same note as
+      # apply-cluster-config.yml — the two must not drift on this).
+      - uses: azure/setup-kubectl@829323503d1be3d00ca8346e5391ca0b07a9ab0d  # v5.1.0
+
+      # The ARC image does not put python on PATH either. Declaring the interpreter
+      # rather than trusting the image is why gate-authz broke on FuzeSDLC#100.
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5
+        with: { python-version: '3.12' }
+
+      - name: Configure kubectl
+        env:
+          KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
+        run: |
+          if [ -z "$KUBE_CONFIG" ]; then echo "::error::KUBE_CONFIG unset"; exit 1; fi
+          mkdir -p "$HOME/.kube"
+          printf '%s' "$KUBE_CONFIG" | base64 -d > "$HOME/.kube/config"
+          chmod 600 "$HOME/.kube/config"
+          echo "KUBECONFIG=$HOME/.kube/config" >> "$GITHUB_ENV"
+
+      - name: Probe
+        env:
+          PORTAL_READ_TOKEN: ${{ secrets.PORTAL_READ_TOKEN }}
+          STRICT: ${{ inputs.strict && '--strict' || '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo "## Production conformance — $(date -u +%Y-%m-%dT%H:%MZ)"
+            echo
+            # shellcheck disable=SC2086  # STRICT is deliberately word-split: it is a flag or empty
+            python3 scripts/prod_conformance.py \
+              --portal-token "${PORTAL_READ_TOKEN:-}" \
+              --json prod-conformance.json \
+              $STRICT
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        if: always()
+        with:
+          name: prod-conformance
+          path: prod-conformance.json
+          retention-days: 14

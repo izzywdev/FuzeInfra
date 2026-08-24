@@ -1,4 +1,18 @@
----
+# ArgoCD OIDC client secret.
+#
+# THE LABEL BELOW IS LOAD-BEARING. ArgoCD only resolves a `$secret:key`
+# reference in argocd-cm from Secrets carrying
+# app.kubernetes.io/part-of: argocd. Without it ArgoCD does not treat this as
+# one of its own Secrets, never substitutes, and sends the LITERAL string
+# "$argocd-oidc:clientSecret" to the token endpoint. Authentik then rejects it:
+#
+#   failed to get token: oauth2: "invalid_client" "Client authentication failed"
+#
+# which reads like a wrong or missing secret rather than a missing label.
+#
+# It lives under spec.template.metadata because that block is NOT encrypted --
+# it is the shape the controller stamps onto the generated Secret. Adding it
+# therefore needs no re-seal, and the ciphertext is untouched.
 apiVersion: bitnami.com/v1alpha1
 kind: SealedSecret
 metadata:
@@ -11,4 +25,6 @@ spec:
     metadata:
       name: argocd-oidc
       namespace: argocd
+      labels:
+        app.kubernetes.io/part-of: argocd
     type: Opaque

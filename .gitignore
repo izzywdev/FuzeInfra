@@ -182,3 +182,8 @@ site/
 docker-compose.local.yml
 local-config/
 dev-overrides/ 
+# Local plaintext credential scratch files. Anything named *.local.txt is a
+# human-readable secret handed over out-of-band (e.g. a rotated break-glass
+# password written for the operator to file in a password manager). They are
+# NOT sealed and must never be committed. Delete after storing.
+*.local.txt

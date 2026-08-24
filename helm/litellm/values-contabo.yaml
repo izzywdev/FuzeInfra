@@ -95,6 +95,38 @@ ingress:
   subdomain: litellm
   domain: prod.fuzefront.com
 
+# Authentik SSO for the LiteLLM admin UI.
+#
+# DELIBERATELY STILL FALSE. deploy/sealed-secrets/litellm-oidc.yaml does not
+# exist yet: the value has to be minted by a human and sealed TWICE
+# (fuzefront/fuzefront-secrets key LITELLM_CLIENT_SECRET for the IdP side,
+# fuzeinfra/litellm-oidc key CLIENT_SECRET for this side) — see
+# deploy/sealed-secrets/authentik-oidc-secrets.yaml.template. Enabling first
+# gives the pod CreateContainerConfigError, exactly as documented for
+# grafana.oidc and kafkaUi.oidc.
+#
+# Second precondition, and it is not a technical one: upstream makes SSO free
+# only up to FIVE users. Confirm the admin roster is within that before
+# flipping, or the sixth person's login is a licence failure, not a bug. Full
+# note on the `sso` block in values.yaml.
+#
+# Unlike airflow, this service IS running (replicas: 1), so once the secret
+# lands this one can actually be verified end to end.
+sso:
+  # PAIRED CHANGE - must merge alongside the matching FuzeFront PR. The OIDC
+  # client secret is sealed in halves (fuzefront-secrets LITELLM_CLIENT_SECRET
+  # on the IdP side, litellm-oidc CLIENT_SECRET here). Landing one without the
+  # other leaves the two ends holding different values, and the token exchange
+  # then fails as a generic "Invalid credentials" that implicates neither side.
+  #
+  # ENABLED 2026-08-20. Preconditions met: deploy/sealed-secrets/litellm-oidc.yaml
+  # exists (sealed together with the fuzefront-secrets LITELLM_CLIENT_SECRET half),
+  # and the admin roster is within upstream's free five-user SSO cap.
+  enabled: true
+  # Bump when litellm-oidc.yaml is resealed — hashed into the pod annotation so a
+  # rotation actually restarts the pod.
+  secretRotation: "2026-08-20"
+
 # NOTE ON NODE PINNING: FuzeFront's own values-prod.yaml pins a `litellm`
 # affinity to node `fuzefront-node-2`. That node does not exist in this cluster
 # (Contabo nodes are vmi* / fuzeinfra-elastic-*), and that block belonged to the

@@ -595,10 +595,15 @@ PROVIDER=stub ROUTING_ENABLED=false \
 **Confirmed reachable — no egress or ingress constraint.** OIDC redirect URIs on
 custom domains work:
 
-- The redirect to `auth.fuzefront.com` is a **browser** redirect. Nothing needs
-  to egress from the cluster.
-- `auth.fuzefront.com` is a public vanity host, outside the `*.prod` Cloudflare
-  Access wall, so no OTP interstitial breaks the flow.
+- The redirect to the IdP is a **browser** redirect. Nothing needs to egress from
+  the cluster.
+- Consumer/product sign-in goes through `app.fuzefront.com`, which reverse-proxies
+  Authentik's OIDC surface at its native paths. `app` is a public vanity host
+  outside the `*.prod` Cloudflare Access wall, so no Access interstitial breaks a
+  customer login.
+- Do **not** point a consumer flow at `authentik.prod.fuzefront.com`. That host is
+  the admin surface and sits INSIDE the Access wall, so an end user would hit a
+  Google/OTP interstitial they are not on the allowlist for.
 - The redirect *back* to `https://app.corpabc.com/...` reaches the cluster over
   the same path as any other request to that domain — the CF for SaaS edge, the
   tunnel, then the materialized Ingress. Once `active` is true, it works.
