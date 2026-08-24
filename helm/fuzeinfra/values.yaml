@@ -233,6 +233,15 @@ ingress:
     enabled: false
 
 # =============================================================================
+# Split-horizon DNS (k3s CoreDNS coredns-custom ConfigMap)
+# Rewrites *.global.domain external hostnames to cluster-internal service FQDNs
+# so in-cluster callers hit the ClusterIP directly rather than the CF Tunnel.
+# Disable on non-k3s clusters (kind uses nginx ingress without this need).
+# -----------------------------------------------------------------------------
+coreDnsSplitHorizon:
+  enabled: false
+
+# =============================================================================
 # Service definitions. Each block: enabled, image, resources, storage size.
 # =============================================================================
 

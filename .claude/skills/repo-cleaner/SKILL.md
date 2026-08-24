@@ -34,7 +34,12 @@ For every non-default branch, run the `branch-audit` algorithm in full:
 **Special cases:**
 - **Has an open PR** → skip to Phase 2 (handle under PR audit).
 - **Release branches** (`chore/release-vX.Y.Z`) with a matching tag → stale, delete.
-- **`claude/*` session branches** with no open PR and no unique content → stale, delete.
+- **AI-session branches** (`claude/*`, `codex/*`, `gemini/*`) — apply the following recency guard before deleting:
+  1. Check whether the remote branch exists. If it does: no open PR + no unique content → stale, delete.
+  2. If the remote branch is 404 (never pushed): check the corresponding local session directory mtime.
+     - mtime **< 4 hours ago** → treat as a **possibly-active** session that hasn't pushed yet — **SKIP** (do not delete the branch or the local directory). Log as `"possibly-active-not-yet-pushed"`.
+     - mtime **≥ 8 hours ago** → treat as **dead session** (pushed nothing, likely crashed) — safe to delete the local directory; nothing to do remotely.
+  3. **Never delete a local session directory** whose remote branch has commits the local worktree has not yet synced (`git log origin/<branch>..HEAD` is non-empty).
 - **Conflict branch** → never delete or push partial merges.
 
 ## Phase 2 — PR audit and closure
