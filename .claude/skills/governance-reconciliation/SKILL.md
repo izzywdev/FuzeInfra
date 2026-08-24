@@ -11,6 +11,8 @@ Keeps a repo *converging*: nothing left half-done, no branch/PR/issue silently r
 
 ### 1. Branches (stale / drifting)
 - List non-default branches (`gh api repos/{r}/branches`, `gh pr list --state all`). For each, classify:
+  - **Story integration branch (`story/**` or runtime-prefixed equivalent)** → must have an open draft/final PR to the default branch, an active Jira Story in the current sprint, and no lifetime beyond one sprint. Report its single next action to completion.
+  - **Task branch (`task/**` or runtime-prefixed equivalent)** → must have a PR to its live Story branch, never directly to default for planned Story work. A task whose Story branch is gone is orphaned and must be reconciled.
   - **Merged-but-not-deleted** → delete the branch (safe).
   - **Has an open PR** → handled in §2 (don't touch here).
   - **No PR + ahead of default + recent (<14d)** → open a **draft PR** ("what is this branch / does it want to land?") and ask the author in the tracking issue.
