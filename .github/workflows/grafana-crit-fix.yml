@@ -366,7 +366,7 @@ jobs:
 
               # 3) Cross-link + close the FuzeInfra tracking issue
               gh issue comment "$TRACK_NUM" --repo "${{ github.repository }}" \
-                --body "🤝 Handed off to ${OWNER_REPO}: ${FF_URL} — that repo's @claude process will fix + deploy. Closing here; tracking continues in the linked issue." 2>/dev/null || true
+                --body "🤝 Handed off to ${OWNER_REPO}: ${FF_URL} — that repo's @fuze handler will diagnose and fix. Closing here; tracking continues in the linked issue." 2>/dev/null || true
               gh issue close "$TRACK_NUM" --repo "${{ github.repository }}" --reason "not planned" 2>/dev/null || true
 
               echo "::notice::handed off ${TRACK_URL} → ${FF_URL}"

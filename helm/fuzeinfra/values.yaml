@@ -58,9 +58,17 @@ credentials:
   airflow:
     adminUser: admin
     adminPassword: admin
-    # Fernet key for Airflow connection encryption. Generate a real one with:
+    # LOCAL DEV ONLY — never use this placeholder in any real environment.
+    # For prod/staging: set fernetKeySecret (below) pointing at a SealedSecret
+    # and leave fernetKey as the empty string so secrets.yaml omits the key entirely.
+    # Generate a real key:
     #   python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
     fernetKey: "Zp9p8x0Q3y0sJpQ8m2nq3l4F6tH9wXyZ1aB2cD3eF4="
+    # When set, AIRFLOW__CORE__FERNET_KEY is sourced from this Secret instead
+    # of fuzeinfra-secrets.  Set in prod via values-contabo.yaml + SealedSecret.
+    fernetKeySecret: {}
+    #  name: fuzeinfra-app-credentials
+    #  key: AIRFLOW_FERNET_KEY
   cloudflare:
     # Tunnel token from the Cloudflare Zero Trust dashboard. Required only when
     # cloudflareTunnel.enabled=true. Prefer supplying via an existing Secret.
@@ -388,6 +396,70 @@ kafkaUi:
     issuer: https://authentik.prod.fuzefront.com/application/o/kafka-ui/
     secretName: kafka-ui-oidc
     secretKey: CLIENT_SECRET
+    # Scopes requested at the authorization endpoint.
+    #
+    # `groups` is NOT optional once rbac.enabled is true. Granting the scope on
+    # the Authentik provider only makes it AVAILABLE; the client still has to ask
+    # for it, and kafka-ui asks for exactly this list. Without it the ID token
+    # carries no `groups` claim, the authority extractor finds nothing, and every
+    # SSO user resolves to zero roles — which under RBAC is a total lockout, not
+    # a downgrade. Verified against the live discovery document:
+    #   scopes_supported: ["openid","email","profile","groups"]
+    #   claims_supported: [... "groups" ...]
+    # Keep it in the list even while rbac is off: it costs nothing, and it means
+    # flipping rbac on is a single change instead of an ordering puzzle.
+    scopes:
+      - openid
+      - email
+      - profile
+      - groups
+    # ---- Authorization (RBAC) -------------------------------------------------
+    # Without this, kafka-ui is authentication-only: every user who completes SSO
+    # is an unscoped admin, and with DYNAMIC_CONFIG_ENABLED=true that admin can
+    # rewrite cluster config, produce and delete messages, and delete topics.
+    #
+    # Default OFF, because turning RBAC on is a hard cutover, not a soft one:
+    # kafka-ui enables RBAC purely by observing that `rbac.roles` is non-empty
+    # (AccessControlService#init at v0.7.2), after which anyone who matches no
+    # role is denied everything. Enable it in an environment only once you are
+    # sure the `groups` claim actually reaches the pod.
+    rbac:
+      enabled: false
+      # The ID-token claim holding the user's group memberships, passed to
+      # kafka-ui as the generic-oauth `roles-field` custom param. Authentik emits
+      # group names in `groups`.
+      rolesClaim: groups
+      # CROSS-REPO CONTRACT — do not rename here alone.
+      #
+      # The same Authentik group already gates Grafana (grafana.oidc
+      # .roleAttributePath) and ArgoCD (argocd/cluster-settings/argocd-rbac-cm
+      # .yaml -> `g, fuzeinfra-admins, role:admin`). It is created by the
+      # groups-fuzeinfra-admins.yaml blueprint in izzywdev/FuzeFront. Renaming it
+      # in one consumer silently removes everyone's access in that consumer only.
+      adminGroup: fuzeinfra-admins
+      # Name of the kafka-ui role the group is mapped onto. Internal identifier
+      # only — kafka-ui matches a user to a role by comparing the role NAME
+      # against the set of role names the extractor produced, so this never
+      # leaves the pod.
+      adminRoleName: admin
+      # NO read-only catch-all role, deliberately — everyone outside adminGroup
+      # gets NOTHING, not Viewer.
+      #
+      # This mirrors the fix already made to grafana.oidc.roleAttributePath: a
+      # `|| 'Viewer'` fallback there meant every account in the directory was
+      # silently auto-provisioned with read access to every dashboard. The same
+      # shape here would be worse — kafka topic payloads are application data,
+      # and "read-only" on a Kafka UI still means reading every message on every
+      # topic. Authentik's policy binding on the `kafka-ui` Application is the
+      # primary gate; this fails closed behind it.
+      #
+      # A read-only tier is a real future need (on-call wanting to inspect lag
+      # without write access). It needs its OWN Authentik group, created in the
+      # FuzeFront blueprints first — do not repurpose fuzeinfra-admins for it.
+    # Raise Spring Security's OAuth2 logging so a failed login reports WHY.
+    # Off by default and meant to be turned back off after diagnosis — see the
+    # TRACE warning in templates/messaging.yaml before changing the level.
+    debugLogging: false
 
 rabbitmq:
   # Source RABBITMQ_DEFAULT_PASS from a dedicated Secret instead of the
@@ -678,6 +750,15 @@ nodeExporter:
   enabled: true
   image: prom/node-exporter:latest
   port: 9100
+
+# Node Configurator DaemonSet — writes /etc/gai.conf on every node.
+# Disabled by default; enable in values-contabo.yaml for prod.
+# Uses docker.io/busybox (not GHCR) so the DaemonSet itself is not affected
+# by GHCR pull failures on nodes that haven't been patched yet.
+nodeConfigurator:
+  preferIPv4:
+    enabled: false
+  image: docker.io/busybox:1.36.1
 
 kubeStateMetrics:
   enabled: true
@@ -990,6 +1071,16 @@ handoffMcp:
   tag: latest
   replicas: 1
   imagePullSecrets: []
+  # Empty = inherit global.imagePullPolicy. Set to Always in any overlay that
+  # still runs the floating `latest` tag, otherwise a node that cached `latest`
+  # never sees a rebuild.
+  imagePullPolicy: ""
+  # Bump on EVERY reseal of deploy/sealed-secrets/handoff-mcp-secret.yaml, in the
+  # SAME commit. It feeds checksum/handoff-secret, which is the only thing that
+  # rolls the pod onto a rotated ANTHROPIC_API_KEY / HANDOFF_MCP_TOKEN: resealing
+  # only rewrites ciphertext that Argo applies from outside this release, and a
+  # running pod keeps its old env until something restarts it (#589).
+  secretRotation: "1"
   resources:
     requests: { cpu: "100m", memory: "256Mi" }
     limits:   { cpu: "500m", memory: "512Mi" }

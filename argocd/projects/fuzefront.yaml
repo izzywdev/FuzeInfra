@@ -33,9 +33,12 @@ spec:
     # NOTE: `fuzeinfra` is deliberately NOT a destination — that is FuzeInfra's
     # namespace. A consumer that needs an infra service consumes it via DNS, it
     # does not deploy into it.
+  # Namespace is the only cluster-scoped resource these workloads need
+  # (CreateNamespace=true sync option). ClusterRole/ClusterRoleBinding/CRD
+  # are blocked — consumers must not be able to modify cluster-level security.
   clusterResourceWhitelist:
-    - group: "*"
-      kind: "*"
+    - group: ''
+      kind: Namespace
   namespaceResourceWhitelist:
     - group: "*"
       kind: "*"

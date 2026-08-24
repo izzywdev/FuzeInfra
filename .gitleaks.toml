@@ -1,6 +1,50 @@
+# `[extend] useDefault = true` is load-bearing. Without it, a .gitleaks.toml that
+# declares no [[rules]] of its own loads ZERO rules, and gitleaks reports
+# "no leaks found" on a tree containing live credentials — the gate is green
+# because it is looking for nothing, not because the tree is clean.
+#
+# This file was in exactly that state. Verified with gitleaks 8.24.3 against a
+# repo holding a planted AWS access key: with this config and no [extend],
+# "no leaks found"; with the same config plus these two lines, the key is found.
+#
+# Never delete these two lines to silence a finding. Narrow the allowlist below
+# instead, and prove the narrowed config still fails on a real secret.
+[extend]
+useDefault = true
+
 [allowlist]
   description = "SealedSecrets are encrypted ciphertext — not plaintext secrets"
   paths = [
     "deploy/sealed-secrets/",
     ".gitleaks.toml",
+    # SealedSecret ciphertext — kubeseal output, encrypted. These are where the
+    # default rules actually match in this repo, found by rescanning full history
+    # with the rules on: 5 in the autoscaler CA provider, 1 in the Argo CD GitHub
+    # App sealed secret. Listed because they were measured, not assumed.
+    '''argocd/cluster-config/.*\.sealed\.yaml''',
+    '''templates/autoscaler/sealed-secret-.*\.yaml''',
+
+    # runners/arc/github-secret.yaml — triggers `private-key` rule on the PEM header.
+    # Verified: every line in this file is commented out. The PEM block reads
+    # "-----BEGIN RSA PRIVATE KEY-----\nREPLACE_WITH_PRIVATE_KEY_CONTENT\n-----END..."
+    # which is a runbook template, not a real key. No actual key bytes are present.
+    '''runners/arc/github-secret\.yaml''',
+
+    # helm/fuzeinfra/values-local.yaml — triggers `curl-auth-header` on "local-dev-token".
+    # Verified: this is a comment (lines 78-85) showing how to curl the local-only
+    # custom-hostname stub service. "local-dev-token" is the stub's well-known dev
+    # token. The chart refuses to render with this stub enabled alongside
+    # provider: cloudflare, so the token can never reach a real service.
+    '''helm/fuzeinfra/values-local\.yaml''',
+
+    # helm/fuzeinfra/values.yaml — triggers `generic-api-key` on the Airflow fernetKey.
+    # Verified: the comment on the same line reads "Generate a real one with:
+    # python -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())'".
+    # The committed value is a sample placeholder; prod overrides it via SealedSecret.
+    '''helm/fuzeinfra/values\.yaml''',
+
+    # docs/consuming-repos/CUSTOM_DOMAINS.md — triggers `curl-auth-header` on "local-dev-token".
+    # Verified: this is a code example in documentation (line ~574) showing how to
+    # POST to the custom-hostname stub in a local cluster. Same local-dev-token as above.
+    '''docs/consuming-repos/CUSTOM_DOMAINS\.md''',
   ]

@@ -1,14 +1,14 @@
 apiVersion: argoproj.io/v1alpha1
 kind: AppProject
 metadata:
-  name: fuzex
+  name: fuzemerchandize
   namespace: argocd
 spec:
-  description: FuzeX product (consumer of FuzeInfra) — may deploy ONLY into its own namespace.
+  description: FuzeMerchandize product (consumer of FuzeInfra) — may deploy ONLY into its own namespace.
   sourceRepos:
-    - https://github.com/izzywdev/FuzeX.git
+    - https://github.com/izzywdev/FuzeMerchandize.git
   destinations:
-    - namespace: fuzex
+    - namespace: fuzemerchandize
       server: https://kubernetes.default.svc
   # Namespace is the only cluster-scoped resource these workloads need
   # (CreateNamespace=true sync option). ClusterRole/ClusterRoleBinding/CRD

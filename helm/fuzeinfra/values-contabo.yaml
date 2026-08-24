@@ -150,6 +150,23 @@ grafana:
 kafkaUi:
   oidc:
     enabled: true
+    # Authorization, not just authentication. Until this flipped, every account
+    # that completed SSO was a full kafka-ui admin — and with
+    # DYNAMIC_CONFIG_ENABLED=true that admin could edit cluster config, produce
+    # and delete messages, and delete topics.
+    #
+    # Safe to enable HERE and only here because prod is the only environment
+    # whose Authentik `kafka-ui` provider actually grants the `groups` scope.
+    # Verified against the live discovery document on 2026-08-20:
+    #   https://authentik.prod.fuzefront.com/application/o/kafka-ui/.well-known/openid-configuration
+    #   -> scopes_supported includes "groups", claims_supported includes "groups"
+    #
+    # This is a hard cutover: once rbac.roles is non-empty, kafka-ui denies
+    # everything to anyone who matches no role. Members of fuzeinfra-admins get
+    # full access; everyone else gets nothing (see values.yaml for why there is
+    # no read-only fallback).
+    rbac:
+      enabled: true
     # Bump this whenever deploy/sealed-secrets/kafka-ui-oidc.yaml is resealed.
     #
     # It exists solely to change the checksum/oidc pod annotation, which hashes
@@ -165,6 +182,14 @@ kafkaUi:
     # did not roll at all — leaving the pair mismatched in the opposite direction
     # from the one the reseal was meant to fix.
     secretRotation: "2026-08-19"
+    # Off again. It did its job: with Spring Security at DEBUG the pod log named
+    # the actual failure — "[invalid_id_token] Unsupported algorithm of HS256" —
+    # which is what identified the missing signing_key on the Authentik providers
+    # (izzywdev/FuzeFront#762). Four prior hypotheses had not found it.
+    #
+    # Turn it back on the same way if another OAuth2 failure needs diagnosing.
+    # Read the TRACE warning in templates/messaging.yaml first.
+    debugLogging: false
 # Alertmanager: wire real notification receivers here. Example webhook receiver:
 # alertmanager:
 #   config:
@@ -261,6 +286,14 @@ airflow:
   adminPasswordSecret:
     name: fuzeinfra-app-credentials
     key: AIRFLOW_ADMIN_PASSWORD
+  # Real Fernet key for connection-credential encryption. A human operator must:
+  #   1. python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+  #   2. seal it: scripts/seal-secret.sh fuzeinfra fuzeinfra-app-credentials AIRFLOW_FERNET_KEY <value>
+  #   3. commit deploy/sealed-secrets/fuzeinfra-app-credentials.yaml (or whichever SealedSecret holds it)
+  # After any key rotation: airflow connections rotate-fernet-key (if connections exist)
+  fernetKeySecret:
+    name: fuzeinfra-app-credentials
+    key: AIRFLOW_FERNET_KEY
   # Authentik SSO for the Airflow UI.
   #
   # DELIBERATELY STILL FALSE, for two independent reasons — either one alone is
@@ -312,13 +345,45 @@ cloudflareTunnel:
 # Anthropic's machine calls skip the *.prod email-OTP wildcard and the app bearer
 # (HANDOFF_MCP_TOKEN) is the gate.
 #
-# GITOPS GATE: keep enabled:false until BOTH land in the SAME change —
+# GITOPS GATE (satisfied by #587): both preconditions landed in the same change —
 #   1. deploy/sealed-secrets/handoff-mcp-secret.yaml (ANTHROPIC_API_KEY + HANDOFF_MCP_TOKEN),
 #      sealed via scripts/seal-secret.sh, and
 #   2. helm/fuzeinfra/files/handoff-state/*.json (the provisioned ids).
 # Enabling before the secret exists CrashLoops the pod (CreateContainerConfigError).
+#
+# STATUS — the gate is open but the service is NOT functional end to end. Three
+# things were wrong at once, each silent on its own. Do not read `enabled: true`
+# as "working":
+#
+#   a. FIXED HERE — the image could not start at all. requirements.txt floored
+#      `mcp>=1.2.0` with no ceiling; mcp 2.0.0 removed mcp.server.fastmcp, so the
+#      image built on main at 2026-08-20T01:52 died on import and the pod ran 248
+#      restarts over 21h in CrashLoopBackOff. Pinned to mcp>=1.9,<2, with an import
+#      smoke test in agent-images.yml so a build can no longer be green about an
+#      image that cannot start.
+#
+#   b. OPEN, needs a human — files/handoff-state/*.json are still `{}` placeholders.
+#      They come from the Provision Managed Agents workflow, which fails with HTTP
+#      400 "Your credit balance is too low to access the Anthropic API" (run
+#      32322608863). Empty state does not crash the server: it starts, serves, and
+#      fails every tool call ("unknown role", "no memory store synced"). Restore
+#      credit on the MANAGED_AGENTS_API_KEY account, re-run Provision, commit the
+#      artifact's ids here.
+#
+#   c. OPEN, one merge away — the CF Access bypass in front of this host was never
+#      applied. #588 set TF_VAR_handoff_mcp_access_enabled=true in the workflow env,
+#      but terraform-plan-apply's apply job only triggers on push to main touching
+#      terraform/**, and #588 touched only .github/workflows/. No apply has run on
+#      main since 2026-08-19T11:23 (before #588 merged), so the Access application
+#      does not exist at the edge and mcp-handoff.prod.fuzefront.com still answers
+#      302 to the *.prod email-OTP login — which a machine caller cannot complete.
+#      This PR touches terraform/ so that apply finally runs.
 handoffMcp:
   enabled: true
+  # `latest` + IfNotPresent = a node that already cached the tag never pulls the
+  # rebuild, so the fix in (a) would never reach the pod. Drop this once the tag is
+  # pinned to an immutable sha-<commit> tag.
+  imagePullPolicy: Always
 # -----------------------------------------------------------------------------
 # Custom Hostname API (prod) — runtime provisioning of customer-owned domains
 # for FuzeFront's multi-tenant portals (EPIC-16). Cloudflare for SaaS issues and
@@ -653,3 +718,10 @@ serviceChromaCollections:
         app.kubernetes.io/name: fuzequality
     collections:
       - fuzequality_ready
+
+# Enable IPv4-preference node configurator on Contabo — fixes GHCR pulls being
+# TCP-reset over IPv6 CDN paths (FuzeInfra#616). Uses busybox from Docker Hub
+# so the DaemonSet itself never touches GHCR.
+nodeConfigurator:
+  preferIPv4:
+    enabled: true

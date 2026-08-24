@@ -12,11 +12,9 @@ on:
 jobs:
   validate:
     name: Lint & schema-validate chart
-    # runs-on the shared Contabo ARC 'staging' runner (verified fetching+running
-    # jobs 2026-07-24 via staging-runner-smoke). Use the scale-set NAME, not
-    # [self-hosted, staging]. The controller self-heal CronJob (arc-systems)
-    # auto-recovers the stuck-controller failure mode. Self-hosted = no GitHub
-    # Actions minutes consumed.
+    # Use the scale-set NAME, not [self-hosted, staging]. The controller self-heal
+    # CronJob (arc-systems) auto-recovers stuck-controller and missing-pool-label
+    # failure modes. Self-hosted = no GitHub Actions minutes consumed.
     runs-on: staging
     steps:
       - uses: actions/checkout@v7
