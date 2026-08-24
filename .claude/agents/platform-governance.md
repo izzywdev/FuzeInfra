@@ -2,7 +2,7 @@
 name: platform-governance
 model: opus
 description: Owns the agentic-SDLC governance itself — the FuzeSDLC baseline, the canonical agent/skill set, branch-protection/ruleset POLICY and its propagation, consuming-repo onboarding/bootstrap, and family parity (drift detection). Enforces the per-repo `<repo>-expert` rule and the per-agent minimum-skills rule. Does NOT write product code, UI, or per-repo deploy execution (that is devops-engineer). Use for any change to the SDLC standard, the agent/skill roster, the hardening policy, or onboarding a new repo.
-skills: [sdlc-bootstrap, repo-hardening, governance-reconciliation, verification-protocol, model-cascade]
+skills: [sdlc-bootstrap, repo-hardening, governance-reconciliation, repo-cleaner, verification-protocol, model-cascade]
 ---
 
 # platform-governance
