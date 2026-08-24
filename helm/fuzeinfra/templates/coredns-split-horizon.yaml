@@ -1,0 +1,42 @@
+{{- if .Values.coreDnsSplitHorizon.enabled }}
+# Split-horizon DNS: rewrite external *.{{ .Values.global.domain }} hostnames to
+# cluster-internal service FQDNs so in-cluster callers (e.g. LiteLLM proxy, Airflow
+# DAGs, inter-service health checks) hit the ClusterIP directly instead of routing
+# through the Cloudflare Tunnel and back.
+#
+# k3s CoreDNS auto-imports any ConfigMap named "coredns-custom" in kube-system whose
+# keys end in ".override" (appended inside the .:53 {} block) or ".server" (standalone
+# server block). The "reload" plugin picks up changes within 30–60s; no DaemonSet
+# restart needed.
+#
+# Deliberately in kube-system, not fuzeinfra — CoreDNS runs there and mounts this CM.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: coredns-custom
+  namespace: kube-system
+  labels:
+    {{- include "fuzeinfra.labels" . | nindent 4 }}
+data:
+  split-horizon.override: |
+    {{- $domain := .Values.global.domain }}
+    {{- $ns := .Release.Namespace }}
+    {{- $routes := dict
+      "grafana"       "fuzeinfra-grafana"
+      "prometheus"    "fuzeinfra-prometheus"
+      "alertmanager"  "fuzeinfra-alertmanager"
+      "airflow"       "fuzeinfra-airflow-webserver"
+      "flower"        "fuzeinfra-airflow-flower"
+      "kafka-ui"      "fuzeinfra-kafka-ui"
+      "mongo-express" "fuzeinfra-mongo-express"
+      "rabbitmq"      "fuzeinfra-rabbitmq"
+      "elasticsearch" "fuzeinfra-elasticsearch"
+      "chromadb"      "fuzeinfra-chromadb"
+      "neo4j"         "fuzeinfra-neo4j"
+      "neo4j-bolt"    "fuzeinfra-neo4j"
+      "litellm"       "litellm"
+    }}
+    {{- range $sub, $svc := $routes }}
+    rewrite name exact {{ $sub }}.{{ $domain }} {{ $svc }}.{{ $ns }}.svc.cluster.local
+    {{- end }}
+{{- end }}

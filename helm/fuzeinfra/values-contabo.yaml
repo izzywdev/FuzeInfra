@@ -40,6 +40,9 @@ longhorn:
     enabled: false
     numberOfReplicas: 3
     reclaimPolicy: Retain
+coreDnsSplitHorizon:
+  enabled: true   # k3s prod — rewrites *.prod.fuzefront.com to ClusterIP inside cluster
+
 ingress:
   enabled: true
   className: traefik
