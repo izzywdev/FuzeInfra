@@ -122,7 +122,7 @@ jobs:
     name: plan (${{ vars.TF_ROOT || 'terraform/contabo' }})
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
 
       # Deadlock-safe self-filter: this job ALWAYS runs (no trigger paths filter)
       # so it can be a required check, but only does real work when terraform/**
@@ -264,7 +264,7 @@ jobs:
       group: terraform-apply-${{ vars.TF_ROOT || 'terraform/contabo' }}
       cancel-in-progress: false
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
 
       - name: Resolve the merged PR + its head SHA
         id: pr

@@ -73,7 +73,7 @@ jobs:
     # deliberately generous so a slow image pull reads as slow, not as a failure.
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
 
       # ubuntu-latest ships tens of GB of preinstalled toolchains we never use,
       # and the full stack's images do not comfortably fit in what is left.
