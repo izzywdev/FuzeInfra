@@ -219,7 +219,7 @@ jobs:
         # final status, instead of the action failing silently with no notification.
         if: steps.preflight.outputs.ok == 'true'
         continue-on-error: true
-        uses: anthropics/claude-code-action@9d7150bc8a3dae8149739a88019d192b579ad90c # v1.0.193
+        uses: anthropics/claude-code-action@24dcd50c0568f0fc9e9211213a4fd2d9eb15c4e0 # v1.0.200
         env:
           # KUBECONFIG (set above) + a real-user PAT for things GITHUB_TOKEN can't
           # do (GHCR package visibility, cross-repo gh api). The agent reads any

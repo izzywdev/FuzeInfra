@@ -222,7 +222,7 @@ jobs:
         # account-level outage (warn, stay green) from a real agent failure (red),
         # which the action itself cannot.
         continue-on-error: true
-        uses: anthropics/claude-code-action@9d7150bc8a3dae8149739a88019d192b579ad90c  # v1
+        uses: anthropics/claude-code-action@24dcd50c0568f0fc9e9211213a4fd2d9eb15c4e0  # v1
         env:
           # LiteLLM authenticates `Authorization: Bearer`, so the key has to travel in
           # ANTHROPIC_AUTH_TOKEN — the action does not read that variable itself, which
