@@ -42,7 +42,7 @@ jobs:
   apply:
     runs-on: staging
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
 
       # `runs-on: staging` is a self-hosted runner and does NOT ship kubectl.
       # It used to be present in the image: this workflow last succeeded

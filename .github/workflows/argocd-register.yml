@@ -114,7 +114,7 @@ jobs:
 
       - name: Check out consumer argo manifests (git checkout mode)
         if: github.event_name == 'workflow_dispatch' || github.event.client_payload.argocd_bundle == ''
-        uses: actions/checkout@v7
+        uses: actions/checkout@v7.0.1
         with:
           repository: ${{ github.event.client_payload.repo || inputs.repo }}
           ref: ${{ github.event.client_payload.ref || inputs.ref || 'main' }}

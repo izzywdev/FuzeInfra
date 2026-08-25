@@ -115,7 +115,7 @@ jobs:
           fi
           echo "Interlock passed (confirm=CUTOVER)."
 
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
 
       # -----------------------------------------------------------------
       # 2. Resolve product_id — workflow_dispatch inputs cannot default to

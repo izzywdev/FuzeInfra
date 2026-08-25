@@ -46,7 +46,7 @@ jobs:
     name: Guard elastic-node exclusion (static HCL analysis)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
 
       - name: Elastic-exclusion guard (static HCL check)
         run: python3 scripts-tools/check-elastic-exclusion.py
