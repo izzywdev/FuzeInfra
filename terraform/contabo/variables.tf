@@ -315,6 +315,12 @@ variable "handoff_mcp_access_enabled" {
   default     = false
 }
 
+variable "a2a_relay_access_enabled" {
+  description = "Create the more-specific CF Access 'bypass' app for relay.<domain> so cloud Claude Code sessions (machine, non-interactive WebSocket) skip the *.prod email-OTP wildcard. The A2A relay is reachable over WSS; v0 is open (capability = unguessable cse_ session-id), and it enforces an optional FUZE_A2A_RELAY_TOKEN bearer when set. Flip to true when the a2a-relay is deployed (a2aRelay.enabled)."
+  type        = bool
+  default     = false
+}
+
 variable "ci_worker_count" {
   description = "Number of TF-managed CI runner nodes to provision. DEFAULT 0; CI env sets TF_VAR_ci_worker_count=1 to spin up one dedicated CI node. CI nodes are tainted fuzeinfra.io/ci=true:NoSchedule so only ARC runner pods land there."
   type        = number

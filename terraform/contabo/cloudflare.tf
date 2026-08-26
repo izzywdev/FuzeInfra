@@ -838,6 +838,7 @@ locals {
     cloudflare_zero_trust_access_application.sealed_secrets_cert[*].id,
     cloudflare_zero_trust_access_application.crit_alert_bridge[*].id,
     cloudflare_zero_trust_access_application.handoff_mcp[*].id,
+    cloudflare_zero_trust_access_application.a2a_relay[*].id,
     # Path-scoped, launcher-invisible, but it lives on authentik.<prod> which IS
     # in local.launcher_hosts (the `authentik` tile) — so without this entry the
     # reconciler would treat it as a deletion candidate and silently re-break the
@@ -985,6 +986,39 @@ resource "cloudflare_zero_trust_access_policy" "handoff_mcp_bypass" {
   account_id     = var.cloudflare_account_id
   application_id = cloudflare_zero_trust_access_application.handoff_mcp[0].id
   name           = "Bypass — handoff MCP (app enforces HANDOFF_MCP_TOKEN bearer)"
+  precedence     = 1
+  decision       = "bypass"
+
+  include {
+    everyone = true
+  }
+}
+
+# A2A WSS relay (agent-templates/orchestration/a2a_relay). Cloud Claude Code sessions
+# open an OUTBOUND WebSocket to relay.<domain>; they are machine, non-interactive
+# callers that cannot pass the *.prod email-OTP wall, so a more-specific bypass app is
+# required. v0 relay is OPEN (capability = unguessable cse_ session-id); it enforces an
+# optional FUZE_A2A_RELAY_TOKEN bearer when the a2a-relay-secret is landed. Same TRAP as
+# handoff_mcp: flipping var.a2a_relay_access_enabled is inert unless the apply job runs —
+# this file is under terraform/**, so a PR that edits it triggers the apply. Verify at the
+# edge (WebSocket upgrade, not a browser):
+#   curl -sS -o /dev/null -w '%{http_code}\n' https://relay.<domain>/healthz
+#   200 -> bypass live (relay answers). 302 -> still behind the OTP wall.
+resource "cloudflare_zero_trust_access_application" "a2a_relay" {
+  count                = local.cloudflare_enabled && var.a2a_relay_access_enabled ? 1 : 0
+  account_id           = var.cloudflare_account_id
+  name                 = "A2A relay (cloud session WSS, capability-gated)"
+  domain               = "relay.${local.prod_domain}"
+  type                 = "self_hosted"
+  session_duration     = "0s"
+  app_launcher_visible = false
+}
+
+resource "cloudflare_zero_trust_access_policy" "a2a_relay_bypass" {
+  count          = local.cloudflare_enabled && var.a2a_relay_access_enabled ? 1 : 0
+  account_id     = var.cloudflare_account_id
+  application_id = cloudflare_zero_trust_access_application.a2a_relay[0].id
+  name           = "Bypass — A2A relay (capability = cse_ session-id; optional bearer)"
   precedence     = 1
   decision       = "bypass"
 
