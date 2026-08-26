@@ -41,6 +41,20 @@
 #      a symptom fix, not a root-cause fix — the dead node itself still needs
 #      manual attention, so it also emits CRIT.
 #
+#   3b. LISTENER ABSENT ENTIRELY (2026-08-26) — check 3's blind spot: if the
+#      node under a listener dies and the pod is removed *cleanly*, or the ARC
+#      controller simply never recreates it, the scale set ends up with NO
+#      listener pod at all (not Terminating — just gone). Check 3 finds
+#      nothing to force-delete, so that one repo's CI queues silently with 0
+#      runners while the rest of the cluster (incl. the controller itself)
+#      looks perfectly healthy. Observed: fuzecontact CI queued ~2.5h with its
+#      `fuzecontact-<hash>-listener` absent, controller Running and healthily
+#      cycling other repos' runners. Check 3b diffs every AutoscalingRunnerSet
+#      against the actual listener pods and, on a miss, restarts the
+#      controller so it re-reconciles every AutoscalingListener and recreates
+#      the missing pod(s) — this is a symptom fix; the recurring node
+#      instability behind it still needs separate ops attention.
+#
 # NOTE ON THE IMAGE: this ran with `rancher/kubectl` + `command: ["sh","-c"]`
 # from creation until 2026-07-27 and StartError'd on EVERY run — that image
 # ships no shell. Any replacement image MUST contain /bin/sh. Check 3 also
@@ -57,6 +71,10 @@ kind: ClusterRole
 metadata: {name: arc-selfheal}
 rules:
   - {apiGroups: ["actions.github.com"], resources: ["ephemeralrunners"], verbs: ["get","list"]}
+  # autoscalingrunnersets: check 3b diffs the desired scale-set list against
+  # the actual listener pods to catch a listener that is absent entirely
+  # (not just stuck Terminating, which check 3 already covers).
+  - {apiGroups: ["actions.github.com"], resources: ["autoscalingrunnersets"], verbs: ["get","list"]}
   # Node patch access for check 1: auto-repair missing fuzeinfra.io/pool=ci label
   # and the fuzeinfra.io/ci=true:NoSchedule taint when they are absent from the
   # expected CI node(s). CRIT is still emitted so the incident is visible in logs.
@@ -132,6 +150,9 @@ spec:
                 - |
                   set -u
                   crit=0
+                  # Tracks whether the controller was already restarted this run, so
+                  # check 2 and check 3b never double-restart it in the same pass.
+                  restarted=0
 
                   # ---- check 1: a schedulable node carries fuzeinfra.io/pool=ci ----
                   # CI_NODES: nodes that SHOULD carry the label. k3s applies --node-label
@@ -193,6 +214,7 @@ spec:
                     else
                       echo "STUCK detected -> restarting ARC controller"
                       kubectl -n arc-systems rollout restart deployment/arc-controller-gha-rs-controller
+                      restarted=1
                     fi
                   else
                     echo "ok controller: creating runners normally"
@@ -223,6 +245,40 @@ spec:
                         kubectl -n arc-systems delete pod "$name" --grace-period=0 --force >/dev/null 2>&1
                         crit=1
                       done
+                    fi
+                  fi
+
+                  # ---- check 3b: scale set has NO listener pod at all (absent) ----
+                  # A listener pod removed cleanly (or never recreated) leaves nothing
+                  # Terminating for check 3 to find, so diff the desired scale-set list
+                  # against the actual listener pods instead of relying on pod phase.
+                  sets=$(kubectl get autoscalingrunnersets -n arc-runners \
+                    -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null)
+                  listener_pods=$(kubectl get pods -n arc-systems \
+                    -l app.kubernetes.io/component=runner-scale-set-listener \
+                    -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null)
+
+                  if [ -z "$sets" ]; then
+                    echo "warn listener-absent: could not list autoscalingrunnersets, skipping check 3b"
+                  else
+                    absent=""
+                    for set in $sets; do
+                      if ! printf '%s\n' "$listener_pods" | grep -Eq "^${set}-[^-]+-listener$"; then
+                        absent="$absent $set"
+                      fi
+                    done
+
+                    if [ -z "$absent" ]; then
+                      echo "ok listener-present: every scale set has a listener pod"
+                    else
+                      echo "CRIT ARC listener-absent:$absent has no listener pod at all (any phase) - that scale set's CI has 0 runners and check 3 has nothing Terminating to force-delete. Requesting a controller reconcile to recreate the missing listener(s); the underlying node instability still needs manual attention."
+                      crit=1
+                      if [ "$restarted" -eq 0 ]; then
+                        kubectl -n arc-systems rollout restart deployment/arc-controller-gha-rs-controller
+                        restarted=1
+                      else
+                        echo "controller already restarted this run (check 2) - not restarting again"
+                      fi
                     fi
                   fi
 
