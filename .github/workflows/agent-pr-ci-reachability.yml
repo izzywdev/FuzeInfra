@@ -1,0 +1,110 @@
+name: Agent PR CI reachability
+
+# Standing tripwire for the two ways an agent PR silently ends up with no CI —
+# both of which are invisible ("my PR has no checks" looks identical to "there are
+# no PRs"), and both of which are caused by agent git operations running as
+# github-actions[bot] / GITHUB_TOKEN instead of a collaborator-backed identity:
+#
+#   GATED   (public repos): pull_request runs created but frozen at
+#           action_required by the fork-PR approval gate, because the triggering
+#           actor is the bot. Observed on FuzeFront #812.
+#   MISSING (private repos): pull_request runs never created, because a
+#           GITHUB_TOKEN push does not trigger workflow runs (recursion guard).
+#           Observed on FuzeContact #63.
+#
+# The fix lives elsewhere (the workflows that open PRs / push to PR branches must
+# use a GitHub App installation token or a dedicated bot PAT). THIS workflow does
+# not fix anything — it FAILS if the condition returns, so that the fix staying in
+# place is observable rather than assumed. Propagated fleet-wide as a managed file
+# so every repo carries its own tripwire.
+#
+# Read-only: needs only to read PRs and Actions runs on its own repo. The default
+# GITHUB_TOKEN is sufficient and appropriate here (this workflow never pushes).
+
+on:
+  schedule:
+    - cron: "17 * * * *"      # hourly, off the top of the hour to avoid stampede
+  workflow_dispatch:
+    inputs:
+      grace_minutes:
+        description: "Minutes a head may have zero pull_request runs before MISSING"
+        default: "20"
+        required: false
+
+permissions:
+  contents: read
+  pull-requests: read
+  actions: read
+
+concurrency:
+  group: agent-pr-ci-reachability-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  detect:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (for the detector script)
+        uses: actions/checkout@v7.0.1
+
+      - name: Fetch agent PRs and evaluate reachability
+        id: detect
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          GRACE_MINUTES: ${{ github.event.inputs.grace_minutes || '20' }}
+        run: |
+          set -euo pipefail
+          python3 - "$REPO" "$GRACE_MINUTES" > /tmp/payload.json <<'PY'
+          import calendar, json, subprocess, sys, time
+
+          repo, grace = sys.argv[1], int(sys.argv[2])
+
+          def gh(path, jq=None):
+              cmd = ["gh", "api", path]
+              if jq:
+                  cmd += ["--jq", jq]
+              out = subprocess.check_output(cmd, text=True)
+              return out
+
+          # Open PRs (paginated). Agent-ness is decided by the detector; we pass
+          # every open PR and let it filter, so the rules live in one place.
+          prs = json.loads(gh(
+              f"repos/{repo}/pulls?state=open&per_page=100",
+              jq="[.[] | {number, head_ref: .head.ref, head_sha: .head.sha, "
+                 "author: .user.login}]"))
+
+          enriched = []
+          for pr in prs:
+              sha = pr["head_sha"]
+              # Head commit time — bounds the MISSING age check.
+              try:
+                  iso = gh(f"repos/{repo}/commits/{sha}",
+                           jq=".commit.committer.date").strip()
+                  # Z == UTC; timegm treats the parsed tuple as UTC (DST-safe).
+                  committed = calendar.timegm(time.strptime(iso, "%Y-%m-%dT%H:%M:%SZ"))
+              except Exception:
+                  committed = None
+              # Workflow runs on exactly this head.
+              try:
+                  runs = json.loads(gh(
+                      f"repos/{repo}/actions/runs?head_sha={sha}&per_page=100",
+                      jq="[.workflow_runs[] | {event, status, conclusion, name, "
+                         "triggering_actor: .triggering_actor.login}]"))
+              except Exception:
+                  runs = []
+              enriched.append({
+                  "number": pr["number"], "head_ref": pr["head_ref"],
+                  "head_sha": sha, "author": pr["author"],
+                  "head_committed_at": committed, "runs": runs,
+              })
+
+          print(json.dumps({
+              "now": int(time.time()),
+              "grace_minutes": grace,
+              "agent_branch_prefixes": ["claude/", "fuze/", "codex/"],
+              "agent_authors": ["github-actions[bot]"],
+              "prs": enriched,
+          }))
+          PY
+          python3 .github/detect-agent-pr-ci.py < /tmp/payload.json
