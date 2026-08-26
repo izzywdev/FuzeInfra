@@ -381,6 +381,9 @@ cloudflareTunnel:
 #      does not exist at the edge and mcp-handoff.prod.fuzefront.com still answers
 #      302 to the *.prod email-OTP login — which a machine caller cannot complete.
 #      This PR touches terraform/ so that apply finally runs.
+a2aRelay:
+  enabled: true
+
 handoffMcp:
   enabled: true
   # `latest` + IfNotPresent = a node that already cached the tag never pulls the

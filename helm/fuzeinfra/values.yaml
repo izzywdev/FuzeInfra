@@ -1074,6 +1074,17 @@ clusterAutoscaler:
 # HANDOFF_MCP_TOKEN) and populates helm/fuzeinfra/files/handoff-state/*.json.
 # Exposed at mcp-handoff.<domain> (Ingress here + CF Access bypass in Terraform).
 # -----------------------------------------------------------------------------
+a2aRelay:
+  # A2A WSS relay for cloud<->cloud Claude Code session messaging
+  # (agent-templates/orchestration/a2a_relay). Off by default; on in values-contabo.
+  enabled: false
+  # v0: no image build — a stock python image pip-installs websockets at start.
+  image: python:3.12-slim
+  replicas: 1
+  # Bump to force a pod roll after resealing a2a-relay-secret (see the template).
+  secretRotation: "0"
+  resources: {}
+
 handoffMcp:
   enabled: false
   image: ghcr.io/izzywdev/fuzeinfra/agent-handoff
