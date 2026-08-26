@@ -13,7 +13,7 @@
     },
     "networking": {
       "type": "limited",
-      "allowed_hosts": ["get.helm.sh"],
+      "allowed_hosts": ["get.helm.sh", "github.com", "*.fuzefront.com", "*.cloudflare.com"],
       "allow_mcp_servers": true,
       "allow_package_managers": true
     }

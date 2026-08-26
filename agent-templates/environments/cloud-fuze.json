@@ -18,7 +18,7 @@
     },
     "networking": {
       "type": "limited",
-      "allowed_hosts": [],
+      "allowed_hosts": ["github.com", "*.fuzefront.com"],
       "allow_mcp_servers": true,
       "allow_package_managers": true
     }

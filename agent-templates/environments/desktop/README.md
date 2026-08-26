@@ -56,7 +56,7 @@ The picker's environments can only be created through the UI:
 | Dialog field | Fuze | DevOps |
 |---|---|---|
 | Name | `Fuze` | `DevOps` |
-| Network access | **Trusted** | **Custom** — hosts from `devops.domains.txt`, **and check** "Also include default list of common package managers" |
+| Network access | **Custom** — hosts from `fuze.domains.txt`, **and check** "Also include default list of common package managers" | **Custom** — hosts from `devops.domains.txt`, **and check** "Also include default list of common package managers" |
 | Environment variables | `fuze.env` | `devops.env` |
 | Setup script | `fuze.setup.sh` | `devops.setup.sh` |
 
@@ -128,9 +128,16 @@ design, not an omission:
 
 ## Network access
 
-`Trusted` is the default allowlist (package registries, GitHub, cloud SDKs) and covers Fuze
-entirely. DevOps needs `get.helm.sh` for the Helm release tarball, which is why it uses `Custom`
-with the defaults still included.
+Both environments use **Custom** with "Also include default list of common package managers" checked,
+so the Trusted defaults (package registries, GitHub, cloud SDKs) still apply and each list below only
+adds what the defaults miss:
+
+- **Fuze** adds `*.fuzefront.com` to reach FuzeFront services/APIs.
+- **DevOps** adds `get.helm.sh` (the Helm release tarball), `*.fuzefront.com`, and `*.cloudflare.com`.
+
+`github.com` is listed in both for explicitness, but it is **redundant**: it is already a Trusted
+default, and GitHub traffic uses a dedicated proxy that bypasses this allowlist entirely (see the note
+below). The net-new reach is `*.fuzefront.com` (both) and `*.cloudflare.com` (DevOps).
 
 Note the constraint that shaped the setup scripts: the GitHub proxy scopes release-asset requests
 to repositories **attached to the session**, so downloading a release from an unattached repo
