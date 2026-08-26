@@ -1,69 +1,72 @@
-# Cloud↔cloud A2A messaging for Claude Code sessions
+# Cloud↔cloud A2A messaging for Claude Code sessions (WSS relay)
 
-**Status:** spike (2026-08-26). Code: `agent-templates/environments/desktop/a2a-bridge/`.
+**Status:** v0 (2026-08-26). Relay: `agent-templates/orchestration/a2a_relay/`. Session
+bridge: `agent-templates/environments/desktop/a2a-bridge/`.
 
 ## Goal
 
-Let one Claude Code **cloud** session (Claude Code on the web) send a message into **another
-cloud session** and get a reply — **cloud → cloud, 2-way** — bootstrapped inside the
-Anthropic sandbox from the environment's setup, exposed over a Cloudflare tunnel. The reply
-may go back to another cloud session **or to a human/local origin**.
+Let one Claude Code **cloud** session message **another cloud session** and get a reply —
+**cloud→cloud, 2-way**. Native cross-session messaging doesn't cover this (cross-machine/web
+is reply-only and can't open a fresh conversation to a web session; cloud sessions are only
+addressable while a *local* session is Remote-Control-connected).
 
-## Why build (native doesn't cover this)
+## Why a relay, not a tunnel (spike finding)
 
-Native cross-session messaging (`SendMessage`/`ListAgents`) is **not** a cloud→cloud path:
+The first design tried a per-session **cloudflared quick tunnel**. A live spike proved it
+**cannot work in the Anthropic sandbox**: cloudflared gets a `*.trycloudflare.com` URL but
+never connects — outbound port **7844** (QUIC and its TCP/HTTP2 fallback) is blocked. The
+sandbox permits only **HTTPS/443 through its security proxy to allowlisted hosts**. So no
+inbound tunnel can exist.
 
-- Reaching cloud sessions is gated on a *local* session being connected to **Remote Control**;
-  a cloud session is not that.
-- Cross-machine/web delivery is **reply-only** — you "cannot open a fresh conversation with a
-  session reachable only through the web," and each cloud session is its own isolated container
-  (they can't share the on-disk inbox socket the way two sessions in one container can).
+What the spike *did* confirm: the session **inbox socket** exists in cloud sessions
+(`CLAUDE_CODE_MESSAGING_SOCKET`, e.g. `/tmp/cc-socks/…`) and a sibling process can open it.
 
-So the bridge supplies the missing capability. (An earlier draft of this doc described
-*local → cloud*, one-way, via the native feature — that was the wrong direction and is replaced.)
+So the transport is inverted: each session opens an **outbound WebSocket over 443** to a
+relay we own, at `wss://relay.prod.fuzefront.com/ws` (host under the allowlisted
+`*.fuzefront.com`). The relay routes by session-id; inbound messages are injected via the
+local inbox socket.
 
-## Three mechanics that shape the design
+```
+Session A ──outbound WSS/443──► relay.prod.fuzefront.com ◄──outbound WSS/443── Session B
+   register session=A                 route by 'to'                  register session=B
+   inbound frame ──► write $CLAUDE_CODE_MESSAGING_SOCKET ──► new turn in A
+   outbound: MCP a2a_send ──► 127.0.0.1:8760 ──► up the WS ──► relay ──► peer
+```
 
-1. **The setup script runs only on the first, uncached session** (then the FS snapshot is reused
-   and the script is skipped). → **Setup script = install** (`a2a-sdk`, `mcp`, `cloudflared`, baked
-   into the snapshot); a repo-committed **`SessionStart` hook** (`CLAUDE_CODE_REMOTE`-scoped) =
-   **start** the tunnel + bridge every session. Wiring: `.claude/settings.json`.
-2. **MCP is pull-only** — a server can't inject a conversation turn. → **Inbound = the inbox
-   socket** (`CLAUDE_CODE_MESSAGING_SOCKET` + `CLAUDE_CODE_MESSAGING_TOKEN`; documented to work for
-   an own-child process even where Claude is PID 1, via the token auth line). **Outbound/reply = an
-   MCP tool** (`a2a_send`). Wiring: `.mcp.json`.
-3. **No secret store; env vars world-readable; tunnel URL ephemeral.** → an ephemeral
-   `trycloudflare.com` **quick tunnel** (no token). Discovery is **manual URL passing** for the
-   spike; the durable rendezvous + real auth graduate to **FuzeAgent**.
+MCP is pull-only (can't inject a turn), so **inbound = the socket**, **outbound = an MCP tool**
+(`a2a_send`).
 
-## Prerequisite: network allowlist
+## Components
 
-The bridge rides the **DevOps** cloud env, which the allowlist PR extended with `*.cloudflare.com`
-(cloudflared + `pkg.cloudflare.com` for the apt install), `*.trycloudflare.com` / `*.argotunnel.com`
-(the tunnel), and `*.fuzefront.com`. `cloudflared` installs via Cloudflare's **apt repo**, not a
-GitHub release — the session proxy 403s release assets for repos not attached to the session.
+- **Relay** (`a2a_relay/relay.py`): `websockets` broker; `/ws` registers `session=<id>`, routes
+  `{to,from,text,reply_to}` by id; `/healthz`. Deployed via `helm/fuzeinfra/templates/a2a-relay.yaml`
+  (ConfigMap-embedded, run by stock `python:3.12-slim` — no image build for v0), gated by
+  `a2aRelay.enabled`. Reachable through the CF tunnel with a CF Access **bypass** on the host
+  (`terraform/contabo/cloudflare.tf`, `a2a_relay_access_enabled`) so machine WSS skips OTP.
+- **Session bridge** (`a2a-bridge/wss_bridge.py`): outbound WSS client (auto-reconnect); inbound
+  → inbox socket; localhost `127.0.0.1:8760` for the MCP tool's outbound sends. `a2a_mcp.py`
+  exposes `a2a_whoami` / `a2a_set_peer` / `a2a_list_peers` / `a2a_send` (peers keyed by session-id).
+  Started by the repo `SessionStart` hook (`.claude/settings.json`), cloud-only + `FUZE_A2A_BRIDGE=1`.
+- **DevOps env** installs `websockets`/`a2a-sdk`/`mcp` (+ `kubectl`) and sets
+  `FUZE_A2A_RELAY_URL`; applied at claude.ai/code (the picker has no API).
 
-## Adopt vs build
+## Auth (v0) and hardening
 
-- **Adopt** the official [`a2a-sdk`](https://github.com/a2aproject/a2a-python) for AgentCard +
-  client/server (installed in the env). The spike's `server.py` is deliberately stdlib-only and
-  A2A-*shaped* so the inbound path works even if pip installs fail; the durable version swaps in
-  a2a-sdk proper.
-- **Build** only the thin bridge glue (socket writer + MCP address-book + launcher).
+- **v0 = OPEN relay** (no bearer): the capability is the unguessable `cse_…` session-id, plus the
+  CF Access bypass. Enough to prove the mechanism; **not** for steady use.
+- **Harden (FuzeAgent / FuzeSDLC#219)**: set `FUZE_A2A_RELAY_TOKEN` (relay SealedSecret
+  `a2a-relay-secret` + the env), and replace the shared bearer with **per-session minted** tokens
+  tied to the agent machine identity. Discovery also graduates from manual id-passing to a
+  FuzeAgent rendezvous.
 
-## The spike, and what it proves
+## Deploy / test
 
-Two unknowns are only answerable inside a real sandbox — the spike exists to answer them:
+1. Merge this change → Argo syncs `a2aRelay` (relay pod + ingress).
+2. Merge the Terraform CF Access bypass PR → CD applies → relay reachable without OTP.
+3. Update the DevOps env at claude.ai/code with the regenerated `devops.{setup.sh,env}`.
+4. Two DevOps sessions: `a2a_whoami` (confirm `relay_connected`), then `a2a_set_peer` + `a2a_send`
+   across them; a new turn should appear in the peer. The socket message frame
+   (`wss_bridge.py:_inbox_frames`) is the one undocumented bit to confirm live.
 
-1. A sibling process posting to the inbox socket actually **starts a new turn** in-session.
-2. A `trycloudflare` **quick tunnel is reachable** under the sandbox security proxy.
-
-Run steps and the tool list are in `agent-templates/environments/desktop/a2a-bridge/README.md`.
-If (1)/(2) hold, promote discovery/auth/orchestration to FuzeAgent.
-
-## Out of scope now → FuzeAgent
-
-Durable rendezvous/registry (session-id → URL), cross-provider agent orchestration, authenticated
-inbound (CF Access service token / minted per-session bearer), and human-channel reply routing
-(Telegram / Remote Control). `agent-templates/README.md` already states this agent-orchestration
-layer belongs in FuzeAgent, not FuzeInfra.
+Graduates to **FuzeAgent** (cross-provider agent orchestration + rendezvous); it lives here only
+to unblock the spike (`agent-templates/README.md`).

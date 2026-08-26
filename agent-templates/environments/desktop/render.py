@@ -71,11 +71,14 @@ MAPPING = {
             ("HELM_DIFF_COLOR", "false", "Plain-text helm output reads better in a transcript."),
             ("FUZE_A2A_BRIDGE", "1",
              "Opt this env into the A2A bridge SessionStart hook (a2a-bridge/). Cloud-only: "
-             "starts a cloudflared quick tunnel + inbound server for cloud<->cloud messaging."),
+             "dials an outbound WSS to the relay for cloud<->cloud session messaging."),
+            ("FUZE_A2A_RELAY_URL", "wss://relay.prod.fuzefront.com/ws",
+             "The A2A WSS relay the bridge connects to (agent-templates/orchestration/a2a_relay). "
+             "Non-secret. The optional FUZE_A2A_RELAY_TOKEN bearer is set live, never committed."),
         ],
         "extras": ["helm"],
-        "needs_cloudflared": True,
-        "report": ["yamllint", "check-jsonschema", "cloudflared"],
+        "needs_kubectl": True,
+        "report": ["yamllint", "check-jsonschema", "kubectl"],
     },
 }
 
@@ -131,20 +134,21 @@ def render_setup(basename, spec, doc):
             "",
         ]
 
-    if spec.get("needs_cloudflared"):
-        # Serial (uses dpkg). GitHub release assets are 403'd by the session proxy for
-        # unattached repos, so cloudflared installs from Cloudflare's apt repo instead
-        # (pkg.cloudflare.com, under the *.cloudflare.com allowlist).
+    if spec.get("needs_kubectl"):
+        # Serial (uses dpkg). kubectl isn't in the base image; install from the k8s
+        # community apt repo (pkgs.k8s.io is in the Trusted default allowlist). Read-only
+        # cluster access still goes through cluster-query.yml — kubectl alone can't reach
+        # the tunnel-only prod API — but it's here for parsing/other read use.
         L += [
-            'echo "[setup] cloudflared"',
-            "install -d -m 0755 /usr/share/keyrings",
-            "curl -fsSL https://pkg.cloudflare.com/cloudflare-main.gpg "
-            "-o /usr/share/keyrings/cloudflare-main.gpg || true",
-            "echo 'deb [signed-by=/usr/share/keyrings/cloudflare-main.gpg] "
-            "https://pkg.cloudflare.com/cloudflared any main' "
-            "> /etc/apt/sources.list.d/cloudflared.list",
+            'echo "[setup] kubectl"',
+            "install -d -m 0755 /etc/apt/keyrings",
+            "curl -fsSL https://pkgs.k8s.io/core:/stable:/v1.31/deb/Release.key "
+            "| gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg 2>/dev/null || true",
+            "echo 'deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] "
+            "https://pkgs.k8s.io/core:/stable:/v1.31/deb/ /' "
+            "> /etc/apt/sources.list.d/kubernetes.list",
             "apt-get update -qq || true",
-            "DEBIAN_FRONTEND=noninteractive apt-get install -y -qq cloudflared || true",
+            "DEBIAN_FRONTEND=noninteractive apt-get install -y -qq kubectl || true",
             "",
         ]
 

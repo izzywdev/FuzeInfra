@@ -1,0 +1,128 @@
+{{- if .Values.a2aRelay.enabled }}
+{{- $root := . -}}
+{{- /*
+  A2A WSS relay (agent-templates/orchestration/a2a_relay). Brokers cloud<->cloud
+  Claude Code session messages over outbound WebSocket/443, because cloudflared
+  quick tunnels are blocked in the Anthropic sandbox (port 7844 denied). Exposed at
+  relay.<domain> through the Cloudflare tunnel with a more-specific CF Access
+  "bypass" app in front (terraform/contabo/cloudflare.tf, a2a_relay_access_enabled)
+  so machine WSS callers don't hit email-OTP.
+
+  v0 = OPEN (no bearer): the capability is the unguessable cse_... session-id. To
+  harden, set FUZE_A2A_RELAY_TOKEN via the a2a-relay-secret SealedSecret (optional
+  ref below) and bump a2aRelay.secretRotation. See the relay README.
+
+  No image build for v0: relay.py is embedded as a ConfigMap and run by a stock
+  python:3.12-slim that pip-installs websockets at start. Bake an image later.
+*/ -}}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: a2a-relay-code
+  labels:
+    {{- include "fuzeinfra.labels" . | nindent 4 }}
+data:
+  relay.py: |-
+{{ $root.Files.Get "files/a2a-relay/relay.py" | indent 4 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: a2a-relay
+  labels:
+    {{- include "fuzeinfra.labels" . | nindent 4 }}
+spec:
+  selector:
+    {{- include "fuzeinfra.selectorLabels" (dict "component" "a2a-relay" "root" $) | nindent 4 }}
+  ports:
+    - name: http
+      port: 8000
+      targetPort: 8000
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: a2a-relay
+  labels:
+    {{- include "fuzeinfra.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.a2aRelay.replicas | default 1 }}
+  selector:
+    matchLabels:
+      {{- include "fuzeinfra.selectorLabels" (dict "component" "a2a-relay" "root" $) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "fuzeinfra.selectorLabels" (dict "component" "a2a-relay" "root" $) | nindent 8 }}
+      annotations:
+        # roll the pod when the embedded relay.py changes (selfHeal syncs the ConfigMap
+        # but won't restart the Deployment on its own).
+        checksum/relay-code: {{ $root.Files.Get "files/a2a-relay/relay.py" | sha256sum }}
+        # roll the pod when a2a-relay-secret is RESEALED (same rationale as handoff-mcp:
+        # the SealedSecret is applied by Argo from outside this release, invisible here).
+        checksum/relay-secret: {{ .Values.a2aRelay.secretRotation | default "0" | toString | sha256sum }}
+    spec:
+      containers:
+        - name: a2a-relay
+          image: {{ .Values.a2aRelay.image | default "python:3.12-slim" }}
+          imagePullPolicy: {{ .Values.a2aRelay.imagePullPolicy | default .Values.global.imagePullPolicy | default "IfNotPresent" }}
+          command: ["/bin/sh", "-c"]
+          args:
+            - "pip install --no-cache-dir --root-user-action=ignore websockets==12.0 && exec python /app/relay.py"
+          ports:
+            - containerPort: 8000
+          env:
+            - name: PORT
+              value: "8000"
+            # Optional bearer. Absent in v0 (open mode). When the a2a-relay-secret
+            # SealedSecret is landed, this switches the relay to bearer-gated.
+            - name: FUZE_A2A_RELAY_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: a2a-relay-secret
+                  key: FUZE_A2A_RELAY_TOKEN
+                  optional: true
+          volumeMounts:
+            - name: code
+              mountPath: /app
+              readOnly: true
+          readinessProbe:
+            httpGet: { path: /healthz, port: 8000 }
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /healthz, port: 8000 }
+            initialDelaySeconds: 30
+            periodSeconds: 20
+          resources:
+            {{- toYaml (.Values.a2aRelay.resources | default dict) | nindent 12 }}
+      volumes:
+        - name: code
+          configMap:
+            name: a2a-relay-code
+{{- if .Values.ingress.enabled }}
+---
+# Traefik-only ingress (tunnel routes *.prod -> Traefik -> here). CF terminates edge
+# TLS; Traefik serves HTTP. WebSocket upgrade passes through Traefik by default.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: fuzeinfra-a2a-relay
+  labels:
+    {{- include "fuzeinfra.labels" . | nindent 4 }}
+spec:
+  ingressClassName: {{ .Values.ingress.className }}
+  rules:
+    - host: {{ include "fuzeinfra.host" (dict "root" $root "sub" "relay") }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: a2a-relay
+                port:
+                  number: 8000
+{{- end }}
+{{- end }}

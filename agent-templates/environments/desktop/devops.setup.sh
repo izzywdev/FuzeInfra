@@ -15,15 +15,15 @@ echo "[setup] apt"
 apt-get update -qq || true
 DEBIAN_FRONTEND=noninteractive apt-get install -y -qq gh || true
 
-echo "[setup] cloudflared"
-install -d -m 0755 /usr/share/keyrings
-curl -fsSL https://pkg.cloudflare.com/cloudflare-main.gpg -o /usr/share/keyrings/cloudflare-main.gpg || true
-echo 'deb [signed-by=/usr/share/keyrings/cloudflare-main.gpg] https://pkg.cloudflare.com/cloudflared any main' > /etc/apt/sources.list.d/cloudflared.list
+echo "[setup] kubectl"
+install -d -m 0755 /etc/apt/keyrings
+curl -fsSL https://pkgs.k8s.io/core:/stable:/v1.31/deb/Release.key | gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg 2>/dev/null || true
+echo 'deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v1.31/deb/ /' > /etc/apt/sources.list.d/kubernetes.list
 apt-get update -qq || true
-DEBIAN_FRONTEND=noninteractive apt-get install -y -qq cloudflared || true
+DEBIAN_FRONTEND=noninteractive apt-get install -y -qq kubectl || true
 
 # Independent of each other — run concurrently, then wait.
-( echo "[setup] pip"; pip install --quiet --no-input yamllint check-jsonschema pyyaml a2a-sdk 'mcp>=1.9,<2' || pip install --quiet --no-input --break-system-packages yamllint check-jsonschema pyyaml a2a-sdk 'mcp>=1.9,<2' || true ) &
+( echo "[setup] pip"; pip install --quiet --no-input yamllint check-jsonschema pyyaml a2a-sdk 'mcp>=1.9,<2' websockets || pip install --quiet --no-input --break-system-packages yamllint check-jsonschema pyyaml a2a-sdk 'mcp>=1.9,<2' websockets || true ) &
 ( echo "[setup] go github.com/yannh/kubeconform/cmd/kubeconform@latest"; GOBIN=/usr/local/bin go install github.com/yannh/kubeconform/cmd/kubeconform@latest || true ) &
 ( echo "[setup] go github.com/bitnami-labs/sealed-secrets/cmd/kubeseal@latest"; GOBIN=/usr/local/bin go install github.com/bitnami-labs/sealed-secrets/cmd/kubeseal@latest || true ) &
 ( echo "[setup] helm"
@@ -40,7 +40,7 @@ wait
 
 # Leave a record in the session log of what actually landed.
 echo "[setup] installed:"
-for b in gh kubeconform kubeseal helm yamllint check-jsonschema cloudflared; do
+for b in gh kubeconform kubeseal helm yamllint check-jsonschema kubectl; do
   printf "  %-12s %s\n" "$b" "$(command -v "$b" 2>/dev/null || echo MISSING)"
 done
 

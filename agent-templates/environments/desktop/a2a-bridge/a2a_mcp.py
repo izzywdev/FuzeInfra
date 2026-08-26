@@ -1,23 +1,16 @@
 #!/usr/bin/env python3
-"""A2A bridge — OUTBOUND half (spike): a stdio MCP server Claude calls to SEND.
+"""A2A bridge — OUTBOUND MCP tools (WSS relay edition).
 
-MCP is pull-only — a server cannot inject a conversation turn — so the two
-directions are split: inbound is the socket-writing HTTP server (server.py);
-outbound is this MCP server. Declared in the repo's `.mcp.json`; Claude connects
-to it over stdio.
+MCP is pull-only (a server can't inject a turn), so directions are split: inbound is
+wss_bridge.py writing to the inbox socket; outbound is these MCP tools, which hand a
+message to the local wss_bridge (127.0.0.1:$A2A_BRIDGE_PORT) to forward up the WS to
+the relay, which routes it to the peer session.
 
-Address book (what the operator asked for), manual for the spike:
-  a2a_whoami()            -> GET this session's own tunnel URL + id, to hand to peers.
-  a2a_set_peer(name, url) -> SET another session's URL under a short name.
-  a2a_list_peers()        -> list registered peers (+ this session's own URL).
-  a2a_send(peer, text)    -> deliver a message to a peer (by name OR raw URL).
-  a2a_card(peer)          -> fetch a peer's AgentCard to confirm reachability.
-Peers persist in the bridge state dir so they survive across tool calls / restarts.
-The durable version resolves names via a FuzeAgent rendezvous instead of manual set.
+Address book (manual for the spike): peers are keyed by the peer's SESSION-ID
+(CLAUDE_CODE_REMOTE_SESSION_ID / cse_...), which you paste from the peer's start log.
+Durable discovery graduates to a FuzeAgent rendezvous.
 
-Pinned `mcp>=1.9,<2`: mcp 2.0 removed `mcp.server.fastmcp` (this bit handoff-mcp —
-see agent-templates/orchestration/handoff_mcp/requirements.txt). HTTP via stdlib
-urllib, so the only added dep is `mcp`.
+Pinned mcp>=1.9,<2 (mcp 2.0 removed mcp.server.fastmcp). HTTP via stdlib urllib.
 """
 import json
 import os
@@ -26,6 +19,7 @@ import urllib.request
 from mcp.server.fastmcp import FastMCP
 
 SESSION_ID = os.environ.get("CLAUDE_CODE_REMOTE_SESSION_ID", "unknown")
+BRIDGE = f"http://127.0.0.1:{os.environ.get('A2A_BRIDGE_PORT', '8760')}"
 
 mcp = FastMCP("fuze-a2a")
 
@@ -37,18 +31,12 @@ def _state_dir():
     return d
 
 
-def _public_url():
-    """This session's tunnel URL. This MCP server is a separate process from
-    start.sh, so prefer the env var but fall back to the file start.sh writes (the
-    URL is only known once the ephemeral tunnel is up)."""
-    env = os.environ.get("A2A_PUBLIC_URL", "")
-    if env:
-        return env
+def _status():
     try:
-        with open(os.path.join(_state_dir(), "public_url"), encoding="utf-8") as f:
-            return f.read().strip()
-    except OSError:
-        return ""
+        with open(os.path.join(_state_dir(), "status.json"), encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return {"session_id": SESSION_ID, "connected": False}
 
 
 def _peers_path():
@@ -63,87 +51,71 @@ def _load_peers():
         return {}
 
 
-def _save_peers(peers):
+def _save_peers(p):
     with open(_peers_path(), "w", encoding="utf-8") as f:
-        json.dump(peers, f, indent=2)
+        json.dump(p, f, indent=2)
 
 
 def _resolve(peer):
-    """A stored peer name -> its URL; a raw http(s) URL -> itself."""
-    if peer.startswith("http://") or peer.startswith("https://"):
+    """A stored peer name -> its session-id; a cse_/session_ id -> itself."""
+    if peer.startswith("cse_") or peer.startswith("session_"):
         return peer
     return _load_peers().get(peer)
 
 
-def _post(url, body, timeout=15):
-    data = json.dumps(body).encode("utf-8")
-    req = urllib.request.Request(url, data=data, method="POST",
-                                 headers={"Content-Type": "application/json"})
-    with urllib.request.urlopen(req, timeout=timeout) as r:  # noqa: S310 — operator-supplied peer URL (spike)
+def _post(path, body, timeout=15):
+    req = urllib.request.Request(BRIDGE + path, data=json.dumps(body).encode(),
+                                 method="POST", headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=timeout) as r:  # noqa: S310 — localhost bridge
         return r.status, r.read().decode("utf-8", "replace")
 
 
 @mcp.tool()
 def a2a_whoami() -> str:
-    """GET this cloud session's own A2A identity — its public tunnel URL and session
-    id. Hand the URL to another session so it can talk to this one. An empty URL means
-    the tunnel is not up yet (check the bridge start log / state dir)."""
-    return json.dumps({"session_id": SESSION_ID, "public_url": _public_url()})
+    """GET this cloud session's own A2A identity — its session-id (hand this to a peer
+    so it can message you) and whether the bridge is connected to the relay."""
+    st = _status()
+    return json.dumps({"session_id": SESSION_ID, "relay_connected": st.get("connected", False),
+                       "relay_url": st.get("relay_url", "")})
 
 
 @mcp.tool()
-def a2a_set_peer(name: str, url: str) -> str:
-    """SET (register) another session's address under a short name, so you can send to
-    it by name later. `url` is the peer's tunnel base URL (from its a2a_whoami), or any
-    HTTPS webhook a human/local origin controls."""
+def a2a_set_peer(name: str, session_id: str) -> str:
+    """SET (register) a peer under a short name so you can send by name. `session_id` is
+    the peer's cse_... id (from its a2a_whoami / start log)."""
     peers = _load_peers()
-    peers[name] = url.rstrip("/")
+    peers[name] = session_id
     _save_peers(peers)
     return json.dumps({"ok": True, "peers": peers})
 
 
 @mcp.tool()
 def a2a_list_peers() -> str:
-    """List registered peers and this session's own public URL."""
-    return json.dumps({"self": {"session_id": SESSION_ID, "public_url": _public_url()},
-                       "peers": _load_peers()})
+    """List registered peers and this session's own identity/relay status."""
+    return json.dumps({"self": _status(), "peers": _load_peers()})
 
 
 @mcp.tool()
 def a2a_send(peer: str, text: str, reply_to: str = "") -> str:
-    """Deliver a message to a peer's Claude session.
+    """Deliver a message to a peer session via the relay.
 
-    peer:     a name registered with a2a_set_peer, OR a raw https:// tunnel URL.
+    peer:     a name from a2a_set_peer, OR a raw cse_/session_ id.
     text:     the message to deliver into the peer's session (starts a new turn there).
-    reply_to: where the peer should reply (defaults to THIS session's own public URL,
-              so replies come back here). Pass a different URL/webhook to route a reply
-              to a human/local origin instead.
+    reply_to: where the peer should reply (defaults to this session's own id so replies
+              route back here). Pass another id to redirect the reply.
     """
-    url = _resolve(peer)
-    if not url:
+    to = _resolve(peer)
+    if not to:
         return json.dumps({"ok": False, "error": f"unknown peer {peer!r}; a2a_set_peer first",
                            "known": list(_load_peers())})
     if not reply_to:
-        reply_to = _public_url()
+        reply_to = SESSION_ID
     try:
-        status, body = _post(url.rstrip("/") + "/", {"text": text, "reply_to": reply_to})
+        status, body = _post("/", {"to": to, "text": text, "reply_to": reply_to})
         return json.dumps({"ok": 200 <= status < 300, "status": status, "response": body})
-    except Exception as e:  # noqa: BLE001 — spike: report the failure to Claude verbatim
-        return json.dumps({"ok": False, "error": str(e), "target": url})
-
-
-@mcp.tool()
-def a2a_card(peer: str) -> str:
-    """Fetch a peer's AgentCard (GET /.well-known/agent-card.json) to confirm it is
-    reachable before sending. `peer` is a registered name or a raw URL."""
-    url = _resolve(peer)
-    if not url:
-        return json.dumps({"ok": False, "error": f"unknown peer {peer!r}"})
-    try:
-        with urllib.request.urlopen(url.rstrip("/") + "/.well-known/agent-card.json", timeout=15) as r:  # noqa: S310
-            return r.read().decode("utf-8", "replace")
     except Exception as e:  # noqa: BLE001
-        return json.dumps({"ok": False, "error": str(e), "target": url})
+        return json.dumps({"ok": False, "error": str(e),
+                           "hint": "is wss_bridge.py running and connected? check a2a_whoami"})
 
 
 if __name__ == "__main__":
