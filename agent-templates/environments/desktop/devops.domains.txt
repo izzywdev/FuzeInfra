@@ -8,3 +8,6 @@
 # GitHub traffic and MCP connector traffic do NOT go through this allowlist.
 
 get.helm.sh
+github.com
+*.fuzefront.com
+*.cloudflare.com
