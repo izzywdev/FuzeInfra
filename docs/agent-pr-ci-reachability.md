@@ -69,6 +69,24 @@ This is a change to the **canonical managed workflows** in FuzeSDLC
 other workflow that pushes to a PR branch) plus the `hardening-convention.md`
 statement, propagated to every repo. It is not a per-repo click.
 
+### Provisioning is agent-work, not a human step
+
+Creating the `fuze-agent` App, setting its permissions, installing it, and
+storing `FUZE_AGENT_APP_ID` / `FUZE_AGENT_APP_PRIVATE_KEY` are all automatable —
+the App can be registered and configured through Claude-in-Chrome, and secrets set
+with `gh secret set`, without a human. Do **not** write runbooks that ask a person
+to click through GitHub Settings for this.
+
+The one exception is capturing the private-key `.pem`: GitHub exposes it only as a
+native browser file download, which page-DOM automation cannot operate. Obtain it
+without a human via the **App-manifest flow** (POST a manifest → capture the
+redirect `code` → `POST /app-manifests/{code}/conversions`, whose JSON response
+contains the `pem`) rather than the Settings-page "Generate a private key" button.
+
+Because the account is a **user account, not an org**, there are no org-level
+secrets: the two App secrets are set as **per-repo secrets** on every consuming
+repo (via propagation or the sealed-secret mechanism), not once centrally.
+
 ## Security property preserved after the change
 
 The fork-PR approval gate stays **on** and at `first_time_contributors`. What
