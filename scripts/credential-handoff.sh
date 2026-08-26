@@ -241,6 +241,11 @@ do_publish() {
       note "   FAIL: cannot clone $consumer at branch '$t_branch' — gh said: $(printf '%s' "$clone_err" | tr '\n' ' ' | sed 's/  */ /g' | cut -c1-300)"
       rc=1; continue
     fi
+    # Fetch the handoff branch so we can start from it if it already exists on
+    # the remote (previous PR merged/closed without branch deletion, or a
+    # concurrent run). Without this, git push fails non-fast-forward.
+    git -C "$repo_dir" fetch -q origin \
+      "+refs/heads/$branch:refs/remotes/origin/$branch" 2>/dev/null || true
     case "$t_path" in
       /*|*..*) note "   FAIL: unsafe manifestPath '$t_path'"; rc=1; continue ;;
     esac
@@ -261,12 +266,19 @@ do_publish() {
     local sub=0
     if (
       cd "$repo_dir"
+      git config user.name  "FuzeInfra Credential Hand-off"
+      git config user.email "handoff@fuzeinfra"
+      # If the handoff branch already exists on the remote (a previous run's PR
+      # was closed without merging, or a concurrent run beat us to the push),
+      # start from it so our push is a fast-forward rather than a rejection.
+      if git show-ref --verify --quiet "refs/remotes/origin/$branch" 2>/dev/null; then
+        git checkout -q -B "$branch" "origin/$branch"
+      else
+        git checkout -q -B "$branch"
+      fi
       if git diff --quiet -- "$t_path" && [ -z "$(git status --porcelain "$t_path")" ]; then
         note "   sealed output identical — nothing to commit"; exit 3
       fi
-      git config user.name  "FuzeInfra Credential Hand-off"
-      git config user.email "handoff@fuzeinfra"
-      git checkout -q -B "$branch"
       git add "$t_path"
       {
         printf 'chore(secrets): re-seal %s from FuzeInfra hand-off (%s)\n\n' "$t_key" "$id"
