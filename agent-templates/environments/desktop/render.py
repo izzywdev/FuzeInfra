@@ -35,6 +35,7 @@ https://code.claude.com/docs/en/cloud-environments.md):
 import argparse
 import json
 import os
+import shlex
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -68,9 +69,13 @@ MAPPING = {
              "Hard boundary marker: this env edits manifests and opens PRs. It holds no "
              "kubeconfig; direct kubectl against prod stays on fuzeinfra-selfhosted-devops."),
             ("HELM_DIFF_COLOR", "false", "Plain-text helm output reads better in a transcript."),
+            ("FUZE_A2A_BRIDGE", "1",
+             "Opt this env into the A2A bridge SessionStart hook (a2a-bridge/). Cloud-only: "
+             "starts a cloudflared quick tunnel + inbound server for cloud<->cloud messaging."),
         ],
         "extras": ["helm"],
-        "report": ["yamllint", "check-jsonschema"],
+        "needs_cloudflared": True,
+        "report": ["yamllint", "check-jsonschema", "cloudflared"],
     },
 }
 
@@ -126,12 +131,31 @@ def render_setup(basename, spec, doc):
             "",
         ]
 
+    if spec.get("needs_cloudflared"):
+        # Serial (uses dpkg). GitHub release assets are 403'd by the session proxy for
+        # unattached repos, so cloudflared installs from Cloudflare's apt repo instead
+        # (pkg.cloudflare.com, under the *.cloudflare.com allowlist).
+        L += [
+            'echo "[setup] cloudflared"',
+            "install -d -m 0755 /usr/share/keyrings",
+            "curl -fsSL https://pkg.cloudflare.com/cloudflare-main.gpg "
+            "-o /usr/share/keyrings/cloudflare-main.gpg || true",
+            "echo 'deb [signed-by=/usr/share/keyrings/cloudflare-main.gpg] "
+            "https://pkg.cloudflare.com/cloudflared any main' "
+            "> /etc/apt/sources.list.d/cloudflared.list",
+            "apt-get update -qq || true",
+            "DEBIAN_FRONTEND=noninteractive apt-get install -y -qq cloudflared || true",
+            "",
+        ]
+
     parallel = []
     if pkgs.get("pip"):
         # Ubuntu 24.04 marks its Python as externally managed (PEP 668), so a root
         # `pip install` can refuse outright. Retry with --break-system-packages before
         # giving up — the session VM is disposable, so there is nothing to protect.
-        spec_pkgs = " ".join(pkgs["pip"])
+        # shlex.quote each spec so version constraints with shell metachars survive,
+        # e.g. `mcp>=1.9,<2` would otherwise be read as redirections.
+        spec_pkgs = " ".join(shlex.quote(p) for p in pkgs["pip"])
         parallel.append(
             '( echo "[setup] pip"; pip install --quiet --no-input ' + spec_pkgs
             + " || pip install --quiet --no-input --break-system-packages " + spec_pkgs
@@ -140,7 +164,7 @@ def render_setup(basename, spec, doc):
     if pkgs.get("npm"):
         parallel.append(
             '( echo "[setup] npm"; npm install -g --silent '
-            + " ".join(pkgs["npm"]) + " || true ) &"
+            + " ".join(shlex.quote(p) for p in pkgs["npm"]) + " || true ) &"
         )
     for mod in pkgs.get("go", []):
         # GOBIN=/usr/local/bin so the binary is on PATH for every user, not just root.

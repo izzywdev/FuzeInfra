@@ -9,11 +9,11 @@
         "github.com/yannh/kubeconform/cmd/kubeconform@latest",
         "github.com/bitnami-labs/sealed-secrets/cmd/kubeseal@latest"
       ],
-      "pip": ["yamllint", "check-jsonschema", "pyyaml"]
+      "pip": ["yamllint", "check-jsonschema", "pyyaml", "a2a-sdk", "mcp>=1.9,<2"]
     },
     "networking": {
       "type": "limited",
-      "allowed_hosts": ["get.helm.sh", "github.com", "*.fuzefront.com", "*.cloudflare.com"],
+      "allowed_hosts": ["get.helm.sh", "github.com", "*.fuzefront.com", "*.cloudflare.com", "*.trycloudflare.com", "*.argotunnel.com"],
       "allow_mcp_servers": true,
       "allow_package_managers": true
     }

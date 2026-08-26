@@ -11,3 +11,5 @@ get.helm.sh
 github.com
 *.fuzefront.com
 *.cloudflare.com
+*.trycloudflare.com
+*.argotunnel.com
