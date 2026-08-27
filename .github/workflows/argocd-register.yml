@@ -58,7 +58,10 @@ concurrency:
 
 jobs:
   register:
-    runs-on: staging
+    # Registration applies Argo Application manifests to the shared cluster.
+    # Use GitHub-hosted capacity so this recovery/control-plane path remains
+    # available when the in-cluster ARC runner scale set is unhealthy.
+    runs-on: ubuntu-latest
     steps:
       # --- Inline bundle mode (private repo dispatch) --------------------------
       - name: Extract inline argocd bundle (repository_dispatch with argocd_bundle)
@@ -124,10 +127,8 @@ jobs:
             ${{ inputs.path || 'deploy/argocd' }}
 
 
-      # `runs-on: staging` is a self-hosted runner that does NOT reliably ship
-      # kubectl — the image drifted and caused all recent runs to fail with
-      # "kubectl: command not found" (exit 127). Install explicitly so the workflow
-      # is self-contained and survives runner rebuilds. See FuzeInfra#135.
+      # Install kubectl explicitly so this control-plane workflow remains
+      # self-contained across runner image updates.
       - name: Install kubectl
         run: |
           if command -v kubectl >/dev/null 2>&1; then
