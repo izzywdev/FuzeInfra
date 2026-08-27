@@ -56,7 +56,10 @@ MAPPING = {
             ("FUZE_ENV_ROLE", "fuze", "Which FuzeOne environment this session is running in."),
             ("PYTHONUNBUFFERED", "1", "Stream pytest/python output instead of buffering it."),
         ],
-        "extras": [],
+        # helm + kubeconform so the shared env can validate Helm charts (helm template |
+        # kubeconform). kubeconform comes from packages.go; helm from the EXTRAS snippet
+        # (not in the Ubuntu archive) and needs get.helm.sh in cloud-fuze.json allowed_hosts.
+        "extras": ["helm"],
         "report": ["pytest", "yamllint", "check-jsonschema", "prettier"],
     },
     "cloud-devops": {
