@@ -166,9 +166,22 @@ jobs:
           # own destination/resource allow-lists without a FuzeInfra PR for every
           # change. FuzeInfra's own AppProjects live in argocd/projects/ and are
           # applied by deploy-prod.yml, which is a separate path.
+          applications=""
           for manifest in "$DIR"/*.yaml "$DIR"/*.yml; do
             [ -f "$manifest" ] || continue
-            kubectl apply -f "$manifest"
+            resources=$(kubectl apply -f "$manifest" -o name)
+            printf '%s\n' "$resources"
+            applications="$applications$(printf '%s\n' "$resources" | sed -n 's#^application.argoproj.io/##p')"
+          done
+          # Apply registers an Application but leaves its first reconciliation to
+          # Argo's polling interval. Trigger a hard refresh + sync now so an
+          # onboarding request has a deployed result rather than an indeterminate
+          # wait. Workloads remain entirely GitOps-owned by their Application.
+          for app in $applications; do
+            kubectl -n argocd annotate application "$app" argocd.argoproj.io/refresh=hard --overwrite
+            kubectl -n argocd patch application "$app" --type merge \
+              -p '{"operation":{"initiatedBy":{"username":"argocd-register"},"sync":{}}}'
+            echo "sync triggered for $app"
           done
           echo ""
           echo "Done. ArgoCD now owns these Applications and will self-sync future"
