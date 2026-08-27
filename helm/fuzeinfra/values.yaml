@@ -1085,6 +1085,17 @@ a2aRelay:
   secretRotation: "0"
   resources: {}
 
+a2aGateway:
+  # A2A delivery gateway (agent-templates/orchestration/a2a_gateway): wakes + delivers
+  # into cloud sessions via `claude -p --cloud`. OFF until a2a-gateway-secret (a
+  # Claude.ai account `.credentials.json`) is landed — enable in the SAME change that
+  # seals the credential, like handoffMcp.
+  enabled: false
+  image: node:20-slim
+  # Bump to roll the pod after resealing a2a-gateway-secret.
+  secretRotation: "0"
+  resources: {}
+
 handoffMcp:
   enabled: false
   image: ghcr.io/izzywdev/fuzeinfra/agent-handoff
