@@ -22,8 +22,14 @@ command -v python3 >/dev/null 2>&1 || { log "python3 not found — exit 0"; exit
 # The precise import a2a_mcp.py needs (mcp 2.0 REMOVED mcp.server.fastmcp — hence <2).
 if ! python3 -c 'import mcp.server.fastmcp' 2>/dev/null; then
   log "mcp.server.fastmcp not importable — installing 'mcp>=1.9,<2'"
+  # The last retry adds --ignore-installed: mcp pulls a newer PyJWT than the
+  # distro-managed one, which pip cannot uninstall ("RECORD file not found ...
+  # installed by debian") — so a plain install fails. --ignore-installed layers
+  # pip's own copy on top instead of trying to remove the debian package.
   pip install --quiet --no-input 'mcp>=1.9,<2' >>"$LOG" 2>&1 \
-    || pip install --quiet --no-input --break-system-packages 'mcp>=1.9,<2' >>"$LOG" 2>&1 || true
+    || pip install --quiet --no-input --break-system-packages 'mcp>=1.9,<2' >>"$LOG" 2>&1 \
+    || pip install --quiet --no-input --break-system-packages --ignore-installed 'mcp>=1.9,<2' >>"$LOG" 2>&1 \
+    || true
 fi
 python3 -c 'import mcp.server.fastmcp' 2>/dev/null || { log "mcp still unimportable — exit 0"; exit 0; }
 

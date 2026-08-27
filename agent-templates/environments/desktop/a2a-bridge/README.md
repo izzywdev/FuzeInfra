@@ -32,8 +32,11 @@ Session A ──outbound WSS/443──► relay.prod.fuzefront.com ◄──outb
   this session's id (what a peer needs).
 - **`a2a_mcp_launch.sh`** — guarded launcher for the MCP server (opt-in + deps present).
 
-Deps (`websockets`, `a2a-sdk`, `mcp`) install in the **DevOps** env setup script;
-`FUZE_A2A_RELAY_URL` is set in that env. Relay: `agent-templates/orchestration/a2a_relay/`.
+Deps (`websockets` for the daemon, `mcp>=1.9,<2` for the tool server) install in the
+**Fuze** and **DevOps** env setup scripts; `FUZE_A2A_BRIDGE=1` + `FUZE_A2A_RELAY_URL` are
+set in both. (`a2a-sdk` is intentionally NOT a dep — the desktop bridge imports only
+`websockets`, `mcp`, and stdlib; the relay server has its own requirements.) Relay:
+`agent-templates/orchestration/a2a_relay/`.
 
 ## Test with two DevOps cloud sessions
 

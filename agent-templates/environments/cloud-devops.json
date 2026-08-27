@@ -9,7 +9,7 @@
         "github.com/yannh/kubeconform/cmd/kubeconform@latest",
         "github.com/bitnami-labs/sealed-secrets/cmd/kubeseal@latest"
       ],
-      "pip": ["yamllint", "check-jsonschema", "pyyaml", "a2a-sdk", "mcp>=1.9,<2", "websockets"]
+      "pip": ["yamllint", "check-jsonschema", "pyyaml", "mcp>=1.9,<2", "websockets"]
     },
     "networking": {
       "type": "limited",
