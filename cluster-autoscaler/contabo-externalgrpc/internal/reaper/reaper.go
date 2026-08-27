@@ -25,6 +25,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"strings"
 	"time"
 
 	"github.com/izzywdev/fuzeinfra/contabo-externalgrpc/internal/contabo"
@@ -276,6 +277,20 @@ func isNodeReady(node *corev1.Node) bool {
 	return false
 }
 
+// isElasticNode reports whether node is one the orphan sweep may consider: an
+// elastic node identified by EITHER the fuzeinfra.io/pool=elastic label OR the
+// "<ElasticTag>-" name prefix (the provider names every elastic node
+// "<ElasticTag>-<hash>" and keeps ElasticTag==NamePrefix in lockstep). Matching
+// on the name prefix as well as the label makes the sweep robust to pool-label
+// drift — observed 2026-08, when two dead elastic nodes relabelled pool=ci were
+// invisible to a label-only sweep and their Node objects were stranded forever.
+func isElasticNode(node *corev1.Node, namePrefix string) bool {
+	if node.Labels[elasticPoolLabel] == elasticPoolValue {
+		return true
+	}
+	return strings.HasPrefix(node.Name, namePrefix)
+}
+
 // isDaemonSetPod reports whether p is owned by a DaemonSet — present on
 // every node by design, never counted against idle status and never
 // evicted (deleting the node removes it; eviction would just cause an
@@ -364,8 +379,9 @@ type OrphanSummary struct {
 	Errors  int
 }
 
-// SweepOrphans deletes k8s Node objects for elastic nodes (label
-// fuzeinfra.io/pool=elastic) that are NotReady AND have no matching
+// SweepOrphans deletes k8s Node objects for elastic nodes — identified by the
+// fuzeinfra.io/pool=elastic label OR the "<ElasticTag>-" name prefix (see
+// isElasticNode) — that are NotReady AND have no matching
 // Contabo instance. This handles the failure mode where Contabo terminates
 // a VPS at billing-period end but the k8s Node object was never removed.
 //
@@ -389,16 +405,26 @@ func (r *Reaper) SweepOrphans(ctx context.Context) (OrphanSummary, error) {
 		contaboNames[inst.Name] = struct{}{}
 	}
 
-	nodeList, err := r.K8s.CoreV1().Nodes().List(ctx, metav1.ListOptions{
-		LabelSelector: elasticPoolLabel + "=" + elasticPoolValue,
-	})
+	// List ALL nodes, not only those labelled fuzeinfra.io/pool=elastic. A dead
+	// elastic node can lose that label to drift — e.g. a manual relabel to
+	// pool=ci (observed 2026-08) — which a label-scoped list would silently skip,
+	// stranding the zombie forever. isElasticNode identifies the candidates by
+	// label OR name prefix; every other node is ignored. The NotReady +
+	// no-Contabo-instance safety rails below are unchanged, so widening the
+	// candidate set never deletes a healthy or still-provisioning node.
+	nodeList, err := r.K8s.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
 	if err != nil {
-		return OrphanSummary{}, fmt.Errorf("orphan sweep: list elastic nodes: %w", err)
+		return OrphanSummary{}, fmt.Errorf("orphan sweep: list nodes: %w", err)
 	}
 
-	summary := OrphanSummary{Checked: len(nodeList.Items)}
+	namePrefix := r.Cfg.ElasticTag + "-"
+	summary := OrphanSummary{}
 	for _, node := range nodeList.Items {
 		node := node
+		if !isElasticNode(&node, namePrefix) {
+			continue
+		}
+		summary.Checked++
 		if isNodeReady(&node) {
 			log.Printf("reaper orphan-sweep: node %q is Ready — skipping (only NotReady nodes qualify)", node.Name)
 			summary.Kept++
