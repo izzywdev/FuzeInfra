@@ -322,7 +322,7 @@ variable "a2a_relay_access_enabled" {
 }
 
 variable "ci_worker_count" {
-  description = "Number of TF-managed CI runner nodes to provision. DEFAULT 0; CI env sets TF_VAR_ci_worker_count=1 to spin up one dedicated CI node. CI nodes are tainted fuzeinfra.io/ci=true:NoSchedule so only ARC runner pods land there."
+  description = "Number of TF-managed CI runner nodes to provision. DEFAULT 0; CI env sets TF_VAR_ci_worker_count=2 (raised from 1 in FuzeInfra#586: fuzeinfra-ci-runner-1 alone was saturated by ~22 ARC scale sets) to spin up fuzeinfra-ci-runner-1..2. CI nodes are tainted fuzeinfra.io/ci=true:NoSchedule and labeled fuzeinfra.io/pool=ci at k3s agent registration (module cloud-init), so only ARC runner pods (nodeSelector fuzeinfra.io/pool=ci + matching toleration, see runners/arc/runner-scale-set-values.yaml) land there — every scale set schedules onto ANY node with that label, so no per-scale-set change is needed when this count grows."
   type        = number
   default     = 0
 
@@ -486,7 +486,4 @@ variable "object_storage_bucket_blobs" {
 
 
 variable "manage_control_plane_config" {
-  description = "Manage /etc/rancher/k3s/config.yaml on ALL control planes (control-planes.tf). DEFAULT FALSE: applying it rewrites the config and RESTARTS k3s on each control plane in turn — a live HA operation. Flip only for a deliberate, supervised run. Requires the SSH private key, so it runs from a workstation, not CD."
-  type        = bool
-  default     = false
-}
+  description = "Manage /etc/rancher/k3s/config.yaml on ALL control planes (control-planes.tf). DEFAULT FALSE: applying it rewrites the config and RESTARTS k3s on each control plane in turn — a live HA operation. Flip only for a deliberate, supervised run. Requires the SSH private key, so it runs from a workstation, not CD.
