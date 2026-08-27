@@ -146,6 +146,7 @@ jobs:
       - name: Install Argo CD CLI
         run: |
           curl -fsSLo /tmp/argocd https://github.com/argoproj/argo-cd/releases/download/v3.4.4/argocd-linux-amd64
+          mkdir -p "$HOME/.local/bin"
           install -m 0755 /tmp/argocd "$HOME/.local/bin/argocd"
 
       - name: Configure kubectl
