@@ -207,6 +207,49 @@ Or, for the dind path: `exec /home/runner/run.sh`.
 
 ---
 
+### F) "Queued forever" can be slot starvation, NOT an offline runner
+
+**Symptom:** a repo's `runs-on: <slug>` jobs sit `queued` for hours (or get
+`cancelled` by `cancel-in-progress` on the next push) and never run — but the
+scale set is registered, the listener is up, and *other* repos' CI is fine.
+
+**This is not the offline-runner failure in (A)/(C).** The scale set *is*
+picking up jobs; there just aren't enough free slots. Two compounding causes,
+both seen on fuzeplan + fuzesdlc (2026-08-27):
+
+1. **Over-subscription.** A single push fans out more `runs-on: <slug>` jobs
+   than the set's `maxRunners`. FuzePlan alone emits ~17 (harden-gate's 9 +
+   ci-cd's 8) against `maxRunners: 5`. A Dependabot/PR burst multiplies that.
+2. **Hung jobs → zombie runners.** ARC runners are ephemeral (one job per pod).
+   A job step with **no `timeout-minutes`** that hangs (a Playwright/`docker
+   compose up --wait` waiting on a server that never comes up) pins its runner
+   slot — and shared CI-node CPU/RAM — for up to GitHub's **6-hour** job cap.
+   `maxRunners` such zombies wedge the set at zero free slots.
+
+**Confirm it:** the runner *did* run recently (`gh api repos/<o>/<r>/actions/runs`
+shows past `success`), and a stuck job's pod is still `Running`, renewing its
+job lease long after any real job would finish. GitHub-hosted jobs in the same
+repo (e.g. CodeQL on `ubuntu-latest`) still pass — only the `<slug>` jobs stick.
+
+**Fixes (in order of durability):**
+
+- **Job timeouts (root cause).** Add `timeout-minutes` to every `runs-on:
+  <slug>` job so a hung job self-terminates instead of squatting a slot.
+  Route by ownership: **canonical** workflows (`harden-gate.yml`,
+  `nightly-integration.yml`, and the rest of `governance_sync.py`'s
+  `STANDARD_STACK`) are reconciled from FuzeSDLC — fix them in
+  **`workflow-templates/`** there or the nightly governance sweep reverts the
+  edit; **repo-owned** workflows (`ci-cd.yml`, `release.yml`, anything not in
+  STANDARD_STACK) are fixed in the repo directly.
+- **The self-heal watchdog reaps zombies automatically.** `controller-selfheal.yaml`
+  check 4 deletes any EphemeralRunner Running past `RUNNER_STUCK_SECS` (2h),
+  freeing the slot — a backstop for jobs that still lack a timeout.
+- **Capacity.** Raising a set's `maxRunners` does **not** help on its own: all
+  sets share one 4-vCPU CI node, and by pod *requests* only ~7 runners fit
+  cluster-wide, so extra `maxRunners` just makes pods `Pending`. The real lever
+  is adding a CI node (`terraform/contabo/ci-workers.tf`; see the cluster
+  scalability backlog), not a values bump.
+
 ### E) Diagnostic checklist
 
 Work through these in order when runners are not picking up jobs:
