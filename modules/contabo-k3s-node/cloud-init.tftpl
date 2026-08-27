@@ -52,6 +52,11 @@ runcmd:
   # Apply the private-NIC netplan before joining so k3s can bind its overlay/
   # node-ip to the private interface (no-op / harmless when the NIC is absent).
   - [ sh, -c, "netplan apply || true" ]
+  # `netplan apply` returns before the DHCP lease lands. Block until the private
+  # NIC actually has an IPv4 (up to 60s) so the k3s join below never computes an
+  # empty --node-ip and joins with a broken/misadvertised address (FuzeInfra#668).
+  # Fail loudly rather than join the cluster with no node-ip.
+  - [ sh, -c, "for i in $(seq 1 60); do ip -4 -o addr show ${private_iface} 2>/dev/null | grep -q 'inet ' && break; sleep 1; done; ip -4 -o addr show ${private_iface} 2>/dev/null | grep -q 'inet ' || { echo 'FATAL: ${private_iface} has no IPv4 after 60s; refusing to join k3s with an empty --node-ip'; exit 1; }" ]
 %{ endif ~}
   # Host firewall: agent needs to reach the API (6443) outbound and accept
   # kubelet (10250), the flannel VXLAN overlay (8472/udp), and the flannel
