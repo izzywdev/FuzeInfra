@@ -167,12 +167,11 @@ jobs:
           # change. FuzeInfra's own AppProjects live in argocd/projects/ and are
           # applied by deploy-prod.yml, which is a separate path.
           applications=""
-          for manifest in "$DIR"/*.yaml "$DIR"/*.yml; do
-            [ -f "$manifest" ] || continue
+          while IFS= read -r manifest; do
             resources=$(kubectl apply -f "$manifest" -o name)
             printf '%s\n' "$resources"
             applications="$applications$(printf '%s\n' "$resources" | sed -n 's#^application.argoproj.io/##p')"
-          done
+          done < <(find "$DIR" -type f \( -name '*.yaml' -o -name '*.yml' \) -print | sort)
           # Apply registers an Application but leaves its first reconciliation to
           # Argo's polling interval. Trigger a hard refresh + sync now so an
           # onboarding request has a deployed result rather than an indeterminate
