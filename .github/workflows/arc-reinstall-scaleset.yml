@@ -42,6 +42,9 @@ jobs:
           kubectl -n arc-runners annotate role staging-gha-rs-manager \
             meta.helm.sh/release-name=staging \
             meta.helm.sh/release-namespace=arc-runners --overwrite 2>/dev/null || true
+          kubectl -n arc-runners annotate rolebinding staging-gha-rs-manager \
+            meta.helm.sh/release-name=staging \
+            meta.helm.sh/release-namespace=arc-runners --overwrite 2>/dev/null || true
           helm upgrade --install staging \
             oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set \
             --version 0.14.2 \
