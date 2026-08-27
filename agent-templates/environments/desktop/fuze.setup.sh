@@ -18,11 +18,22 @@ DEBIAN_FRONTEND=noninteractive apt-get install -y -qq gh || true
 # Independent of each other — run concurrently, then wait.
 ( echo "[setup] pip"; pip install --quiet --no-input pytest pytest-asyncio requests httpx pyyaml yamllint check-jsonschema || pip install --quiet --no-input --break-system-packages pytest pytest-asyncio requests httpx pyyaml yamllint check-jsonschema || true ) &
 ( echo "[setup] npm"; npm install -g --silent prettier || true ) &
+( echo "[setup] go github.com/yannh/kubeconform/cmd/kubeconform@latest"; GOBIN=/usr/local/bin go install github.com/yannh/kubeconform/cmd/kubeconform@latest || true ) &
+( echo "[setup] helm"
+  HELM_VER="$(curl -fsSL https://get.helm.sh/helm-latest-version 2>/dev/null | tr -d '[:space:]')"
+  if [ -n "${HELM_VER:-}" ] \
+     && curl -fsSL "https://get.helm.sh/helm-${HELM_VER}-linux-amd64.tar.gz" -o /tmp/helm.tgz \
+     && tar -xzf /tmp/helm.tgz -C /tmp linux-amd64/helm; then
+    install -m 0755 /tmp/linux-amd64/helm /usr/local/bin/helm || true
+  else
+    echo "[setup] helm: get.helm.sh unavailable, building from source" >&2
+    GOBIN=/usr/local/bin go install helm.sh/helm/v3/cmd/helm@latest || true
+  fi ) &
 wait
 
 # Leave a record in the session log of what actually landed.
 echo "[setup] installed:"
-for b in gh pytest yamllint check-jsonschema prettier; do
+for b in gh kubeconform helm pytest yamllint check-jsonschema prettier; do
   printf "  %-12s %s\n" "$b" "$(command -v "$b" 2>/dev/null || echo MISSING)"
 done
 

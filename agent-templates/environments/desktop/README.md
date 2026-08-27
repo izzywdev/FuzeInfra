@@ -72,8 +72,10 @@ that snapshot; so does the roughly seven-day cache expiry.
 ### Fuze — the general agentic-dev environment
 
 The superset the domain environments build on: `gh`, the shared pytest/httpx/pyyaml test deps,
-`yamllint` + `check-jsonschema` for manifest work, `prettier`. Everything else it needs is already
-in the base image (git, Python, Node 20–22, Go, Docker, Postgres, Redis, jq, yq, ripgrep).
+`yamllint` + `check-jsonschema` for manifest work, `prettier`, and `helm` + `kubeconform` so any
+session on the shared env can validate Helm charts (`helm template … | kubeconform …`) without
+switching to the DevOps env. Everything else it needs is already in the base image (git, Python,
+Node 20–22, Go, Docker, Postgres, Redis, jq, yq, ripgrep).
 
 **The agent roster is not something this environment grants.** Cloud sessions clone the repo, and
 `.claude/agents/`, `.claude/skills/`, `.claude/commands/`, `.claude/rules/`, `CLAUDE.md` and
@@ -132,12 +134,12 @@ Both environments use **Custom** with "Also include default list of common packa
 so the Trusted defaults (package registries, GitHub, cloud SDKs) still apply and each list below only
 adds what the defaults miss:
 
-- **Fuze** adds `*.fuzefront.com` to reach FuzeFront services/APIs.
+- **Fuze** adds `get.helm.sh` (the Helm release tarball) and `*.fuzefront.com` to reach FuzeFront services/APIs.
 - **DevOps** adds `get.helm.sh` (the Helm release tarball), `*.fuzefront.com`, and `*.cloudflare.com`.
 
 `github.com` is listed in both for explicitness, but it is **redundant**: it is already a Trusted
 default, and GitHub traffic uses a dedicated proxy that bypasses this allowlist entirely (see the note
-below). The net-new reach is `*.fuzefront.com` (both) and `*.cloudflare.com` (DevOps).
+below). The net-new reach is `get.helm.sh` (both) and `*.fuzefront.com` (both), plus `*.cloudflare.com` (DevOps).
 
 Note the constraint that shaped the setup scripts: the GitHub proxy scopes release-asset requests
 to repositories **attached to the session**, so downloading a release from an unattached repo
