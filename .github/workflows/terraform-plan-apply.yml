@@ -60,7 +60,7 @@ on:
   workflow_dispatch:
     inputs:
       pr_number:
-        description: 'PR number whose saved plan to apply (leave blank to skip apply — use for testing)'
+        description: 'PR number whose saved plan to apply (leave blank to skip apply -- use for testing)'
         required: false
         type: string
 
@@ -103,7 +103,10 @@ env:
   TF_VAR_google_access_client_id: ${{ secrets.GOOGLE_ACCESS_CLIENT_ID }}
   TF_VAR_google_access_client_secret: ${{ secrets.GOOGLE_ACCESS_CLIENT_SECRET }}
   TF_VAR_k3s_node_token: ${{ secrets.K3S_NODE_TOKEN }}
-  TF_VAR_ci_worker_count: "1"
+  # 1 -> 2 (FuzeInfra#586): fuzeinfra-ci-runner-1 (4 vCPU/8Gi) was saturated by
+  # ~22 ARC scale sets; adds fuzeinfra-ci-runner-2 on the same plan via the
+  # existing modules/contabo-k3s-node `range(var.ci_worker_count)` pattern.
+  TF_VAR_ci_worker_count: "2"
   # CF token now has Zone/Custom Hostnames:Edit — re-enabled after token fix
   TF_VAR_saas_custom_hostnames_enabled: "true"
   # Handoff MCP — more-specific CF Access bypass app for mcp-handoff.<domain>

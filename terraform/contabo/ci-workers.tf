@@ -11,8 +11,12 @@
 # externalgrpc provider classifies them as foreign (never a scale-down
 # candidate). See docs/adr/0001-cluster-autoscaling-identity-scoped-baseline.md.
 #
-# To provision:  set ci_worker_count = 1 in terraform.tfvars and apply.
-# To tear down:  set ci_worker_count = 0 and apply.
+# To provision:  set ci_worker_count = N in terraform.tfvars (or TF_VAR_ci_worker_count
+#                 in CI, see .github/workflows/terraform-plan-apply.yml) and apply.
+#                 Nodes are named fuzeinfra-ci-runner-1..N. Currently 2 (FuzeInfra#586:
+#                 fuzeinfra-ci-runner-1 alone was saturated by ~22 ARC scale sets).
+# To tear down:  lower the count and apply (removes the highest-numbered node(s) first,
+#                since `requests` is keyed by name — see modules/contabo-k3s-node/main.tf).
 # ---------------------------------------------------------------------------
 module "ci_workers" {
   source = "../../modules/contabo-k3s-node"
