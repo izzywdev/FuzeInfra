@@ -170,7 +170,7 @@ jobs:
           while IFS= read -r manifest; do
             resources=$(kubectl apply -f "$manifest" -o name)
             printf '%s\n' "$resources"
-            applications="$applications$(printf '%s\n' "$resources" | sed -n 's#^application.argoproj.io/##p')"
+            applications="$applications $(printf '%s\n' "$resources" | sed -n 's#^application.argoproj.io/##p' | tr '\n' ' ')"
           done < <(find "$DIR" -type f \( -name '*.yaml' -o -name '*.yml' \) -print | sort)
           # Apply registers an Application but leaves its first reconciliation to
           # Argo's polling interval. Trigger a hard refresh + sync now so an
