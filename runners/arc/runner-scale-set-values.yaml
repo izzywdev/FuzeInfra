@@ -1,1 +1,211 @@
-$(cat /tmp/claude-0/-home-user-FuzeInfra/70801dd9-0b9f-59ce-a53b-b9a0c903809b/scratchpad/runner-scale-set-values.yaml)
+# =============================================================================
+# ARC Runner Scale Set Helm values
+# Chart: oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set
+# Namespace: arc-runners  |  Release name: staging
+#
+# Shared BASE values for every ARC scale set. The arc-runner-scale-sets
+# ApplicationSet (argocd/applications/arc-runners.yaml) layers per-set overrides
+# (githubConfigUrl / runnerScaleSetName / maxRunners) on top via helm parameters,
+# so common settings are edited here ONCE and Argo rolls them to all sets.
+#
+# TARGETING — READ THIS BEFORE EDITING A CONSUMER WORKFLOW:
+#   gha-runner-scale-set runners register with NO labels at all (verified:
+#   `gh api repos/<owner>/<repo>/actions/runners` returns "labels": []).
+#   Jobs are matched by the SCALE SET NAME, not by labels. Therefore:
+#       runs-on: staging            # ✅ correct — bare string == runnerScaleSetName
+#       runs-on: [self-hosted, staging]   # ❌ never matches; queues forever
+#       runs-on: self-hosted              # ❌ never matches; queues forever
+#       runs-on: ["a", "staging", "b"]    # ❌ arrays never match a scale set
+#   `[self-hosted, <label>]` belongs to the LEGACY RunnerDeployment mode, which
+#   this chart is not. izzywdev is a personal account (not an org), so runners
+#   are repo-scoped and there is no org runner-group to target either.
+# =============================================================================
+
+# ---- GitHub target ----------------------------------------------------------
+# Repo-level URL — required for personal accounts (org-level API not available).
+githubConfigUrl: "https://github.com/izzywdev/FuzeInfra"
+
+# Name of the Kubernetes Secret containing GitHub App credentials.
+# Create it from runners/arc/github-secret.yaml before installing.
+githubConfigSecret: arc-runner-github-app
+
+# ---- Scale set name ---------------------------------------------------------
+# This is the job-matching key: workflows target it with `runs-on: staging`
+# (bare string, exactly this value). It is NOT a label — see the targeting note
+# in the header. Overridden per set by the ApplicationSet.
+runnerScaleSetName: staging
+
+# ---- Scaling ----------------------------------------------------------------
+# minRunners=0  → idle costs nothing; runners spin up on demand.
+# maxRunners    → hard cap per set; tune based on cluster capacity. Runner pods
+#                 are pinned via nodeSelector fuzeinfra.io/pool=ci, so only nodes
+#                 carrying that label + taint fuzeinfra.io/ci=true:NoSchedule
+#                 accept them — raising this without labelling extra nodes is a
+#                 no-op.  Baseline is 3 (single CI node). Temporarily raised to 5
+#                 while extra elastic nodes are in the cluster (until 2026-08-30);
+#                 revert to 3 when the extra nodes are released.
+#
+# ISSUE #586: with 22 scale sets sharing this file, maxRunners × set-count was
+# never the real ceiling — it is a per-set cap nothing sums across sets, and it
+# says nothing about actual node CPU/memory. See the `resources` blocks below:
+# those are what now bound the SUM (issue's ask #2), by making the k8s
+# scheduler itself refuse to over-pack the pinned CI node, regardless of how
+# many scale sets exist or what each one's maxRunners says.
+# Overridden per set by argocd/applications/arc-runners.yaml.
+minRunners: 0
+maxRunners: 5
+
+# ---- Runner pod spec --------------------------------------------------------
+template:
+  spec:
+    # deployer ServiceAccount: grants namespaced RBAC in each consumer's
+    # staging namespace via a RoleBinding the platform grants at onboarding.
+    serviceAccountName: arc-runner-sa
+
+    # ISSUE #586 — explicit dind pod spec (init container + sidecar), replacing
+    # the `containerMode: dind` shorthand that used to sit where this comment
+    # is. Functionally IDENTICAL to what that shorthand auto-generates on this
+    # chart version (0.14.2) — same init container, same dockerd invocation,
+    # same DOCKER_HOST wiring — this is not a re-architecture, it is the exact
+    # reference podspec the chart's own values.yaml documents under
+    # "containerMode.type=dind, we will populate the template.spec with...".
+    #
+    # WHY: verified against the chart's actual template logic
+    # (templates/_helpers.tpl `gha-runner-scale-set.dind-container`) — the
+    # `containerMode: dind` shorthand hardcodes the injected `dind` sidecar
+    # with NO resources block at all, and does not read one from values even
+    # if you declare a container named "dind" under template.spec.containers
+    # (that field is simply ignored while the shorthand is active). So the
+    # dind sidecar — the container that actually runs `docker build` /
+    # `docker compose` / `docker run` for every job — was completely invisible
+    # to the scheduler's resource accounting. Only the `runner` container's
+    # 500m/1Gi request was ever counted, understating each pod's real
+    # footprint by roughly half. That is the root cause behind "unbounded dind
+    # sidecars, most likely to take the node down" (issue's ask #3): pods that
+    # looked schedulable by their declared requests could still starve or OOM
+    # the node once dind's actual usage kicked in.
+    #
+    # Opting out of the shorthand (containerMode block removed) lets us write
+    # the `dind` container out explicitly and give it a real `resources`
+    # block — the only way to do that on this chart version.
+    initContainers:
+      - name: init-dind-externals
+        image: ghcr.io/izzywdev/fuzeinfra-arc-runner:latest
+        command: ["cp", "-r", "/home/runner/externals/.", "/home/runner/tmpDir/"]
+        volumeMounts:
+          - name: dind-externals
+            mountPath: /home/runner/tmpDir
+
+    containers:
+      - name: runner
+        # CI-capable image (built from runners/arc/Dockerfile), NOT the stock
+        # actions-runner. A self-hosted runner is not ubuntu-latest: the stock
+        # image ships almost no toolchain, so workflows written for hosted
+        # runners fail with exit 127. Observed on FuzeMarket the moment its jobs
+        # first ran: `gh: command not found`, and `pip install semgrep` -> 127.
+        # This image bakes in gh, jq, curl, docker compose-v2 + buildx, node,
+        # and pre-warms /opt/hostedtoolcache so actions/setup-python|node
+        # resolve locally instead of fetching.
+        # It is also register-repo.sh's RUNNER_IMAGE default, so this makes the
+        # Argo-managed sets match how new sets are registered.
+        # PREREQUISITE: must stay published + PUBLIC — there is NO
+        # imagePullSecret in arc-runners, so a private image ImagePullBackOffs.
+        image: ghcr.io/izzywdev/fuzeinfra-arc-runner:latest
+        # REQUIRED for the runner to come online — see the ISSUE #586 note
+        # above: with `containerMode: dind` this was auto-injected for us;
+        # writing the podspec by hand means it has to be explicit here too.
+        # Without it the container runs the image default Cmd ["/bin/bash"],
+        # exits 0 instantly, and the runner never comes online. (measured
+        # 2026-07-27; fix verified on fuzepicker).
+        command: ["/home/runner/run.sh"]
+        # securityContext omitted — seccompProfile.type:RuntimeDefault is not
+        # guaranteed available on k3s nodes; add back once runner is stable.
+        # Headroom for buildkit client work + Node actions (1Gi OOMs). Compose/
+        # build workloads run in the dind sidecar's cgroup, not here.
+        resources:
+          requests:
+            cpu: 500m
+            memory: 1Gi
+          limits:
+            cpu: "2"
+            memory: 2Gi
+        env:
+          # Prevent the runner from self-updating (image version is the pin).
+          - name: DISABLE_RUNNER_UPDATE
+            value: "1"
+          # Previously injected automatically by the `containerMode: dind`
+          # shorthand (see gha-runner-scale-set.dind-runner-container in the
+          # upstream chart) — now that the podspec is explicit these have to
+          # be set by hand. Values match exactly what the shorthand used to
+          # produce; no behavior change for the runner container itself.
+          - name: DOCKER_HOST
+            value: unix:///var/run/docker.sock
+          - name: RUNNER_WAIT_FOR_DOCKER_IN_SECONDS
+            value: "120"
+        volumeMounts:
+          - name: work
+            mountPath: /home/runner/_work
+          - name: dind-sock
+            mountPath: /var/run
+
+      - name: dind
+        image: docker:dind
+        args:
+          - dockerd
+          - --host=unix:///var/run/docker.sock
+          - --group=$(DOCKER_GROUP_GID)
+        env:
+          - name: DOCKER_GROUP_GID
+            value: "123"
+        securityContext:
+          privileged: true
+        # ISSUE #586 — the fix. This sidecar was previously UNBOUNDED (no
+        # resources block existed anywhere for it — see the comment above).
+        # Request the SAME envelope as the runner container, so a runner+dind
+        # POD PAIR reserves 1 vCPU / 2Gi total. On the pinned 4 vCPU / 8Gi CI
+        # node that gives a real, scheduler-enforced ceiling of ~4 concurrent
+        # pairs summed ACROSS ALL 22 SCALE SETS — bounding the sum instead of
+        # the per-set maxRunners number, which is what the issue asks for.
+        # The limit is set higher than the request (2 vCPU / 4Gi) so a single
+        # heavy `docker build` / whole-monorepo `npm install` still has room
+        # to burst — one was observed running 32+ minutes on this pool — but
+        # it can no longer consume the entire node's memory outright, which is
+        # the specific OOM risk this issue flags dind as "most likely" to
+        # cause.
+        resources:
+          requests:
+            cpu: 500m
+            memory: 1Gi
+          limits:
+            cpu: "2"
+            memory: 4Gi
+        volumeMounts:
+          - name: work
+            mountPath: /home/runner/_work
+          - name: dind-sock
+            mountPath: /var/run
+          - name: dind-externals
+            mountPath: /home/runner/externals
+
+    volumes:
+      - name: work
+        emptyDir: {}
+      - name: dind-sock
+        emptyDir: {}
+      - name: dind-externals
+        emptyDir: {}
+
+    # Pin runner pods to the dedicated CI node (tainted fuzeinfra.io/ci=true:NoSchedule).
+    nodeSelector:
+      fuzeinfra.io/pool: ci
+    tolerations:
+      - key: fuzeinfra.io/ci
+        operator: Exists
+        effect: NoSchedule
+
+# ---- ARC controller reference -----------------------------------------------
+controllerServiceAccount:
+  namespace: arc-systems
+  # Must match the SA created by the controller chart release.
+  # Controller installed as: helm install arc-controller ... → SA = arc-controller-gha-rs-controller
+  name: arc-controller-gha-rs-controller
