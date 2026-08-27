@@ -1,7 +1,26 @@
-# Cloud↔cloud A2A messaging for Claude Code sessions (WSS relay)
+# Cloud↔cloud A2A messaging for Claude Code sessions
 
-**Status:** v0 (2026-08-26). Relay: `agent-templates/orchestration/a2a_relay/`. Session
-bridge: `agent-templates/environments/desktop/a2a-bridge/`.
+**Status:** v0 (2026-08-27). Delivery gateway: `agent-templates/orchestration/a2a_gateway/`
+(the path that works for idle peers). WSS relay: `agent-templates/orchestration/a2a_relay/`
+(active↔active only). Session bridge: `agent-templates/environments/desktop/a2a-bridge/`.
+
+## Delivery mechanism (validated) — the gateway, not the relay
+
+The 2-session relay test proved the **fatal limit**: a cloud sandbox **freezes background
+processes when the session is idle**, so the in-sandbox WSS bridge disconnects and can't
+receive/wake an idle peer. Only Anthropic server-side can wake an idle cloud session — via
+`claude -p "<msg>" --cloud <session-id>`.
+
+**Validated 2026-08-27:** an idle/archived cloud session was woken by a server-side
+follow-up (the web-UI form of `--cloud`), processed the message (`WOKE_OK` + ran commands),
+and its bridge **reconnected to the relay on wake** (`/health` → `connected:true`).
+
+So delivery goes through the **gateway** (`a2a_gateway/`): it runs on our infra, holds a
+**Claude.ai account login** (`--cloud` rejects API keys), and shells out to `claude -p
+--cloud`. Sessions POST `/send` to it (outbound HTTPS, works from an active session); the
+gateway wakes + delivers to the target even if idle. The WSS relay remains only for
+low-latency **active↔active** + presence. Both graduate to **FuzeAgent**. See
+`agent-templates/orchestration/a2a_gateway/README.md`.
 
 ## Goal
 

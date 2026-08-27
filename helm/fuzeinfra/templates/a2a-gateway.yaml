@@ -1,0 +1,143 @@
+{{- if .Values.a2aGateway.enabled }}
+{{- $root := . -}}
+{{- /*
+  A2A delivery gateway (agent-templates/orchestration/a2a_gateway). Wakes + delivers
+  into cloud Claude Code sessions via `claude -p "<msg>" --cloud <session-id>` — the
+  only mechanism that can reach an IDLE cloud session (an in-sandbox bridge freezes
+  when idle). Runs on our infra, holds a Claude.ai ACCOUNT login (sealed secret), and
+  shells out to the claude CLI. Exposed at a2a-gateway.<domain> behind the CF tunnel +
+  a CF Access bypass (terraform: a2a_gateway_access_enabled).
+
+  v0: no image build — relay.mjs... gateway.mjs is embedded as a ConfigMap and run by a
+  stock node image that `npm i -g @anthropic-ai/claude-code` at start. Bake an image later.
+
+  CREDENTIAL: a2a-gateway-secret must carry `.credentials.json` (from `claude auth
+  login` on a machine — the Claude.ai account, NOT an API key; --cloud rejects API
+  keys) and optionally FUZE_A2A_GATEWAY_TOKEN (bearer). ANTHROPIC_API_KEY is left unset
+  so the CLI uses the account login. The creds are copied to a writable dir at start so
+  the CLI can refresh the token (re-seal when the refresh token eventually rotates).
+*/ -}}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: a2a-gateway-code
+  labels:
+    {{- include "fuzeinfra.labels" . | nindent 4 }}
+data:
+  gateway.mjs: |-
+{{ $root.Files.Get "files/a2a-gateway/gateway.mjs" | indent 4 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: a2a-gateway
+  labels:
+    {{- include "fuzeinfra.labels" . | nindent 4 }}
+spec:
+  selector:
+    {{- include "fuzeinfra.selectorLabels" (dict "component" "a2a-gateway" "root" $) | nindent 4 }}
+  ports:
+    - name: http
+      port: 8000
+      targetPort: 8000
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: a2a-gateway
+  labels:
+    {{- include "fuzeinfra.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "fuzeinfra.selectorLabels" (dict "component" "a2a-gateway" "root" $) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "fuzeinfra.selectorLabels" (dict "component" "a2a-gateway" "root" $) | nindent 8 }}
+      annotations:
+        checksum/gateway-code: {{ $root.Files.Get "files/a2a-gateway/gateway.mjs" | sha256sum }}
+        checksum/gateway-secret: {{ .Values.a2aGateway.secretRotation | default "0" | toString | sha256sum }}
+    spec:
+      containers:
+        - name: a2a-gateway
+          image: {{ .Values.a2aGateway.image | default "node:20-slim" }}
+          imagePullPolicy: {{ .Values.a2aGateway.imagePullPolicy | default .Values.global.imagePullPolicy | default "IfNotPresent" }}
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -e
+              mkdir -p /root/.claude /state
+              # Copy the account credential to a WRITABLE location so the CLI can refresh its token.
+              if [ -f /creds/.credentials.json ]; then cp /creds/.credentials.json /root/.claude/.credentials.json; fi
+              npm install -g --no-fund --no-audit @anthropic-ai/claude-code
+              exec node /app/gateway.mjs
+          ports:
+            - containerPort: 8000
+          env:
+            - name: PORT
+              value: "8000"
+            - name: CLAUDE_CONFIG_DIR
+              value: /root/.claude
+            - name: A2A_REGISTRY_PATH
+              value: /state/registry.json
+            # Optional bearer. Absent in v0 (open). Landed via a2a-gateway-secret.
+            - name: FUZE_A2A_GATEWAY_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: a2a-gateway-secret
+                  key: FUZE_A2A_GATEWAY_TOKEN
+                  optional: true
+          volumeMounts:
+            - name: code
+              mountPath: /app
+              readOnly: true
+            - name: creds
+              mountPath: /creds
+              readOnly: true
+            - name: state
+              mountPath: /state
+          readinessProbe:
+            httpGet: { path: /healthz, port: 8000 }
+            initialDelaySeconds: 20
+            periodSeconds: 10
+          resources:
+            {{- toYaml (.Values.a2aGateway.resources | default dict) | nindent 12 }}
+      volumes:
+        - name: code
+          configMap:
+            name: a2a-gateway-code
+        - name: creds
+          secret:
+            secretName: a2a-gateway-secret
+            optional: true
+            items:
+              - key: ".credentials.json"
+                path: ".credentials.json"
+        - name: state
+          emptyDir: {}
+{{- if .Values.ingress.enabled }}
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: fuzeinfra-a2a-gateway
+  labels:
+    {{- include "fuzeinfra.labels" . | nindent 4 }}
+spec:
+  ingressClassName: {{ .Values.ingress.className }}
+  rules:
+    - host: {{ include "fuzeinfra.host" (dict "root" $root "sub" "a2a-gateway") }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: a2a-gateway
+                port:
+                  number: 8000
+{{- end }}
+{{- end }}
