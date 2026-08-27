@@ -20,13 +20,17 @@ metadata:
     {{- include "fuzeinfra.selectorLabels" (dict "component" "ca-reaper" "root" $) | nindent 4 }}
 ---
 # Least-privilege RBAC for the reaper's actual behavior (internal/reaper.go):
-#   - list/watch/get elastic instances' matching Nodes + cluster-wide Pods
-#     (to determine idle status: spec.nodeName field-selected Pod listing).
+#   - list/watch/get Nodes (cluster-wide) + cluster-wide Pods (to determine
+#     idle status: spec.nodeName field-selected Pod listing).
 #   - patch Nodes (cordon: merge-patch spec.unschedulable=true).
+#   - delete Nodes — SweepOrphans() removes the zombie Node object left behind
+#     when an elastic VPS is gone from Contabo but its Node object was never
+#     cleaned up (k3s-on-Contabo has no cloud-controller-manager to do it).
+#     WITHOUT this verb the sweep's Nodes().Delete() 403s on every hourly run
+#     (non-fatally, so the pod still Completes) and the tombstone survives
+#     forever, attracting unschedulable pods — the exact bug this grant fixes.
 #   - create pods/eviction (drain via the Eviction API, honors PDBs).
-# No delete/update on pods, no write access to any other resource — the
-# reaper never deletes a Node object itself (Contabo's own instance
-# cancellation + the Cluster Autoscaler/kubelet lifecycle removes it).
+# No delete/update on pods, and no write access to any other resource.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -37,7 +41,7 @@ metadata:
 rules:
   - apiGroups: [""]
     resources: ["nodes"]
-    verbs: ["get", "list", "watch", "patch"]
+    verbs: ["get", "list", "watch", "patch", "delete"]
   - apiGroups: [""]
     resources: ["pods"]
     verbs: ["get", "list", "watch"]

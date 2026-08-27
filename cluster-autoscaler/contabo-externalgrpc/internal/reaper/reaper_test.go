@@ -547,6 +547,74 @@ func TestSweepOrphans_NotReadyNodeWithLiveContaboInstanceIsKept(t *testing.T) {
 	}
 }
 
+// TestSweepOrphans_LabelDriftedNodeStillDeletedByNamePrefix verifies the sweep
+// is robust to pool-label drift: a dead elastic node whose fuzeinfra.io/pool
+// label was changed away from "elastic" (observed 2026-08: relabelled to "ci")
+// is still identified as elastic by its "<ElasticTag>-" name prefix and, being
+// NotReady with no matching Contabo instance, is deleted. A label-only sweep
+// stranded exactly these nodes forever.
+func TestSweepOrphans_LabelDriftedNodeStillDeletedByNamePrefix(t *testing.T) {
+	drifted := &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:   "fuzeinfra-elastic-79c10ab3",
+			Labels: map[string]string{elasticPoolLabel: "ci"}, // drifted away from "elastic"
+		},
+		Status: corev1.NodeStatus{
+			Conditions: []corev1.NodeCondition{
+				{Type: corev1.NodeReady, Status: corev1.ConditionFalse},
+			},
+		},
+	}
+	fc := &fakeContabo{instances: []contabo.Instance{}} // VPS gone from Contabo
+	k8s := k8sfake.NewSimpleClientset(drifted)
+
+	r := &Reaper{Contabo: fc, K8s: k8s, Cfg: DefaultConfig(), Now: time.Now}
+
+	summary, err := r.SweepOrphans(context.Background())
+	if err != nil {
+		t.Fatalf("SweepOrphans returned error: %v", err)
+	}
+	if summary.Deleted != 1 || summary.Kept != 0 || summary.Errors != 0 {
+		t.Fatalf("summary = %+v, want Deleted=1 Kept=0 Errors=0 (name-prefix match despite label drift)", summary)
+	}
+	if _, getErr := k8s.CoreV1().Nodes().Get(context.Background(), "fuzeinfra-elastic-79c10ab3", metav1.GetOptions{}); getErr == nil {
+		t.Fatal("expected the label-drifted zombie Node to have been deleted, but it still exists")
+	}
+}
+
+// TestSweepOrphans_UnrelatedNodeIsIgnored verifies the widened candidate set
+// still ignores nodes that are neither pool=elastic nor name-prefixed: a
+// NotReady durable/control-plane node with no Contabo instance must NOT be
+// deleted — it is simply out of the reaper's scope.
+func TestSweepOrphans_UnrelatedNodeIsIgnored(t *testing.T) {
+	durable := &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:   "mendys-worker-1",
+			Labels: map[string]string{elasticPoolLabel: "durable"},
+		},
+		Status: corev1.NodeStatus{
+			Conditions: []corev1.NodeCondition{
+				{Type: corev1.NodeReady, Status: corev1.ConditionFalse},
+			},
+		},
+	}
+	fc := &fakeContabo{instances: []contabo.Instance{}}
+	k8s := k8sfake.NewSimpleClientset(durable)
+
+	r := &Reaper{Contabo: fc, K8s: k8s, Cfg: DefaultConfig(), Now: time.Now}
+
+	summary, err := r.SweepOrphans(context.Background())
+	if err != nil {
+		t.Fatalf("SweepOrphans returned error: %v", err)
+	}
+	if summary.Checked != 0 || summary.Deleted != 0 {
+		t.Fatalf("summary = %+v, want Checked=0 Deleted=0 (non-elastic node ignored)", summary)
+	}
+	if _, getErr := k8s.CoreV1().Nodes().Get(context.Background(), "mendys-worker-1", metav1.GetOptions{}); getErr != nil {
+		t.Fatalf("unrelated node must NOT be deleted, but Get returned: %v", getErr)
+	}
+}
+
 // TestSweepOrphans_MultipleOrphansAllDeleted verifies that when there are
 // several zombie nodes (as in the Aug 2026 incident: 5 orphaned nodes after
 // elastic fleet billing expired), all are deleted in a single sweep pass.
