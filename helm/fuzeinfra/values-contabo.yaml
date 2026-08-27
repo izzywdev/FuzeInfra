@@ -724,6 +724,22 @@ serviceChromaCollections:
         app.kubernetes.io/name: fuzequality
     collections:
       - fuzequality_ready
+  # Shared A2A server RAG store (FuzeInfra#643, delegated from FuzeAgent).
+  # collections: [] is deliberate — the A2A server creates one collection per
+  # A2A tenant (a2a-<tenant>) inside the a2a database at runtime, so there is no
+  # meaningful bootstrap set; isolation is by collection, not by a where filter.
+  - name: fuzeagent-a2a
+    enabled: true
+    tenant: fuzeagent
+    database: a2a
+    credentialSecret:
+      name: fuzeagent-a2a-chroma-credentials
+      key: token
+    networkPolicy:
+      namespace: fuzeagent
+      podLabels:
+        app.kubernetes.io/name: a2a-shared
+    collections: []
 
 # Enable IPv4-preference node configurator on Contabo — fixes GHCR pulls being
 # TCP-reset over IPv6 CDN paths (FuzeInfra#616). Uses busybox from Docker Hub
