@@ -110,6 +110,7 @@ env:
   # so Anthropic Managed Agents (machine, non-interactive) skip email-OTP.
   TF_VAR_handoff_mcp_access_enabled: "true"
   TF_VAR_a2a_relay_access_enabled: "true"
+  TF_VAR_a2a_gateway_access_enabled: "true"
   # mendysrobotics.com zone ID — gates all mendys DNS + Access resources.
   # Default empty string disables those resources; set the secret to enable.
   TF_VAR_mendysrobotics_zone_id: ${{ secrets.MENDYSROBOTICS_ZONE_ID }}

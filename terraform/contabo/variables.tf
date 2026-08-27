@@ -321,6 +321,12 @@ variable "a2a_relay_access_enabled" {
   default     = false
 }
 
+variable "a2a_gateway_access_enabled" {
+  description = "Create the more-specific CF Access 'bypass' app for a2a-gateway.<domain> so cloud Claude Code sessions (machine, non-interactive) can POST to the A2A delivery gateway without the *.prod email-OTP wildcard. The gateway enforces its own optional FUZE_A2A_GATEWAY_TOKEN bearer. Flip to true when the a2a-gateway is deployed (a2aGateway.enabled)."
+  type        = bool
+  default     = false
+}
+
 variable "ci_worker_count" {
   description = "Number of TF-managed CI runner nodes to provision. DEFAULT 0; CI env sets TF_VAR_ci_worker_count=1 to spin up one dedicated CI node. CI nodes are tainted fuzeinfra.io/ci=true:NoSchedule so only ARC runner pods land there."
   type        = number
