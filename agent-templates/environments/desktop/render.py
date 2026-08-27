@@ -84,6 +84,9 @@ MAPPING = {
             ("FUZE_A2A_RELAY_URL", "wss://relay.prod.fuzefront.com/ws",
              "The A2A WSS relay the bridge connects to (agent-templates/orchestration/a2a_relay). "
              "Non-secret. The optional FUZE_A2A_RELAY_TOKEN bearer is set live, never committed."),
+            ("FUZE_A2A_GATEWAY_URL", "https://a2a-gateway.prod.fuzefront.com",
+             "The A2A delivery gateway (agent-templates/orchestration/a2a_gateway). a2a_send POSTs "
+             "here; it runs `claude -p --cloud` to WAKE + deliver to an idle peer. Non-secret."),
         ],
         "extras": ["helm"],
         "needs_kubectl": True,

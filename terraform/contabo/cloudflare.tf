@@ -839,6 +839,7 @@ locals {
     cloudflare_zero_trust_access_application.crit_alert_bridge[*].id,
     cloudflare_zero_trust_access_application.handoff_mcp[*].id,
     cloudflare_zero_trust_access_application.a2a_relay[*].id,
+    cloudflare_zero_trust_access_application.a2a_gateway[*].id,
     # Path-scoped, launcher-invisible, but it lives on authentik.<prod> which IS
     # in local.launcher_hosts (the `authentik` tile) — so without this entry the
     # reconciler would treat it as a deletion candidate and silently re-break the
@@ -1019,6 +1020,37 @@ resource "cloudflare_zero_trust_access_policy" "a2a_relay_bypass" {
   account_id     = var.cloudflare_account_id
   application_id = cloudflare_zero_trust_access_application.a2a_relay[0].id
   name           = "Bypass — A2A relay (capability = cse_ session-id; optional bearer)"
+  precedence     = 1
+  decision       = "bypass"
+
+  include {
+    everyone = true
+  }
+}
+
+# A2A delivery gateway (agent-templates/orchestration/a2a_gateway). Cloud Claude Code
+# sessions POST to a2a-gateway.<domain>; the gateway runs `claude -p --cloud <id>` to
+# WAKE + deliver to an idle peer. Machine, non-interactive callers → need a bypass past
+# the *.prod email-OTP wall. The gateway enforces its own FUZE_A2A_GATEWAY_TOKEN bearer.
+# Same TRAP as handoff_mcp/a2a_relay: flipping the var is inert unless the apply job runs;
+# this file is under terraform/**, so a PR editing it triggers the apply. Verify:
+#   curl -sS -o /dev/null -w '%{http_code}\n' https://a2a-gateway.<domain>/healthz
+#   200 -> bypass live. 302 -> still behind the OTP wall.
+resource "cloudflare_zero_trust_access_application" "a2a_gateway" {
+  count                = local.cloudflare_enabled && var.a2a_gateway_access_enabled ? 1 : 0
+  account_id           = var.cloudflare_account_id
+  name                 = "A2A delivery gateway (cloud session HTTPS, bearer-gated)"
+  domain               = "a2a-gateway.${local.prod_domain}"
+  type                 = "self_hosted"
+  session_duration     = "0s"
+  app_launcher_visible = false
+}
+
+resource "cloudflare_zero_trust_access_policy" "a2a_gateway_bypass" {
+  count          = local.cloudflare_enabled && var.a2a_gateway_access_enabled ? 1 : 0
+  account_id     = var.cloudflare_account_id
+  application_id = cloudflare_zero_trust_access_application.a2a_gateway[0].id
+  name           = "Bypass — A2A gateway (app enforces FUZE_A2A_GATEWAY_TOKEN bearer)"
   precedence     = 1
   decision       = "bypass"
 

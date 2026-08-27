@@ -2,7 +2,10 @@
   "mcpServers": {
     "fuze-a2a": {
       "command": "bash",
-      "args": ["${CLAUDE_PROJECT_DIR}/agent-templates/environments/desktop/a2a-bridge/a2a_mcp_launch.sh"]
+      "args": [
+        "-c",
+        "exec bash \"${CLAUDE_PROJECT_DIR:-$PWD}/agent-templates/environments/desktop/a2a-bridge/a2a_mcp_launch.sh\""
+      ]
     }
   }
 }

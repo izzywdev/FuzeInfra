@@ -20,6 +20,10 @@ from mcp.server.fastmcp import FastMCP
 
 SESSION_ID = os.environ.get("CLAUDE_CODE_REMOTE_SESSION_ID", "unknown")
 BRIDGE = f"http://127.0.0.1:{os.environ.get('A2A_BRIDGE_PORT', '8760')}"
+# The delivery gateway (agent-templates/orchestration/a2a_gateway): it runs
+# `claude -p --cloud <id>`, which WAKES an idle peer — the local WSS bridge can't.
+GATEWAY = os.environ.get("FUZE_A2A_GATEWAY_URL", "").rstrip("/")
+GATEWAY_TOKEN = os.environ.get("FUZE_A2A_GATEWAY_TOKEN", "")
 
 mcp = FastMCP("fuze-a2a")
 
@@ -97,25 +101,29 @@ def a2a_list_peers() -> str:
 
 @mcp.tool()
 def a2a_send(peer: str, text: str, reply_to: str = "") -> str:
-    """Deliver a message to a peer session via the relay.
+    """Deliver a message to a peer cloud session — and WAKE it if idle.
 
-    peer:     a name from a2a_set_peer, OR a raw cse_/session_ id.
-    text:     the message to deliver into the peer's session (starts a new turn there).
-    reply_to: where the peer should reply (defaults to this session's own id so replies
-              route back here). Pass another id to redirect the reply.
+    Goes through the A2A delivery gateway (FUZE_A2A_GATEWAY_URL), which runs
+    `claude -p --cloud <id>` server-side; that wakes an idle peer, which the local WSS
+    bridge cannot. `peer` = a name from a2a_set_peer OR a raw cse_/session_ id. `reply_to`
+    defaults to this session's id so the peer can reply back to you.
     """
-    to = _resolve(peer)
-    if not to:
-        return json.dumps({"ok": False, "error": f"unknown peer {peer!r}; a2a_set_peer first",
-                           "known": list(_load_peers())})
+    if not GATEWAY:
+        return json.dumps({"ok": False, "error": "FUZE_A2A_GATEWAY_URL unset — no delivery gateway"})
+    to = _resolve(peer) or peer  # the gateway also resolves names it has in its registry
     if not reply_to:
         reply_to = SESSION_ID
+    body = {"to": to, "text": f"[A2A from {reply_to}] {text}"}
+    hdrs = {"Content-Type": "application/json"}
+    if GATEWAY_TOKEN:
+        hdrs["Authorization"] = f"Bearer {GATEWAY_TOKEN}"
     try:
-        status, body = _post("/", {"to": to, "text": text, "reply_to": reply_to})
-        return json.dumps({"ok": 200 <= status < 300, "status": status, "response": body})
+        req = urllib.request.Request(GATEWAY + "/send", data=json.dumps(body).encode(),
+                                     method="POST", headers=hdrs)
+        with urllib.request.urlopen(req, timeout=90) as r:  # noqa: S310 — our gateway
+            return r.read().decode("utf-8", "replace")
     except Exception as e:  # noqa: BLE001
-        return json.dumps({"ok": False, "error": str(e),
-                           "hint": "is wss_bridge.py running and connected? check a2a_whoami"})
+        return json.dumps({"ok": False, "error": str(e), "gateway": GATEWAY})
 
 
 if __name__ == "__main__":

@@ -26,6 +26,16 @@ fi
 setsid nohup python3 "$HERE/wss_bridge.py" >"$STATE/bridge.log" 2>&1 &
 echo $! >"$STATE/bridge.pid"
 
+# Register with the delivery gateway so peers can reach THIS session by name/id — even
+# after it goes idle (the gateway wakes it via `claude -p --cloud`). Best-effort.
+if [ -n "${FUZE_A2A_GATEWAY_URL:-}" ] && [ -n "${CLAUDE_CODE_REMOTE_SESSION_ID:-}" ]; then
+  curl -sS -m 10 -X POST "${FUZE_A2A_GATEWAY_URL%/}/register" \
+    -H "Content-Type: application/json" \
+    ${FUZE_A2A_GATEWAY_TOKEN:+-H "Authorization: Bearer ${FUZE_A2A_GATEWAY_TOKEN}"} \
+    -d "{\"name\":\"${FUZE_AGENT_NAME:-$CLAUDE_CODE_REMOTE_SESSION_ID}\",\"session_id\":\"$CLAUDE_CODE_REMOTE_SESSION_ID\"}" \
+    >"$STATE/register.log" 2>&1 || true
+fi
+
 echo "======================================================================"
 echo " A2A bridge starting for session: ${CLAUDE_CODE_REMOTE_SESSION_ID:-unknown}"
 echo " Relay: ${FUZE_A2A_RELAY_URL:-<FUZE_A2A_RELAY_URL unset>}"

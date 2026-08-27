@@ -36,6 +36,15 @@ jobs:
       - name: Reinstall scale set (fresh broker registration)
         run: |
           echo "=== Installing fresh scale set ==="
+          # A previous interrupted uninstall can leave the manager Role behind
+          # without Helm ownership metadata. Adopt it before reinstalling so the
+          # scale set can be recreated instead of failing on an import error.
+          kubectl -n arc-runners annotate role staging-gha-rs-manager \
+            meta.helm.sh/release-name=staging \
+            meta.helm.sh/release-namespace=arc-runners --overwrite 2>/dev/null || true
+          kubectl -n arc-runners annotate rolebinding staging-gha-rs-manager \
+            meta.helm.sh/release-name=staging \
+            meta.helm.sh/release-namespace=arc-runners --overwrite 2>/dev/null || true
           helm upgrade --install staging \
             oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set \
             --version 0.14.2 \
