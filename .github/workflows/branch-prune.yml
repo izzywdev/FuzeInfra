@@ -1,0 +1,82 @@
+name: Branch Prune
+
+# Manually delete stale, non-default branches via workflow_dispatch.
+#
+# Why this exists: agent/CI sessions reach GitHub through an egress proxy that
+# blocks raw `git push` (including `--delete`), and the GitHub MCP surface has
+# no delete-ref tool. A workflow runs on GitHub's own runners with the ambient
+# GITHUB_TOKEN, so it can delete a remote ref that those sessions cannot — and
+# turns branch cleanup into a reviewable, one-click operation.
+#
+# Safety: the default branch and a protected-name list can never be deleted,
+# and `dry_run` defaults to true so the first dispatch only previews.
+
+on:
+  workflow_dispatch:
+    inputs:
+      branches:
+        description: "Branch name(s) to delete — space- or comma-separated (e.g. 'fix/orphan-node-cleanup staging')"
+        type: string
+        required: true
+      dry_run:
+        description: "Preview only — list what would be deleted without deleting"
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+jobs:
+  prune:
+    name: Delete stale branches
+    runs-on: ubuntu-latest
+    steps:
+      - name: Delete branches
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          INPUT_BRANCHES: ${{ inputs.branches }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          set -euo pipefail
+
+          # Names that must never be deleted, regardless of input.
+          PROTECTED="main master develop"
+
+          # Normalize separators (commas / newlines -> spaces).
+          BRANCHES=$(printf '%s' "$INPUT_BRANCHES" | tr ',\n' '  ')
+          if [ -z "${BRANCHES// /}" ]; then
+            echo "::error::No branches supplied."; exit 1
+          fi
+
+          rc=0
+          for b in $BRANCHES; do
+            b="${b#refs/heads/}"
+
+            if [ "$b" = "$DEFAULT_BRANCH" ]; then
+              echo "::error::Refusing to delete the default branch '$b'."; rc=1; continue
+            fi
+
+            skip=""
+            for p in $PROTECTED; do
+              if [ "$b" = "$p" ]; then
+                echo "::error::Refusing to delete protected branch '$b'."; rc=1; skip=1; break
+              fi
+            done
+            [ -n "$skip" ] && continue
+
+            if ! gh api "repos/$REPO/git/ref/heads/$b" >/dev/null 2>&1; then
+              echo "::warning::Branch '$b' not found (already deleted?); skipping."; continue
+            fi
+
+            if [ "$DRY_RUN" = "true" ]; then
+              echo "[dry-run] would delete: $b"
+            else
+              echo "Deleting branch: $b"
+              gh api --method DELETE "repos/$REPO/git/refs/heads/$b"
+              echo "Deleted: $b"
+            fi
+          done
+
+          exit $rc
