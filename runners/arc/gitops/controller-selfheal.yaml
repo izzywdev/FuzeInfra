@@ -55,6 +55,30 @@
 #      the missing pod(s) — this is a symptom fix; the recurring node
 #      instability behind it still needs separate ops attention.
 #
+#   4. A RUNNER POD HUNG ON A JOB HOLDS A maxRunners SLOT (2026-08-27) — the
+#      other three checks are about pods that never START; this is a pod that
+#      starts, picks up a job, and then never FINISHES. ARC runners are
+#      ephemeral (one job per pod), so a job that hangs — a step with no
+#      `timeout-minutes`, e.g. a Playwright/`docker compose up --wait` that
+#      waits on a server that never comes up — pins its runner slot for up to
+#      GitHub's 6h job cap. A repo whose scale set is `maxRunners: N` needs
+#      only N such zombies to wedge its own CI at zero free slots while the
+#      controller, listener, and node all look perfectly healthy; every check
+#      above reports OK. Worse on this cluster: all scale sets share ONE
+#      4-vCPU CI node, so a handful of zombies across repos also exhausts node
+#      CPU/RAM, so OTHER repos' fresh runners go Pending too. Observed: fuzeplan
+#      and fuzesdlc CI both queued for hours behind runner pods that had been
+#      Running 2.5h+ still renewing the job lease (izzywdev/FuzePlan ci-cd.yml
+#      "Run Playwright tests", no timeout-minutes). Check 4 reaps any
+#      EphemeralRunner Running past $RUNNER_STUCK_SECS — well above any legit
+#      job on this stack (harden-gate minutes, full compose+e2e well under an
+#      hour) and well below the 6h cap — so a genuinely-long build is never
+#      touched while a hung one is freed. Deleting the EphemeralRunner cascades
+#      to its Pod and lets the listener request a fresh runner for whatever is
+#      still queued. This is a symptom fix: the durable fix is timeout-minutes
+#      on the jobs (canonical workflows in FuzeSDLC workflow-templates/,
+#      repo-owned ones like ci-cd.yml in the repo) so pods self-terminate.
+#
 # NOTE ON THE IMAGE: this ran with `rancher/kubectl` + `command: ["sh","-c"]`
 # from creation until 2026-07-27 and StartError'd on EVERY run — that image
 # ships no shell. Any replacement image MUST contain /bin/sh. Check 3 also
@@ -70,7 +94,12 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata: {name: arc-selfheal}
 rules:
-  - {apiGroups: ["actions.github.com"], resources: ["ephemeralrunners"], verbs: ["get","list"]}
+  # check 4 deletes an EphemeralRunner that has been Running past the reap
+  # threshold (a job hung with no timeout-minutes holding a maxRunners slot),
+  # so this needs delete in addition to get/list. Deleting the EphemeralRunner
+  # CR cascades to its runner Pod via ownerReferences, freeing the scale-set
+  # slot AND the CI-node capacity the zombie was pinning.
+  - {apiGroups: ["actions.github.com"], resources: ["ephemeralrunners"], verbs: ["get","list","delete"]}
   # autoscalingrunnersets: check 3b diffs the desired scale-set list against
   # the actual listener pods to catch a listener that is absent entirely
   # (not just stuck Terminating, which check 3 already covers).
@@ -279,6 +308,45 @@ spec:
                       else
                         echo "controller already restarted this run (check 2) - not restarting again"
                       fi
+                    fi
+                  fi
+
+                  # ---- check 4: runner pod hung on a job, holding a slot ----
+                  # An EphemeralRunner Running past this has not "just started a
+                  # long build" — a runner picks up its one job within seconds of
+                  # going Running, and the heaviest legit job on this stack (full
+                  # docker compose + e2e) finishes well under an hour. Anything
+                  # past 2h is a job hung with no timeout-minutes, pinning a
+                  # maxRunners slot (and CI-node CPU/RAM) until GitHub's 6h cap.
+                  # Kept well below that cap and well above any real job so a
+                  # genuine long build is never reaped. Tune up if a legitimately
+                  # multi-hour job is ever added on a self-hosted runner.
+                  RUNNER_STUCK_SECS=7200
+                  runners_json=$(kubectl get ephemeralrunner -A -o json 2>/dev/null)
+
+                  if [ -z "$runners_json" ]; then
+                    echo "warn runner-hung: could not list ephemeralrunners, skipping check 4"
+                  else
+                    # Running phase + alive longer than the threshold. creationTimestamp
+                    # is the right clock: an EphemeralRunner is created when a job is
+                    # assigned to it, so its age is the job's running time. Emit
+                    # "<namespace>/<name>" so the delete is namespace-correct (runners
+                    # live in arc-runners, not this CronJob's arc-systems).
+                    hung=$(printf '%s' "$runners_json" | jq -r --argjson thresh "$RUNNER_STUCK_SECS" '
+                      .items[]
+                      | select(.status.phase == "Running")
+                      | select((now - (.metadata.creationTimestamp | fromdateiso8601)) > $thresh)
+                      | "\(.metadata.namespace)/\(.metadata.name)"' 2>/dev/null)
+
+                    if [ -z "$hung" ]; then
+                      echo "ok runner-hung: no ephemeralrunner Running past ${RUNNER_STUCK_SECS}s"
+                    else
+                      for nn in $hung; do
+                        ns=${nn%%/*}; name=${nn##*/}
+                        echo "CRIT ARC runner-hung: $nn has been Running over ${RUNNER_STUCK_SECS}s - a job hung with no timeout-minutes is holding a maxRunners slot (and CI-node capacity) up to GitHub's 6h cap, so this scale set's queue cannot drain. Deleting the EphemeralRunner (cascades to its Pod) to free the slot; the durable fix is a timeout-minutes on that job so the pod self-terminates."
+                        kubectl -n "$ns" delete ephemeralrunner "$name" --wait=false >/dev/null 2>&1
+                        crit=1
+                      done
                     fi
                   fi
 
