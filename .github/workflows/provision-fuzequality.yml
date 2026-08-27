@@ -178,7 +178,8 @@ jobs:
 
   verify:
     if: inputs.phase == 'verify'
-    runs-on: staging
+    # Read-only production verification must remain available when ARC is down.
+    runs-on: ubuntu-latest
     environment: production
     steps:
       - uses: azure/setup-kubectl@829323503d1be3d00ca8346e5391ca0b07a9ab0d # v5.1.0
