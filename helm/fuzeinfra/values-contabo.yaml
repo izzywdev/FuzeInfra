@@ -384,6 +384,11 @@ cloudflareTunnel:
 a2aRelay:
   enabled: true
 
+a2aGateway:
+  # Enabled together with the a2a-gateway-secret (Claude.ai account .credentials.json)
+  # landed in this same change — see deploy/sealed-secrets/a2a-gateway-secret.yaml.
+  enabled: true
+
 handoffMcp:
   enabled: true
   # `latest` + IfNotPresent = a node that already cached the tag never pulls the
