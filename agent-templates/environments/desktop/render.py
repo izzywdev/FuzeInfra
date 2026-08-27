@@ -62,7 +62,10 @@ MAPPING = {
              "The A2A WSS relay the bridge connects to (agent-templates/orchestration/a2a_relay). "
              "Non-secret. The optional FUZE_A2A_RELAY_TOKEN bearer is set live, never committed."),
         ],
-        "extras": [],
+        # helm + kubeconform so the shared env can validate Helm charts (helm template |
+        # kubeconform). kubeconform comes from packages.go; helm from the EXTRAS snippet
+        # (not in the Ubuntu archive) and needs get.helm.sh in cloud-fuze.json allowed_hosts.
+        "extras": ["helm"],
         "report": ["pytest", "yamllint", "check-jsonschema", "prettier"],
     },
     "cloud-devops": {

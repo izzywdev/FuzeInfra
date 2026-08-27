@@ -27,7 +27,11 @@ jobs:
     env:
       # The apps this workflow kicks AND waits on. Single source of truth so the
       # trigger loop and the wait step can never drift apart.
-      SYNC_APPS: "fuzeinfra-prod sealed-secrets fuzeinfra-sealed-secrets fuzequality arc-selfheal"
+      # FuzeInfra-owned Applications only. Consumer apps (e.g. fuzequality) carry
+      # selfHeal and converge on their own; gating this deploy on their sync state
+      # let one consumer app's failed hook (a stuck kafka-topics Job) freeze the
+      # whole FuzeInfra deploy signal — see #682. Their health is theirs to own.
+      SYNC_APPS: "fuzeinfra-prod sealed-secrets fuzeinfra-sealed-secrets arc-selfheal"
       # Per-app budget for reaching Synced. 600s (10 min) to accommodate first-boot
       # of newly-provisioned stateful services (e.g. Neo4j fresh PVC + image pull
       # + DB bootstrap easily exceeds 5 min on cold start).
@@ -136,28 +140,6 @@ jobs:
             echo "registered $app"
           done
 
-          # Recover a demonstrably stale FuzeQuality operation. A newer chart
-          # cannot change hooks or rollout strategy while an old operation remains
-          # Running indefinitely.
-          phase=$(kubectl -n argocd get application fuzequality -o jsonpath='{.status.operationState.phase}')
-          started=$(kubectl -n argocd get application fuzequality -o jsonpath='{.status.operationState.startedAt}')
-          if [ "$phase" = Running ] && [ -n "$started" ]; then
-            age_seconds=$(( $(date +%s) - $(date -d "$started" +%s) ))
-            # The deployment verifier uses the same five-minute rollout budget.
-            if [ "$age_seconds" -gt 300 ]; then
-              echo "cancelling stale FuzeQuality operation (${age_seconds}s old)"
-              kubectl config set-context --current --namespace=argocd
-              argocd login --core
-              argocd app terminate-op fuzequality --core
-              for _ in $(seq 1 30); do
-                current_phase=$(kubectl -n argocd get application fuzequality -o jsonpath='{.status.operationState.phase}')
-                [ "$current_phase" != Running ] && break
-                sleep 2
-              done
-              current_phase=$(kubectl -n argocd get application fuzequality -o jsonpath='{.status.operationState.phase}')
-              [ "$current_phase" != Running ] || { echo '::error::stale FuzeQuality operation did not terminate'; exit 1; }
-            fi
-          fi
           # Kick an immediate sync so the rollout starts seconds after merge.
           # Deliberately an explicit list, NOT every registered app: forcing a hard
           # refresh + sync on the ARC scale sets would restart listeners and can
