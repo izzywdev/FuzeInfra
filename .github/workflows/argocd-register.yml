@@ -182,6 +182,13 @@ jobs:
               -p '{"operation":{"initiatedBy":{"username":"argocd-register"},"sync":{}}}'
             echo "sync triggered for $app"
           done
+          # Report the first reconciliation state, including render/sync errors,
+          # so a successful registration cannot be mistaken for a deployment.
+          sleep 15
+          for app in $applications; do
+            kubectl -n argocd get application "$app" \
+              -o jsonpath="${app}: sync={.status.sync.status} health={.status.health.status} phase={.status.operationState.phase} message={.status.operationState.message}{'\n'}"
+          done
           echo ""
           echo "Done. ArgoCD now owns these Applications and will self-sync future"
           echo "changes to deploy/argocd — do not re-run this for ordinary edits."
