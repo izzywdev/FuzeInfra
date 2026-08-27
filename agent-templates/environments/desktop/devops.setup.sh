@@ -23,7 +23,7 @@ apt-get update -qq || true
 DEBIAN_FRONTEND=noninteractive apt-get install -y -qq kubectl || true
 
 # Independent of each other — run concurrently, then wait.
-( echo "[setup] pip"; pip install --quiet --no-input yamllint check-jsonschema pyyaml a2a-sdk 'mcp>=1.9,<2' websockets || pip install --quiet --no-input --break-system-packages yamllint check-jsonschema pyyaml a2a-sdk 'mcp>=1.9,<2' websockets || true ) &
+( echo "[setup] pip"; pip install --quiet --no-input yamllint check-jsonschema pyyaml 'mcp>=1.9,<2' websockets || pip install --quiet --no-input --break-system-packages yamllint check-jsonschema pyyaml 'mcp>=1.9,<2' websockets || pip install --quiet --no-input --break-system-packages --ignore-installed yamllint check-jsonschema pyyaml 'mcp>=1.9,<2' websockets || true ) &
 ( echo "[setup] go github.com/yannh/kubeconform/cmd/kubeconform@latest"; GOBIN=/usr/local/bin go install github.com/yannh/kubeconform/cmd/kubeconform@latest || true ) &
 ( echo "[setup] go github.com/bitnami-labs/sealed-secrets/cmd/kubeseal@latest"; GOBIN=/usr/local/bin go install github.com/bitnami-labs/sealed-secrets/cmd/kubeseal@latest || true ) &
 ( echo "[setup] helm"

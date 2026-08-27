@@ -16,7 +16,7 @@ apt-get update -qq || true
 DEBIAN_FRONTEND=noninteractive apt-get install -y -qq gh || true
 
 # Independent of each other — run concurrently, then wait.
-( echo "[setup] pip"; pip install --quiet --no-input pytest pytest-asyncio requests httpx pyyaml yamllint check-jsonschema || pip install --quiet --no-input --break-system-packages pytest pytest-asyncio requests httpx pyyaml yamllint check-jsonschema || true ) &
+( echo "[setup] pip"; pip install --quiet --no-input pytest pytest-asyncio requests httpx pyyaml yamllint check-jsonschema 'mcp>=1.9,<2' websockets || pip install --quiet --no-input --break-system-packages pytest pytest-asyncio requests httpx pyyaml yamllint check-jsonschema 'mcp>=1.9,<2' websockets || pip install --quiet --no-input --break-system-packages --ignore-installed pytest pytest-asyncio requests httpx pyyaml yamllint check-jsonschema 'mcp>=1.9,<2' websockets || true ) &
 ( echo "[setup] npm"; npm install -g --silent prettier || true ) &
 wait
 

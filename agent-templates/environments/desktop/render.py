@@ -55,6 +55,12 @@ MAPPING = {
         "env": [
             ("FUZE_ENV_ROLE", "fuze", "Which FuzeOne environment this session is running in."),
             ("PYTHONUNBUFFERED", "1", "Stream pytest/python output instead of buffering it."),
+            ("FUZE_A2A_BRIDGE", "1",
+             "Opt this env into the A2A bridge SessionStart hook (a2a-bridge/). Cloud-only: "
+             "dials an outbound WSS to the relay for cloud<->cloud session messaging."),
+            ("FUZE_A2A_RELAY_URL", "wss://relay.prod.fuzefront.com/ws",
+             "The A2A WSS relay the bridge connects to (agent-templates/orchestration/a2a_relay). "
+             "Non-secret. The optional FUZE_A2A_RELAY_TOKEN bearer is set live, never committed."),
         ],
         "extras": [],
         "report": ["pytest", "yamllint", "check-jsonschema", "prettier"],
@@ -157,12 +163,19 @@ def render_setup(basename, spec, doc):
         # Ubuntu 24.04 marks its Python as externally managed (PEP 668), so a root
         # `pip install` can refuse outright. Retry with --break-system-packages before
         # giving up — the session VM is disposable, so there is nothing to protect.
-        # shlex.quote each spec so version constraints with shell metachars survive,
-        # e.g. `mcp>=1.9,<2` would otherwise be read as redirections.
+        # A third retry adds --ignore-installed: some wanted deps (e.g. mcp pulls a newer
+        # PyJWT) collide with a *distro-managed* package pip cannot uninstall ("RECORD
+        # file not found ... installed by debian"), which fails the WHOLE combined
+        # install and, under `|| true`, silently drops packages like `mcp`. --ignore-installed
+        # sidesteps the uninstall by layering pip's own copy on top. shlex.quote each spec
+        # so version constraints with shell metachars survive (`mcp>=1.9,<2` would else be
+        # read as redirections).
         spec_pkgs = " ".join(shlex.quote(p) for p in pkgs["pip"])
         parallel.append(
             '( echo "[setup] pip"; pip install --quiet --no-input ' + spec_pkgs
             + " || pip install --quiet --no-input --break-system-packages " + spec_pkgs
+            + " || pip install --quiet --no-input --break-system-packages --ignore-installed "
+            + spec_pkgs
             + " || true ) &"
         )
     if pkgs.get("npm"):

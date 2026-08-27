@@ -13,7 +13,9 @@
         "httpx",
         "pyyaml",
         "yamllint",
-        "check-jsonschema"
+        "check-jsonschema",
+        "mcp>=1.9,<2",
+        "websockets"
       ]
     },
     "networking": {
