@@ -5,6 +5,7 @@ Handles Jira and Confluence webhook creation, updates, and management.
 """
 
 import os
+import sys
 import requests
 from typing import Dict, List, Optional, Any
 import json
