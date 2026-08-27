@@ -44,6 +44,13 @@ runnerScaleSetName: staging
 #                 no-op.  Baseline is 3 (single CI node). Temporarily raised to 5
 #                 while extra elastic nodes are in the cluster (until 2026-08-30);
 #                 revert to 3 when the extra nodes are released.
+#
+# ISSUE #586: with 22 scale sets sharing this file, maxRunners × set-count was
+# never the real ceiling — it is a per-set cap nothing sums across sets, and it
+# says nothing about actual node CPU/memory. See the `resources` blocks below:
+# those are what now bound the SUM (issue's ask #2), by making the k8s
+# scheduler itself refuse to over-pack the pinned CI node, regardless of how
+# many scale sets exist or what each one's maxRunners says.
 # Overridden per set by argocd/applications/arc-runners.yaml.
 minRunners: 0
 maxRunners: 5
@@ -54,6 +61,40 @@ template:
     # deployer ServiceAccount: grants namespaced RBAC in each consumer's
     # staging namespace via a RoleBinding the platform grants at onboarding.
     serviceAccountName: arc-runner-sa
+
+    # ISSUE #586 — explicit dind pod spec (init container + sidecar), replacing
+    # the `containerMode: dind` shorthand that used to sit where this comment
+    # is. Functionally IDENTICAL to what that shorthand auto-generates on this
+    # chart version (0.14.2) — same init container, same dockerd invocation,
+    # same DOCKER_HOST wiring — this is not a re-architecture, it is the exact
+    # reference podspec the chart's own values.yaml documents under
+    # "containerMode.type=dind, we will populate the template.spec with...".
+    #
+    # WHY: verified against the chart's actual template logic
+    # (templates/_helpers.tpl `gha-runner-scale-set.dind-container`) — the
+    # `containerMode: dind` shorthand hardcodes the injected `dind` sidecar
+    # with NO resources block at all, and does not read one from values even
+    # if you declare a container named "dind" under template.spec.containers
+    # (that field is simply ignored while the shorthand is active). So the
+    # dind sidecar — the container that actually runs `docker build` /
+    # `docker compose` / `docker run` for every job — was completely invisible
+    # to the scheduler's resource accounting. Only the `runner` container's
+    # 500m/1Gi request was ever counted, understating each pod's real
+    # footprint by roughly half. That is the root cause behind "unbounded dind
+    # sidecars, most likely to take the node down" (issue's ask #3): pods that
+    # looked schedulable by their declared requests could still starve or OOM
+    # the node once dind's actual usage kicked in.
+    #
+    # Opting out of the shorthand (containerMode block removed) lets us write
+    # the `dind` container out explicitly and give it a real `resources`
+    # block — the only way to do that on this chart version.
+    initContainers:
+      - name: init-dind-externals
+        image: ghcr.io/izzywdev/fuzeinfra-arc-runner:latest
+        command: ["cp", "-r", "/home/runner/externals/.", "/home/runner/tmpDir/"]
+        volumeMounts:
+          - name: dind-externals
+            mountPath: /home/runner/tmpDir
 
     containers:
       - name: runner
@@ -70,12 +111,12 @@ template:
         # PREREQUISITE: must stay published + PUBLIC — there is NO
         # imagePullSecret in arc-runners, so a private image ImagePullBackOffs.
         image: ghcr.io/izzywdev/fuzeinfra-arc-runner:latest
-        # REQUIRED WHENEVER containerMode.dind IS ON — see the dind block below.
-        # The ARC controller injects this itself on the non-dind path, but not
-        # when dind rewrites this container; without it the container runs the
-        # image default Cmd ["/bin/bash"], exits 0 instantly, and the runner
-        # never comes online. (The old "do NOT override command/args" note here
-        # referred to a removed debug JITCONFIG wrapper, not to run.sh.)
+        # REQUIRED for the runner to come online — see the ISSUE #586 note
+        # above: with `containerMode: dind` this was auto-injected for us;
+        # writing the podspec by hand means it has to be explicit here too.
+        # Without it the container runs the image default Cmd ["/bin/bash"],
+        # exits 0 instantly, and the runner never comes online. (measured
+        # 2026-07-27; fix verified on fuzepicker).
         command: ["/home/runner/run.sh"]
         # securityContext omitted — seccompProfile.type:RuntimeDefault is not
         # guaranteed available on k3s nodes; add back once runner is stable.
@@ -92,6 +133,67 @@ template:
           # Prevent the runner from self-updating (image version is the pin).
           - name: DISABLE_RUNNER_UPDATE
             value: "1"
+          # Previously injected automatically by the `containerMode: dind`
+          # shorthand (see gha-runner-scale-set.dind-runner-container in the
+          # upstream chart) — now that the podspec is explicit these have to
+          # be set by hand. Values match exactly what the shorthand used to
+          # produce; no behavior change for the runner container itself.
+          - name: DOCKER_HOST
+            value: unix:///var/run/docker.sock
+          - name: RUNNER_WAIT_FOR_DOCKER_IN_SECONDS
+            value: "120"
+        volumeMounts:
+          - name: work
+            mountPath: /home/runner/_work
+          - name: dind-sock
+            mountPath: /var/run
+
+      - name: dind
+        image: docker:dind
+        args:
+          - dockerd
+          - --host=unix:///var/run/docker.sock
+          - --group=$(DOCKER_GROUP_GID)
+        env:
+          - name: DOCKER_GROUP_GID
+            value: "123"
+        securityContext:
+          privileged: true
+        # ISSUE #586 — the fix. This sidecar was previously UNBOUNDED (no
+        # resources block existed anywhere for it — see the comment above).
+        # Request the SAME envelope as the runner container, so a runner+dind
+        # POD PAIR reserves 1 vCPU / 2Gi total. On the pinned 4 vCPU / 8Gi CI
+        # node that gives a real, scheduler-enforced ceiling of ~4 concurrent
+        # pairs summed ACROSS ALL 22 SCALE SETS — bounding the sum instead of
+        # the per-set maxRunners number, which is what the issue asks for.
+        # The limit is set higher than the request (2 vCPU / 4Gi) so a single
+        # heavy `docker build` / whole-monorepo `npm install` still has room
+        # to burst — one was observed running 32+ minutes on this pool — but
+        # it can no longer consume the entire node's memory outright, which is
+        # the specific OOM risk this issue flags dind as "most likely" to
+        # cause.
+        resources:
+          requests:
+            cpu: 500m
+            memory: 1Gi
+          limits:
+            cpu: "2"
+            memory: 4Gi
+        volumeMounts:
+          - name: work
+            mountPath: /home/runner/_work
+          - name: dind-sock
+            mountPath: /var/run
+          - name: dind-externals
+            mountPath: /home/runner/externals
+
+    volumes:
+      - name: work
+        emptyDir: {}
+      - name: dind-sock
+        emptyDir: {}
+      - name: dind-externals
+        emptyDir: {}
 
     # Pin runner pods to the dedicated CI node (tainted fuzeinfra.io/ci=true:NoSchedule).
     nodeSelector:
@@ -100,36 +202,6 @@ template:
       - key: fuzeinfra.io/ci
         operator: Exists
         effect: NoSchedule
-
-# ---- Docker-in-Docker ------------------------------------------------------
-# Injects a privileged `dind` sidecar + `init-dind-externals` initContainer and
-# wires DOCKER_HOST, so `docker build` / `docker buildx build --push` /
-# `docker run` work self-hosted.
-#
-# ⚠ REQUIRES the explicit `command: ["/home/runner/run.sh"]` on the runner
-# container above. Do not remove one without the other. Enabling dind WITHOUT
-# it silently breaks every runner in this exact way (measured 2026-07-27):
-#   * runners REGISTER with GitHub but NEVER come online
-#     (`gh api repos/<o>/<r>/actions/runners` → total=1, online=0), every job
-#     queues forever, and pods churn every few seconds.
-#   * the runner container exits `exitCode=0, reason=Completed` with
-#     startedAt == finishedAt and ZERO log output.
-# Cause: the ARC controller injects `command: ["/home/runner/run.sh"]` into the
-# runner container in the NON-dind path (verified on a live working pod), but
-# not when dind rewrites that container. Without it the container runs the
-# image's default `Cmd: ["/bin/bash"]`, which with no TTY reads EOF and exits 0
-# immediately — the runner never starts, so it can never come online.
-#
-# Verified working on fuzepicker with dind + the explicit command:
-#   registered=1 online=1, pod 2/2 Running and stable, and inside the pod
-#   `docker version` → client 29.6.1 / server 29.6.2, `docker build` produced an
-#   image and `docker run` executed it.
-#
-# DIAGNOSTIC RULE: pods reaching Running is NOT evidence that runners work.
-# They reach Running and still never connect. Always check `online > 0` via the
-# runners API.
-containerMode:
-  type: dind
 
 # ---- ARC controller reference -----------------------------------------------
 controllerServiceAccount:
