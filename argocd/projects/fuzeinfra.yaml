@@ -38,6 +38,14 @@ spec:
     # which blocks EVERY other resource in the app, not just these two.
     - namespace: fuzefront
       server: https://kubernetes.default.svc
+    # The chart applies a coredns-custom ConfigMap (CoreDNS customization) to
+    # kube-system. Without this entry the whole fuzeinfra-prod sync fails with
+    #   ConfigMap/coredns-custom: namespace kube-system is not permitted in
+    #   project 'fuzeinfra'
+    # which blocks EVERY other resource in the app (this froze all prod deploys,
+    # FuzeInfra #668).
+    - namespace: kube-system
+      server: https://kubernetes.default.svc
   # The chart creates cluster-scoped objects (monitoring ClusterRole/Binding),
   # so cluster resources must be allowed for this project.
   clusterResourceWhitelist:
