@@ -28,6 +28,9 @@ apiVersion: apps/v1
 kind: StatefulSet
 metadata:
   name: fuzeinfra-kafka
+  annotations:
+    # Forces Argo to reconcile the broker after the emergency live scale-down.
+    fuzeinfra.io/reconcile-at: "2026-08-28-kafka-restore"
   labels:
     {{- include "fuzeinfra.labels" . | nindent 4 }}
 spec:
