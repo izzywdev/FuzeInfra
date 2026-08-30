@@ -339,9 +339,9 @@ variable "ci_worker_count" {
 }
 
 variable "ci_worker_product_id" {
-  description = "Contabo product/plan UUID for CI runner nodes. Defaults to the same plan as the control-plane (var.product_id) unless overridden. The cheapest VPS S tier is sufficient for most CI workloads."
+  description = "Contabo product/plan SKU for ADDITIONAL CI runner nodes (index >= 1 in ci-workers.tf); the first node (fuzeinfra-ci-runner-1) stays on var.product_id so growing the pool never replaces it. Default V153 = the current 'Cloud VPS 4' catalog SKU (4 vCPU/8 GiB); the older V92 is retired and fails ordering with 'No offer was found for product ID V92'. Keep this in sync with helm/fuzeinfra/values-contabo.yaml's autoscaler productId."
   type        = string
-  default     = ""
+  default     = "V153"
 }
 
 variable "ci_worker_region" {
