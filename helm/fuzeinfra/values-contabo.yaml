@@ -501,9 +501,9 @@ clusterAutoscaler:
     # has a tagged release (see cluster-autoscaler/contabo-externalgrpc).
     image: ghcr.io/izzywdev/fuzeinfra-contabo-ca-provider:latest
     existingSecret: fuzeinfra-ca-provider
-    # TODO: fill in the Contabo product/image IDs for the elastic node flavor
-    # (contabo API: GET /v1/compute/instances/images, /v1/pricing).
-    productId: "V92"
+    # Current Contabo create-instance catalog: Cloud VPS 4 (4 vCPU / 8 GiB).
+    # V92 is a retired SKU and fails ordering with "No offer was found".
+    productId: "V153"
     imageId: "d64d5c6c-9dda-4e38-8174-0ee282474d8a"
     region: EU
     # v1 is contaminated: ca-salvage-enroll historically assigned the

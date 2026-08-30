@@ -49,8 +49,8 @@ jobs:
           # These messages are control-loop failures, not harmless verbosity:
           # - nil/unregistered means provider instances cannot correlate to Nodes;
           # - target-size repair skips the entire autoscaling iteration;
-          # - no expansion / didn't-trigger means Pending pods have no usable pool.
-          PATTERN='Nodegroup is nil|[1-9][0-9]* unregistered nodes present|No node group for node|Some node group target size was fixed|pod didn.t trigger scale-up|No expansion options|NotTriggerScaleUp'
+          # - failed/no expansion / didn't-trigger means Pending pods have no usable pool.
+          PATTERN='Nodegroup is nil|[1-9][0-9]* unregistered nodes present|No node group for node|Some node group target size was fixed|FailedToScaleUpGroup|cloudProviderError|pod didn.t trigger scale-up|No expansion options|NotTriggerScaleUp'
           if grep -Ei "$PATTERN" "$LOG_FILE" >/tmp/ca-health-anomalies.txt; then
             COUNT=$(wc -l </tmp/ca-health-anomalies.txt | tr -d ' ')
             echo "reason=Detected ${COUNT} autoscaler identity/scale-up anomalies in the last 20 minutes" >> "$GITHUB_OUTPUT"

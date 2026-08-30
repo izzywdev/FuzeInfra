@@ -41,6 +41,7 @@ def test_prod_uses_a_clean_synchronized_elastic_pool_identity() -> None:
     assert provider["elasticTag"] == provider["elasticNamePrefix"]
     assert provider["elasticTag"] == "fuzeinfra-prod-elastic-v2"
     assert provider["elasticTag"] != "fuzeinfra-elastic"
+    assert provider["productId"] == "V153"
 
 
 def test_scale_from_zero_template_preserves_name_provider_id_and_pool_contract() -> None:
@@ -78,6 +79,8 @@ def test_cutover_workflow_cannot_restore_stale_identity_or_bounds() -> None:
     assert ".clusterAutoscaler.provider.maxSize = 1" in workflow
     assert ".clusterAutoscaler.nodeGroup.maxSize = 1" in workflow
     assert ".clusterAutoscaler.provider.maxSize = 5" not in workflow
+    assert "PRODUCTION_PRODUCT_ID: V153" in workflow
+    assert '!= "$PRODUCTION_PRODUCT_ID"' in workflow
 
 
 def test_operational_check_detects_identity_and_scale_up_failures() -> None:
@@ -89,6 +92,8 @@ def test_operational_check_detects_identity_and_scale_up_failures() -> None:
         "unregistered nodes present",
         "No node group for node",
         "Some node group target size was fixed",
+        "FailedToScaleUpGroup",
+        "cloudProviderError",
         "pod didn.t trigger scale-up",
         "No expansion options",
         "NotTriggerScaleUp",
