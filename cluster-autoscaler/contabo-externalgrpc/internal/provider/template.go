@@ -22,20 +22,23 @@ type productSpec struct {
 }
 
 // productSpecs maps Contabo VPS/VDS product IDs to their hardware capacities.
-// Whitelisted SKUs for elastic node groups: V1, V45, V46, V47, V76, V92.
+// Whitelisted SKUs for elastic node groups include the current Cloud VPS 4
+// SKU (V153) plus legacy SKUs retained for existing installations.
 //
 // IMPORTANT: Specs marked "best-effort" should be verified against Contabo's
 // current catalog before use in production. Wrong capacity causes CA to make
 // incorrect scale-up decisions.
 var productSpecs = map[string]productSpec{
+	// Current Cloud VPS product line (Contabo create-instance API, 2026-08).
+	"V153": {VCPU: 4, MemGi: 8}, // Cloud VPS 4 — current production elastic SKU
 	// VPS product line
 	"V1":  {VCPU: 4, MemGi: 8},   // VPS S — best-effort; verify against catalog
 	"V45": {VCPU: 6, MemGi: 16},  // VPS M — verified as primary elastic SKU
 	"V46": {VCPU: 8, MemGi: 24},  // VPS L — best-effort; verify against catalog
 	"V47": {VCPU: 10, MemGi: 32}, // VPS XL — best-effort; verify against catalog
 	// VDS product line
-	"V76": {VCPU: 6, MemGi: 16},  // VDS S — best-effort; verify against catalog
-	"V92": {VCPU: 4, MemGi: 8}, // verified against live Contabo instance via ca-cutover GATE A (was a wrong 12/48 guess)
+	"V76": {VCPU: 6, MemGi: 16}, // VDS S — best-effort; verify against catalog
+	"V92": {VCPU: 4, MemGi: 8},  // verified against live Contabo instance via ca-cutover GATE A (was a wrong 12/48 guess)
 }
 
 // NodeGroupTemplateNodeInfo returns a synthetic Node describing the capacity,

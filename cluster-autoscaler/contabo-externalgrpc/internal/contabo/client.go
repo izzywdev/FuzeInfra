@@ -88,6 +88,11 @@ type CreateReq struct {
 	PrivateNetworkID int64
 }
 
+// elasticContractPeriodMonths is intentionally one month. Elastic capacity
+// must not create a long-term commitment, and spelling the period out avoids
+// relying on an API default that has changed across Contabo product catalogs.
+const elasticContractPeriodMonths int64 = 1
+
 // privateNetworkingAddOn is the (currently empty) configuration object for the
 // Contabo Private Networking add-on. Contabo's createInstance API expresses
 // add-ons as a named object: {"addOns":{"privateNetworking":{}}}.
@@ -998,6 +1003,7 @@ func (c *HTTPClient) Create(ctx context.Context, req CreateReq) (Instance, error
 			ImageID     string        `json:"imageId"`
 			ProductID   string        `json:"productId"`
 			Region      string        `json:"region"`
+			Period      int64         `json:"period"`
 			SSHKeys     []int64       `json:"sshKeys,omitempty"`
 			UserData    string        `json:"userData"`
 			AddOns      *createAddOns `json:"addOns,omitempty"`
@@ -1006,6 +1012,7 @@ func (c *HTTPClient) Create(ctx context.Context, req CreateReq) (Instance, error
 			ImageID:     req.ImageID,
 			ProductID:   req.ProductID,
 			Region:      req.Region,
+			Period:      elasticContractPeriodMonths,
 			SSHKeys:     sshKeys,
 			AddOns:      addOns,
 			// PLAIN text, NOT base64. Contabo's POST /v1/compute/instances
