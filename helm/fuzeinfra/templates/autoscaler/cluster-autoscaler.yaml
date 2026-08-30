@@ -1,4 +1,19 @@
 {{- if .Values.clusterAutoscaler.enabled }}
+{{- $caMin := int .Values.clusterAutoscaler.nodeGroup.minSize }}
+{{- $caMax := int .Values.clusterAutoscaler.nodeGroup.maxSize }}
+{{- $providerMin := int .Values.clusterAutoscaler.provider.minSize }}
+{{- $providerMax := int .Values.clusterAutoscaler.provider.maxSize }}
+{{- $elasticTag := required "clusterAutoscaler.provider.elasticTag is required" .Values.clusterAutoscaler.provider.elasticTag }}
+{{- $elasticPrefix := required "clusterAutoscaler.provider.elasticNamePrefix is required" .Values.clusterAutoscaler.provider.elasticNamePrefix }}
+{{- if or (ne $caMin $providerMin) (ne $caMax $providerMax) }}
+{{- fail (printf "clusterAutoscaler node-group bounds must match provider bounds (CA=%d:%d provider=%d:%d)" $caMin $caMax $providerMin $providerMax) }}
+{{- end }}
+{{- if or (lt $caMin 0) (le $caMax $caMin) }}
+{{- fail (printf "clusterAutoscaler node-group bounds are invalid: min=%d max=%d" $caMin $caMax) }}
+{{- end }}
+{{- if ne $elasticTag $elasticPrefix }}
+{{- fail (printf "clusterAutoscaler elasticTag and elasticNamePrefix must match (tag=%q prefix=%q); provider discovery, hard-cap naming, and reaper identity must stay in lockstep" $elasticTag $elasticPrefix) }}
+{{- end }}
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -170,6 +185,12 @@ spec:
       {{- include "fuzeinfra.clusterAutoscaler.selectorLabels" $ | nindent 6 }}
   template:
     metadata:
+      annotations:
+        # The CA process caches cloud-provider state across iterations. Restart
+        # it when the external provider's pool identity/bounds change so a pool
+        # rotation starts from a clean desired-size view and old anomaly logs do
+        # not trip the scheduled health check after reconciliation.
+        checksum/autoscaler-pool-identity: {{ printf "%s|%s|%d|%d" $elasticTag $elasticPrefix $caMin $caMax | sha256sum }}
       labels:
         {{- include "fuzeinfra.labels" . | nindent 8 }}
         {{- include "fuzeinfra.clusterAutoscaler.selectorLabels" $ | nindent 8 }}

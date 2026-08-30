@@ -468,23 +468,30 @@ dnsmasq:
   enabled: false
 # -----------------------------------------------------------------------------
 # Cluster Autoscaler elastic pool (Contabo).
-# Maintains an elastic node pool sized 0:2 (min:max) via the externalgrpc
-# provider (Task 12) + upstream Cluster Autoscaler (this task). This is up to 2
-# elastic nodes ADDED ON TOP of the existing (floating) baseline — the
+# Maintains an elastic node pool sized 0:1 (min:max) via the externalgrpc
+# provider (Task 12) + upstream Cluster Autoscaler (this task). This is one
+# elastic node ADDED ON TOP of the existing (floating) baseline — the
 # control-plane plus however many worker nodes consumer repos have currently
 # dispatched via infra-request-handler. There is no fixed baseline count here;
 # the elastic pool only ever adds/removes the nodes it tagged itself
-# (`fuzeinfra-elastic`) and never touches the baseline. Overprovisioning pause
+# (the production-scoped tag configured below) and never touches the baseline.
+# Overprovisioning pause
 # pods hold a headroom buffer so the CA has something to evict/scale against
 # before real workloads go unschedulable — bumping overprovisioning replicas
-# raises how much of the 0:2 elastic pool is proactively reserved.
+# raises how much of the 0:1 elastic pool is proactively reserved.
 # -----------------------------------------------------------------------------
-# NOTE: kept DISABLED on main. Prod is Argo auto-synced (selfHeal) from main, so
-# enabling here before the fuzeinfra-ca-provider SealedSecret + real product/image/
-# k3sServerUrl + canonical elastic userDataTemplateB64 exist would CrashLoop the
-# provider into prod. Flip to true ONLY as part of the gated Task 18 cutover.
+# Prod is Argo auto-synced (selfHeal) from main. Keep the SealedSecret,
+# product/image/k3s URL, pool identity, and canonical userDataTemplateB64 in one
+# reviewed change; never patch either autoscaler Deployment in the live cluster.
 clusterAutoscaler:
   enabled: true
+  # Keep the upstream CA and the external provider on the exact same bounds.
+  # Desired size is provider-discovered (the count of instances carrying the
+  # clean pool tag below), so this overlay deliberately starts at 0 and lets
+  # the pending elastic-only overprovisioning pod request the first worker.
+  nodeGroup:
+    minSize: 0
+    maxSize: 1
   # Billing-aware model: Contabo only terminates a canceled instance at the
   # end of its paid month, so utilization scale-down is disabled — the
   # reaper CronJob below owns releasing idle elastic capacity instead.
@@ -499,6 +506,18 @@ clusterAutoscaler:
     productId: "V92"
     imageId: "d64d5c6c-9dda-4e38-8174-0ee282474d8a"
     region: EU
+    # v1 is contaminated: ca-salvage-enroll historically assigned the
+    # `fuzeinfra-elastic` tag to durable/control-plane/CI instances whose
+    # Contabo display names do not match their Kubernetes node identities.
+    # That made NodeGroupTargetSize report 4 while only 2 nodes correlated,
+    # so CA tried to repair target size and skipped every scale-up iteration.
+    # A fresh, production-scoped identity gives this pool desired=0 at cutover;
+    # every node subsequently created by the provider has the same display
+    # name, k3s --node-name, and contabo:// providerID by construction.
+    elasticTag: fuzeinfra-prod-elastic-v2
+    elasticNamePrefix: fuzeinfra-prod-elastic-v2
+    minSize: 0
+    maxSize: 1
     # TODO: set to the k3s server URL the elastic nodes join
     # (e.g. https://<contabo-server-ip>:6443).
     k3sServerUrl: "https://161.97.118.134:6443"
@@ -535,7 +554,6 @@ clusterAutoscaler:
     # this value from the sealed secret / a separate values overlay instead
     # of committing the literal id here).
     notifyTelegramChatId: "5196390841"
-    maxSize: 5
   # Billing-aware reaper -- releases an idle elastic instance only within 24h
   # of its projected monthly renewal (see cmd/reaper). billingPeriod matches
   # the chart default (720h/~30d); set explicitly here so prod release window
@@ -545,11 +563,10 @@ clusterAutoscaler:
     schedule: "0 * * * *"
     releaseWindow: 24h
     billingPeriod: 720h
-  nodeGroup:
-    maxSize: 5
 overprovisioning:
   # Enabled together with clusterAutoscaler during the gated Task 18 cutover.
   enabled: true
+  replicas: 1
 # Per-service Postgres provisioning (issue #153) — PROD.
 #
 # The provisioning hook Job reads each role password via `secretKeyRef` from a

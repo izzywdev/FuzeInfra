@@ -3,15 +3,22 @@ name: ca-salvage-enroll
 # Salvage already-paid Contabo instances into the elastic pool: reinstall each
 # with the elastic cloud-init (userData sent PLAIN — Contabo does NOT want it
 # base64-encoded; that double-encoding was the "provisioned-but-never-joined"
-# bug) and assign the fuzeinfra-elastic tag so the autoscaler adopts them.
+# bug) and assign the active pool tag so the autoscaler adopts them.
 # Also the LIVE validation of the plain-userData fix: dry-run, then reinstall
 # ONE running orphan and confirm it joins `kubectl get nodes`.
+#
+# Safety: this workflow previously accepted durable/control-plane templates and
+# arbitrary node-name overrides while still assigning the autoscaler's tag.
+# That contaminated desired-size discovery with baseline/CI instances and
+# blocked every CA loop. The active tag/prefix are pinned below and guarded by
+# tests/test_autoscaler_identity.py; only elastic templates and matching names
+# may now be enrolled.
 on:
   workflow_dispatch:
     inputs:
       instance_ids:
         description: 'Comma-separated Contabo instance IDs to reinstall + enroll as elastic nodes.'
-        default: '203459381'
+        default: ''
         required: true
       mode:
         description: 'dry-run = render + validate (safe); reinstall = PUT reinstall (plain userData) + tag'
@@ -23,10 +30,10 @@ on:
         description: 'For mode=reinstall ONLY: type SALVAGE to proceed.'
         default: ''
       template:
-        description: 'cloud-init template path (default public; use the -privnet variant to reinstall onto the VLAN)'
+        description: 'Elastic cloud-init template path (non-elastic templates are rejected).'
         default: 'cluster-autoscaler/contabo-externalgrpc/deploy/elastic-userdata.template'
       node_name:
-        description: 'Override the k8s --node-name (default = Contabo displayName). Use when displayName != k8s node name (e.g. vmi3396106). Single-instance only.'
+        description: 'Override k8s --node-name. Must start with the active elastic prefix; single-instance only.'
         default: ''
 
 permissions:
@@ -52,10 +59,19 @@ jobs:
           CONFIRM: ${{ inputs.confirm }}
           TEMPLATE_IN: ${{ inputs.template }}
           NODE_NAME_OVERRIDE: ${{ inputs.node_name }}
+          ELASTIC_TAG: fuzeinfra-prod-elastic-v2
+          ELASTIC_NAME_PREFIX: fuzeinfra-prod-elastic-v2
         run: |
           set -euo pipefail
           TMPL="${TEMPLATE_IN:-cluster-autoscaler/contabo-externalgrpc/deploy/elastic-userdata.template}"
           [ -f "$TMPL" ] || { echo "::error::template not found: $TMPL"; exit 1; }
+          case "$(basename "$TMPL")" in
+            elastic-userdata*.template) ;;
+            *)
+              echo "::error::refusing to enroll a non-elastic template '$TMPL' into autoscaler pool '$ELASTIC_TAG'"
+              exit 1
+              ;;
+          esac
           for v in CID CSEC CUSER CPASS IMAGE_ID K3S_SERVER_URL K3S_NODE_TOKEN NODE_SSH_PUBLIC_KEY; do
             eval "val=\${$v}"; [ -n "$val" ] || { echo "::error::secret/env $v is empty"; exit 1; }
           done
@@ -71,14 +87,17 @@ jobs:
           [ -n "$TOK" ] && [ "$TOK" != "null" ] || { echo "::error::Contabo auth failed"; exit 1; }
 
           TAGID=$(curl -sS -H "Authorization: Bearer $TOK" -H "x-request-id: $(cat /proc/sys/kernel/random/uuid)" \
-            "https://api.contabo.com/v1/tags?name=fuzeinfra-elastic" | jq -r '.data[0].tagId // empty')
+            "https://api.contabo.com/v1/tags?name=${ELASTIC_TAG}" \
+            | jq -r --arg name "$ELASTIC_TAG" '.data[] | select(.name == $name) | .tagId' | head -1)
           if [ -z "$TAGID" ]; then
+            TAG_BODY=$(jq -nc --arg name "$ELASTIC_TAG" '{name:$name,color:"#00aaaa"}')
             TAGID=$(curl -sS -X POST -H "Authorization: Bearer $TOK" -H "Content-Type: application/json" \
               -H "x-request-id: $(cat /proc/sys/kernel/random/uuid)" \
-              -d '{"name":"fuzeinfra-elastic","color":"#00aaaa"}' \
+              -d "$TAG_BODY" \
               "https://api.contabo.com/v1/tags" | jq -r '.data[0].tagId')
           fi
-          echo "fuzeinfra-elastic tagId=$TAGID"
+          [ -n "$TAGID" ] && [ "$TAGID" != "null" ] || { echo "::error::could not resolve/create exact tag '$ELASTIC_TAG'"; exit 1; }
+          echo "$ELASTIC_TAG tagId=$TAGID"
 
           IFS=',' read -ra ARR <<< "$IDS"
           for RAW in "${ARR[@]}"; do
@@ -90,6 +109,13 @@ jobs:
             [ -n "$NODE_NAME_OVERRIDE" ] && NAME="$NODE_NAME_OVERRIDE"
             STATUS=$(echo "$INST" | jq -r '.data[0].status')
             [ -n "$NAME" ] && [ "$NAME" != "null" ] || { echo "::warning::instance $ID not found, skipping"; continue; }
+            case "$NAME" in
+              "$ELASTIC_NAME_PREFIX"-*) ;;
+              *)
+                echo "::error::refusing to tag instance $ID: node name '$NAME' is outside active elastic prefix '$ELASTIC_NAME_PREFIX-'"
+                exit 1
+                ;;
+            esac
             echo "==== instance $ID  name=$NAME  status=$STATUS ===="
 
             # render cloud-init (sed; token/key never printed). '|' delim: replacements contain / + = : @ but no |.
@@ -107,7 +133,7 @@ jobs:
             done
 
             if [ "$MODE" = "dry-run" ]; then
-              echo "  [dry-run] WOULD PUT reinstall imageId=$IMAGE_ID (userData PLAIN, $(printf '%s' "$RENDERED" | wc -c) bytes) + assign tag $TAGID to $ID"
+              echo "  [dry-run] WOULD PUT reinstall imageId=$IMAGE_ID (userData PLAIN, $(printf '%s' "$RENDERED" | wc -c) bytes) + assign tag $ELASTIC_TAG/$TAGID to $ID"
               continue
             fi
 

@@ -509,8 +509,12 @@ jobs:
               .clusterAutoscaler.provider.k3sServerUrl = strenv(K3S_URL) |
               .clusterAutoscaler.provider.userDataTemplateB64 = strenv(USERDATA_B64) |
               .clusterAutoscaler.provider.notifyTelegramChatId = strenv(TELEGRAM_CHAT_ID) |
-              .clusterAutoscaler.provider.maxSize = 5 |
-              .clusterAutoscaler.nodeGroup.maxSize = 5
+              .clusterAutoscaler.provider.elasticTag = "fuzeinfra-prod-elastic-v2" |
+              .clusterAutoscaler.provider.elasticNamePrefix = "fuzeinfra-prod-elastic-v2" |
+              .clusterAutoscaler.provider.minSize = 0 |
+              .clusterAutoscaler.provider.maxSize = 1 |
+              .clusterAutoscaler.nodeGroup.minSize = 0 |
+              .clusterAutoscaler.nodeGroup.maxSize = 1
             ' "$VALUES_PATH"
           rm -f "$RENDERED_USERDATA"
           trap - EXIT
