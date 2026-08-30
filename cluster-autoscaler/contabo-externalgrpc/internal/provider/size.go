@@ -16,8 +16,12 @@ func (s *Server) NodeGroupTargetSize(ctx context.Context, req *protos.NodeGroupT
 		return nil, fmt.Errorf("NodeGroupTargetSize: listing elastic instances: %w", err)
 	}
 
+	s.mu.Lock()
+	reserved := s.inFlight
+	s.mu.Unlock()
+
 	return &protos.NodeGroupTargetSizeResponse{
-		TargetSize: int32(len(instances)),
+		TargetSize: int32(len(instances) + reserved),
 	}, nil
 }
 

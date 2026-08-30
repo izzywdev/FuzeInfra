@@ -48,20 +48,23 @@ func (s *Server) NodeGroupIncreaseSize(ctx context.Context, req *protos.NodeGrou
 	}
 
 	currentByPrefix := len(prefixInstances)
+	s.mu.Lock()
+	reserved := s.inFlight
+	s.mu.Unlock()
 
 	// HARD CAP BY REAL COUNT (critical anti-runaway guard): refuse outright,
 	// creating nothing, if the name-prefix count is already at or beyond
 	// MaxSize — regardless of what ListByTag/CA's own view says. This must
 	// be checked BEFORE looking at Delta at all, since the whole point is
 	// that a broken tag view must never let scale-up proceed anyway.
-	if currentByPrefix >= s.cfg.MaxSize {
+	if currentByPrefix+reserved >= s.cfg.MaxSize {
 		log.Printf("cluster-autoscaler(contabo): REFUSING NodeGroupIncreaseSize — elastic instance count by name prefix %q is %d, already >= MaxSize %d (Delta requested=%d); creating NOTHING", s.cfg.NamePrefix, currentByPrefix, s.cfg.MaxSize, req.Delta)
 		return nil, status.Errorf(codes.OutOfRange,
 			"would exceed MaxSize: current (name-prefix count)=%d, Delta=%d, MaxSize=%d",
 			currentByPrefix, req.Delta, s.cfg.MaxSize)
 	}
 
-	requested := currentByPrefix + int(req.Delta)
+	requested := currentByPrefix + reserved + int(req.Delta)
 	if requested > s.cfg.MaxSize {
 		return nil, status.Errorf(codes.OutOfRange,
 			"would exceed MaxSize: current (name-prefix count)=%d, Delta=%d, MaxSize=%d",
@@ -77,6 +80,18 @@ func (s *Server) NodeGroupIncreaseSize(ctx context.Context, req *protos.NodeGrou
 	for _, inst := range prefixInstances {
 		usedNames[inst.Name] = struct{}{}
 	}
+
+	s.mu.Lock()
+	s.inFlight += int(req.Delta)
+	s.mu.Unlock()
+	remainingReservations := int(req.Delta)
+	defer func() {
+		if remainingReservations > 0 {
+			s.mu.Lock()
+			s.inFlight -= remainingReservations
+			s.mu.Unlock()
+		}
+	}()
 
 	// Create Delta instances.
 	for i := 0; i < int(req.Delta); i++ {
@@ -110,8 +125,7 @@ func (s *Server) NodeGroupIncreaseSize(ctx context.Context, req *protos.NodeGrou
 			go notifier.Notify(subject, body)
 		}
 
-		// Create the instance
-		_, err = s.cloud.Create(ctx, contabo.CreateReq{
+		createReq := contabo.CreateReq{
 			Name:      instanceName,
 			ProductID: s.cfg.ProductID,
 			ImageID:   s.cfg.ImageID,
@@ -122,7 +136,36 @@ func (s *Server) NodeGroupIncreaseSize(ctx context.Context, req *protos.NodeGrou
 
 			PrivateNetworking: s.cfg.PrivateNetworking,
 			PrivateNetworkID:  s.cfg.PrivateNetworkID,
-		})
+		}
+
+		// CA's external-gRPC call has a short deadline, but Contabo's
+		// create/visibility/tag sequence legitimately takes longer. Accept the
+		// request and finish it with a bounded detached context; the reservation
+		// above keeps scale-up idempotent while this runs.
+		if externalGRPCShortDeadline(ctx) {
+			remainingReservations--
+			go func(name string, req contabo.CreateReq) {
+				defer func() {
+					s.mu.Lock()
+					s.inFlight--
+					s.mu.Unlock()
+				}()
+				provisionCtx, cancel := context.WithTimeout(context.Background(), elasticProvisionTimeout)
+				defer cancel()
+				if _, createErr := s.cloud.Create(provisionCtx, req); createErr != nil {
+					log.Printf("cluster-autoscaler(contabo): asynchronous provisioning %q failed: %v", name, createErr)
+					return
+				}
+				log.Printf("cluster-autoscaler(contabo): asynchronous provisioning %q finalized", name)
+			}(instanceName, createReq)
+			continue
+		}
+
+		_, err = s.cloud.Create(ctx, createReq)
+		remainingReservations--
+		s.mu.Lock()
+		s.inFlight--
+		s.mu.Unlock()
 		if err != nil {
 			return nil, status.Errorf(codes.Unavailable, "NodeGroupIncreaseSize: creating %q: %v", instanceName, err)
 		}
