@@ -654,7 +654,21 @@ spec:
         maxDuration: 3m
 ---
 # -----------------------------------------------------------------------------
-# fuzesdlc  ->  workflows target it with `runs-on: fuzesdlc`
+# fuzesdlc set  ->  workflows now target it with `runs-on: fuze-runner`
+#
+# Uniform-runner convention (FuzeSDLC governance/ci-runners.md): the job-matching
+# key `runnerScaleSetName` is the family-wide constant `fuze-runner`, while the
+# Helm `releaseName` (fuzesdlc) and `githubConfigUrl` (izzywdev/FuzeSDLC) stay
+# repo-scoped — on a personal account each set is repo-scoped, so many sets can
+# share the name `fuze-runner` without colliding. releaseName is left UNCHANGED so
+# this is an in-place rename of the existing set, not a second set (no orphan, no
+# added capacity pressure on the shared CI node).
+#
+# FuzeSDLC's consuming side is already flipped: .fuze/manifest.json declares
+# `ci.runner: fuze-runner` and every workflow uses `runs-on: fuze-runner`. Until
+# this rename lands the set was still registered as `fuzesdlc`, so every FuzeSDLC
+# job queued forever behind idle runners — the exact "flip the manifest and the
+# set rename together" hazard the doc describes.
 # Priority: FuzeSDLC#115 (v1.8.0 baseline release) is blocked on this set.
 # -----------------------------------------------------------------------------
 apiVersion: argoproj.io/v1alpha1
@@ -680,7 +694,7 @@ spec:
           - name: githubConfigUrl
             value: "https://github.com/izzywdev/FuzeSDLC"
           - name: runnerScaleSetName
-            value: "fuzesdlc"
+            value: "fuze-runner"
           - name: maxRunners
             value: "5"
           - name: minRunners
