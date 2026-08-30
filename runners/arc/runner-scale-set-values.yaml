@@ -150,10 +150,25 @@ template:
 
       - name: dind
         image: docker:dind
+        # ISSUE #659 — nested dockerd MTU override. The dind sidecar runs its
+        # own internal bridge network defaulting to MTU 1500, layered on top
+        # of the flannel wireguard-native pod-overlay path (see FuzeInfra#318
+        # in terraform/contabo/provisioning.tf ~line 111 for that prior VXLAN
+        # fragmentation fix). A 1500 MTU on the nested bridge riding a smaller
+        # real-path MTU is a known source of exactly the symptoms reported:
+        # small requests fine, large blob transfers (e.g. npm tarballs from
+        # pkg-npm.githubusercontent.com) stall out or ECONNRESET mid-transfer
+        # once "fragmentation needed" ICMP doesn't round-trip. Neither the
+        # issue nor its comments specify an MTU value, so 1400 is an assumed
+        # safe default: comfortably under WireGuard's typical ~1420 usable
+        # MTU on a 1500-MTU underlay, leaving headroom for its own
+        # encapsulation overhead. Live confirmation (per issue comment
+        # 2026-08-30) is still outstanding; see the PR body.
         args:
           - dockerd
           - --host=unix:///var/run/docker.sock
           - --group=$(DOCKER_GROUP_GID)
+          - --mtu=1400
         env:
           - name: DOCKER_GROUP_GID
             value: "123"
