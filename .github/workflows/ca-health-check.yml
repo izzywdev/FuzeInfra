@@ -1,0 +1,90 @@
+name: Contabo autoscaler health
+
+on:
+  schedule:
+    - cron: '*/15 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: contabo-autoscaler-health
+  cancel-in-progress: true
+
+jobs:
+  inspect:
+    # Direct cluster access is intentionally isolated on the tainted CI pool.
+    runs-on: staging
+    steps:
+      - uses: azure/setup-kubectl@829323503d1be3d00ca8346e5391ca0b07a9ab0d # v5.1.0
+
+      - name: Configure read-only cluster access
+        env:
+          KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
+        run: |
+          set -euo pipefail
+          [ -n "$KUBE_CONFIG" ] || { echo "::error::KUBE_CONFIG unset"; exit 1; }
+          mkdir -p "$HOME/.kube"
+          printf '%s' "$KUBE_CONFIG" | base64 -d > "$HOME/.kube/config"
+          chmod 600 "$HOME/.kube/config"
+          echo "KUBECONFIG=$HOME/.kube/config" >> "$GITHUB_ENV"
+
+      - name: Detect broken node-group discovery or blocked scale-up
+        id: check
+        env:
+          NAMESPACE: fuzeinfra
+        run: |
+          set -euo pipefail
+          LOG_FILE=$(mktemp)
+          trap 'rm -f "$LOG_FILE"' EXIT
+
+          if ! kubectl -n "$NAMESPACE" logs deploy/fuzeinfra-cluster-autoscaler \
+              --since=20m --tail=5000 >"$LOG_FILE" 2>&1; then
+            echo "reason=Could not read cluster-autoscaler logs" >> "$GITHUB_OUTPUT"
+            echo "::error::Could not read cluster-autoscaler logs"
+            exit 1
+          fi
+
+          # These messages are control-loop failures, not harmless verbosity:
+          # - nil/unregistered means provider instances cannot correlate to Nodes;
+          # - target-size repair skips the entire autoscaling iteration;
+          # - no expansion / didn't-trigger means Pending pods have no usable pool.
+          PATTERN='Nodegroup is nil|[1-9][0-9]* unregistered nodes present|No node group for node|Some node group target size was fixed|pod didn.t trigger scale-up|No expansion options|NotTriggerScaleUp'
+          if grep -Ei "$PATTERN" "$LOG_FILE" >/tmp/ca-health-anomalies.txt; then
+            COUNT=$(wc -l </tmp/ca-health-anomalies.txt | tr -d ' ')
+            echo "reason=Detected ${COUNT} autoscaler identity/scale-up anomalies in the last 20 minutes" >> "$GITHUB_OUTPUT"
+            {
+              echo '### Contabo autoscaler health: FAILED'
+              echo
+              echo "Detected ${COUNT} matching lines in the last 20 minutes. First 80:"
+              echo '```text'
+              head -80 /tmp/ca-health-anomalies.txt
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::cluster-autoscaler has unregistered/nil node groups or Pending pods that cannot trigger scale-up"
+            exit 1
+          fi
+
+          echo '### Contabo autoscaler health: healthy' >> "$GITHUB_STEP_SUMMARY"
+          echo 'No node-group identity, target-size repair, or blocked scale-up messages in the last 20 minutes.' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Telegram alert
+        if: failure()
+        env:
+          TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          CHAT: ${{ secrets.TELEGRAM_CHAT_ID }}
+          REASON: ${{ steps.check.outputs.reason || 'Contabo autoscaler health check failed' }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -uo pipefail
+          if [ -z "${TOKEN:-}" ]; then
+            echo "::warning::TELEGRAM_BOT_TOKEN unset — GitHub Actions failure remains the alert"
+            exit 0
+          fi
+          TEXT=$(printf '🔴 Contabo autoscaler unhealthy\n%s\n%s' "$REASON" "$RUN_URL")
+          curl -sS -X POST "https://api.telegram.org/bot${TOKEN}/sendMessage" \
+            --data-urlencode "chat_id=${CHAT}" \
+            --data-urlencode "text=${TEXT}" \
+            --data "disable_web_page_preview=true" >/dev/null \
+            && echo "telegram sent" || echo "::warning::telegram send failed"
