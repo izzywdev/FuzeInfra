@@ -5,6 +5,8 @@ package provider
 
 import (
 	"context"
+	"sync"
+	"time"
 
 	"github.com/izzywdev/fuzeinfra/contabo-externalgrpc/internal/contabo"
 	"github.com/izzywdev/fuzeinfra/contabo-externalgrpc/internal/notify"
@@ -73,6 +75,29 @@ type Server struct {
 
 	cfg   Config
 	cloud contabo.Client
+
+	// inFlight tracks create requests that have been accepted by the
+	// autoscaler but are still being finalized by Contabo (instance
+	// visibility/tagging can take tens of seconds).  The external-gRPC
+	// autoscaler gives NodeGroupIncreaseSize a short deadline, so production
+	// requests are detached into a bounded background operation.  Counting
+	// reservations here prevents another autoscaler loop from ordering a
+	// second paid VPS while the first one is not yet visible in ListByNamePrefix.
+	mu       sync.Mutex
+	inFlight int
+}
+
+// elasticProvisionTimeout bounds a detached Contabo create/tag operation.
+// It is deliberately longer than the API's eventual-consistency window, but
+// finite so a permanently wedged request cannot reserve capacity forever.
+const elasticProvisionTimeout = 5 * time.Minute
+
+// externalGRPCShortDeadline identifies the cluster-autoscaler request shape.
+// CA v1.30 gives cloud-provider scale operations roughly five seconds; a
+// Contabo create plus visibility/tag retries legitimately takes much longer.
+func externalGRPCShortDeadline(ctx context.Context) bool {
+	deadline, ok := ctx.Deadline()
+	return ok && time.Until(deadline) < 30*time.Second
 }
 
 // New returns a new Server backed by the given Contabo client.
