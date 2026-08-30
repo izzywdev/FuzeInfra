@@ -23,8 +23,19 @@ module "ci_workers" {
 
   requests = [
     for i in range(var.ci_worker_count) : {
-      name       = "fuzeinfra-ci-runner-${i + 1}"
-      product_id = var.ci_worker_product_id != "" ? var.ci_worker_product_id : var.product_id
+      name = "fuzeinfra-ci-runner-${i + 1}"
+      # Per-index product so growing the pool never disturbs an existing node.
+      # fuzeinfra-ci-runner-1 (index 0) was created on var.product_id (the shared
+      # CONTABO_PRODUCT_ID, currently the retired "V92" SKU). Contabo cannot
+      # repackage a live VPS, so product_id is effectively ForceNew — feeding it a
+      # new value would destroy+recreate the running node (and V92 can no longer be
+      # ordered: "No offer was found for product ID V92"). So index 0 KEEPS
+      # var.product_id (matches its live state → no diff), and every ADDITIONAL node
+      # uses var.ci_worker_product_id (the current catalog SKU, "V153" = Cloud VPS 4,
+      # 4 vCPU/8 GiB — same size). Result: a mixed pool (node-1 V92, node-2 V153) with
+      # zero disruption. Migrate node-1 onto the current SKU later in a window, by
+      # bumping CONTABO_PRODUCT_ID (its replacement is then a deliberate, drained op).
+      product_id = i == 0 ? var.product_id : (var.ci_worker_product_id != "" ? var.ci_worker_product_id : var.product_id)
       region     = var.ci_worker_region
       role       = "ci"
       labels     = {}
