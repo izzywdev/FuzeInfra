@@ -131,21 +131,39 @@ providerKeys:
 # -----------------------------------------------------------------------------
 models:
   # --- chat -------------------------------------------------------------------
-  # FuzeFront's LITELLM_DEFAULT_MODEL default (services/chat-service/src/index.ts).
-  # Kept verbatim so their chat-service works with zero config change.
+  # Full Anthropic model lineup. Every current model ID that a consumer (Claude
+  # Code, chat-service, fuze-code-action) might request must be listed here — the
+  # gateway 403s any name not in model_list before the fallback chain runs.
+  #
+  # Legacy alias — FuzeFront's LITELLM_DEFAULT_MODEL default.
   - name: claude-opus-4-5
     provider: anthropic/claude-opus-4-5-20251101
     keyEnv: ANTHROPIC_API_KEY
-  # Current-generation Claude. Consumers should migrate to these; claude-opus-4-5
-  # is a legacy alias that will eventually be retired upstream.
+  # Claude 4.x series
+  - name: claude-opus-4-6
+    provider: anthropic/claude-opus-4-6
+    keyEnv: ANTHROPIC_API_KEY
+  - name: claude-opus-4-8
+    provider: anthropic/claude-opus-4-8
+    keyEnv: ANTHROPIC_API_KEY
+  - name: claude-sonnet-4-5
+    provider: anthropic/claude-sonnet-4-5
+    keyEnv: ANTHROPIC_API_KEY
+  - name: claude-sonnet-4-6
+    provider: anthropic/claude-sonnet-4-6
+    keyEnv: ANTHROPIC_API_KEY
+  - name: claude-haiku-4-5
+    provider: anthropic/claude-haiku-4-5
+    keyEnv: ANTHROPIC_API_KEY
+  # Claude 5 family
   - name: claude-opus-5
     provider: anthropic/claude-opus-5
     keyEnv: ANTHROPIC_API_KEY
   - name: claude-sonnet-5
     provider: anthropic/claude-sonnet-5
     keyEnv: ANTHROPIC_API_KEY
-  - name: claude-haiku-4-5
-    provider: anthropic/claude-haiku-4-5
+  - name: claude-fable-5
+    provider: anthropic/claude-fable-5
     keyEnv: ANTHROPIC_API_KEY
   # --- cross-provider fallback chat models -------------------------------------
   # These exist so a provider-level outage does not take chat down. They are
@@ -341,13 +359,23 @@ routerSettings:
     BadRequestErrorRetries: 1
   fallbacks:
     - claude-opus-4-5: ["gpt-4.1", "gemini-flash-latest"]
+    - claude-opus-4-6: ["gpt-4.1", "gemini-flash-latest"]
+    - claude-opus-4-8: ["gpt-4.1", "gemini-flash-latest"]
     - claude-opus-5: ["gpt-4.1", "gemini-flash-latest"]
+    - claude-sonnet-4-5: ["gpt-4.1", "gemini-flash-latest"]
+    - claude-sonnet-4-6: ["gpt-4.1", "gemini-flash-latest"]
     - claude-sonnet-5: ["gpt-4.1", "gemini-flash-latest"]
+    - claude-fable-5: ["gpt-4.1", "gemini-flash-latest"]
     - claude-haiku-4-5: ["gpt-4.1-mini", "gemini-flash-lite-latest"]
   context_window_fallbacks:
     - claude-opus-4-5: ["gpt-4.1", "gemini-flash-latest"]
+    - claude-opus-4-6: ["gpt-4.1", "gemini-flash-latest"]
+    - claude-opus-4-8: ["gpt-4.1", "gemini-flash-latest"]
     - claude-opus-5: ["gpt-4.1", "gemini-flash-latest"]
+    - claude-sonnet-4-5: ["gpt-4.1", "gemini-flash-latest"]
+    - claude-sonnet-4-6: ["gpt-4.1", "gemini-flash-latest"]
     - claude-sonnet-5: ["gpt-4.1", "gemini-flash-latest"]
+    - claude-fable-5: ["gpt-4.1", "gemini-flash-latest"]
     - claude-haiku-4-5: ["gpt-4.1-mini", "gemini-flash-lite-latest"]
 
 # -----------------------------------------------------------------------------
