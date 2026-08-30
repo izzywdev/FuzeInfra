@@ -1,0 +1,96 @@
+name: arc-restart-listener-scaleset
+
+# Narrow, single-scale-set broker-session refresh.
+#
+# Sibling of arc-restart-listener.yml, but SCOPED to one scale set instead of
+# deleting every listener at once. arc-restart-listener.yml selects on
+# `app.kubernetes.io/component=runner-scale-set-listener` alone, so it bounces
+# ALL repos' listeners — a fleet-wide disruption when you only need to nudge one.
+# This workflow ANDs in `actions.github.com/scale-set-name=<input>`, so it touches
+# exactly the listener for the scale set you name and nothing else.
+#
+# WHEN TO USE: a scale set is registered and Argo-synced (its listener/manager
+# RBAC exists in arc-systems / arc-runners) but its listener isn't scaling up
+# runners for queued jobs — typically a stale broker session after a
+# `runnerScaleSetName` rename in argocd/applications/arc-runners.yaml. Deleting
+# the listener makes the ARC controller recreate it with a fresh broker session;
+# it does NOT touch runner pods, ephemeralrunnersets, or any other scale set.
+#
+# The scale-set NAME is the GitHub-side runnerScaleSetName (what `runs-on:`
+# matches), e.g. `fuze-runner` — NOT the Helm release name.
+
+on:
+  workflow_dispatch:
+    inputs:
+      scale_set_name:
+        description: "runnerScaleSetName to refresh (the runs-on value, e.g. fuze-runner)"
+        required: true
+        type: string
+        default: fuze-runner
+
+permissions:
+  contents: read
+
+concurrency:
+  group: arc-restart-listener-scaleset-${{ github.event.inputs.scale_set_name }}
+  cancel-in-progress: false
+
+jobs:
+  restart:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Setup kubectl
+        run: |
+          mkdir -p ~/.kube
+          echo "${{ secrets.KUBE_CONFIG }}" | base64 -d > ~/.kube/config
+          chmod 600 ~/.kube/config
+
+      - name: Restart ONLY this scale set's listener
+        env:
+          SS: ${{ github.event.inputs.scale_set_name }}
+        run: |
+          set -euo pipefail
+          SEL="actions.github.com/scale-set-name=${SS},app.kubernetes.io/component=runner-scale-set-listener"
+          echo "=== Selector: ${SEL} ==="
+          echo "=== Current listener for '${SS}' (before) ==="
+          kubectl -n arc-systems get pods -l "$SEL" -o wide || echo "(none found — is the scale set registered/synced?)"
+
+          COUNT=$(kubectl -n arc-systems get pods -l "$SEL" -o name 2>/dev/null | wc -l | tr -d ' ')
+          if [ "$COUNT" = "0" ]; then
+            echo "::error::No listener pod matched scale-set-name=${SS}. Nothing restarted. Verify the set exists (kubectl -n arc-runners get autoscalingrunnersets) and that its runnerScaleSetName is '${SS}'."
+            exit 1
+          fi
+
+          echo "=== Deleting ${COUNT} listener pod(s) for '${SS}' — controller recreates with a fresh broker session ==="
+          kubectl -n arc-systems delete pods -l "$SEL" --ignore-not-found
+
+          echo "=== Waiting for the recreated listener to become Ready ==="
+          kubectl -n arc-systems wait pods -l "$SEL" --for=condition=Ready --timeout=120s
+
+          echo "=== Listener for '${SS}' (after) ==="
+          kubectl -n arc-systems get pods -l "$SEL" -o wide
+
+      - name: Verify broker connection (listener logs)
+        env:
+          SS: ${{ github.event.inputs.scale_set_name }}
+        run: |
+          set +e
+          SEL="actions.github.com/scale-set-name=${SS},app.kubernetes.io/component=runner-scale-set-listener"
+          sleep 10
+          LPOD=$(kubectl -n arc-systems get pods -o name -l "$SEL" 2>/dev/null | head -1)
+          if [ -n "$LPOD" ]; then
+            echo "=== ${LPOD} logs (tail) ==="
+            kubectl -n arc-systems logs "$LPOD" --tail=30 2>/dev/null || echo "(no logs yet)"
+          else
+            echo "No listener pod found for scale-set-name=${SS} after restart."
+          fi
+
+      - name: Scale set + runner-pod status
+        env:
+          SS: ${{ github.event.inputs.scale_set_name }}
+        run: |
+          set +e
+          echo "=== AutoscalingRunnerSet '${SS}' ==="
+          kubectl -n arc-runners get autoscalingrunnersets "$SS" -o wide 2>/dev/null || echo "(not found by that name — release/object name may differ from runnerScaleSetName)"
+          echo "=== runner pods matching '${SS}' (arc-runners) ==="
+          kubectl -n arc-runners get pods -o wide 2>/dev/null | grep -E "${SS}|NAME" || echo "(no runner pods yet — expected until a job is assigned)"
