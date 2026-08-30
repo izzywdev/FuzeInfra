@@ -271,9 +271,11 @@ func renderUserData(templateStr, nodeName, k3sServerURL, k3sNodeToken string) (s
 func (s *Server) NodeGroupDeleteNodes(ctx context.Context, req *protos.NodeGroupDeleteNodesRequest) (*protos.NodeGroupDeleteNodesResponse, error) {
 	// Fetch current elastic instances to build the allowed-to-delete set
 	// and the name->instance lookup used to resolve the numeric Contabo id.
-	elasticInstances, err := s.cloud.ListByTag(ctx, s.cfg.ElasticTag)
+	// The managed name prefix is authoritative; tag assignment can lag after a
+	// successful create and must not make a valid worker undeletable.
+	elasticInstances, err := s.cloud.ListByNamePrefix(ctx, s.cfg.NamePrefix)
 	if err != nil {
-		return nil, status.Errorf(codes.Unavailable, "NodeGroupDeleteNodes: listing elastic instances: %v", err)
+		return nil, status.Errorf(codes.Unavailable, "NodeGroupDeleteNodes: listing elastic instances by name prefix: %v", err)
 	}
 
 	// Build a name -> instance map for membership checking and id resolution.
