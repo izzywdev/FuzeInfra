@@ -1,5 +1,17 @@
 # A2A bridge — cloud↔cloud messaging via the WSS relay
 
+> **⚠️ SUPERSEDED for inbound delivery — do not build on this for new work.**
+> The outbound half works, but *inbound* delivery depends on writing frames to the
+> peer's internal `CLAUDE_CODE_MESSAGING_SOCKET` (Claude Code's `peerProtocol` v1,
+> compiled into `/opt/claude-code/bin/claude`). That frame format is undocumented and
+> reverse-engineering it is deliberately guardrailed, so `_inbox_frames` never lands a
+> turn — a message reaches the relay but never appears in the peer. Use the **Routines
+> API** pattern instead (`create_session` + `create_trigger`/`fire_trigger`), which
+> delivers a peer turn natively and even wakes an idle peer, with no relay/socket/token.
+> See **`../../orchestration/CAPABILITY_DELEGATION.md`** for the design, the working
+> transport, and the fail-closed authorization model. This directory is kept only as the
+> record of why the relay/socket route is a dead-end.
+
 Lets one **Claude Code on the web** cloud session message **another** and get a reply —
 the direction native cross-session messaging doesn't cover (cross-machine/web is
 reply-only and can't open a fresh conversation to a web session).

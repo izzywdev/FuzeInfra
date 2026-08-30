@@ -6,6 +6,13 @@ keeps its full conversation history, sandbox filesystem, and outputs, and resume
 cleanly after idling. So a handoff carries a **pointer + a summary**, never a copied
 transcript, and an idle session costs nothing while it waits.
 
+> **Capability delegation across sessions** (a session that lacks a capability asks a
+> session that has it, in the environment that owns the credential, and gets back only
+> the result) is specified in **`CAPABILITY_DELEGATION.md`** — including the transport
+> that works today (the Routines API), the deprecation of the WSS relay/socket bridge,
+> and the **fail-closed authorization model** (default-deny, `providesTo`-based, no
+> arbitrary command delegation, credentials never returned).
+
 ## 1. In-process fan-out — `multiagent` coordinator (same environment)
 
 A coordinator agent delegates to a roster of sub-agents *within one session*
