@@ -328,9 +328,9 @@ variable "a2a_gateway_access_enabled" {
 }
 
 variable "ci_worker_count" {
-  description = "Number of TF-managed CI runner nodes to provision. DEFAULT 0; CI env sets TF_VAR_ci_worker_count=1 to spin up one dedicated CI node. CI nodes are tainted fuzeinfra.io/ci=true:NoSchedule so only ARC runner pods land there."
+  description = "Number of TF-managed CI runner nodes to provision. DEFAULT 2 (raised from 1 on 2026-08-30 after the elastic node pool was released left a single 4vCPU/8GB CI node unable to seat the ARC runner fleet — dozens of runners Pending across 22 scale sets). CI env pins TF_VAR_ci_worker_count to the same value. CI nodes are tainted fuzeinfra.io/ci=true:NoSchedule so only ARC runner pods land there."
   type        = number
-  default     = 0
+  default     = 2
 
   validation {
     condition     = var.ci_worker_count >= 0

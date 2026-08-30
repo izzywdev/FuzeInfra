@@ -190,7 +190,7 @@ spec:
                   # stays in sync with runners/arc/runner-scale-set-values.yaml (which pins
                   # the scale sets to fuzeinfra.io/pool: ci via nodeSelector). Add a space-
                   # separated entry if a second durable CI node is ever enrolled.
-                  CI_NODES="fuzeinfra-ci-runner-1"
+                  CI_NODES="fuzeinfra-ci-runner-1 fuzeinfra-ci-runner-2"
 
                   nodes=$(kubectl get nodes -l fuzeinfra.io/pool=ci \
                     -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.spec.unschedulable}{"\n"}{end}' 2>/dev/null)
