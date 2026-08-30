@@ -7,7 +7,7 @@ ready-to-apply diffs + an apply script that a maintainer runs locally.
 ## Why
 
 When org-hosted Actions minutes are exhausted, every `ubuntu-latest` job dies in
-~2s with no logs — including **`claude.yml`**, the cross-repo `@claude` handler.
+~2s with no logs — including **`claude.yml`**, the cross-repo `@fuze` handler.
 That is exactly why delegated issues sat un-actioned. Moving the handler and the
 CI/build jobs onto the always-available ARC scale set (`runs-on: staging`) makes
 delegation, builds, and prod introspection independent of hosted minutes.
@@ -38,7 +38,7 @@ image the runners use). **Do not touch these.**
 
 | Workflow | Line | Priority | Why |
 |---|---|---|---|
-| `claude.yml` | 44 | **critical** | the `@claude` handler — must not depend on hosted minutes |
+| `claude.yml` | 44 | **critical** | the `@fuze` handler — must not depend on hosted minutes |
 | `claude-smoke.yml` | 22 | high | smoke-checks the handler |
 | `claude-auto-pr.yml` | 18 | high | opens PRs from `claude/**` branches |
 | `infrastructure-tests.yml` | 22 | high | uses `docker compose` (needs the runner image) |

@@ -9,11 +9,11 @@ reference implementation; these are the parameterized, install-ready copies.
 
 | Template | Install as | Purpose |
 |---|---|---|
-| `claude.yml` | `.github/workflows/claude.yml` | The `@claude` issue/PR handler. **Expert-first** + cross-repo hand-off + trusted-author gate. |
+| `claude.yml` | `.github/workflows/claude.yml` | The `@fuze` issue/PR handler. **Expert-first** + cross-repo hand-off + trusted-author gate. |
 
 (Other stack members — `claude-ci-autofix.yml`, `helm-validate.yml`, `auto-merge.yml`, `telegram-pr-merged.yml`, the deliverable-verification check — live in FuzeInfra's `.github/workflows/`; copy them across the same way. This dir grows as they're parameterized.)
 
-## Installing the `@claude` handler into a repo
+## Installing the `@fuze` handler into a repo
 
 1. Copy `claude.yml` → the target repo's `.github/workflows/claude.yml`.
 2. Replace every `__REPONAME__` with the repo's short name, lowercased
@@ -21,7 +21,7 @@ reference implementation; these are the parameterized, install-ready copies.
    handler starts with.
 3. Add the `ANTHROPIC_API_KEY` secret (and `GH_TOKEN` if cross-repo / package ops
    are needed).
-4. **Cluster access** is OFF by default. Only repos whose `@claude` must perform
+4. **Cluster access** is OFF by default. Only repos whose `@fuze` must perform
    live cluster operations keep the block marked *OPTIONAL: cluster access*
    (and add `KUBE_CONFIG` + the guard-shim step — see FuzeInfra's live
    `claude.yml` for the full, SHA-pinned version with kubectl/helm/terraform +
@@ -40,6 +40,6 @@ If that agent **doesn't exist yet**, the handler **bootstraps it**:
 3. Opens a PR adding it, then uses it for the task.
 
 So a repo with the standard handler installed becomes self-bootstrapping: the
-first `@claude` task in a repo without an expert creates one for every task
+first `@fuze` task in a repo without an expert creates one for every task
 after it. Ship `.claude/templates/repo-expert.template.md` alongside the handler
 (it's repo-agnostic — copy it as-is).

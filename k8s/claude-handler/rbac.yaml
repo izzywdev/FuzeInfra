@@ -1,5 +1,5 @@
 # =============================================================================
-# Scoped RBAC for the @claude cluster handler (issue #78)
+# Scoped RBAC for the @fuze cluster handler (issue #78)
 #
 # Replaces the cluster-admin k3s kubeconfig that the claude.yml handler used to
 # mount (KUBE_CONFIG secret) with a dedicated ServiceAccount whose permissions

@@ -49,7 +49,7 @@ found, unannotated, or the value is invalid.
   files here, `ignore` requests suppression here.
 - **Consumer-owned** crit (a code-fix PR can't target another repo's checkout):
   the handler performs a **cross-repo handoff** — it (1) records a FuzeInfra
-  **tracking** issue, (2) opens an issue in the owner repo that **`@claude`-mentions**
+  **tracking** issue, (2) opens an issue in the owner repo that **`@fuze`-mentions**
   so the owner's own handler fixes the root cause and deploys, (3) cross-links the
   two, and (4) **closes the FuzeInfra tracking issue** as handed-off. `action=fix`
   on a consumer namespace is first downgraded into this handoff path. Dedup is on

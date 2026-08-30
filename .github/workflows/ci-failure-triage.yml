@@ -1,4 +1,4 @@
-# Surface deploy-path workflow FAILURES as an idempotent @claude triage issue.
+# Surface deploy-path workflow FAILURES as an idempotent @fuze triage issue.
 #
 # Why: the existing claude-ci-autofix.yml only watches "Infrastructure Tests" +
 # "Helm Chart Validation" AND requires an associated PR. Deploy workflows that
@@ -8,7 +8,7 @@
 # GitHub Actions runs. This closes that gap for the deploy-critical workflows.
 #
 # Behaviour: on `conclusion == failure`, open ONE issue per (workflow, branch)
-# labelled `ci-failure`, mentioning @claude, with the failing job's error tail.
+# labelled `ci-failure`, mentioning @fuze, with the failing job's error tail.
 # If an open one already exists, comment "recurred" instead of duplicating.
 #
 # NOTE: workflow_run matches by workflow DISPLAY NAME, and only fires for
@@ -50,11 +50,11 @@ jobs:
           # Use the PAT, not the default GITHUB_TOKEN. GitHub deliberately does
           # NOT re-dispatch workflow events (here: `issues: opened`) for actions
           # performed with GITHUB_TOKEN — so an issue created with it would never
-          # wake the @claude responder (claude.yml `on: issues`), leaving the
+          # wake the @fuze responder (claude.yml `on: issues`), leaving the
           # triage issue sitting unactioned. The PAT makes the mention cascade.
-          # (Same reason argo-outofsync-autofix.yml opens @claude issues with
+          # (Same reason argo-outofsync-autofix.yml opens @fuze issues with
           # secrets.GH_TOKEN.) Fall back to GITHUB_TOKEN so the issue is still
-          # filed even if the PAT is unset — it just won't auto-summon @claude.
+          # filed even if the PAT is unset — it just won't auto-summon @fuze.
           GH_TOKEN: ${{ secrets.GH_TOKEN || secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
           WF: ${{ github.event.workflow_run.name }}

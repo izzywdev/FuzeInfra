@@ -126,7 +126,7 @@ the admin UI before re-minting under the same alias.
 
 SealedSecrets are **strictly scoped** — a secret sealed for `fuzeinfra` cannot be
 decrypted in your namespace. So the same master-key value is sealed a second
-time for yours. Open a FuzeInfra issue mentioning `@claude` with your namespace
+time for yours. Open a FuzeInfra issue mentioning `@fuze` with your namespace
 and target Secret name; the operator runs:
 
 ```bash

@@ -327,7 +327,7 @@ jobs:
           if [ "$ACTION" = "issue" ] && [ "$IS_SELF" != "true" ]; then
             # ── Consumer-owned crit: HAND OFF to the owner repo ───────────────
             # The crit came from a consumer's namespace, so FuzeInfra can't fix it.
-            # Record a FuzeInfra tracking issue, open an @claude issue in the owner
+            # Record a FuzeInfra tracking issue, open an @fuze issue in the owner
             # repo (its own process fixes the root cause + deploys), cross-link the
             # two, then close the FuzeInfra tracking issue as handed-off. Dedup on
             # the owner repo so repeated alerts don't pile on.
@@ -348,7 +348,7 @@ jobs:
                      --title "🚨 ${TITLE} (→ ${OWNER_REPO})" --body-file /tmp/issue_body.md)
               TRACK_NUM="${TRACK_URL##*/}"
 
-              # 2) Owner-repo issue with @claude + a back-link to the tracking issue
+              # 2) Owner-repo issue with @fuze + a back-link to the tracking issue
               {
                 cat /tmp/issue_body.md
                 echo ""; echo "---"
