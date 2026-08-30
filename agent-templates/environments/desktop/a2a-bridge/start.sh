@@ -23,6 +23,34 @@ if [ -f "$STATE/bridge.pid" ] && kill -0 "$(cat "$STATE/bridge.pid" 2>/dev/null)
   exit 0
 fi
 
+# Dependency backstop. The env Setup script installs the bridge deps at BUILD time, but a
+# session on a stale/cached env snapshot (or a partial install) can boot missing them —
+# `websockets` (this daemon) or `mcp` (the MCP tool server) — which surfaces only as a
+# dead bridge / CONNECTION_CLOSED with no obvious cause. Install here at hook time as the
+# earliest recovery point, with the same 3-tier escalation the setup uses: the last retry
+# adds --ignore-installed because mcp pulls a newer PyJWT than the distro-managed one,
+# which pip cannot uninstall ("RECORD file not found ... installed by debian"). Best-effort
+# and logged to $STATE/bridge_deps.log; if PyPI is unreachable at hook time it is a no-op
+# and the build-time install remains the durable path.
+DEPLOG="$STATE/bridge_deps.log"
+ensure_pymod() {  # <import-name> <pip-spec>
+  python3 -c "import $1" 2>/dev/null && return 0
+  echo "[deps $(date -u +%H:%M:%S)] import $1 failed — installing $2" >>"$DEPLOG"
+  pip install --quiet --no-input "$2" >>"$DEPLOG" 2>&1 \
+    || pip install --quiet --no-input --break-system-packages "$2" >>"$DEPLOG" 2>&1 \
+    || pip install --quiet --no-input --break-system-packages --ignore-installed "$2" >>"$DEPLOG" 2>&1 \
+    || true
+  python3 -c "import $1" 2>/dev/null
+}
+
+# The daemon needs `websockets` — ensure it synchronously before launching.
+ensure_pymod websockets 'websockets' \
+  || echo "[a2a-bridge] WARNING: 'websockets' still unavailable; bridge may fail to start" >&2
+# The MCP tool server needs `mcp` — kick its install in the background so a2a_mcp_launch.sh
+# likely finds it ready (that launcher also self-heals as a fallback). Non-blocking so the
+# hook does not stall session start on mcp's larger dependency tree.
+( ensure_pymod 'mcp.server.fastmcp' 'mcp>=1.9,<2' >/dev/null 2>&1 || true ) &
+
 setsid nohup python3 "$HERE/wss_bridge.py" >"$STATE/bridge.log" 2>&1 &
 echo $! >"$STATE/bridge.pid"
 
