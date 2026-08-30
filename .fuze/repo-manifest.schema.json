@@ -605,7 +605,7 @@
     },
     "dataTier": {
       "type": "array",
-      "description": "Declarative data-tier provisioning request (the IaC hand-off to FuzeInfra). FuzeInfra's reconciler consumes each entry: it ensures the per-service role exists AND is GRANTED the declared privileges on the declared database, then VERIFIES the role can actually read/write it (fail-loud if a role can auth but not access its DB). Replaces the old ad-hoc '@fuze please provision' request (governance/shared-cluster-deploy.md \u00a75). Every store the product's role authenticates to MUST be declared here, with the exact database name the app uses \u2014 a role granted on the wrong db name is the classic silent-empty-data bug.",
+      "description": "Declarative data-tier provisioning request (the IaC hand-off to FuzeInfra). FuzeInfra's reconciler consumes each entry: it ensures the per-service role exists AND is GRANTED the declared privileges on the declared database, then VERIFIES the role can actually read/write it (fail-loud if a role can auth but not access its DB). Replaces the old ad-hoc '@claude please provision' request (governance/shared-cluster-deploy.md \u00a75). Every store the product's role authenticates to MUST be declared here, with the exact database name the app uses \u2014 a role granted on the wrong db name is the classic silent-empty-data bug.",
       "items": {
         "type": "object",
         "additionalProperties": false,
@@ -677,7 +677,7 @@
     },
     "dataTier": {
       "type": "array",
-      "description": "Declarative data-tier provisioning request (the IaC hand-off to FuzeInfra). FuzeInfra's reconciler consumes each entry: it ensures the per-service role exists AND is GRANTED the declared privileges on the declared database, then VERIFIES the role can actually read/write it (fail-loud if a role can auth but not access its DB). Replaces the old ad-hoc '@fuze please provision' request (governance/shared-cluster-deploy.md §5). Every store the product's role authenticates to MUST be declared here, with the exact database name the app uses — a role granted on the wrong db name is the classic silent-empty-data bug.",
+      "description": "Declarative data-tier provisioning request (the IaC hand-off to FuzeInfra). FuzeInfra's reconciler consumes each entry: it ensures the per-service role exists AND is GRANTED the declared privileges on the declared database, then VERIFIES the role can actually read/write it (fail-loud if a role can auth but not access its DB). Replaces the old ad-hoc '@claude please provision' request (governance/shared-cluster-deploy.md §5). Every store the product's role authenticates to MUST be declared here, with the exact database name the app uses — a role granted on the wrong db name is the classic silent-empty-data bug.",
       "items": {
         "type": "object",
         "additionalProperties": false,
