@@ -101,6 +101,26 @@ the API path only; the display name ("FuzeInfra devops-engineer") is not an API 
 there either — the API references agents solely by opaque `agent_id`. **Seeding that map
 does not unblock delegation** — it only turns "unknown role" into "insufficient credit."
 
+**The API-path session assembly is already built** (the gap is data + credit, not code).
+`handoff_mcp/server.py::_new_session(role)` reads `agent-ids.json`
+(`role → {id, version, environment_id}`), attaches `vault-ids.json` (credentials) and
+`memory-ids.json` (shared memory), and calls `driver.create_session(...)` to form a
+fully-running managed-agents session — **agent + version + environment + creds + memory**.
+The `sync/*.py` + `providers/provision.py` scripts create those resources and write the
+three id maps; the maps are `{}` because the *Provision Managed Agents* workflow is
+credit-blocked, not because the coupling is missing.
+
+### 2b. Which path to use — keyed on where the CALLER runs
+
+| Caller context | Use | Why |
+|---|---|---|
+| **Local / desktop Claude Code session** | Launch a **Claude Code session in the DevOps environment by name** ("DevOps" in the desktop env picker, or `create_session(environment_id=<cloud-devops>)`) | **Subscription/plan usage** — no API credit, no `agent_id` needed; the assembly is just "spawn into the env" (§3) |
+| **Remote / non-local** (a managed-agent or headless/API context, no desktop) | `handoff-mcp spawn_agent("devops", …)` — resolves the **`agent_id`** and assembles agent+env+creds+memory via the Managed Agents API | **API-billed** — needs credit + the id maps populated; this is the built code above |
+
+Both paths carry the *same* delegation envelope and fail-closed authorization (§4); only
+the transport and billing differ. Prefer the local/subscription path when the caller has
+it; fall back to the managed-agent path when running non-locally.
+
 ---
 
 ## 3. The working transport (#3) — mapping and proof
