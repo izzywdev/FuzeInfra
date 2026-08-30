@@ -213,6 +213,7 @@ func TestCreateAndDelete(t *testing.T) {
 func TestCreate_UserDataSentAsPlainTextNotBase64(t *testing.T) {
 	const wantUserData = "#cloud-config\nfoo: bar\n"
 	var gotUserData string
+	var gotPeriod int64
 	var sawRequest bool
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -221,11 +222,13 @@ func TestCreate_UserDataSentAsPlainTextNotBase64(t *testing.T) {
 			sawRequest = true
 			var body struct {
 				UserData string `json:"userData"`
+				Period   int64  `json:"period"`
 			}
 			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 				t.Errorf("decode create-instance request body: %v", err)
 			}
 			gotUserData = body.UserData
+			gotPeriod = body.Period
 			w.Write([]byte(`{"data":[{"instanceId":101,"displayName":"fuzeinfra-elastic-2","status":"provisioning"}]}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/tags":
 			w.Write([]byte(`{"data":[{"tagId":7,"name":"fuzeinfra-elastic","color":"#0A78C3"}]}`))
@@ -250,6 +253,9 @@ func TestCreate_UserDataSentAsPlainTextNotBase64(t *testing.T) {
 	}
 	if gotUserData != wantUserData {
 		t.Fatalf("request body userData = %q, want plain text %q (must NOT be base64-encoded)", gotUserData, wantUserData)
+	}
+	if gotPeriod != 1 {
+		t.Fatalf("request body period = %d, want 1 month for elastic capacity", gotPeriod)
 	}
 }
 

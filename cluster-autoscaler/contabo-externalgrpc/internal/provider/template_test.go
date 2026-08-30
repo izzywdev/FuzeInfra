@@ -11,6 +11,26 @@ import (
 	corev1 "k8s.io/api/core/v1"
 )
 
+func TestNodeGroupTemplateNodeInfo_V153_Capacity(t *testing.T) {
+	s := provider.New(provider.Config{
+		ProductID:  "V153",
+		NamePrefix: "fuzeinfra-prod-elastic-v2",
+		MinSize:    0,
+		MaxSize:    1,
+	}, &fakeCloud{})
+
+	resp, err := s.NodeGroupTemplateNodeInfo(context.Background(), &protos.NodeGroupTemplateNodeInfoRequest{Id: "elastic"})
+	if err != nil {
+		t.Fatalf("NodeGroupTemplateNodeInfo: %v", err)
+	}
+	if got := resp.NodeInfo.Status.Capacity.Cpu().String(); got != "4" {
+		t.Fatalf("V153 CPU capacity = %s, want 4", got)
+	}
+	if got := resp.NodeInfo.Status.Capacity.Memory().String(); got != "8Gi" {
+		t.Fatalf("V153 memory capacity = %s, want 8Gi", got)
+	}
+}
+
 func TestNodeGroupTemplateNodeInfo_V45_Capacity(t *testing.T) {
 	cfg := provider.Config{
 		NamePrefix: "fuzeinfra-elastic",
