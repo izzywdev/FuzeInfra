@@ -157,7 +157,7 @@ FuzeInfra's job logs are public), and there is no `exec`/`port-forward`/`proxy`.
 usage, the dispatch credential it needs, and the caveats:
 [`docs/consuming-repos/CLUSTER_QUERY.md`](docs/consuming-repos/CLUSTER_QUERY.md).
 
-Changing anything in the cluster remains GitOps (your own `deploy/**`) or an `@claude`
+Changing anything in the cluster remains GitOps (your own `deploy/**`) or an `@fuze`
 delegation to FuzeInfra. This is the read half only.
 
 ---

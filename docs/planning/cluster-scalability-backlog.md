@@ -6,7 +6,7 @@
 > project-create). Once connected this imports 1 Epic + 9 children as-is. Track here until then.
 >
 > After the `FI` project exists, its **FuzePlan workflow scheme / scripts** (statuses, screens,
-> automation) are applied by the **FuzePlan** repo via cross-repo `@claude`, not from here.
+> automation) are applied by the **FuzePlan** repo via cross-repo `@fuze`, not from here.
 
 ## Epic — FuzeInfra scalable, self-healing cluster
 Priority **High** · labels `autoscaling, ha, storage, networking, observability, k8s-version`

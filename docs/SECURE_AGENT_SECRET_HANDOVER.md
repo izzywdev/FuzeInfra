@@ -54,7 +54,7 @@ one channel that does **not** work from a FuzeInfra-scoped App token.
 
 1. Consumer mints the secret into its **own** namespace Secret
    (`<ns>/<app>-secrets`, well-known key, e.g. via its SealedSecret/bootstrap).
-2. Consumer opens an `@claude` request on the provider repo with a STATE block and
+2. Consumer opens an `@fuze` request on the provider repo with a STATE block and
    the intended `secretRef` + `secretKey` (**never the value**).
 3. Provider creates the resource and **aligns the backing credential to the
    consumer's value**, read in-cluster
@@ -112,7 +112,7 @@ gh secret set DB_PASSWORD -R izzywdev/<consumer> -b "$PW"   # 404s without cross
 
 ## The handshake (all channels)
 
-1. **Request** — consumer opens an `@claude` issue on the provider repo (STATE
+1. **Request** — consumer opens an `@fuze` issue on the provider repo (STATE
    block, `secretRef`/`secretKey`, **no secret value**).
 2. **Provision + place** — provider does its half in-cluster (A/B/C/D above).
 3. **Pointer + fingerprint** — provider publishes the non-secret **handoff
@@ -144,7 +144,7 @@ gh secret set DB_PASSWORD -R izzywdev/<consumer> -b "$PW"   # 404s without cross
 
 Channels **A/B/C** work from a FuzeInfra-scoped runner today. Channel **D** and
 the *"open a GitHub issue on the consumer repo"* leg of the handshake require the
-FuzeInfra `@claude` runner to hold a **cross-repo credential** — the GitHub App
+FuzeInfra `@fuze` runner to hold a **cross-repo credential** — the GitHub App
 installed on (or a PAT scoped to) `izzywdev/<consumer>` with `issues:write` +
 `secrets:write`. Without it, `gh` returns `404` for the consumer repo and the
 provider must fall back to the **in-cluster handoff ConfigMap (step 3)** as the

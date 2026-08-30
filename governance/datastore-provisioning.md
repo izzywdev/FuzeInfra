@@ -5,7 +5,7 @@ How a consumer repo gets a least-privilege silo on FuzeInfra's shared datastores
 
 > FuzeInfra is the datastore master. Consumers never hold superuser creds and
 > never operate the cluster. All provisioning is delegated to FuzeInfra's
-> `@claude` handler, whose runner holds the prod `KUBE_CONFIG` and a cross-repo
+> `@fuze` handler, whose runner holds the prod `KUBE_CONFIG` and a cross-repo
 > `GH_TOKEN` PAT (see `.github/workflows/claude.yml`).
 
 > **Credential delivery (agent → agent, no human):** the "push GH secret" step
@@ -17,12 +17,12 @@ How a consumer repo gets a least-privilege silo on FuzeInfra's shared datastores
 
 ## The flow (push, not pull)
 
-1. **Consumer opens an `@claude` issue on FuzeInfra** naming only the app
+1. **Consumer opens an `@fuze` issue on FuzeInfra** naming only the app
    (e.g. "provision Postgres + Redis for `fuzekeys`"). The issue **must not**
    contain proposed usernames, passwords, or connection strings — issues are
    plaintext and public. Requesting "create user xyz with password pass123"
    is forbidden.
-2. **FuzeInfra's `@claude` provisions on the runner.** Credentials are
+2. **FuzeInfra's `@fuze` provisions on the runner.** Credentials are
    generated runner-side (`openssl rand -hex 24` — hex-only, no shell
    metachars) and exist only in runner memory. Superuser access is read
    directly from the cluster secret via `kubectl` — never echoed.
@@ -34,9 +34,9 @@ How a consumer repo gets a least-privilege silo on FuzeInfra's shared datastores
 4. **Registry updated.** Every allocation is recorded in
    `governance/datastore-allocations.md` (names/prefixes/indexes only, never
    secrets) so future allocations don't collide.
-5. **Done + hand-off.** FuzeInfra's `@claude` comments `DONE:` on the issue
+5. **Done + hand-off.** FuzeInfra's `@fuze` comments `DONE:` on the issue
    listing the secret **names** (never values), then opens a hand-off issue on
-   the consumer repo mentioning its `@claude` ("creds delivered as `<APP>_DB_*`,
+   the consumer repo mentioning its `@fuze` ("creds delivered as `<APP>_DB_*`,
    run seal-secrets, verify migrations").
 
 ## Naming convention (deterministic, per app `<app>`)

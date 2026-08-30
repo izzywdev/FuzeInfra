@@ -17,7 +17,7 @@ stalls asking a human to "run this on the cluster" or "do this on GitHub":
 A **coordinator** agent routes each request to the role whose environment already holds
 the needed access, so work is dispatched rather than bounced back to a human.
 
-> Vendor-semi-agnostic: the `.md` personas keep driving Claude Code and the `@claude`
+> Vendor-semi-agnostic: the `.md` personas keep driving Claude Code and the `@fuze`
 > GitHub Action. This layer *projects* them into `/v1/agents`; nothing is forked.
 
 > **Provider-abstracted.** The definitions + orchestration are provider-neutral; a

@@ -9,7 +9,7 @@ FuzeInfra) reconciles.
 > Boundary: the consumer owns its `deploy/**` (Helm/kustomize + Argo Applications
 > + sealed secrets). FuzeInfra owns the cluster, Argo, the tunnel, and the shared
 > datastores. Consumers never edit FuzeInfra or operate the cluster; they delegate
-> via `@claude` (baseline §1).
+> via `@fuze` (baseline §1).
 
 ## 1. Ingress — reuse Traefik + the Cloudflare Tunnel (do NOT add nginx/cert-manager)
 
@@ -85,7 +85,7 @@ re-run the workflow.
 
 A consumer's backend authenticates to FuzeInfra's shared Postgres/Mongo/Redis/Neo4j
 with a **dedicated least-privilege role**. FuzeInfra owns those datastores, so the
-consumer **requests provisioning via an `@claude` issue on FuzeInfra** (role +
+consumer **requests provisioning via an `@fuze` issue on FuzeInfra** (role +
 database per datastore; creds delivered as GH Actions secrets on the consumer repo,
 never in the issue). The consumer composes its connection URLs from those creds +
 the published host/port contract (`fuzeinfra-<svc>.fuzeinfra`).
@@ -154,7 +154,7 @@ the cost of ~1-2 GiB extra heap.
 Provisioning is a **single GitOps workflow** — no manual sealing, no local
 kubectl access needed:
 
-1. Open an `@claude` issue on FuzeInfra requesting a Neo4j instance named `<service>`.
+1. Open an `@fuze` issue on FuzeInfra requesting a Neo4j instance named `<service>`.
    FuzeInfra creates and runs a `provision-<service>-neo4j` workflow that:
    - Generates a random hex password runner-side (masked, never logged).
    - Seals it as `neo4j-<service>-credentials` (key: `password`) for the
@@ -212,7 +212,7 @@ job logs are **public**. Full usage + caveats:
 
 Once live, `docs/argo-selfheal-autofix.md` keeps it healthy: any `OutOfSync`,
 `Degraded`, or `Unknown`/ComparisonError on the consumer's Argo apps fires an
-`@claude` issue back to the owning repo automatically.
+`@fuze` issue back to the owning repo automatically.
 
 ## Gotchas proven in practice
 

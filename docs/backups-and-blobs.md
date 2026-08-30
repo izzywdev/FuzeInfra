@@ -107,7 +107,7 @@ Onboarding an app for blob storage:
 
 1. Provision a bucket/prefix + a scoped S3 key pair (Terraform `object-storage.tf`).
 2. Seal the key pair for the app's namespace as a SealedSecret (the app repo
-   does this via the `@claude` delegation flow — FuzeInfra is not edited directly).
+   does this via the `@fuze` delegation flow — FuzeInfra is not edited directly).
 3. The app reads endpoint/bucket/creds from env and uses its S3 SDK:
 
 ```

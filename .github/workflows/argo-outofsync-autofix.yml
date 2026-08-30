@@ -10,7 +10,7 @@
 #        - app sourced from THIS repo (FuzeInfra) -> a devops-engineer Claude run
 #          that diagnoses and opens a fix PR (auto-merge -> Argo re-syncs).
 #        - app sourced from a CONSUMER repo (e.g. MendysRobotics) -> an idempotent
-#          @claude issue in the OWNING repo (FuzeInfra never edits a consumer's
+#          @fuze issue in the OWNING repo (FuzeInfra never edits a consumer's
 #          chart — that's the cross-repo delegation boundary).
 #
 # Dedup: concurrency per app + a preflight that exits if an argo-autofix PR/issue
@@ -100,7 +100,7 @@ jobs:
             --data-urlencode "text=${TEXT}" \
             --data "disable_web_page_preview=true" >/dev/null && echo "telegram sent" || echo "::warning::telegram send failed"
 
-  # ---- CONSUMER app: delegate to the owning repo via an @claude issue --------
+  # ---- CONSUMER app: delegate to the owning repo via an @fuze issue --------
   delegate-consumer:
     needs: preflight
     if: needs.preflight.outputs.skip != 'true' && needs.preflight.outputs.is_self != 'true'
@@ -111,7 +111,7 @@ jobs:
       SYNC: ${{ github.event.client_payload.sync }}
       HEALTH: ${{ github.event.client_payload.health }}
     steps:
-      - name: Open an idempotent @claude issue in the owning repo
+      - name: Open an idempotent @fuze issue in the owning repo
         env:
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
         run: |

@@ -7,7 +7,7 @@ dispatchable read-only introspection workflow —
 that any repo with a FuzeInfra dispatch credential can trigger.
 
 This is the one thing a consumer may do **directly against the cluster**. Everything
-that *changes* the cluster stays GitOps or `@claude`-delegated (see
+that *changes* the cluster stays GitOps or `@fuze`-delegated (see
 [`CONSUMER_ONBOARDING_SHARED_CLUSTER.md`](../CONSUMER_ONBOARDING_SHARED_CLUSTER.md)) —
 `cluster-query` is read, and only read.
 
@@ -80,7 +80,7 @@ Either mint one (a human step — GitHub has no API for creating PATs):
 4. Short expiry + a rotation reminder
 5. `gh secret set FUZEINFRA_DISPATCH_TOKEN --repo izzywdev/<your-repo>`
 
-…or skip the credential entirely and **delegate**: open an `@claude` issue on
+…or skip the credential entirely and **delegate**: open an `@fuze` issue on
 FuzeInfra asking for the read. That path always works; it is only slower.
 
 </details>
@@ -132,7 +132,7 @@ gh api --method POST repos/izzywdev/FuzeInfra/dispatches \
 ```
 
 Only `*.mendysrobotics.com` and `*.prod.fuzefront.com` are allowlisted; anything else
-fails the step. Adding a hostname is a FuzeInfra change — delegate via `@claude`.
+fails the step. Adding a hostname is a FuzeInfra change — delegate via `@fuze`.
 
 ---
 
@@ -212,7 +212,7 @@ because the pods are `Running` and the endpoint answers.** Quote the run URL as 
 evidence.
 
 When the answer is "it's broken and needs a change," stop querying and go back to the
-normal paths: your own `deploy/**` (GitOps) for your app, or an `@claude` issue on
+normal paths: your own `deploy/**` (GitOps) for your app, or an `@fuze` issue on
 FuzeInfra for anything the platform owns.
 
 ---
@@ -224,4 +224,4 @@ FuzeInfra for anything the platform owns.
 - [`SECRETS_MANAGEMENT.md`](../SECRETS_MANAGEMENT.md) — why Secret reads are blocked here and what to do instead.
 - [`INFRA_REQUEST_DISPATCH.md`](../INFRA_REQUEST_DISPATCH.md) — the *write* side: declaring infra needs and dispatching them to FuzeInfra.
 - [`../../CONTRACT.md`](../../CONTRACT.md) — FuzeInfra's stable service interface.
-- [`../argo-selfheal-autofix.md`](../argo-selfheal-autofix.md) — the automatic loop that opens an `@claude` issue when your app goes unhealthy.
+- [`../argo-selfheal-autofix.md`](../argo-selfheal-autofix.md) — the automatic loop that opens an `@fuze` issue when your app goes unhealthy.

@@ -3,7 +3,7 @@
 This repo **extends the FuzeSDLC baseline** (L0):
 <https://github.com/izzywdev/FuzeSDLC/blob/main/CLAUDE.baseline.md>.
 
-**Precedence:** this `CLAUDE.md` overrides the baseline; the baseline overrides defaults. All generic org policy — governance model, the agent roster + single-responsibility/done-contract, contract-first fan-out, design-system-first frontend, verification protocol, signed-commit/trailer conventions, async-orchestration, cross-repo `@claude` delegation, and RTK — lives in the baseline and is **not** restated here. Read the baseline first; this file carries only what is specific to FuzeInfra.
+**Precedence:** this `CLAUDE.md` overrides the baseline; the baseline overrides defaults. All generic org policy — governance model, the agent roster + single-responsibility/done-contract, contract-first fan-out, design-system-first frontend, verification protocol, signed-commit/trailer conventions, async-orchestration, cross-repo `@fuze` delegation, and RTK — lives in the baseline and is **not** restated here. Read the baseline first; this file carries only what is specific to FuzeInfra.
 
 ```yaml
 tier: infra
@@ -16,7 +16,7 @@ Consult **`fuzeinfra-expert`** first for architecture/deploy/gotcha context (it 
 
 ## What FuzeInfra is (boundary)
 
-The **shared, containerized infrastructure platform** — generic infra **only**, no application code. Apps attach via the external Docker network **`FuzeInfra`** (compose) or by addressing services in the **`fuzeinfra`** k8s namespace. Keeping app-specific things out of this repo is the whole point. App repos never edit FuzeInfra directly — they delegate via `@claude` (baseline §8).
+The **shared, containerized infrastructure platform** — generic infra **only**, no application code. Apps attach via the external Docker network **`FuzeInfra`** (compose) or by addressing services in the **`fuzeinfra`** k8s namespace. Keeping app-specific things out of this repo is the whole point. App repos never edit FuzeInfra directly — they delegate via `@fuze` (baseline §8).
 
 ## Dual delivery model
 

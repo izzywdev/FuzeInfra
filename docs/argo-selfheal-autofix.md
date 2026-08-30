@@ -16,7 +16,7 @@ repository_dispatch  event_type=argo-out-of-sync  ──►  izzywdev/FuzeInfra
 .github/workflows/argo-outofsync-autofix.yml
   ├─ Telegram 🔴 alert (link to the Argo app)
   ├─ app sourced from FuzeInfra  ─► devops-engineer Claude run → fix PR (auto-merge → Argo re-syncs)
-  └─ app sourced from a CONSUMER ─► idempotent @claude issue in the OWNING repo
+  └─ app sourced from a CONSUMER ─► idempotent @fuze issue in the OWNING repo
 ```
 
 Config lives in `argocd/notifications/argocd-notifications-cm.yaml` (triggers +
@@ -53,7 +53,7 @@ that's the cross-repo delegation boundary. So the reaction routes by the app's
 - **App sourced from `izzywdev/FuzeInfra`** → in-repo `devops-engineer` Claude
   run edits `helm/fuzeinfra/**` and opens a fix PR.
 - **App sourced from a consumer repo** (e.g. `izzywdev/MendysRobotics`) → an
-  **idempotent `@claude` issue** is opened in that repo (label `argo-autofix`,
+  **idempotent `@fuze` issue** is opened in that repo (label `argo-autofix`,
   one per app) carrying the app name, sync/health, and the real `status.conditions`
   error, so the consumer's own agents fix it from their own manifests.
 
@@ -69,7 +69,7 @@ reaches any agent holding cluster creds.
   `/dispatches`).
 - **GitHub Actions secrets:** `ANTHROPIC_API_KEY`, `KUBE_CONFIG`, `TELEGRAM_*`
   (optional alert), and `GH_TOKEN` — a PAT with access to consumer repos so the
-  cross-repo `@claude` issue can be opened. Without `GH_TOKEN`, consumer-app
+  cross-repo `@fuze` issue can be opened. Without `GH_TOKEN`, consumer-app
   failures still alert but the issue is skipped (logged as a warning).
 
 ## Related self-heal arms
