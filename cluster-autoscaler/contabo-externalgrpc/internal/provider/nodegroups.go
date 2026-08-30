@@ -22,18 +22,20 @@ func (s *Server) NodeGroups(ctx context.Context, _ *protos.NodeGroupsRequest) (*
 }
 
 // NodeGroupForNode returns the node group for the given node.
-// If the node is tagged with ElasticTag, it belongs to the "elastic" group.
-// Otherwise it is a baseline/control-plane node and returns an empty node group (id = "").
+// If the node name matches the provider's elastic name prefix, it belongs to
+// the "elastic" group.  Name is authoritative here: Contabo tag assignment
+// is eventually consistent, and a just-created worker must not be reported as
+// unregistered merely because its tag has not propagated yet.
 func (s *Server) NodeGroupForNode(ctx context.Context, req *protos.NodeGroupForNodeRequest) (*protos.NodeGroupForNodeResponse, error) {
 	if req.Node == nil {
 		// No node provided; return empty group
 		return &protos.NodeGroupForNodeResponse{NodeGroup: &protos.NodeGroup{}}, nil
 	}
 
-	// Fetch elastic instances and check if the node matches any of them by name.
-	instances, err := s.cloud.ListByTag(ctx, s.cfg.ElasticTag)
+	// Fetch all instances in the managed name namespace and check by name.
+	instances, err := s.cloud.ListByNamePrefix(ctx, s.cfg.NamePrefix)
 	if err != nil {
-		return nil, fmt.Errorf("NodeGroupForNode: listing elastic instances: %w", err)
+		return nil, fmt.Errorf("NodeGroupForNode: listing elastic instances by name prefix: %w", err)
 	}
 
 	// Check if the node's name matches any elastic instance name.

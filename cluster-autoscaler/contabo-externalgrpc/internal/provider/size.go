@@ -9,11 +9,13 @@ import (
 )
 
 // NodeGroupTargetSize returns the current target size of the node group,
-// which is the number of elastic Contabo instances.
+// which is the number of Contabo instances in the managed name namespace.
+// Name-prefix membership is authoritative because tag assignment is
+// eventually consistent.
 func (s *Server) NodeGroupTargetSize(ctx context.Context, req *protos.NodeGroupTargetSizeRequest) (*protos.NodeGroupTargetSizeResponse, error) {
-	instances, err := s.cloud.ListByTag(ctx, s.cfg.ElasticTag)
+	instances, err := s.cloud.ListByNamePrefix(ctx, s.cfg.NamePrefix)
 	if err != nil {
-		return nil, fmt.Errorf("NodeGroupTargetSize: listing elastic instances: %w", err)
+		return nil, fmt.Errorf("NodeGroupTargetSize: listing elastic instances by name prefix: %w", err)
 	}
 
 	s.mu.Lock()
@@ -28,9 +30,9 @@ func (s *Server) NodeGroupTargetSize(ctx context.Context, req *protos.NodeGroupT
 // NodeGroupNodes returns the list of nodes in the node group,
 // mapped from elastic Contabo instances to the proto Instance format.
 func (s *Server) NodeGroupNodes(ctx context.Context, req *protos.NodeGroupNodesRequest) (*protos.NodeGroupNodesResponse, error) {
-	instances, err := s.cloud.ListByTag(ctx, s.cfg.ElasticTag)
+	instances, err := s.cloud.ListByNamePrefix(ctx, s.cfg.NamePrefix)
 	if err != nil {
-		return nil, fmt.Errorf("NodeGroupNodes: listing elastic instances: %w", err)
+		return nil, fmt.Errorf("NodeGroupNodes: listing elastic instances by name prefix: %w", err)
 	}
 
 	protoInstances := make([]*protos.Instance, 0, len(instances))
