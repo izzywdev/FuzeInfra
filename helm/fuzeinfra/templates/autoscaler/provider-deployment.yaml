@@ -14,6 +14,12 @@ spec:
       {{- include "fuzeinfra.selectorLabels" (dict "component" "contabo-ca-provider" "root" $) | nindent 6 }}
   template:
     metadata:
+      annotations:
+        # :latest is intentionally used for the provider image, but Argo must
+        # still roll the Deployment whenever a new provider build is promoted.
+        # The GitOps-pinned rollout token prevents a stale pod from retaining
+        # an older provisioning implementation.
+        checksum/provider-image: {{ .Values.clusterAutoscaler.provider.imageRollout | quote }}
       labels:
         {{- include "fuzeinfra.labels" . | nindent 8 }}
         {{- include "fuzeinfra.selectorLabels" (dict "component" "contabo-ca-provider" "root" $) | nindent 8 }}
