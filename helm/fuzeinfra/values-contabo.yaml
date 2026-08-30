@@ -499,7 +499,9 @@ clusterAutoscaler:
   provider:
     # TODO: replace with the published image once fuzeinfra-contabo-ca-provider
     # has a tagged release (see cluster-autoscaler/contabo-externalgrpc).
-    image: ghcr.io/izzywdev/fuzeinfra-contabo-ca-provider:239bac7778ab7a246febb3fd587a30442a0f9717
+    image: ghcr.io/izzywdev/fuzeinfra-contabo-ca-provider:latest
+    # Bump with the provider image build SHA so Argo rolls the :latest pod.
+    imageRollout: "9a38caa82c19fe1c10ba7885248f398c25b5fe6c"
     existingSecret: fuzeinfra-ca-provider
     # Current Contabo create-instance catalog: Cloud VPS 4 (4 vCPU / 8 GiB).
     # V92 is a retired SKU and fails ordering with "No offer was found".
