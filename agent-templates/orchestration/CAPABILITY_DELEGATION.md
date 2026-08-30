@@ -220,12 +220,18 @@ asks for the credential itself, and it never needs a Managed-Agents `agent_id`.
 
 ## 6. Phased plan (the "all 3")
 
-- **Phase 1 — working transport + docs (this PR).** This document; the envelope +
-  authz convention above; deprecation banner on the relay/socket bridge README. Next
-  1b: a thin reference runbook/helper that encodes the `spawn → [A2A envelope] →
-  reply-to-session_id` calls so agents do it identically (and, where skills are sourced
-  from FuzeSDLC, a `capability-delegation` skill so agents reach for this at a
-  capability boundary).
+- **Phase 1 — working transport + docs.** ✅ This document; the envelope + authz
+  convention above; deprecation banner on the relay/socket bridge README.
+- **Phase 1b — reference runbook + helper.** ✅ **`CAPABILITY_DELEGATION_RUNBOOK.md`**
+  (the step-by-step every session follows at a capability wall — caller's 4 steps +
+  callee's authorize-first) and **`capability_delegation.py`** (the deterministic pieces
+  as importable functions + a CLI: `build_envelope`/`parse_envelope`, the
+  capability→environment registry, `select_path` local-vs-remote, and the fail-closed
+  `authorize`), guarded offline by `tests/test_capability_delegation.py`. `CLAUDE.md`
+  carries the caller-guidance rule (delegate at a capability wall) that §0 named as
+  missing. **Still owed here:** where skills are sourced from FuzeSDLC, a
+  `capability-delegation` skill so agents reach for this at a boundary automatically —
+  that lives in FuzeSDLC, not this repo.
 - **Phase 2 — reconcile onto handoff-mcp (#1).** Make `spawn_agent`/`ask_agent`/
   `resume_session` actually work: unblock managed-agents provisioning (the Anthropic
   credit / role-state `{}` issue is external and must be resolved first), fix the CF

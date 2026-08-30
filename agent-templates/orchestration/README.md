@@ -11,7 +11,11 @@ transcript, and an idle session costs nothing while it waits.
 > the result) is specified in **`CAPABILITY_DELEGATION.md`** — including the transport
 > that works today (the Routines API), the deprecation of the WSS relay/socket bridge,
 > and the **fail-closed authorization model** (default-deny, `providesTo`-based, no
-> arbitrary command delegation, credentials never returned).
+> arbitrary command delegation, credentials never returned). To *do* it at a capability
+> wall, follow **`CAPABILITY_DELEGATION_RUNBOOK.md`** (caller's 4 steps + callee's
+> authorize-first); the deterministic pieces (envelope, capability→environment registry,
+> path selection, the fail-closed check) are in **`capability_delegation.py`** (importable
+> + a CLI), guarded offline by `tests/test_capability_delegation.py`.
 
 ## 1. In-process fan-out — `multiagent` coordinator (same environment)
 
