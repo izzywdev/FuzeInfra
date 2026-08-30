@@ -76,8 +76,30 @@ Nothing below changes that model. What follows is **which transport carries it**
 | 2 | **WSS relay + gateway + desktop bridge** | `orchestration/a2a_relay/`, `orchestration/a2a_gateway/`, `environments/desktop/a2a-bridge/` | **Deprecated dead-end.** Outbound works, but *inbound* delivery requires writing frames to the peer's internal `CLAUDE_CODE_MESSAGING_SOCKET` (`peerProtocol` v1, compiled into `/opt/claude-code/bin/claude`). That frame format is undocumented and reverse-engineering it is deliberately guardrailed. Do not build on it. |
 | 3 | **Routines API** (`create_session` + `create_trigger`/`fire_trigger` + `list_sessions`) | `claude-code-remote` MCP server (platform-native) | **Works — proven end-to-end 2026-08-30.** No relay, no socket, no gateway token, no reverse-engineering. `fire_trigger` even wakes an idle/suspended peer. |
 
-**Decision:** carry the model on **transport #3 today**, converge onto **#1 (handoff-mcp)
-as the semantic API** once it is fixed (#3 can be its substrate), and **retire #2**.
+**Decision:** carry the model on **transport #3 today**. Transport #1 (handoff-mcp) is
+not just "unfixed" — it is on a **different billing model** that is the actual blocker
+(below), so treat it as optional, not the target. **Retire #2.**
+
+### 2a. The two billing models (this is why #3 wins, not just that it works)
+
+| Path | What actually runs | Billed as |
+|---|---|---|
+| **handoff-mcp `spawn_agent`** (Managed Agents API) | an API-managed agent session | **per-token Anthropic API credit** — the exact thing that is exhausted; this is *why* provisioning fails and the agents are dark |
+| **`create_session` / desktop-launched cloud session** (Claude Code) | a Claude Code session in the target environment | **subscription / plan usage** — works today |
+
+Evidence: a `create_session`-spawned peer reports a **`seven_day` rate-limit window** in
+its session record — a plan-usage concept, not API metering. So spawning a Claude Code
+session (from the desktop app, or via `create_session`) runs on the account's **usage
+plan**, independent of the API credit that blocks the managed-agents path. The working
+transport is therefore also the **unblocked and cheaper** one.
+
+**Addressing follows from this.** The Claude Code path has **no "agent" object** — you
+spawn into an **environment** (`environment_id`, e.g. the `cloud-devops` env), so
+delegation keys on **capability → environment** (§5), *never* on a Managed-Agents
+`agent_id`. The `role → agent_id` map (`handoff-state/agent-ids.json`) is an artifact of
+the API path only; the display name ("FuzeInfra devops-engineer") is not an API handle
+there either — the API references agents solely by opaque `agent_id`. **Seeding that map
+does not unblock delegation** — it only turns "unknown role" into "insufficient credit."
 
 ---
 
@@ -158,17 +180,21 @@ capabilities are added), keyed to `roles.environments` in `.fuze/manifest.json`:
 | exec decisions | `cloud-exec` (tenants `Exec-{ceo,cto,cfo,ciso}`) | governed by the frozen exec A2A card contract |
 | **GitHub secret provisioning** | **not wired to any managed-agent env today** | `cloud-devops` has `gh` but `GITHUB_TOKEN` is unset (the proxy injects *git* creds only, not org/secret admin). Provisioning repo/org secrets needs an explicit token with secret-write scope added to the owning env (Phase 3) before a delegate can actually do it. |
 
-A caller that needs a capability looks it up here, `spawn`s (or `list_sessions`-finds) a
-session in that environment, and delegates — it never asks for the credential itself.
+A caller that needs a capability looks it up here and **spawns a Claude Code session in
+that `environment_id`** (or `list_sessions`-finds a live one), then delegates — it never
+asks for the credential itself, and it never needs a Managed-Agents `agent_id`.
 
-> **Registration gap — the root cause of the orphaned agents.** Even a correctly
-> credentialed console agent is unreachable if it is not in the handoff routing table.
-> Today `helm/fuzeinfra/files/handoff-state/agent-ids.json` is `{}` — **empty** — so
-> `spawn_agent`/`ask_agent` resolve no role→agent id and return "unknown role"; a
-> hand-created console agent (e.g. `agent_015…`) appears **nowhere** in this repo. That
-> table is populated by the *Provision Managed Agents* workflow, which fails on Anthropic
-> credit, so nothing ever wires the agent in. Phase 2 must populate it (fix provisioning,
-> or seed the ids) for delegation to reach a real agent.
+> **Why the "orphaned managed agents" are a red herring for the working path.** The
+> hand-created console agents are dark because (a) nothing invokes them, (b) the API path
+> is credit-blocked, and (c) they are unregistered: `helm/fuzeinfra/files/handoff-state/
+> agent-ids.json` is `{}`, so `spawn_agent`/`ask_agent` resolve no role→agent id and
+> return "unknown role" — and a console agent like `agent_015…` appears **nowhere** in
+> this repo. **But seeding that map is not the unblock** (§2a): it only converts "unknown
+> role" into "insufficient credit", because that whole path is API-billed. The
+> subscription-billed Claude Code path in §3 needs **none** of this — it spawns into the
+> environment directly. Fixing/registering handoff-mcp (Phase 2) matters only if/when you
+> specifically want the API-billed managed-agents surface; it is not required for
+> capability delegation to work.
 
 ---
 
