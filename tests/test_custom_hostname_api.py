@@ -11,6 +11,7 @@ matches the frozen `openapi.yaml` that consumers generate their clients from.
 from __future__ import annotations
 
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -275,7 +276,13 @@ class TestLifecycle:
 
     def test_stub_reaches_active(self, client):
         client.post("/custom-hostnames", json={"domain": "app.corpabc.com"}, headers=auth())
+        # The stub advances tls_status on a wall-clock timer, so an immediate
+        # read can still be mid-lifecycle on a fast runner. Poll until it settles
+        # rather than racing a single read against the activation window.
+        deadline = time.monotonic() + 5.0
         body = client.get("/custom-hostnames/app.corpabc.com", headers=auth()).json()
+        while body["tls_status"] != "active" and time.monotonic() < deadline:
+            body = client.get("/custom-hostnames/app.corpabc.com", headers=auth()).json()
         assert body["tls_status"] == "active"
         assert body["dns_status"] == "active"
         assert body["active"] is True
