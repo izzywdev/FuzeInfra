@@ -1,0 +1,97 @@
+{{- if .Values.enabled }}
+{{- /*
+PostSync hook: ensure every virtual key has access to ALL models in model_list.
+
+WHY THIS EXISTS. LiteLLM virtual keys carry an independent `models` allow-list
+stored in the database. Adding a model to model_list (values.yaml) does NOT
+automatically grant existing keys access to it — the gateway 403s the request
+("key not allowed to access model") before the fallback chain ever runs. This
+caused a fleet-wide CI deadlock when `claude-opus-4-8` was added: the FUZE_KEY
+was provisioned before that model existed and could not reach it.
+
+Setting `models: []` (empty) on a key means "all models". This hook runs after
+every sync to enforce that, so a model-list addition never silently breaks a
+consumer.
+*/ -}}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: litellm-sync-key-models
+  labels:
+    {{- include "litellm.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": post-upgrade,post-install
+    "helm.sh/hook-weight": "10"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  ttlSecondsAfterFinished: 600
+  backoffLimit: 3
+  template:
+    metadata:
+      labels:
+        {{- include "litellm.selectorLabels" . | nindent 8 }}
+        job: sync-key-models
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: sync
+          image: alpine:3.20
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -eu
+              apk add --no-cache curl jq >/dev/null 2>&1
+              BASE="http://litellm:{{ .Values.port }}"
+
+              echo "Waiting for LiteLLM readiness..."
+              attempts=0
+              until curl -sf "$BASE/health/readiness" >/dev/null 2>&1; do
+                attempts=$((attempts + 1))
+                if [ "$attempts" -ge 60 ]; then
+                  echo "LiteLLM not ready after 5 minutes — aborting."
+                  exit 1
+                fi
+                sleep 5
+              done
+              echo "LiteLLM is ready."
+
+              RESP=$(curl -sf \
+                -H "Authorization: Bearer $LITELLM_MASTER_KEY" \
+                "$BASE/key/list" 2>/dev/null) || {
+                echo "WARN: /key/list failed (no database, or auth error). Skipping."
+                exit 0
+              }
+
+              TOKENS=$(echo "$RESP" | jq -r '.keys[]? | select(.models != null and (.models | length) > 0) | .token' 2>/dev/null)
+
+              if [ -z "$TOKENS" ]; then
+                echo "No keys with model restrictions found. Nothing to update."
+                exit 0
+              fi
+
+              echo "$TOKENS" | while IFS= read -r token; do
+                [ -z "$token" ] && continue
+                short="${token%%????????????????????????}"
+                echo "Updating key ${token:0:8}... → models=[] (all models)"
+                curl -sf -X POST "$BASE/key/update" \
+                  -H "Authorization: Bearer $LITELLM_MASTER_KEY" \
+                  -H "Content-Type: application/json" \
+                  -d "{\"key\": \"$token\", \"models\": []}" >/dev/null 2>&1 \
+                  && echo "  OK" \
+                  || echo "  WARN: update failed"
+              done
+              echo "Sync complete."
+          env:
+            - name: LITELLM_MASTER_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secretName }}
+                  key: LITELLM_MASTER_KEY
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests: { cpu: "10m", memory: "32Mi" }
+            limits:   { cpu: "250m", memory: "128Mi" }
+{{- end }}
