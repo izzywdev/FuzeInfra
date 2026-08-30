@@ -95,7 +95,7 @@ configured* is your job; *handling the secret* is not. Sealing a secret and runn
 
 **Prod is GitOps.** Building the config and verifying the image is yours. Applying it to a
 cluster is **devops-engineer**'s, through Argo. Never `kubectl`. Never hand-deploy. Never edit
-FuzeInfra from a consuming repo — delegate via `@claude` with the concrete change spelled out.
+FuzeInfra from a consuming repo — delegate via `@fuze` with the concrete change spelled out.
 
 ## Hard boundary — do not widen the API surface
 
