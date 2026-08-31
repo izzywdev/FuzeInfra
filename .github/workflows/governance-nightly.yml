@@ -4,6 +4,21 @@ name: Governance Nightly
 # stale/drifting branches, open-PR triage, open-issue completion, and drift vs FuzeSDLC.
 # Takes only safe/reversible actions; files one "Governance reconciliation — <date>" issue.
 # Routes through the shared LiteLLM gateway (LITELLM_FUZE_KEY) — no direct provider key.
+#
+# VACUITY FIX (see PR body / commit for full root-cause writeup): prior runs reported
+# green while never once producing the tracking issue. Root cause was that the
+# claude-code-action step ran with NO `additional_permissions` / `--permission-mode
+# bypassPermissions` — same class of bug documented in claude.yml/fuze.yml's history
+# ("every non-git command ... was denied behind an approval gate an automated run
+# can't clear"). Headless, nobody can approve those prompts, so every mutating action
+# (git push, gh pr/issue create, file edits) was silently denied while read-only
+# exploration (Read/Grep/Glob) succeeded — the SDK call itself still reported
+# is_error:false because Claude Code narrates around a denial rather than raising one,
+# so "green" meant only "the API call didn't error," never "the sweep did anything."
+# Fixed by (1) bypassPermissions + additional_permissions, matching fuze.yml's proven
+# pattern, and (2) a post-run assertion that the tracking issue was actually
+# created/updated THIS run — a green run now means a decision was recorded, not that
+# a step exited 0.
 
 on:
   schedule:
@@ -39,12 +54,93 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Fail fast if gateway key absent
+        id: key-guard
+        env:
+          KEY: ${{ secrets.LITELLM_FUZE_KEY }}
+        run: |
+          if [ -z "$KEY" ]; then
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+            echo "reason=LITELLM_FUZE_KEY secret is empty or unset — mint one with scripts/mint-litellm-fuze-key.sh and set it as LITELLM_FUZE_KEY" >> "$GITHUB_OUTPUT"
+            echo "::error::LITELLM_FUZE_KEY secret is empty or unset"
+            exit 0
+          fi
+          echo "ok=true" >> "$GITHUB_OUTPUT"
+
+      # Prove the whole credential path before spending a run on it — same shape as
+      # fuze.yml's preflight. A failure here is a hard stop with a clear reason
+      # instead of a claude-code-action step that silently does nothing useful.
+      - name: Preflight — LiteLLM gateway reachable & key valid
+        id: preflight
+        if: steps.key-guard.outputs.ok == 'true'
+        env:
+          GATEWAY_KEY: ${{ secrets.LITELLM_FUZE_KEY }}
+        run: |
+          set -uo pipefail
+          code=$(curl -sS -o /tmp/preflight.json -w '%{http_code}' --max-time 30 \
+            -X POST "${ANTHROPIC_BASE_URL}/v1/messages" \
+            -H "Authorization: Bearer ${GATEWAY_KEY}" \
+            -H "anthropic-version: 2023-06-01" \
+            -H "content-type: application/json" \
+            -d "{\"model\":\"${ANTHROPIC_MODEL}\",\"max_tokens\":1,\"messages\":[{\"role\":\"user\",\"content\":\"ping\"}]}" \
+            2>/tmp/preflight.err) || true
+          [ -z "${code:-}" ] && code="000"
+          err=$(jq -r '.error.message // .message // empty' /tmp/preflight.json 2>/dev/null || true)
+          transport=$(tr -d '\r' < /tmp/preflight.err 2>/dev/null | grep -v '^$' | tail -1 || true)
+          echo "curl detail: ${transport:-<none>} (http_code=$code)"
+          [ -z "$err" ] && err="HTTP $code"
+          case "$code" in
+            200)
+              echo "ok=true" >> "$GITHUB_OUTPUT"
+              echo "LiteLLM gateway preflight OK (model ${ANTHROPIC_MODEL})" ;;
+            *)
+              echo "ok=false" >> "$GITHUB_OUTPUT"
+              {
+                echo "reason<<GHA_EOF"
+                echo "LiteLLM gateway preflight failed (HTTP $code): $err — ${transport:-no transport detail}"
+                echo "GHA_EOF"
+              } >> "$GITHUB_OUTPUT" ;;
+          esac
+
+      # Recorded BEFORE the agent runs so the deliverable check below can prove the
+      # tracking issue was touched THIS run, not left over from a prior night.
+      - name: Record run-start timestamp
+        id: clock
+        run: echo "start_epoch=$(date -u +%s)" >> "$GITHUB_OUTPUT"
+
       - name: Run platform-governance reconciliation
+        id: reconcile
+        # continue-on-error: the Detect step below owns the job's final status so it
+        # can run (and post the deliverable check) even when this step errors.
+        continue-on-error: true
+        if: steps.key-guard.outputs.ok == 'true' && steps.preflight.outputs.ok == 'true'
         uses: anthropics/claude-code-action@24dcd50c0568f0fc9e9211213a4fd2d9eb15c4e0  # v1.0.200
+        env:
+          # LiteLLM authenticates `Authorization: Bearer`; the action does not read
+          # that from the anthropic_api_key input alone, so the key must ALSO travel
+          # as ANTHROPIC_AUTH_TOKEN (see fuze.yml for the same requirement spelled out).
+          ANTHROPIC_AUTH_TOKEN: ${{ secrets.LITELLM_FUZE_KEY }}
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
         with:
           anthropic_api_key: ${{ secrets.LITELLM_FUZE_KEY }}
           # github_token bypasses the OIDC→App token exchange that fails on staging runners.
           github_token: ${{ secrets.GH_TOKEN }}
+          # THE FIX: without these, every mutating tool call (git push, gh pr/issue
+          # create, file edits) sits behind an interactive approval gate that nothing
+          # can clear in headless CI and is silently denied — the sweep could read
+          # the repo but never act on it. Safe here because this job only ever acts
+          # on THIS repo with a scoped GH_TOKEN and takes only the safe/reversible
+          # actions enumerated in the prompt's guardrails.
+          additional_permissions: |
+            Bash
+            Write
+            Edit
+            MultiEdit
+            Task
+            TodoWrite
+          claude_args: >-
+            --permission-mode bypassPermissions
+            --max-turns 60
           prompt: |
             You are the **platform-governance** agent running the nightly **governance-reconciliation**
             sweep for the repository ${{ github.repository }}. Follow the governance-reconciliation skill.
@@ -72,3 +168,104 @@ jobs:
             resolved issues, open draft/follow-up PRs, comment/label, update-branch). Never force-push,
             never auto-merge, never delete branches with unique unmerged commits, never close an issue you
             cannot prove resolved.
+
+            MANDATORY LAST STEP: whatever you find or do, you MUST end this run by creating or updating the
+            "Governance reconciliation — <today's date>" issue (label: governance) — even if every check
+            came back clean, the issue must say so explicitly ("no drift, no stale branches, no actionable
+            PRs/issues found"). A run that finds nothing still has to record that it looked. This run is
+            graded on whether that issue exists with a fresh timestamp, not on how many turns you took.
+
+      # DETECT: did the responder actually fail? Same three signals as fuze.yml —
+      # a key/preflight hard-stop, the action step's own failure, or is_error in the
+      # execution log.
+      - name: Detect reconciliation failure
+        id: detect
+        if: always()
+        env:
+          EXEC_FILE: ${{ steps.reconcile.outputs.execution_file }}
+          KEY_OK: ${{ steps.key-guard.outputs.ok }}
+          KEY_REASON: ${{ steps.key-guard.outputs.reason }}
+          PREFLIGHT_OK: ${{ steps.preflight.outputs.ok }}
+          PREFLIGHT_REASON: ${{ steps.preflight.outputs.reason }}
+          STEP_OUTCOME: ${{ steps.reconcile.outcome }}
+        run: |
+          set -uo pipefail
+          failed=false; reason=""
+          if [ "${KEY_OK:-}" != "true" ]; then
+            failed=true; reason="${KEY_REASON:-LITELLM_FUZE_KEY secret is empty or unset}"
+          elif [ "${PREFLIGHT_OK:-}" != "true" ]; then
+            failed=true; reason="${PREFLIGHT_REASON:-preflight did not pass}"
+          elif [ "${STEP_OUTCOME:-}" = "failure" ]; then
+            failed=true; reason="claude-code-action step failed"
+          elif [ -n "${EXEC_FILE:-}" ] && [ -f "$EXEC_FILE" ] && \
+               grep -Eq '"is_error"[[:space:]]*:[[:space:]]*true' "$EXEC_FILE"; then
+            turns=$(jq -rs '[.[]|.. |objects|select(.type?=="result")]|last|.num_turns // ""' "$EXEC_FILE" 2>/dev/null || true)
+            failed=true; reason="reconciliation run returned is_error (num_turns=${turns:-?}) — it errored before completing the sweep"
+          fi
+          echo "failed=$failed" >> "$GITHUB_OUTPUT"
+          {
+            echo "reason<<GHA_EOF"
+            echo "${reason}"
+            echo "GHA_EOF"
+          } >> "$GITHUB_OUTPUT"
+          if [ "$failed" = "true" ]; then
+            echo "::error::governance-reconciliation failed: $reason"
+          else
+            echo "governance-reconciliation completed without an error signal"
+          fi
+
+      # MAKE VACUITY FAIL: a green step (or even an is_error:false result) is not
+      # proof the sweep did anything — this is exactly how prior runs reported
+      # success while never once filing the tracking issue (50 turns, $1.56 spent,
+      # zero issues created — see PR description). Assert the actual deliverable:
+      # the "Governance reconciliation — <date>" issue must have been created or
+      # commented on AFTER this run started. No such evidence => the job goes red,
+      # regardless of what the SDK call reported.
+      - name: Verify reconciliation deliverable
+        id: verify
+        if: always() && steps.detect.outputs.failed != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+          REPO: ${{ github.repository }}
+          START_EPOCH: ${{ steps.clock.outputs.start_epoch }}
+        run: |
+          set -uo pipefail
+          # Look at every issue (open or closed) labeled governance whose title
+          # starts with the sweep's fixed prefix — tolerant of whatever date format
+          # the agent used, since the prompt does not pin one.
+          candidates=$(gh api "repos/${REPO}/issues" --paginate -f state=all -f labels=governance \
+            --jq '.[] | select(.title | startswith("Governance reconciliation")) | [.number, .updated_at] | @tsv' \
+            2>/dev/null || true)
+          if [ -z "$candidates" ]; then
+            echo "found=false" >> "$GITHUB_OUTPUT"
+            echo "::error::No 'Governance reconciliation — <date>' issue (label: governance) exists at all — the sweep has never produced its deliverable."
+            exit 0
+          fi
+          fresh=""
+          while IFS=$'\t' read -r number updated_at; do
+            [ -z "${updated_at:-}" ] && continue
+            updated_epoch=$(date -u -d "$updated_at" +%s 2>/dev/null || echo 0)
+            if [ "$updated_epoch" -ge "$((START_EPOCH - 60))" ]; then
+              fresh="$number"
+              break
+            fi
+          done <<< "$candidates"
+          if [ -n "$fresh" ]; then
+            echo "found=true" >> "$GITHUB_OUTPUT"
+            echo "Governance reconciliation issue #$fresh was created/updated this run — deliverable confirmed."
+          else
+            echo "found=false" >> "$GITHUB_OUTPUT"
+            echo "::error::A 'Governance reconciliation' issue exists but none was created or updated since this run started (start_epoch=${START_EPOCH}) — the sweep ran but produced no fresh decision this time."
+          fi
+
+      - name: Fail job if reconciliation did not complete or produce a decision
+        if: always() && (steps.detect.outputs.failed == 'true' || steps.verify.outputs.found == 'false')
+        env:
+          DETECT_REASON: ${{ steps.detect.outputs.reason }}
+        run: |
+          if [ "${{ steps.detect.outputs.failed }}" = "true" ]; then
+            echo "::error::Marking job failed — reconciliation did not complete: ${DETECT_REASON}"
+          else
+            echo "::error::Marking job failed — reconciliation ran but produced no verifiable decision (no fresh Governance reconciliation issue). A green run must mean a decision was recorded, not that a step exited 0."
+          fi
+          exit 1
