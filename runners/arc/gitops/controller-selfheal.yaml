@@ -79,6 +79,36 @@
 #      on the jobs (canonical workflows in FuzeSDLC workflow-templates/,
 #      repo-owned ones like ci-cd.yml in the repo) so pods self-terminate.
 #
+#   5. AN EPHEMERALRUNNER STUCK "Failed" PINS A maxRunners SLOT (2026-08-31) --
+#      check 4 reaps a runner that starts a job and never finishes; this is the
+#      mirror image: a runner whose POD IS NEVER CREATED AT ALL. When the API
+#      server rejects the runner pod (an invalid podspec, a quota denial, a
+#      rejected securityContext), the EphemeralRunner goes phase=Failed with the
+#      rejection in .status.message and NO pod. ARC does not garbage-collect a
+#      Failed EphemeralRunner, and the EphemeralRunnerSet still counts it in
+#      CurrentReplicas -- so once maxRunners of them pile up the listener sees
+#      currentRunnerCount == desired, stops asking for runners, and re-patches
+#      the same set forever while every job on that repo queues. Nothing above
+#      catches it: the controller is healthy (check 1), the CI node is labelled
+#      and schedulable (check 2), the listener pod exists and is Running
+#      (checks 3/3b), and no runner is Running-too-long (check 4). Argo also
+#      reports Synced, because the object matches Git.
+#      Observed: EIGHT scale sets (fuzecontact, fuzehub, fuzemarket, fuzepicker,
+#      fuzesales, fuzeservice, fuzesocial, mendysrobotics) dead for up to 30h,
+#      each with 5/5 EphemeralRunners Failed on
+#        "spec.initContainers[1].name: Duplicate value: \"dind\""
+#      -- a stale dind initContainer left behind by the old imperative
+#      `containerMode: dind` helm release that Argo's ServerSideApply could not
+#      prune because the "helm" field manager still owned it (root-caused and
+#      fixed in runners/arc/register-repo.sh).
+#      Check 5 deletes any EphemeralRunner Failed longer than
+#      $FAILED_RUNNER_SECS, freeing the slot, and emits CRIT carrying
+#      .status.message -- so the NEXT occurrence names its own cause in the
+#      alert instead of costing a multi-hour investigation. Reaping is a
+#      symptom fix: if the podspec itself is rejected the replacement fails
+#      too, so a REPEATING runner-failed CRIT means "fix the podspec", not
+#      "reap harder".
+#
 # NOTE ON THE IMAGE: this ran with `rancher/kubectl` + `command: ["sh","-c"]`
 # from creation until 2026-07-27 and StartError'd on EVERY run — that image
 # ships no shell. Any replacement image MUST contain /bin/sh. Check 3 also
@@ -94,11 +124,14 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata: {name: arc-selfheal}
 rules:
-  # check 4 deletes an EphemeralRunner that has been Running past the reap
-  # threshold (a job hung with no timeout-minutes holding a maxRunners slot),
-  # so this needs delete in addition to get/list. Deleting the EphemeralRunner
-  # CR cascades to its runner Pod via ownerReferences, freeing the scale-set
-  # slot AND the CI-node capacity the zombie was pinning.
+  # checks 4 and 5 both delete an EphemeralRunner, so this needs delete in
+  # addition to get/list. Check 4 reaps one Running past the hang threshold (a
+  # job with no timeout-minutes holding a maxRunners slot) -- that delete
+  # cascades to its runner Pod via ownerReferences, freeing the slot AND the
+  # CI-node capacity the zombie was pinning. Check 5 reaps one stuck Failed,
+  # whose pod was never created at all; there is nothing to cascade to, but the
+  # CR itself still counts against the EphemeralRunnerSet's replica total, so
+  # deleting it is what frees that scale set to request a working runner.
   - {apiGroups: ["actions.github.com"], resources: ["ephemeralrunners"], verbs: ["get","list","delete"]}
   # autoscalingrunnersets: check 3b diffs the desired scale-set list against
   # the actual listener pods to catch a listener that is absent entirely
@@ -344,6 +377,40 @@ spec:
                       for nn in $hung; do
                         ns=${nn%%/*}; name=${nn##*/}
                         echo "CRIT ARC runner-hung: $nn has been Running over ${RUNNER_STUCK_SECS}s - a job hung with no timeout-minutes is holding a maxRunners slot (and CI-node capacity) up to GitHub's 6h cap, so this scale set's queue cannot drain. Deleting the EphemeralRunner (cascades to its Pod) to free the slot; the durable fix is a timeout-minutes on that job so the pod self-terminates."
+                        kubectl -n "$ns" delete ephemeralrunner "$name" --wait=false >/dev/null 2>&1
+                        crit=1
+                      done
+                    fi
+                  fi
+
+                  # ---- check 5: EphemeralRunner stuck Failed (pod never created) ----
+                  # Terminal state: ARC never GCs these and never retries them, so a
+                  # Failed runner holds its maxRunners slot until something deletes it.
+                  # 10 min is far longer than any legitimate transient (a pod is either
+                  # admitted or rejected within seconds) while still clearing a wedged
+                  # scale set inside one cron period.
+                  FAILED_RUNNER_SECS=600
+                  failed_json=$(kubectl get ephemeralrunner -A -o json 2>/dev/null)
+
+                  if [ -z "$failed_json" ]; then
+                    echo "warn runner-failed: could not list ephemeralrunners, skipping check 5"
+                  else
+                    stuck=$(printf '%s' "$failed_json" | jq -r --argjson thresh "$FAILED_RUNNER_SECS" '
+                      .items[]
+                      | select(.status.phase == "Failed")
+                      | select((now - (.metadata.creationTimestamp | fromdateiso8601)) > $thresh)
+                      | .metadata.namespace + "/" + .metadata.name' 2>/dev/null)
+
+                    if [ -z "$stuck" ]; then
+                      echo "ok runner-failed: no ephemeralrunner Failed past ${FAILED_RUNNER_SECS}s"
+                    else
+                      for nn in $stuck; do
+                        ns=${nn%%/*}; name=${nn##*/}
+                        # Carry the rejection reason into the alert -- this is the whole
+                        # point of check 5. Truncated so one bad podspec cannot flood the
+                        # log; jsonpath yields "" (not an error) when status.message is unset.
+                        msg=$(kubectl -n "$ns" get ephemeralrunner "$name"                           -o jsonpath='{.status.message}' 2>/dev/null | head -c 300)
+                        echo "CRIT ARC runner-failed: $nn has been Failed for over ${FAILED_RUNNER_SECS}s - its pod was never created, ARC never garbage-collects a Failed EphemeralRunner, and the EphemeralRunnerSet still counts it, so it pins a maxRunners slot and that scale set's queue can never drain. Reason: ${msg:-(status.message empty)}. Deleting it to free the slot. If this CRIT REPEATS for the same scale set the podspec itself is being rejected - fix the podspec (runners/arc/runner-scale-set-values.yaml), reaping cannot help."
                         kubectl -n "$ns" delete ephemeralrunner "$name" --wait=false >/dev/null 2>&1
                         crit=1
                       done

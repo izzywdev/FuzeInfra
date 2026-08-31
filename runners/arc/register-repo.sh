@@ -25,14 +25,9 @@
 #       --name      fuzefront \
 #       --secret    arc-runner-github-app   # existing secret in arc-runners
 #
-#   # override the CI runner image or container mode (both have CI-capable
-#   # defaults — the FuzeInfra runner image + dind — so onboarding stays a
-#   # single invocation):
-#   ./runners/arc/register-repo.sh \
-#       --repo-url  https://github.com/izzywdev/FuzeFront \
-#       --name      fuzefront --secret arc-runner-github-app \
-#       --runner-image ghcr.io/izzywdev/fuzeinfra-arc-runner:2026-07-13 \
-#       --container-mode dind
+#   # The runner pod spec (image, containerMode/dind, resources, node pinning)
+#   # is NOT settable here -- it comes from runner-scale-set-values.yaml, the
+#   # same file Argo renders. Change it THERE so both paths stay identical.
 #
 #   # uninstall a repo's scale set
 #   ./runners/arc/register-repo.sh --name fuzefront --uninstall
@@ -57,24 +52,11 @@ ARC_VERSION="0.14.2"
 # the node; raise per-repo with --max-runners once the CI pool is scaled out.
 MAX_RUNNERS=3
 MIN_RUNNERS=0
-# Runner image. Defaults to the FuzeInfra CI-capable image (runners/arc/Dockerfile:
-# stock actions-runner + docker compose-v2 & buildx plugins + jq/curl + warm
-# Python/Node toolcache + Playwright browser deps) so every scale set comes up
-# CI-capable from this one provisioning change. Override with --runner-image or
-# RUNNER_IMAGE (e.g. the stock ghcr.io/actions/actions-runner:latest — but that
-# lacks `docker compose`, so gate-* / build-test jobs will fail on it).
-#
-# PREREQUISITE: the default image must be published + PUBLIC (or an imagePullSecret
-# wired into arc-runners) or runner pods ImagePullBackOff. Publish it via the
-# build-runner-image workflow (runners/arc/workflows-to-install/build-runner-image.yml)
-# or runners/arc/build-and-push-runner-image.sh before onboarding new repos.
-RUNNER_IMAGE="${RUNNER_IMAGE:-ghcr.io/izzywdev/fuzeinfra-arc-runner:latest}"
-
-# Container mode for the runner pods. "dind" (default) injects a privileged
-# docker:dind sidecar + init-dind-externals initContainer and wires DOCKER_HOST,
-# giving docker / docker compose / docker buildx / docker run self-hosted. Kept
-# parameterizable (--container-mode) but dind is the CI-capable default.
-CONTAINER_MODE="dind"
+# NOTE: the runner image, containerMode/dind wiring, resources, node pinning and
+# tolerations all live in runner-scale-set-values.yaml (shared with Argo). They
+# are deliberately NOT overridable from this script -- see the incident note in
+# the "Per-repo values" section below for what happened the last time this
+# script rendered its own divergent pod spec.
 
 REPO_URL=""
 SCALE_SET_NAME=""
@@ -99,8 +81,17 @@ while [[ $# -gt 0 ]]; do
     --app-install-id)    APP_INSTALL_ID="$2"; shift 2 ;;
     --app-private-key)   APP_PRIVATE_KEY_FILE="$2"; shift 2 ;;
     --max-runners)       MAX_RUNNERS="$2"; shift 2 ;;
-    --runner-image)      RUNNER_IMAGE="$2"; shift 2 ;;
-    --container-mode)    CONTAINER_MODE="$2"; shift 2 ;;
+    --runner-image|--container-mode)
+      # Previously these rendered into an inline values block. They now have no
+      # effect, and silently ignoring them is how the pod spec diverged from
+      # Argo's in the first place -- so refuse instead of pretending.
+      echo "ERROR: $1 is no longer supported." >&2
+      echo "       The runner pod spec (image, containerMode/dind, resources) is owned by" >&2
+      echo "       runners/arc/runner-scale-set-values.yaml, which BOTH this script and the" >&2
+      echo "       Argo Applications render. Edit that file so every scale set changes" >&2
+      echo "       together; a per-invocation override here would re-create the split" >&2
+      echo "       field-manager drift that broke 8 scale sets on 2026-08-31." >&2
+      exit 1 ;;
     --uninstall)         UNINSTALL=true; shift ;;
     --help|-h)           usage ;;
     *) echo "Unknown option: $1"; usage ;;
@@ -157,77 +148,45 @@ else
     --dry-run=client -o yaml | kubectl apply -f -
 fi
 
-# ---- Build per-repo values (in-memory, no temp file) ------------------------
-VALUES=$(cat <<YAML
-githubConfigUrl: "${REPO_URL}"
-githubConfigSecret: ${K8S_SECRET_NAME}
-runnerScaleSetName: ${SCALE_SET_NAME}
-
-minRunners: ${MIN_RUNNERS}
-maxRunners: ${MAX_RUNNERS}
-
-template:
-  spec:
-    serviceAccountName: arc-runner-sa
-    containers:
-      - name: runner
-        image: ${RUNNER_IMAGE}
-        # Headroom for buildkit client work + Node-based actions (1Gi OOMs).
-        # NOTE: compose/build workloads run in the dind sidecar's cgroup, not
-        # here; the sidecar is unbounded, so node capacity is the real limit.
-        resources:
-          requests:
-            cpu: 500m
-            memory: 1Gi
-          limits:
-            cpu: "2"
-            memory: 2Gi
-        env:
-          - name: DISABLE_RUNNER_UPDATE
-            value: "1"
-    # Must stay in lockstep with runners/arc/runner-scale-set-values.yaml — see the long
-    # rationale there. In short: an equality nodeSelector pinned runners to the fixed,
-    # hand-labelled `ci` pair, which has no autoscaling path, while the autoscaler grew an
-    # `elastic` pool no runner was allowed to select. That left 40 runner pods Pending
-    # fleet-wide with every individual component reporting healthy.
-    affinity:
-      nodeAffinity:
-        requiredDuringSchedulingIgnoredDuringExecution:
-          nodeSelectorTerms:
-            - matchExpressions:
-                - key: fuzeinfra.io/pool
-                  operator: In
-                  values:
-                    - ci
-                    - elastic
-    tolerations:
-      - key: fuzeinfra.io/ci
-        operator: Exists
-        effect: NoSchedule
-      - key: fuzeinfra.io/elastic
-        operator: Exists
-        effect: PreferNoSchedule
-
-# ---- Docker-in-Docker -------------------------------------------------------
-# Gives every consumer scale set a real Docker daemon: the chart injects a
-# privileged dind sidecar (docker:dind) + an init-dind-externals initContainer
-# and wires DOCKER_HOST for the runner. This makes docker build / docker buildx
-# build --push / docker run work self-hosted (no separate kind-host runner).
-# COMPOSE CAVEAT: the stock actions-runner image ships the docker CLI + buildx
-# but NOT the compose-v2 plugin, so "docker compose -f ..." still fails with
-# "unknown shorthand flag: 'f' in -f" until RUNNER_IMAGE points at a compose-
-# enabled image (see runners/arc/Dockerfile). dind alone does not add compose.
-# NOTE: existing scale sets must be RE-REGISTERED (re-run arc-register.yml, or
-# FuzeInfra arc-reinstall-scaleset.yml for the staging set) to pick this up --
-# the dind sidecar only appears on pods created after this Helm values change.
-containerMode:
-  type: ${CONTAINER_MODE}
-
-controllerServiceAccount:
-  namespace: ${CONTROLLER_NS}
-  name: ${CONTROLLER_SA}
-YAML
-)
+# ---- Per-repo values --------------------------------------------------------
+# SINGLE SOURCE OF TRUTH: the pod spec comes from runner-scale-set-values.yaml,
+# the SAME file the Argo Applications in argocd/applications/arc-runners.yaml
+# render with. This script only supplies the per-repo parameters on top of it.
+#
+# WHY THIS IS NO LONGER AN INLINE VALUES BLOCK (2026-08-31 incident):
+# this script used to build its own values using the `containerMode: dind`
+# SHORTHAND. On chart 0.14.2 that shorthand renders dind as a native sidecar
+# *initContainer*:
+#     initContainers: [init-dind-externals, dind]   containers: [runner]
+# while the shared values file -- since #675, which bounded dind's resources --
+# declares dind explicitly as an ordinary container:
+#     initContainers: [init-dind-externals]         containers: [runner, dind]
+#
+# Either form is valid alone. The damage came from BOTH managers owning the one
+# live AutoscalingRunnerSet: helm (this script) wrote the initContainer form,
+# Argo later applied the container form server-side, and ServerSideApply CANNOT
+# prune a field owned by a DIFFERENT field manager ("helm"). The stale `dind`
+# initContainer therefore survived indefinitely, leaving the live object with
+# dind in BOTH lists. Kubernetes requires container names to be unique across
+# initContainers+containers, so the API server rejected EVERY runner pod with:
+#     Failed to create the pod: ... spec.initContainers[1].name: Duplicate value: "dind"
+# Each EphemeralRunner went Failed with no pod; ARC never garbage-collects
+# Failed runners, so they accumulated to maxRunners and the listener then looped
+# forever re-patching a set that could never produce a runner. Eight scale sets
+# (fuzecontact, fuzehub, fuzemarket, fuzepicker, fuzesales, fuzeservice,
+# fuzesocial, mendysrobotics) queued ALL their CI silently for up to 30h while
+# Argo reported them Synced the entire time -- Git and Argo's own applied config
+# were both correct; the drift lived in a field Argo did not own.
+#
+# Rendering from the shared file keeps the imperative path and the GitOps path
+# byte-identical, so the two managers can no longer disagree.
+VALUES_FILE="$(dirname "$0")/runner-scale-set-values.yaml"
+if [[ ! -f "$VALUES_FILE" ]]; then
+  echo "ERROR: shared values file not found: $VALUES_FILE" >&2
+  echo "       Callers using a sparse checkout must include" >&2
+  echo "       runners/arc/runner-scale-set-values.yaml alongside this script." >&2
+  exit 1
+fi
 
 # ---- Ensure runner SA exists in the namespace (idempotent) ------------------
 echo "==> Ensuring runner ServiceAccount in $RUNNER_NS …"
@@ -241,14 +200,19 @@ EOF
 
 # ---- Helm install/upgrade ---------------------------------------------------
 echo "==> Registering scale set '$SCALE_SET_NAME' for $REPO_URL …"
-echo "    runner image : $RUNNER_IMAGE"
-echo "    containerMode: $CONTAINER_MODE"
-echo "$VALUES" | helm upgrade --install "$SCALE_SET_NAME" \
+echo "    values file  : $VALUES_FILE (shared with Argo -- pod spec lives there)"
+echo "    maxRunners   : $MAX_RUNNERS"
+helm upgrade --install "$SCALE_SET_NAME" \
   "$ARC_RUNNER_CHART" \
   --version "$ARC_VERSION" \
   --namespace "$RUNNER_NS" \
   --create-namespace \
-  --values - \
+  --values "$VALUES_FILE" \
+  --set githubConfigUrl="$REPO_URL" \
+  --set githubConfigSecret="$K8S_SECRET_NAME" \
+  --set runnerScaleSetName="$SCALE_SET_NAME" \
+  --set maxRunners="$MAX_RUNNERS" \
+  --set minRunners="$MIN_RUNNERS" \
   --wait --timeout 3m
 
 echo ""
