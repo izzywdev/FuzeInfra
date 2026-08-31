@@ -1,0 +1,96 @@
+name: Argo – Terminate stale operation
+
+on:
+  workflow_dispatch:
+    inputs:
+      app:
+        description: 'Argo Application name (e.g. litellm, fuzeinfra-prod)'
+        required: true
+        default: 'litellm'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: argo-terminate-op
+  cancel-in-progress: false
+
+jobs:
+  terminate:
+    runs-on: staging
+    environment: production
+    steps:
+      - uses: azure/setup-kubectl@829323503d1be3d00ca8346e5391ca0b07a9ab0d # v5.1.0
+
+      - name: Install Argo CD CLI
+        run: |
+          set -euo pipefail
+          version=v3.4.2
+          curl -fsSLO "https://github.com/argoproj/argo-cd/releases/download/${version}/argocd-linux-amd64"
+          curl -fsSLO "https://github.com/argoproj/argo-cd/releases/download/${version}/cli_checksums.txt"
+          grep ' argocd-linux-amd64$' cli_checksums.txt | sha256sum -c -
+          sudo install -m0755 argocd-linux-amd64 /usr/local/bin/argocd
+
+      - name: Configure kubectl
+        env:
+          KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
+        run: |
+          if [ -z "$KUBE_CONFIG" ]; then echo "::error::KUBE_CONFIG unset"; exit 1; fi
+          mkdir -p "$HOME/.kube"
+          printf '%s' "$KUBE_CONFIG" | base64 -d > "$HOME/.kube/config"
+          chmod 600 "$HOME/.kube/config"
+
+      - name: Terminate stale operation
+        env:
+          APP: ${{ inputs.app }}
+        run: |
+          set -euo pipefail
+          export KUBECONFIG="$HOME/.kube/config"
+
+          echo "=== Current state of $APP ==="
+          kubectl -n argocd get application "$APP" -o jsonpath='
+          phase:        {.status.operationState.phase}
+          syncRevision: {.status.operationState.syncResult.revision}
+          syncStatus:   {.status.sync.status}
+          headRevision:  {.status.sync.revision}
+          operation:    {.operation}
+          '
+          echo ""
+          echo ""
+
+          phase=$(kubectl -n argocd get application "$APP" \
+                    -o jsonpath='{.status.operationState.phase}' 2>/dev/null || echo "")
+
+          if [ "$phase" != "Running" ]; then
+            echo "Operation is not Running (phase=$phase) — nothing to terminate."
+            exit 0
+          fi
+
+          echo "=== Attempting argocd app terminate-op (core mode) ==="
+          argocd login --core
+          argocd app terminate-op "$APP" --core 2>&1 || echo "terminate-op returned non-zero"
+
+          sleep 5
+          echo "=== State after terminate-op ==="
+          phase2=$(kubectl -n argocd get application "$APP" \
+                     -o jsonpath='{.status.operationState.phase}' 2>/dev/null || echo "")
+          echo "phase: $phase2"
+
+          if [ "$phase2" = "Running" ]; then
+            echo "=== terminate-op did not change phase — patching status subresource directly ==="
+            kubectl -n argocd patch application "$APP" \
+              --subresource=status \
+              --type=merge \
+              -p '{"status":{"operationState":{"phase":"Failed","message":"Force-terminated by CI: stale operation at old revision was blocking new syncs"}}}'
+
+            sleep 3
+            echo "=== State after direct patch ==="
+            kubectl -n argocd get application "$APP" -o jsonpath='
+          phase:        {.status.operationState.phase}
+          syncRevision: {.status.operationState.syncResult.revision}
+          syncStatus:   {.status.sync.status}
+          '
+            echo ""
+          fi
+
+          echo "=== Done ==="
