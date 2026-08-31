@@ -24,10 +24,11 @@ name: A2A Maintain
 # lapse should not be able to do that.
 #
 # Requires repo secret LITELLM_CI_KEY — a SCOPED virtual key (budget + model allowlist,
-# minted by scripts/mint-litellm-ci-key.sh), NOT the gateway admin key. Falls back to
-# LITELLM_MASTER_KEY with a warning so the migration is zero-downtime. No key at all,
-# or an unreachable gateway -> SKIPS (never red): none of that is the PR author's
-# fault, and a permanent red nobody can
+# minted by scripts/mint-litellm-ci-key.sh), NOT the gateway admin key. The migration off
+# LITELLM_MASTER_KEY (the gateway ADMIN key — it can mint keys, read the proxy config and
+# see every consumer's spend, none of which CI needs) is DONE: there is deliberately no
+# fallback to it any more. No key at all, or an unreachable gateway -> SKIPS (never red):
+# none of that is the PR author's fault, and a permanent red nobody can
 # clear is indistinguishable from a broken check — it trains people to ignore it,
 # including on the day it goes red for REAL A2A drift. A genuine agent failure is still
 # RED, with the real error text surfaced (see "Surface the real result" below).
@@ -102,21 +103,19 @@ jobs:
       - name: Skip if gateway key absent
         id: guard
         env:
-          KEY: ${{ secrets.LITELLM_CI_KEY || secrets.LITELLM_MASTER_KEY }}
-          SCOPED: ${{ secrets.LITELLM_CI_KEY != '' }}
+          KEY: ${{ secrets.LITELLM_CI_KEY }}
         run: |
           if [ -z "$KEY" ]; then
-            echo "::notice::No gateway key set — A2A maintain skipped. Mint one with scripts/mint-litellm-ci-key.sh and set it as LITELLM_CI_KEY."
+            # Deliberately NOT `|| secrets.LITELLM_MASTER_KEY` any more. That fallback
+            # was the zero-downtime path FOR the migration; keeping it after the
+            # migration is exactly the failure mode it was designed to avoid — a repo
+            # without a scoped key silently escalates to the gateway ADMIN key instead
+            # of skipping visibly, so a key that never got minted or was scoped away
+            # never shows up as a gap. Skip loudly instead: this is a config gap to
+            # close (mint one), not a reason to hand this job an admin credential.
+            echo "::notice::LITELLM_CI_KEY not set — A2A maintain skipped. Mint one with scripts/mint-litellm-ci-key.sh and set it as the LITELLM_CI_KEY repo secret."
             echo "ok=false" >> "$GITHUB_OUTPUT"
           else
-            if [ "$SCOPED" != "true" ]; then
-              # Works, but the master key is the gateway ADMIN key: it can mint
-              # keys, read the proxy config and see every consumer's spend. CI
-              # needs none of that, and spend booked against it cannot be
-              # attributed. Deliberately a warning, not a failure — this path is
-              # what keeps the check alive during the migration.
-              echo "::warning::Falling back to LITELLM_MASTER_KEY (the gateway ADMIN key). Mint a scoped key with scripts/mint-litellm-ci-key.sh, set it as LITELLM_CI_KEY, then delete the LITELLM_MASTER_KEY repo secret."
-            fi
             echo "ok=true" >> "$GITHUB_OUTPUT"
           fi
 
@@ -152,7 +151,7 @@ jobs:
         id: preflight
         if: steps.guard.outputs.ok == 'true' && steps.marker.outputs.run == 'true'
         env:
-          GATEWAY_KEY: ${{ secrets.LITELLM_CI_KEY || secrets.LITELLM_MASTER_KEY }}
+          GATEWAY_KEY: ${{ secrets.LITELLM_CI_KEY }}
         run: |
           set -uo pipefail
           # NO `|| echo 000` here: curl's own -w already emits 000 when it never got
@@ -230,9 +229,9 @@ jobs:
           # purely to satisfy the action's "some credential is configured" launch check,
           # and the copy it puts in x-api-key is ignored. Dropping either one breaks the
           # run, in two different and equally confusing ways.
-          ANTHROPIC_AUTH_TOKEN: ${{ secrets.LITELLM_CI_KEY || secrets.LITELLM_MASTER_KEY }}
+          ANTHROPIC_AUTH_TOKEN: ${{ secrets.LITELLM_CI_KEY }}
         with:
-          anthropic_api_key: ${{ secrets.LITELLM_CI_KEY || secrets.LITELLM_MASTER_KEY }}
+          anthropic_api_key: ${{ secrets.LITELLM_CI_KEY }}
           # github_token bypasses the OIDC→App token exchange that fails on staging runners.
           github_token: ${{ secrets.GH_TOKEN }}
           prompt: |
