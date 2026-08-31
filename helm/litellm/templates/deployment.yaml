@@ -116,6 +116,28 @@ spec:
                 secretKeyRef:
                   name: {{ .Values.secretName }}
                   key: LITELLM_MASTER_KEY
+            # Encryption key for provider credentials LiteLLM stores in Postgres
+            # (STORE_MODEL_IN_DB is on below). MUST be set explicitly and MUST be
+            # decoupled from the master key.
+            #
+            # When LITELLM_SALT_KEY is unset, LiteLLM falls back to
+            # LITELLM_MASTER_KEY for that encryption. That silently welds the
+            # ADMIN credential to the DATA-AT-REST key: rotating the master key
+            # then makes every stored provider credential undecryptable, and
+            # because FuzeInfra's deployed workflows are LiteLLM-only and
+            # fail-closed, that is agent CI down fleet-wide -- an outage that
+            # looks exactly like a security fix.
+            #
+            # It is seeded to the CURRENT master value, so introducing it is a
+            # no-op for decryption (same key, same ciphertext). What it buys is
+            # that the master key becomes rotatable on its own from here on.
+            # Do NOT rotate this one: it is the key the stored ciphertext was
+            # written with, and changing it is a data migration, not a rotation.
+            - name: LITELLM_SALT_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secretName }}
+                  key: LITELLM_SALT_KEY
             {{- range .Values.providerKeys }}
             - name: {{ .name }}
               valueFrom:
