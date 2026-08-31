@@ -3,6 +3,14 @@
   "class": "oss-public",
   "tier": "infra",
   "expert": "fuzeinfra-expert",
+  "expertMonitors": [
+    "docker-compose.FuzeInfra.yml",
+    "helm/fuzeinfra/",
+    "argocd/",
+    "agent-templates/roles/",
+    ".fuze/manifest.json",
+    ".github/workflows/"
+  ],
   "baselineRef": "main",
   "agents": [
     "contract-designer",
