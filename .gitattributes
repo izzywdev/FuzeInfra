@@ -6,3 +6,9 @@ terraform/contabo/*.js text eol=lf
 # as Bash on Ubuntu; keep them LF so a Windows checkout can't paste CRLF and leave a
 # stray \r in the shebang.
 agent-templates/environments/desktop/*.sh text eol=lf
+
+# ARC onboarding scripts are executed as Bash (in-cluster and from CI). Same hazard as
+# above and it is not theoretical here: on a Windows checkout `bash -n
+# runners/arc/register-repo.sh` already fails with `syntax error near unexpected token
+# $'{\r'`, so the script is unrunnable from this working tree today.
+runners/arc/*.sh text eol=lf

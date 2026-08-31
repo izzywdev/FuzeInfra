@@ -210,13 +210,50 @@ template:
       - name: dind-externals
         emptyDir: {}
 
-    # Pin runner pods to the dedicated CI node (tainted fuzeinfra.io/ci=true:NoSchedule).
-    nodeSelector:
-      fuzeinfra.io/pool: ci
+    # Runner pods run on the dedicated CI nodes (tainted fuzeinfra.io/ci=true:NoSchedule)
+    # OR on autoscaled elastic nodes.
+    #
+    # WHY THIS IS AFFINITY AND NOT `nodeSelector: {fuzeinfra.io/pool: ci}` ANY MORE.
+    # A nodeSelector can only express equality, so pinning to `ci` made the ci pool the
+    # ONLY place a runner could land — and the ci pool is a fixed, hand-labelled pair of
+    # nodes (k3s applies node labels only at agent registration; see rules/nodes.yml).
+    # It has no autoscaling path at all. Meanwhile the cluster-autoscaler grows the
+    # `elastic` group, whose nodes come up labelled fuzeinfra.io/pool=elastic — a pool no
+    # runner pod was permitted to select.
+    #
+    # The result, measured 2026-08-31: 40 runner pods Pending across 10 scale sets, the
+    # autoscaler logging `Skipping node group elastic - max size reached` while scaling a
+    # pool that could not have relieved the pressure even if it had grown. CI was stuck
+    # fleet-wide with no failing component — every part was healthy, the feedback loop
+    # between "runners are unschedulable" and "add capacity" simply did not exist.
+    #
+    # `In [ci, elastic]` closes that loop: unschedulable runner pods now make the
+    # autoscaler add nodes those same pods can actually be placed on. Keep `ci` first in
+    # intent — the ci nodes are dedicated and cheaper to fill — but do not encode that as
+    # a hard constraint; a soft preference would silently reintroduce the same stall the
+    # moment ci is full, which is exactly the state that produced this comment.
+    affinity:
+      nodeAffinity:
+        requiredDuringSchedulingIgnoredDuringExecution:
+          nodeSelectorTerms:
+            - matchExpressions:
+                - key: fuzeinfra.io/pool
+                  operator: In
+                  values:
+                    - ci
+                    - elastic
     tolerations:
       - key: fuzeinfra.io/ci
         operator: Exists
         effect: NoSchedule
+      # Elastic nodes carry fuzeinfra.io/elastic=true:PreferNoSchedule. That taint is
+      # soft, so a runner would land there without this — but only after the scheduler
+      # has preferred every other node, which reintroduces the delay the affinity change
+      # exists to remove. Tolerating it explicitly makes elastic a first-class runner
+      # target rather than a last resort.
+      - key: fuzeinfra.io/elastic
+        operator: Exists
+        effect: PreferNoSchedule
 
 # ---- ARC controller reference -----------------------------------------------
 controllerServiceAccount:
