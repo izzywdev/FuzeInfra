@@ -299,6 +299,11 @@ litellmSettings:
   modify_params: true
   num_retries: 2
   request_timeout: 600
+  # Console logging — logs request metadata, model, and failure reason to stdout
+  # (captured by Loki via Promtail). Keys are auto-redacted by LiteLLM.
+  set_verbose: true
+  log_raw_request_response: true
+  json_logs: true
 
 # Free-form general_settings passthrough (master_key is injected by the template).
 generalSettings: {}

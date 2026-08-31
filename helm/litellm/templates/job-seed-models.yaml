@@ -40,20 +40,20 @@ spec:
       restartPolicy: Never
       containers:
         - name: seed
-          image: alpine:3.20
+          image: ghcr.io/jqlang/jq:latest
           command: ["/bin/sh", "-c"]
           args:
             - |
               set -eu
-              apk add --no-cache curl jq >/dev/null 2>&1
               BASE="http://litellm:{{ .Values.port }}"
 
               echo "=== litellm-seed-models PostSync hook ==="
               echo "Target: $BASE"
+              echo "Image: ghcr.io/jqlang/jq (curl+jq pre-installed, no apk)"
 
               echo "Waiting for LiteLLM readiness..."
               attempts=0
-              until curl -sf "$BASE/health/readiness" >/dev/null 2>&1; do
+              until wget -qO /dev/null "$BASE/health/readiness" 2>/dev/null; do
                 attempts=$((attempts + 1))
                 if [ "$attempts" -ge 60 ]; then
                   echo "LiteLLM not ready after 5 minutes — skipping (will retry next sync)."
@@ -64,15 +64,14 @@ spec:
               echo "LiteLLM is ready (after $attempts probes)."
 
               # Fetch current model list (both YAML and DB models).
-              MODELS_RESP=$(curl -sf \
-                -H "Authorization: Bearer $LITELLM_MASTER_KEY" \
-                "$BASE/model/info" 2>/dev/null) || {
+              if ! wget -qO /tmp/models.json \
+                --header="Authorization: Bearer $LITELLM_MASTER_KEY" \
+                "$BASE/model/info" 2>/dev/null; then
                 echo "WARN: /model/info failed. Skipping model seeding."
                 exit 0
-              }
+              fi
 
-              EXISTING=$(echo "$MODELS_RESP" | jq -r '
-                (.data // [])[] | .model_name' 2>/dev/null | sort -u)
+              EXISTING=$(jq -r '(.data // [])[] | .model_name' /tmp/models.json 2>/dev/null | sort -u)
               echo "Found $(echo "$EXISTING" | grep -c . || echo 0) existing model(s)."
 
               added=0
@@ -83,21 +82,21 @@ spec:
               if echo "$EXISTING" | grep -qx '{{ .name }}'; then
                 skipped=$((skipped + 1))
               else
-                HTTP_CODE=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/model/new" \
-                  -H "Authorization: Bearer $LITELLM_MASTER_KEY" \
-                  -H "Content-Type: application/json" \
-                  -d '{
+                if wget -qO /dev/null \
+                  --header="Authorization: Bearer $LITELLM_MASTER_KEY" \
+                  --header="Content-Type: application/json" \
+                  --post-data='{
                     "model_name": "{{ .name }}",
                     "litellm_params": {
                       "model": "{{ .provider }}",
                       "api_key": "os.environ/{{ .keyEnv }}"
                     }
-                  }')
-                if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "201" ]; then
-                  echo "  + {{ .name }} (HTTP $HTTP_CODE)"
+                  }' \
+                  "$BASE/model/new" 2>/dev/null; then
+                  echo "  + {{ .name }}"
                   added=$((added + 1))
                 else
-                  echo "  ! {{ .name }} failed (HTTP $HTTP_CODE)"
+                  echo "  ! {{ .name }} failed"
                 fi
               fi
               {{- end }}

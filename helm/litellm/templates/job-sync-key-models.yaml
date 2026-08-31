@@ -37,20 +37,20 @@ spec:
       restartPolicy: Never
       containers:
         - name: sync
-          image: alpine:3.20
+          image: ghcr.io/jqlang/jq:latest
           command: ["/bin/sh", "-c"]
           args:
             - |
               set -eu
-              apk add --no-cache curl jq >/dev/null 2>&1
               BASE="http://litellm:{{ .Values.port }}"
 
               echo "=== litellm-sync-key-models PostSync hook ==="
               echo "Target: $BASE"
+              echo "Image: ghcr.io/jqlang/jq (curl+jq pre-installed, no apk)"
 
               echo "Waiting for LiteLLM readiness..."
               attempts=0
-              until curl -sf "$BASE/health/readiness" >/dev/null 2>&1; do
+              until wget -qO /dev/null "$BASE/health/readiness" 2>/dev/null; do
                 attempts=$((attempts + 1))
                 if [ "$attempts" -ge 60 ]; then
                   echo "LiteLLM not ready after 5 minutes — skipping (will retry next sync)."
@@ -60,6 +60,56 @@ spec:
               done
               echo "LiteLLM is ready (after $attempts probes)."
 
+<<<<<<< HEAD
+              # Fetch key list. LiteLLM accepts GET on all tested versions.
+              echo "--- Fetching key list ---"
+              if ! wget -qO /tmp/keys.json \
+                --header="Authorization: Bearer $LITELLM_MASTER_KEY" \
+                "$BASE/key/list" 2>/tmp/wget.err; then
+                echo "WARN: GET /key/list failed. Error:"
+                cat /tmp/wget.err 2>/dev/null || true
+                echo "Skipping."
+                exit 0
+              fi
+
+              TOP_KEYS=$(jq -r 'keys_unsorted | join(", ")' /tmp/keys.json 2>/dev/null || echo "not-json")
+              echo "Response top-level keys: $TOP_KEYS"
+              TOTAL=$(jq -r '(.keys // .data // []) | length' /tmp/keys.json 2>/dev/null || echo "?")
+              echo "Total keys found: $TOTAL"
+
+              # Log each key's structure (redacting sensitive values).
+              jq -r '
+                (.keys // .data // [])[] |
+                "  key_alias=\(.key_alias // .key_name // "n/a") models_count=\((.models // []) | length) token_prefix=\((.token // "n/a")[:12])"
+              ' /tmp/keys.json 2>/dev/null || echo "  (could not parse individual keys)"
+
+              # Extract tokens/keys that have a non-empty models restriction.
+              TOKENS=$(jq -r '
+                (.keys // .data // [])[]
+                | select(.models != null and (.models | type == "array") and (.models | length) > 0)
+                | (.token // .key // empty)' /tmp/keys.json 2>/dev/null || true)
+
+              if [ -z "$TOKENS" ]; then
+                echo "No keys with model restrictions found. Nothing to update."
+                echo "=== hook complete (no-op) ==="
+                exit 0
+              fi
+
+              echo "--- Updating restricted keys ---"
+              echo "$TOKENS" | while IFS= read -r token; do
+                [ -z "$token" ] && continue
+                echo "Updating key ${token:0:12}... → models=[] (all models)"
+                if wget -qO /tmp/upd.json \
+                  --header="Authorization: Bearer $LITELLM_MASTER_KEY" \
+                  --header="Content-Type: application/json" \
+                  --post-data="{\"key\": \"$token\", \"models\": []}" \
+                  "$BASE/key/update" 2>/tmp/upd.err; then
+                  echo "  OK"
+                else
+                  echo "  WARN: update failed. Error:"
+                  cat /tmp/upd.err 2>/dev/null || true
+                  cat /tmp/upd.json 2>/dev/null | head -c 200 || true
+=======
               # Try GET /key/list first (LiteLLM <1.60), then POST (1.60+).
               echo "--- Fetching key list ---"
               RESP=""
@@ -126,6 +176,7 @@ spec:
                   echo "  OK (HTTP $UPD_CODE)"
                 else
                   echo "  WARN: HTTP $UPD_CODE — response: $(echo "$UPD_BODY" | head -c 200)"
+>>>>>>> origin/main
                 fi
               done
               echo "=== hook complete ==="
