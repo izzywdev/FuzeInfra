@@ -1,0 +1,95 @@
+name: Mint LITELLM_CI_KEY
+
+# One-shot operator workflow: mints (or re-mints) the SCOPED LiteLLM virtual key that
+# a2a-maintain.yml uses, and distributes it to the two places that need it.
+#
+# WHY THIS RUNS IN-CLUSTER RATHER THAN VIA A LOCAL PORT-FORWARD. The documented local
+# path (scripts/mint-litellm-ci-key.sh's own usage comment) is
+# `kubectl -n fuzeinfra port-forward svc/litellm 4000:4000`, but the node currently
+# hosting the litellm pod cannot be reached that way: the k3s API server gets
+# `error dialing backend: ... dialing <node>:10250, code 502` for exec/logs/port-forward
+# on that node (the same condition litellm-admin.yml's "Talks to the gateway over
+# cluster DNS" comment documents). Pod-to-pod traffic never touches the kubelet, so an
+# in-cluster ARC runner reaches the gateway at http://litellm.fuzeinfra.svc.cluster.local
+# fine even while a local kubectl session cannot. Mirrors mint-litellm-fuze-key.yml,
+# which hit the same constraint first.
+#
+# Write targets:
+#   izzywdev/FuzeInfra  — a2a-maintain.yml reads LITELLM_CI_KEY directly from here
+#   izzywdev/FuzeSDLC   — SRC_LITELLM_CI_KEY, the source-of-truth value
+#                         provision_secrets.py reads back out (FuzeSDLC PR: fleet
+#                         discovery + LITELLM_CI_KEY fix)
+#
+# Prerequisites (secrets that must already exist in this repo):
+#   LITELLM_MASTER_KEY  — LiteLLM admin key (in the litellm-secret k8s Secret;
+#                         also stored as a GH secret for workflows that need it).
+#                         Migration follow-up (B3): once LITELLM_CI_KEY is confirmed set
+#                         and a2a-maintain.yml no longer falls back to it, this repo
+#                         secret is deleted — the cluster Secret stays authoritative.
+#   GH_TOKEN            — token with secrets:write on FuzeInfra + FuzeSDLC
+#
+# If the alias already exists in LiteLLM, delete it first (LiteLLM enforces unique
+# key_alias — see mint-litellm-ci-key.sh's own error-path comment):
+#   LiteLLM admin UI → Keys → a2a-maintain-ci → Delete
+# or pass --alias with a different name here and update a2a-maintain.yml accordingly.
+on:
+  workflow_dispatch:
+    inputs:
+      alias:
+        description: 'Key alias (default: a2a-maintain-ci). Change only to rotate without deleting the old key first.'
+        required: false
+        default: 'a2a-maintain-ci'
+      budget:
+        description: 'Max spend in USD before the key is refused (default: 25)'
+        required: false
+        default: '25'
+      window:
+        description: 'Budget reset window, LiteLLM duration string (default: 30d)'
+        required: false
+        default: '30d'
+
+permissions:
+  contents: read
+
+jobs:
+  mint:
+    name: Mint a2a-maintain-ci key
+    runs-on: staging
+    environment: fuzeinfra-ops
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Mint key and distribute
+        env:
+          LITELLM_MASTER_KEY: ${{ secrets.LITELLM_MASTER_KEY }}
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+          LITELLM_BASE_URL: http://litellm.fuzeinfra.svc.cluster.local:4000
+          ALIAS: ${{ inputs.alias }}
+          BUDGET: ${{ inputs.budget }}
+          WINDOW: ${{ inputs.window }}
+        run: |
+          set -euo pipefail
+
+          # Mint the virtual key (key printed to stdout; diagnostics to stderr).
+          # Mask immediately — the plaintext must never appear in logs or argv.
+          KEY=$(bash scripts/mint-litellm-ci-key.sh \
+            --alias  "$ALIAS"  \
+            --budget "$BUDGET" \
+            --window "$WINDOW" \
+            --base-url "$LITELLM_BASE_URL")
+          echo "::add-mask::$KEY"
+
+          # 1. Register on this repo so a2a-maintain.yml can use it directly.
+          printf '%s' "$KEY" | gh secret set LITELLM_CI_KEY \
+            --repo izzywdev/FuzeInfra
+          echo "::notice::LITELLM_CI_KEY written to izzywdev/FuzeInfra"
+
+          # 2. Write the source-of-truth copy to FuzeSDLC (SRC_LITELLM_CI_KEY).
+          #    Unlike LITELLM_FUZE_KEY, this key is FuzeInfra-only (only FuzeInfra's own
+          #    a2a-maintain.yml references secrets.LITELLM_CI_KEY), so
+          #    provision_secrets.py's per-repo workflow survey — not the fleet-wide
+          #    MANIFEST_RULES — is what delivers it, and it lands nowhere else.
+          printf '%s' "$KEY" | gh secret set SRC_LITELLM_CI_KEY \
+            --repo izzywdev/FuzeSDLC
+          echo "::notice::SRC_LITELLM_CI_KEY written to izzywdev/FuzeSDLC (source of truth for provision_secrets.py)"
