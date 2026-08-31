@@ -419,6 +419,12 @@ def build_report(owner: str, repos: list, owner_level: dict, policy: dict) -> di
             "severity": (rule or {}).get("severity", "-"),
             "fleet_sourced": (rule or {}).get("fleetSourced"),
             "notes": (rule or {}).get("notes", ""),
+            "description": (rule or {}).get("description", ""),
+            "used_by": (rule or {}).get("usedBy", []),
+            "scenario": (rule or {}).get("scenario", ""),
+            "without_it": (rule or {}).get("withoutIt", ""),
+            "why_sharing": (rule or {}).get("whyThisSharing", ""),
+            "extra_note": (rule or {}).get("note", ""),
             "missing_from": [],
             "unexpected_in": [],
         }
@@ -613,6 +619,39 @@ def render_markdown(report: dict) -> str:
             f"{r['count']} | {_fmt(r['present_in'], 5)} |"
         )
     add("")
+
+    documented = [r for r in rows if r.get("description")]
+    if documented:
+        add("## Reference — what each secret is for")
+        add("")
+        add(
+            "GitHub Actions secrets have no native description field (the REST API stores only "
+            "name, created_at and updated_at), so these live in `governance/secrets-policy.json` "
+            "and are rendered here."
+        )
+        add("")
+        for r in sorted(documented, key=lambda x: x["name"]):
+            add(f"### `{r['name']}`")
+            add("")
+            add(f"*{r['propagation']} · {r['sharing']} · source {r['source']} · in {r['count']} repo(s)*")
+            add("")
+            add(r["description"])
+            if r["used_by"]:
+                add("")
+                add("**Used by:** " + ", ".join(f"`{u}`" for u in r["used_by"]))
+            if r["scenario"]:
+                add("")
+                add(f"**In practice.** {r['scenario']}")
+            if r["without_it"]:
+                add("")
+                add(f"**Without it.** {r['without_it']}")
+            if r["why_sharing"]:
+                add("")
+                add(f"**Why {r['sharing']}.** {r['why_sharing']}")
+            if r["extra_note"]:
+                add("")
+                add(f"> **Note.** {r['extra_note']}")
+            add("")
 
     env_rows = [(r["name"], repo, envs) for r in rows for repo, envs in r["environments"].items()]
     if env_rows:
