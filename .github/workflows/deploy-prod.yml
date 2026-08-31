@@ -140,6 +140,27 @@ jobs:
             echo "registered $app"
           done
 
+          # If an Argo Application has a Running sync operation from a previous
+          # commit, `kubectl patch` to start a new sync is silently ignored —
+          # the old operation must complete or be terminated first. This caused a
+          # persistent deadlock: a PostSync hook failing at an old revision
+          # blocked the very sync that carried the fix (PRs #737/#738).
+          # Terminate any Running operation whose revision doesn't match this
+          # commit so the fresh sync can proceed.
+          for app in $SYNC_APPS; do
+            phase=$(kubectl -n argocd get application "$app" \
+                      -o jsonpath='{.status.operationState.phase}' 2>/dev/null || echo "")
+            if [ "$phase" = "Running" ]; then
+              op_rev=$(kubectl -n argocd get application "$app" \
+                         -o jsonpath='{.status.operationState.syncResult.revision}' 2>/dev/null || echo "")
+              if [ -n "$op_rev" ] && [ "$op_rev" != "$GITHUB_SHA" ]; then
+                echo "::warning::$app has a Running operation at ${op_rev:0:7} (this deploy is ${GITHUB_SHA:0:7}) — terminating stale operation"
+                argocd app terminate-op "$app" --core || true
+                sleep 2
+              fi
+            fi
+          done
+
           # Kick an immediate sync so the rollout starts seconds after merge.
           # Deliberately an explicit list, NOT every registered app: forcing a hard
           # refresh + sync on the ARC scale sets would restart listeners and can
