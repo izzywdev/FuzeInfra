@@ -60,6 +60,7 @@ spec:
               done
               echo "LiteLLM is ready (after $attempts probes)."
 
+<<<<<<< HEAD
               # Fetch key list. LiteLLM accepts GET on all tested versions.
               echo "--- Fetching key list ---"
               if ! wget -qO /tmp/keys.json \
@@ -108,6 +109,74 @@ spec:
                   echo "  WARN: update failed. Error:"
                   cat /tmp/upd.err 2>/dev/null || true
                   cat /tmp/upd.json 2>/dev/null | head -c 200 || true
+=======
+              # Try GET /key/list first (LiteLLM <1.60), then POST (1.60+).
+              echo "--- Fetching key list ---"
+              RESP=""
+              HTTP_CODE=$(curl -s -w '%{http_code}' -o /tmp/keys.json \
+                -H "Authorization: Bearer $LITELLM_MASTER_KEY" \
+                "$BASE/key/list" 2>/dev/null) || true
+              if [ "$HTTP_CODE" = "200" ]; then
+                RESP=$(cat /tmp/keys.json)
+                echo "GET /key/list returned 200"
+              else
+                echo "GET /key/list returned HTTP $HTTP_CODE — trying POST..."
+                HTTP_CODE=$(curl -s -w '%{http_code}' -o /tmp/keys.json \
+                  -X POST "$BASE/key/list" \
+                  -H "Authorization: Bearer $LITELLM_MASTER_KEY" \
+                  -H "Content-Type: application/json" \
+                  -d '{}' 2>/dev/null) || true
+                if [ "$HTTP_CODE" = "200" ]; then
+                  RESP=$(cat /tmp/keys.json)
+                  echo "POST /key/list returned 200"
+                else
+                  echo "WARN: /key/list failed (GET=$HTTP_CODE, POST=$HTTP_CODE). Skipping."
+                  exit 0
+                fi
+              fi
+
+              TOP_KEYS=$(echo "$RESP" | jq -r 'keys_unsorted | join(", ")' 2>/dev/null || echo "not-json")
+              echo "Response top-level keys: $TOP_KEYS"
+              TOTAL=$(echo "$RESP" | jq -r '(.keys // .data // []) | length' 2>/dev/null || echo "?")
+              echo "Total keys found: $TOTAL"
+
+              # Log each key's structure (redacting sensitive values).
+              echo "$RESP" | jq -r '
+                (.keys // .data // [])[] |
+                "  key_alias=\(.key_alias // .key_name // "n/a") models=\(.models // "null") token_prefix=\(.token[:12] // "n/a")"
+              ' 2>/dev/null || echo "  (could not parse individual keys)"
+
+              # Extract tokens/keys that have a non-empty models restriction.
+              # Try .token first (standard), fall back to .key (some versions).
+              TOKENS=$(echo "$RESP" | jq -r '
+                (.keys // .data // [])[]
+                | select(.models != null and (.models | type == "array") and (.models | length) > 0)
+                | (.token // .key // empty)' 2>/dev/null)
+
+              if [ -z "$TOKENS" ]; then
+                echo "No keys with model restrictions found. Nothing to update."
+                echo "=== hook complete (no-op) ==="
+                exit 0
+              fi
+
+              echo "--- Updating restricted keys ---"
+              updated=0
+              failed=0
+              echo "$TOKENS" | while IFS= read -r token; do
+                [ -z "$token" ] && continue
+                echo "Updating key ${token:0:12}... → models=[] (all models)"
+                UPD_BODY=""
+                UPD_CODE=$(curl -s -w '%{http_code}' -o /tmp/upd.json \
+                  -X POST "$BASE/key/update" \
+                  -H "Authorization: Bearer $LITELLM_MASTER_KEY" \
+                  -H "Content-Type: application/json" \
+                  -d "{\"key\": \"$token\", \"models\": []}") || true
+                UPD_BODY=$(cat /tmp/upd.json 2>/dev/null || echo "")
+                if [ "$UPD_CODE" = "200" ]; then
+                  echo "  OK (HTTP $UPD_CODE)"
+                else
+                  echo "  WARN: HTTP $UPD_CODE — response: $(echo "$UPD_BODY" | head -c 200)"
+>>>>>>> origin/main
                 fi
               done
               echo "=== hook complete ==="
