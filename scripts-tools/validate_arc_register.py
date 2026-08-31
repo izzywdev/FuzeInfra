@@ -66,11 +66,19 @@ def validate(allowlist, claimed_repo, claimed_action):
 
     reasons = []
 
-    action = (claimed_action or "install").strip()
+    # Blank/unset action is the workflow's `||` fallback sentinel for "nothing
+    # supplied" (neither client_payload.action nor inputs.action set) — that is
+    # the ONE normalization performed here, and it is an explicit default, not
+    # fuzzy matching. Everything else is compared EXACTLY: no case-folding, no
+    # whitespace-trimming, on either repo or action. A claim that differs from
+    # an allowlist key by so much as trailing whitespace or casing is treated
+    # as a non-match rather than "close enough" — the whole point of this gate
+    # is that only an exact, auditable string decides the outcome.
+    action = "install" if not claimed_action else claimed_action
     if action not in allowed_actions:
         reasons.append(f"action '{action}' not in allowed_actions {allowed_actions}")
 
-    repo = (claimed_repo or "").strip()
+    repo = claimed_repo or ""
     entry = allowed_repos.get(repo)
     if entry is None:
         reasons.append(

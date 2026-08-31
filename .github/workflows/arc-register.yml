@@ -1,0 +1,278 @@
+# ===========================================================================
+# arc-register — delegation handler for ARC runner scale-set registration
+# ===========================================================================
+# Lets a consumer repo (FuzeContact, FuzeHub, FuzeSales, FuzeService,
+# FuzeSocial, MendysRobotics) get its self-hosted ARC AutoscalingRunnerSet
+# installed/uninstalled WITHOUT holding a cluster credential. Today those six
+# repos each carry a full cluster-admin KUBE_CONFIG (`kubectl config view
+# --raw`) for the sole purpose of running runners/arc/register-repo.sh
+# themselves (see runners/arc/ONBOARD-REPO.md, the old workflow-template/
+# arc-register.yml). This handler moves that one operation into FuzeInfra, the
+# same pattern already proven by cluster-query.yml (read-only kubectl) and
+# infra-request-handler.yml (mutating Terraform).
+#
+# THIS PR DOES NOT REMOVE KUBE_CONFIG FROM ANY CONSUMER REPO. It only stands
+# up the handler side. Migrating a consumer's own arc-register.yml to dispatch
+# here instead of running register-repo.sh locally, and then revoking that
+# repo's KUBE_CONFIG, is a separate follow-up per repo, proven end-to-end on
+# ONE repo first.
+#
+# Two trigger shapes:
+#   workflow_dispatch  — operator-driven, for manual install/uninstall/replay.
+#   repository_dispatch (type=arc-register) — consumer-driven, using the same
+#     FUZEINFRA_DISPATCH_TOKEN already used for infra-request/cluster-query
+#     (Contents:write on FuzeInfra — no new credential to mint).
+#
+# Payload / inputs:
+#   repo   — owner/name of the consumer repo (e.g. "izzywdev/FuzeHub")
+#   action — "install" | "uninstall"
+#
+# AUTHORIZATION: `repo` is checked against config/arc-register-allowlist.json
+# by scripts-tools/validate_arc_register.py — see that file's docstring for
+# why the payload's repo claim is treated as untrusted input rather than an
+# identity: repository_dispatch has no field that cryptographically proves
+# which repo dispatched it, so the only thing every dispatch can be judged on
+# is whether the claimed name is an exact allowlist key. On a match, the repo
+# URL and scale-set name used for the ACTUAL registration come from the
+# allowlist config entry, never from the raw payload. Anything else is denied,
+# loudly, before any kubectl/helm step runs.
+#
+# VERIFICATION: a scale-set Helm release succeeding, or even its runner pods
+# showing Running, is not proof the runner is usable — ARC has shipped both
+# failure modes for real (see runners/arc/ONBOARD-REPO.md Troubleshooting C
+# and the "8 scale sets Pending 11h" / "every runner registered but stayed
+# online=0" incidents in project memory). The only real proof is the GitHub
+# runners API reporting `status: online` for a runner carrying this scale
+# set's label, on the CONSUMER repo (not FuzeInfra). That is what the verify
+# step below polls for; a green job here means that, not "helm exited 0".
+#
+# Required repo secrets (FuzeInfra CI only):
+#   KUBE_CONFIG  — base64 kubeconfig for the k3s server (same secret used by
+#                  cluster-query.yml / argocd-register.yml / arc-bootstrap.yml)
+#   GH_TOKEN     — cross-repo PAT (same one argocd-register.yml /
+#                  verify-consumer-credentials.yml already use) with
+#                  Actions:read + Contents:write on the allowlisted consumer
+#                  repos, for the online-runner check and the best-effort
+#                  dispatch-back.
+#
+# Example (operator, manual):
+#   gh workflow run arc-register.yml --repo izzywdev/FuzeInfra \
+#     -f repo=izzywdev/FuzeHub -f action=install
+#
+# Example (consumer dispatch — see docs/consuming-repos/ARC_REGISTRATION.md):
+#   gh api --method POST repos/izzywdev/FuzeInfra/dispatches \
+#     -f event_type=arc-register \
+#     -f 'client_payload[repo]=izzywdev/FuzeHub' \
+#     -f 'client_payload[action]=install'
+
+name: arc-register
+
+on:
+  workflow_dispatch:
+    inputs:
+      repo:
+        description: "Consumer repo to register (owner/name)"
+        required: true
+        type: string
+      action:
+        description: "install or uninstall"
+        required: true
+        default: install
+        type: choice
+        options: [install, uninstall]
+  repository_dispatch:
+    types: [arc-register]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: arc-register-${{ github.event.client_payload.repo || inputs.repo }}
+  cancel-in-progress: false
+
+jobs:
+  # ---------------------------------------------------------------------
+  # authorize — the fail-closed gate. Nothing below this job ever sees an
+  # unlisted repo name or an unrecognized action.
+  # ---------------------------------------------------------------------
+  authorize:
+    runs-on: ubuntu-latest
+    outputs:
+      decision: ${{ steps.validate.outputs.decision }}
+      repo: ${{ steps.validate.outputs.repo }}
+      repo_url: ${{ steps.validate.outputs.repo_url }}
+      scale_set_name: ${{ steps.validate.outputs.scale_set_name }}
+      action: ${{ steps.validate.outputs.action }}
+      reasons: ${{ steps.validate.outputs.reasons }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          sparse-checkout: |
+            config/arc-register-allowlist.json
+            scripts-tools/validate_arc_register.py
+
+      - name: Validate claimed repo + action against the allowlist
+        id: validate
+        env:
+          CLAIMED_REPO: ${{ github.event.client_payload.repo || inputs.repo }}
+          CLAIMED_ACTION: ${{ github.event.client_payload.action || inputs.action || 'install' }}
+        run: |
+          python3 scripts-tools/validate_arc_register.py \
+            --allowlist config/arc-register-allowlist.json \
+            --repo "$CLAIMED_REPO" \
+            --action "$CLAIMED_ACTION" \
+            --github-output "$GITHUB_OUTPUT"
+
+      - name: Refuse (fail closed)
+        if: steps.validate.outputs.decision != 'authorized'
+        run: |
+          echo "::error title=arc-register::REFUSED — ${{ steps.validate.outputs.reasons }}"
+          {
+            echo "### arc-register: REFUSED"
+            echo ""
+            echo "Claimed repo: \`${{ github.event.client_payload.repo || inputs.repo }}\`"
+            echo "Reason: ${{ steps.validate.outputs.reasons }}"
+            echo ""
+            echo "To onboard a new repo, add it to \`config/arc-register-allowlist.json\` in a reviewed PR."
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit 1
+
+  # ---------------------------------------------------------------------
+  # register — runs register-repo.sh with FuzeInfra's own KUBE_CONFIG, then
+  # PROVES the runner is online before calling anything successful.
+  # ---------------------------------------------------------------------
+  register:
+    needs: authorize
+    if: needs.authorize.outputs.decision == 'authorized'
+    # ubuntu-latest, not the ARC scale set: this workflow provisions/repairs
+    # ARC scale sets, so it must not depend on one being healthy already
+    # (same reasoning as argocd-register.yml / arc-bootstrap.yml).
+    runs-on: ubuntu-latest
+    env:
+      REPO: ${{ needs.authorize.outputs.repo }}
+      REPO_URL: ${{ needs.authorize.outputs.repo_url }}
+      SCALE_SET_NAME: ${{ needs.authorize.outputs.scale_set_name }}
+      ACTION: ${{ needs.authorize.outputs.action }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          sparse-checkout: |
+            runners/arc/register-repo.sh
+
+      - uses: azure/setup-kubectl@829323503d1be3d00ca8346e5391ca0b07a9ab0d # v5.1.0
+
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+
+      - name: Configure kubectl
+        env:
+          KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
+        run: |
+          if [ -z "$KUBE_CONFIG" ]; then echo "::error::KUBE_CONFIG unset"; exit 1; fi
+          mkdir -p "$HOME/.kube"
+          printf '%s' "$KUBE_CONFIG" | base64 -d > "$HOME/.kube/config"
+          chmod 600 "$HOME/.kube/config"
+
+      - name: Install / upgrade scale set
+        if: env.ACTION == 'install'
+        run: |
+          chmod +x runners/arc/register-repo.sh
+          ./runners/arc/register-repo.sh \
+            --repo-url "$REPO_URL" \
+            --name     "$SCALE_SET_NAME" \
+            --secret   arc-runner-github-app
+
+      - name: Confirm AutoscalingRunnerSet exists (install)
+        if: env.ACTION == 'install'
+        run: |
+          kubectl -n arc-runners get autoscalingrunnerset "$SCALE_SET_NAME" -o wide
+
+      - name: Verify the runner is actually ONLINE (not just pods Running)
+        id: verify
+        if: env.ACTION == 'install'
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+        run: |
+          set -uo pipefail
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "::error::GH_TOKEN unset — cannot query ${REPO}'s runners API to verify online status. This is a hard requirement: a Helm release succeeding, or pods showing Running, has previously masked scale sets stuck at online=0 (missing dind run.sh entrypoint) or Pending for 11h (label drift). Without this check a red flag would report green."
+            exit 1
+          fi
+          ONLINE=0
+          for i in $(seq 1 20); do
+            ONLINE=$(gh api "repos/${REPO}/actions/runners" --paginate \
+              --jq "[.runners[] | select(.status==\"online\" and (.labels[].name==\"${SCALE_SET_NAME}\"))] | length" \
+              2>/dev/null || echo 0)
+            echo "attempt $i/20: ${ONLINE} online runner(s) for ${REPO} labeled '${SCALE_SET_NAME}'"
+            [ "$ONLINE" -gt 0 ] && break
+            sleep 15
+          done
+          echo "online=$ONLINE" >> "$GITHUB_OUTPUT"
+          if [ "$ONLINE" -eq 0 ]; then
+            echo "::error title=arc-register::No ONLINE runner appeared for ${REPO} (label ${SCALE_SET_NAME}) after 5 minutes."
+            echo "Pods Running is not proof of registration. Check, in order:"
+            echo "  1) containerMode dind entrypoint — ARC only injects run.sh on the non-dind path"
+            echo "     (runners/arc/ONBOARD-REPO.md Troubleshooting C)."
+            echo "  2) listener credential coverage — is ${REPO} within the arc-runner-github-app"
+            echo "     GitHub App installation's repository access? (ONBOARD-REPO.md, step 2b)."
+            echo "  3) node capacity / scheduling — runners/arc/ONBOARD-REPO.md Troubleshooting D/F."
+            echo "--- diagnostics ---"
+            kubectl -n arc-runners get pods -l "app.kubernetes.io/instance=${SCALE_SET_NAME}" -o wide 2>&1 || true
+            kubectl -n arc-systems get pods 2>&1 | grep "$SCALE_SET_NAME" || echo "(no listener pod matching ${SCALE_SET_NAME})"
+            exit 1
+          fi
+          echo "Confirmed: ${ONLINE} runner(s) online for ${REPO} under label '${SCALE_SET_NAME}'."
+
+      - name: Uninstall scale set
+        if: env.ACTION == 'uninstall'
+        run: |
+          chmod +x runners/arc/register-repo.sh
+          ./runners/arc/register-repo.sh --name "$SCALE_SET_NAME" --uninstall
+
+      - name: Confirm the scale set is actually gone (uninstall)
+        if: env.ACTION == 'uninstall'
+        run: |
+          if kubectl -n arc-runners get autoscalingrunnerset "$SCALE_SET_NAME" >/dev/null 2>&1; then
+            echo "::error::AutoscalingRunnerSet ${SCALE_SET_NAME} still present after uninstall"
+            exit 1
+          fi
+          echo "Confirmed: AutoscalingRunnerSet ${SCALE_SET_NAME} no longer exists."
+
+      - name: Job summary
+        if: always()
+        run: |
+          {
+            echo "### arc-register: \`${ACTION}\` for \`${REPO}\`"
+            echo ""
+            echo "| field | value |"
+            echo "|---|---|"
+            echo "| repo | \`${REPO}\` |"
+            echo "| scale set | \`${SCALE_SET_NAME}\` |"
+            echo "| action | \`${ACTION}\` |"
+            if [ "${ACTION}" = "install" ]; then
+              echo "| runners online (label=${SCALE_SET_NAME}) | ${{ steps.verify.outputs.online || '0' }} |"
+            fi
+            echo "| job status | ${{ job.status }} |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # Best-effort report back to the requesting repo. Consumer repos are not
+      # required to listen for this event — it is a courtesy, not a contract —
+      # so failure here never fails the job. The job summary above (and the
+      # run's own conclusion, visible via `gh run list --repo izzywdev/FuzeInfra
+      # --workflow=arc-register.yml`) is the guaranteed, always-present result.
+      - name: Report result back to the requesting repo (best effort)
+        if: always() && github.event_name == 'repository_dispatch'
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+        run: |
+          set -uo pipefail
+          RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          jq -n \
+            --arg status "${{ job.status }}" \
+            --arg run_url "$RUN_URL" \
+            --arg scale_set "$SCALE_SET_NAME" \
+            --arg action "$ACTION" \
+            '{event_type:"arc-register-result",
+              client_payload:{status:$status, run_url:$run_url, scale_set_name:$scale_set, action:$action}}' \
+            | gh api --method POST "repos/${REPO}/dispatches" --input - \
+            && echo "Reported result to ${REPO} via arc-register-result dispatch." \
+            || echo "::warning::could not dispatch arc-register-result to ${REPO} (repo may not listen for it, or GH_TOKEN lacks Contents:write there) — see the job summary/run URL instead: ${RUN_URL}"
