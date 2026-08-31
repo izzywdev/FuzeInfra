@@ -27,12 +27,37 @@ data:
 
     general_settings:
       master_key: os.environ/LITELLM_MASTER_KEY
+      {{- if .Values.storeModelInDB }}
+      store_model_in_db: true
+      {{- end }}
+      {{- if .Values.redis.enabled }}
+      use_redis_transaction_buffer: true
+      {{- end }}
       {{- with .Values.generalSettings }}
       {{- toYaml . | nindent 6 }}
       {{- end }}
 
     litellm_settings:
       {{- toYaml .Values.litellmSettings | nindent 6 }}
+      {{- if .Values.redis.enabled }}
+      cache: true
+      cache_params:
+        type: redis
+        host: os.environ/REDIS_HOST
+        port: os.environ/REDIS_PORT
+        {{- if .Values.redis.db }}
+        db: {{ .Values.redis.db }}
+        {{- end }}
+        {{- if .Values.redis.passwordSecret }}
+        password: os.environ/REDIS_PASSWORD
+        {{- end }}
+        namespace: "litellm"
+        ttl: 600
+        supported_call_types:
+          - acompletion
+          - atext_completion
+          - aembedding
+      {{- end }}
     {{- with .Values.routerSettings }}
 
     # Cross-provider fallbacks. `fallbacks` is a list of single-key maps —
@@ -40,5 +65,15 @@ data:
     # model_list above, or the router silently never routes to it.
     router_settings:
       {{- toYaml . | nindent 6 }}
+      {{- if $.Values.redis.enabled }}
+      redis_host: os.environ/REDIS_HOST
+      redis_port: os.environ/REDIS_PORT
+      {{- if $.Values.redis.db }}
+      redis_db: {{ $.Values.redis.db }}
+      {{- end }}
+      {{- if $.Values.redis.passwordSecret }}
+      redis_password: os.environ/REDIS_PASSWORD
+      {{- end }}
+      {{- end }}
     {{- end }}
 {{- end }}
