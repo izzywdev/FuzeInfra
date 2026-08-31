@@ -125,13 +125,22 @@ jobs:
 
       - name: Refuse (fail closed)
         if: steps.validate.outputs.decision != 'authorized'
+        # The claimed repo (and the validator's echoed-back `reasons`, which
+        # embeds it) is untrusted `github` context data — a malicious dispatch
+        # payload could contain shell metacharacters. Route it through env:
+        # rather than interpolating `${{ }}` straight into the script, so it
+        # is passed as a value, never parsed as shell syntax (gate-sast /
+        # Semgrep flags the direct-interpolation form for exactly this).
+        env:
+          CLAIMED_REPO: ${{ github.event.client_payload.repo || inputs.repo }}
+          REASONS: ${{ steps.validate.outputs.reasons }}
         run: |
-          echo "::error title=arc-register::REFUSED — ${{ steps.validate.outputs.reasons }}"
+          echo "::error title=arc-register::REFUSED — ${REASONS}"
           {
             echo "### arc-register: REFUSED"
             echo ""
-            echo "Claimed repo: \`${{ github.event.client_payload.repo || inputs.repo }}\`"
-            echo "Reason: ${{ steps.validate.outputs.reasons }}"
+            echo "Claimed repo: \`${CLAIMED_REPO}\`"
+            echo "Reason: ${REASONS}"
             echo ""
             echo "To onboard a new repo, add it to \`config/arc-register-allowlist.json\` in a reviewed PR."
           } >> "$GITHUB_STEP_SUMMARY"
@@ -239,6 +248,9 @@ jobs:
 
       - name: Job summary
         if: always()
+        env:
+          ONLINE_COUNT: ${{ steps.verify.outputs.online || '0' }}
+          JOB_STATUS: ${{ job.status }}
         run: |
           {
             echo "### arc-register: \`${ACTION}\` for \`${REPO}\`"
@@ -249,9 +261,9 @@ jobs:
             echo "| scale set | \`${SCALE_SET_NAME}\` |"
             echo "| action | \`${ACTION}\` |"
             if [ "${ACTION}" = "install" ]; then
-              echo "| runners online (label=${SCALE_SET_NAME}) | ${{ steps.verify.outputs.online || '0' }} |"
+              echo "| runners online (label=${SCALE_SET_NAME}) | ${ONLINE_COUNT} |"
             fi
-            echo "| job status | ${{ job.status }} |"
+            echo "| job status | ${JOB_STATUS} |"
           } >> "$GITHUB_STEP_SUMMARY"
 
       # Best-effort report back to the requesting repo. Consumer repos are not
@@ -263,11 +275,12 @@ jobs:
         if: always() && github.event_name == 'repository_dispatch'
         env:
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          JOB_STATUS: ${{ job.status }}
         run: |
           set -uo pipefail
-          RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
           jq -n \
-            --arg status "${{ job.status }}" \
+            --arg status "${JOB_STATUS}" \
             --arg run_url "$RUN_URL" \
             --arg scale_set "$SCALE_SET_NAME" \
             --arg action "$ACTION" \
