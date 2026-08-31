@@ -31,7 +31,7 @@ jobs:
       # selfHeal and converge on their own; gating this deploy on their sync state
       # let one consumer app's failed hook (a stuck kafka-topics Job) freeze the
       # whole FuzeInfra deploy signal — see #682. Their health is theirs to own.
-      SYNC_APPS: "fuzeinfra-prod sealed-secrets fuzeinfra-sealed-secrets arc-selfheal"
+      SYNC_APPS: "fuzeinfra-prod sealed-secrets fuzeinfra-sealed-secrets arc-selfheal litellm"
       # Per-app budget for reaching Synced. 600s (10 min) to accommodate first-boot
       # of newly-provisioned stateful services (e.g. Neo4j fresh PVC + image pull
       # + DB bootstrap easily exceeds 5 min on cold start).
