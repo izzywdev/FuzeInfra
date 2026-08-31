@@ -48,6 +48,9 @@ spec:
               apk add --no-cache curl jq >/dev/null 2>&1
               BASE="http://litellm:{{ .Values.port }}"
 
+              echo "=== litellm-seed-models PostSync hook ==="
+              echo "Target: $BASE"
+
               echo "Waiting for LiteLLM readiness..."
               attempts=0
               until curl -sf "$BASE/health/readiness" >/dev/null 2>&1; do
@@ -58,7 +61,7 @@ spec:
                 fi
                 sleep 5
               done
-              echo "LiteLLM is ready."
+              echo "LiteLLM is ready (after $attempts probes)."
 
               # Fetch current model list (both YAML and DB models).
               MODELS_RESP=$(curl -sf \
