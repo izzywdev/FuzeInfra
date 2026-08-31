@@ -224,7 +224,35 @@ kafkaUi:
 #      commit it, let Argo sync.
 #   3. Flip loki.s3.enabled -> true here, commit, let Argo sync.
 loki:
+  # 20Gi, not the 5Gi base default. Recorded here because the live volume was
+  # ALREADY expanded to 20Gi out-of-band on 2026-08-31 and Git must not disagree
+  # with the cluster: a StatefulSet's volumeClaimTemplates are immutable, so an
+  # existing PVC can only be grown by patching the PVC directly — but a STS that
+  # is ever recreated reads THIS value, and at 5Gi it would land straight back in
+  # the failure below.
+  #
+  # WHY 5Gi WAS NOT SURVIVABLE, and why this is not merely a tuning nit. Loki
+  # retains 744h (31 days) of fleet logs and compacts them on a schedule
+  # (compactor.retention_enabled, configmaps-monitoring.yaml). 31 days of logs
+  # from 22 repos' workloads does not fit in 5Gi, so the volume filled — and a
+  # FULL Loki volume is self-sealing, because retention is enforced BY the
+  # compactor, the compactor runs inside Loki, and Loki cannot start:
+  #
+  #   mkdir /loki/tsdb-shipper-active/scratch/...: no space left on device
+  #
+  # It crash-looped 694 times over 2d11h and could never free its own space.
+  #
+  # The cost was not lost logs. Argo's sync of fuzeinfra-prod blocks on resource
+  # health, so a permanently-unhealthy Loki wedged one sync operation in `Running`
+  # for 37 HOURS (started 2026-08-30 08:47), and every prod change queued behind
+  # it silently — including the cluster-autoscaler maxSize raise that fleet-wide
+  # CI was waiting on. A monitoring component took the delivery pipeline down by
+  # filling a disk. Size this generously; it is not where to economise.
+  storage: 20Gi
   s3:
+    # Flipping this to true is the real remedy for unbounded growth, not a bigger
+    # disk: chunks+index move to Contabo Object Storage and the PVC stops being
+    # the constraint. Still human-gated on the loki-s3 SealedSecret.
     enabled: false            # human-gated flip (needs the loki-s3 SealedSecret)
     endpoint: "eu2.contabostorage.com"
     region: "default"
