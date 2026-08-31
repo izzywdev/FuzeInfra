@@ -185,12 +185,28 @@ template:
         env:
           - name: DISABLE_RUNNER_UPDATE
             value: "1"
-    nodeSelector:
-      fuzeinfra.io/pool: ci
+    # Must stay in lockstep with runners/arc/runner-scale-set-values.yaml — see the long
+    # rationale there. In short: an equality nodeSelector pinned runners to the fixed,
+    # hand-labelled `ci` pair, which has no autoscaling path, while the autoscaler grew an
+    # `elastic` pool no runner was allowed to select. That left 40 runner pods Pending
+    # fleet-wide with every individual component reporting healthy.
+    affinity:
+      nodeAffinity:
+        requiredDuringSchedulingIgnoredDuringExecution:
+          nodeSelectorTerms:
+            - matchExpressions:
+                - key: fuzeinfra.io/pool
+                  operator: In
+                  values:
+                    - ci
+                    - elastic
     tolerations:
       - key: fuzeinfra.io/ci
         operator: Exists
         effect: NoSchedule
+      - key: fuzeinfra.io/elastic
+        operator: Exists
+        effect: PreferNoSchedule
 
 # ---- Docker-in-Docker -------------------------------------------------------
 # Gives every consumer scale set a real Docker daemon: the chart injects a

@@ -491,7 +491,20 @@ clusterAutoscaler:
   # the pending elastic-only overprovisioning pod request the first worker.
   nodeGroup:
     minSize: 0
-    maxSize: 1
+    # Raised 1 -> 4 on 2026-08-31. At maxSize 1 the autoscaler had exactly one elastic
+    # node to give and was already at it, so it logged `Skipping node group elastic -
+    # max size reached` against 49 unschedulable pods (40 ARC runners plus fuzebi,
+    # fuzehub-backend and fuzekeys-frontend) and could do nothing. Paired with the
+    # runner affinity change in runners/arc/runner-scale-set-values.yaml — that change
+    # lets runner pods land on elastic nodes at all, and this one lets there be more
+    # than one. Either alone leaves CI stuck.
+    #
+    # Scale-DOWN remains billing-aware and is NOT governed by this number: Contabo only
+    # terminates a cancelled instance at the end of its paid month, so utilization
+    # scale-down stays disabled and the reaper CronJob releases idle elastic capacity
+    # 24h before renewal. So this is a ceiling on concurrent spend, not a commitment to
+    # it — the pool still returns to 0 when idle.
+    maxSize: 4
   # Billing-aware model: Contabo only terminates a canceled instance at the
   # end of its paid month, so utilization scale-down is disabled — the
   # reaper CronJob below owns releasing idle elastic capacity instead.
@@ -519,7 +532,14 @@ clusterAutoscaler:
     elasticTag: fuzeinfra-prod-elastic-v2
     elasticNamePrefix: fuzeinfra-prod-elastic-v2
     minSize: 0
-    maxSize: 1
+    # Must match clusterAutoscaler.nodeGroup.maxSize exactly — the block above states
+    # the rule ("Keep the upstream CA and the external provider on the exact same
+    # bounds"). If these two disagree the CA and the provider hold different ideas of
+    # the pool ceiling, which is the class of desired-vs-target mismatch that already
+    # cost this pool a cutover once (see the elasticTag v1 contamination note above:
+    # NodeGroupTargetSize reported 4 while only 2 nodes correlated, and CA skipped every
+    # scale-up iteration trying to repair target size).
+    maxSize: 4
     # TODO: set to the k3s server URL the elastic nodes join
     # (e.g. https://<contabo-server-ip>:6443).
     k3sServerUrl: "https://161.97.118.134:6443"
