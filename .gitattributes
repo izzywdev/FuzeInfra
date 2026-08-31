@@ -12,3 +12,8 @@ agent-templates/environments/desktop/*.sh text eol=lf
 # runners/arc/register-repo.sh` already fails with `syntax error near unexpected token
 # $'{\r'`, so the script is unrunnable from this working tree today.
 runners/arc/*.sh text eol=lf
+
+# The bootstrap provenance ledger is rewritten by scripts/bootstrap (Python text mode),
+# so a Windows run stores it CRLF and gate-line-endings hard-fails the PR that touched it.
+# Measured: FuzeInfra#771, `i/crlf  .fuze/installed.json`.
+.fuze/*.json text eol=lf
