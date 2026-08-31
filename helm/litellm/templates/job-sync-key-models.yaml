@@ -12,6 +12,30 @@ was provisioned before that model existed and could not reach it.
 Setting `models: []` (empty) on a key means "all models". This hook runs after
 every sync to enforce that, so a model-list addition never silently breaks a
 consumer.
+
+IMAGE CHOICE IS LOAD-BEARING — do not "simplify" this to alpine.
+Two earlier revisions of this hook failed for image reasons alone, each costing
+a full deploy cycle to discover:
+  1. `alpine:3.20` + `apk add --no-cache curl jq` — apk exited 5 (the node
+     cannot reach the Alpine package mirrors), and `set -eu` killed the script.
+     Output was redirected to /dev/null, so it failed completely silently.
+  2. `ghcr.io/jqlang/jq` — a distroless image with ONLY the jq binary. It has
+     no shell at all, so `command: ["/bin/sh","-c"]` cannot even start
+     ("exec: sh: executable file not found in $PATH").
+Reusing the gateway's own image removes the entire class: it is already present
+on the node (the Deployment runs it, so there is no pull), and being a Python
+image it is guaranteed to have python3. The script below uses ONLY the standard
+library — no pip, no apk, no jq, no curl, nothing to install at runtime.
+
+THIS HOOK MUST NEVER FAIL THE SYNC. It is best-effort reconciliation of a
+database row, not a deployment step. An earlier revision could exhaust
+backoffLimit and leave the whole litellm Application degraded — a broken
+reconciler blocking every unrelated prod change. Every failure path below
+therefore logs loudly and exits 0.
+
+NO SECRET IS EVER PRINTED. `/key/list` returns the HASHED token, never the
+plaintext key, and only its first 8 characters are logged — enough to correlate
+a row across runs, useless as a credential. FuzeInfra job logs are public.
 */ -}}
 apiVersion: batch/v1
 kind: Job
@@ -27,7 +51,9 @@ metadata:
     "argocd.argoproj.io/hook-delete-policy": BeforeHookCreation,HookSucceeded
 spec:
   ttlSecondsAfterFinished: 600
-  backoffLimit: 3
+  # 0 retries: the script already exits 0 on every failure path, so a non-zero
+  # exit means the interpreter itself died and retrying will not help.
+  backoffLimit: 0
   template:
     metadata:
       labels:
@@ -37,149 +63,118 @@ spec:
       restartPolicy: Never
       containers:
         - name: sync
-          image: ghcr.io/jqlang/jq:latest
-          command: ["/bin/sh", "-c"]
+          image: "{{ .Values.image }}:{{ .Values.tag }}"
+          imagePullPolicy: {{ .Values.imagePullPolicy }}
+          command: ["python3", "-c"]
           args:
             - |
-              set -eu
-              BASE="http://litellm:{{ .Values.port }}"
+              import json, os, sys, time, urllib.error, urllib.request
 
-              echo "=== litellm-sync-key-models PostSync hook ==="
-              echo "Target: $BASE"
-              echo "Image: ghcr.io/jqlang/jq (curl+jq pre-installed, no apk)"
+              BASE = "http://litellm:{{ .Values.port }}"
+              KEY = os.environ.get("LITELLM_MASTER_KEY", "")
 
-              echo "Waiting for LiteLLM readiness..."
-              attempts=0
-              until wget -qO /dev/null "$BASE/health/readiness" 2>/dev/null; do
-                attempts=$((attempts + 1))
-                if [ "$attempts" -ge 60 ]; then
-                  echo "LiteLLM not ready after 5 minutes — skipping (will retry next sync)."
-                  exit 0
-                fi
-                sleep 5
-              done
-              echo "LiteLLM is ready (after $attempts probes)."
+              print("=== litellm-sync-key-models PostSync hook ===", flush=True)
+              print("Target: " + BASE, flush=True)
 
-<<<<<<< HEAD
-              # Fetch key list. LiteLLM accepts GET on all tested versions.
-              echo "--- Fetching key list ---"
-              if ! wget -qO /tmp/keys.json \
-                --header="Authorization: Bearer $LITELLM_MASTER_KEY" \
-                "$BASE/key/list" 2>/tmp/wget.err; then
-                echo "WARN: GET /key/list failed. Error:"
-                cat /tmp/wget.err 2>/dev/null || true
-                echo "Skipping."
-                exit 0
-              fi
+              def api(path, payload=None, timeout=30):
+                  body = json.dumps(payload).encode() if payload is not None else None
+                  req = urllib.request.Request(
+                      BASE + path,
+                      data=body,
+                      method="POST" if payload is not None else "GET",
+                  )
+                  req.add_header("Authorization", "Bearer " + KEY)
+                  req.add_header("Content-Type", "application/json")
+                  with urllib.request.urlopen(req, timeout=timeout) as r:
+                      raw = r.read().decode() or "null"
+                  return json.loads(raw)
 
-              TOP_KEYS=$(jq -r 'keys_unsorted | join(", ")' /tmp/keys.json 2>/dev/null || echo "not-json")
-              echo "Response top-level keys: $TOP_KEYS"
-              TOTAL=$(jq -r '(.keys // .data // []) | length' /tmp/keys.json 2>/dev/null || echo "?")
-              echo "Total keys found: $TOTAL"
+              def bail(msg):
+                  # Best-effort reconciler: never fail the Argo sync.
+                  print("SKIP: " + msg, flush=True)
+                  print("=== hook complete (skipped) ===", flush=True)
+                  sys.exit(0)
 
-              # Log each key's structure (redacting sensitive values).
-              jq -r '
-                (.keys // .data // [])[] |
-                "  key_alias=\(.key_alias // .key_name // "n/a") models_count=\((.models // []) | length) token_prefix=\((.token // "n/a")[:12])"
-              ' /tmp/keys.json 2>/dev/null || echo "  (could not parse individual keys)"
+              if not KEY:
+                  bail("LITELLM_MASTER_KEY is empty")
 
-              # Extract tokens/keys that have a non-empty models restriction.
-              TOKENS=$(jq -r '
-                (.keys // .data // [])[]
-                | select(.models != null and (.models | type == "array") and (.models | length) > 0)
-                | (.token // .key // empty)' /tmp/keys.json 2>/dev/null || true)
+              # --- wait for readiness -------------------------------------------
+              ready = False
+              for attempt in range(60):
+                  try:
+                      urllib.request.urlopen(BASE + "/health/readiness", timeout=5).read()
+                      ready = True
+                      print("LiteLLM ready after " + str(attempt) + " probes.", flush=True)
+                      break
+                  except Exception:
+                      time.sleep(5)
+              if not ready:
+                  bail("LiteLLM not ready after 5 minutes (will retry next sync)")
 
-              if [ -z "$TOKENS" ]; then
-                echo "No keys with model restrictions found. Nothing to update."
-                echo "=== hook complete (no-op) ==="
-                exit 0
-              fi
+              # --- fetch key list -----------------------------------------------
+              print("--- Fetching key list ---", flush=True)
+              try:
+                  resp = api("/key/list?return_full_object=true&size=100")
+              except urllib.error.HTTPError as e:
+                  bail("/key/list HTTP " + str(e.code) + ": " + e.read().decode()[:300])
+              except Exception as e:
+                  bail("/key/list failed: " + repr(e))
 
-              echo "--- Updating restricted keys ---"
-              echo "$TOKENS" | while IFS= read -r token; do
-                [ -z "$token" ] && continue
-                echo "Updating key ${token:0:12}... → models=[] (all models)"
-                if wget -qO /tmp/upd.json \
-                  --header="Authorization: Bearer $LITELLM_MASTER_KEY" \
-                  --header="Content-Type: application/json" \
-                  --post-data="{\"key\": \"$token\", \"models\": []}" \
-                  "$BASE/key/update" 2>/tmp/upd.err; then
-                  echo "  OK"
-                else
-                  echo "  WARN: update failed. Error:"
-                  cat /tmp/upd.err 2>/dev/null || true
-                  cat /tmp/upd.json 2>/dev/null | head -c 200 || true
-=======
-              # Try GET /key/list first (LiteLLM <1.60), then POST (1.60+).
-              echo "--- Fetching key list ---"
-              RESP=""
-              HTTP_CODE=$(curl -s -w '%{http_code}' -o /tmp/keys.json \
-                -H "Authorization: Bearer $LITELLM_MASTER_KEY" \
-                "$BASE/key/list" 2>/dev/null) || true
-              if [ "$HTTP_CODE" = "200" ]; then
-                RESP=$(cat /tmp/keys.json)
-                echo "GET /key/list returned 200"
-              else
-                echo "GET /key/list returned HTTP $HTTP_CODE — trying POST..."
-                HTTP_CODE=$(curl -s -w '%{http_code}' -o /tmp/keys.json \
-                  -X POST "$BASE/key/list" \
-                  -H "Authorization: Bearer $LITELLM_MASTER_KEY" \
-                  -H "Content-Type: application/json" \
-                  -d '{}' 2>/dev/null) || true
-                if [ "$HTTP_CODE" = "200" ]; then
-                  RESP=$(cat /tmp/keys.json)
-                  echo "POST /key/list returned 200"
-                else
-                  echo "WARN: /key/list failed (GET=$HTTP_CODE, POST=$HTTP_CODE). Skipping."
-                  exit 0
-                fi
-              fi
+              if isinstance(resp, dict):
+                  keys = resp.get("keys") or resp.get("data") or []
+              else:
+                  keys = resp or []
+              print("Total keys returned: " + str(len(keys)), flush=True)
 
-              TOP_KEYS=$(echo "$RESP" | jq -r 'keys_unsorted | join(", ")' 2>/dev/null || echo "not-json")
-              echo "Response top-level keys: $TOP_KEYS"
-              TOTAL=$(echo "$RESP" | jq -r '(.keys // .data // []) | length' 2>/dev/null || echo "?")
-              echo "Total keys found: $TOTAL"
+              # A key may come back as a bare hashed-token string when
+              # return_full_object is not honoured; normalise both shapes.
+              norm = []
+              for k in keys:
+                  if isinstance(k, str):
+                      norm.append({"token": k, "models": None, "key_alias": None})
+                  elif isinstance(k, dict):
+                      norm.append(k)
+              if not norm:
+                  bail("no keys parsed from /key/list response")
 
-              # Log each key's structure (redacting sensitive values).
-              echo "$RESP" | jq -r '
-                (.keys // .data // [])[] |
-                "  key_alias=\(.key_alias // .key_name // "n/a") models=\(.models // "null") token_prefix=\(.token[:12] // "n/a")"
-              ' 2>/dev/null || echo "  (could not parse individual keys)"
+              restricted = []
+              for k in norm:
+                  tok = k.get("token") or k.get("key") or ""
+                  models = k.get("models")
+                  alias = k.get("key_alias") or k.get("key_name") or "n/a"
+                  count = len(models) if isinstance(models, list) else "unknown"
+                  # token is a HASH, and only a prefix — safe for a public log.
+                  print("  alias=" + str(alias) + " models=" + str(count) +
+                        " token_prefix=" + tok[:8], flush=True)
+                  if isinstance(models, list) and len(models) > 0:
+                      restricted.append((tok, alias))
 
-              # Extract tokens/keys that have a non-empty models restriction.
-              # Try .token first (standard), fall back to .key (some versions).
-              TOKENS=$(echo "$RESP" | jq -r '
-                (.keys // .data // [])[]
-                | select(.models != null and (.models | type == "array") and (.models | length) > 0)
-                | (.token // .key // empty)' 2>/dev/null)
+              if not restricted:
+                  print("No keys carry a model restriction. Nothing to do.", flush=True)
+                  print("=== hook complete (no-op) ===", flush=True)
+                  sys.exit(0)
 
-              if [ -z "$TOKENS" ]; then
-                echo "No keys with model restrictions found. Nothing to update."
-                echo "=== hook complete (no-op) ==="
-                exit 0
-              fi
+              # --- clear restrictions -------------------------------------------
+              print("--- Clearing restrictions on " + str(len(restricted)) + " key(s) ---", flush=True)
+              failures = 0
+              for tok, alias in restricted:
+                  if not tok:
+                      continue
+                  try:
+                      api("/key/update", {"key": tok, "models": []})
+                      print("  OK  alias=" + str(alias) + " token_prefix=" + tok[:8] +
+                            " -> models=[] (all models)", flush=True)
+                  except urllib.error.HTTPError as e:
+                      failures += 1
+                      print("  ERR alias=" + str(alias) + " HTTP " + str(e.code) +
+                            ": " + e.read().decode()[:300], flush=True)
+                  except Exception as e:
+                      failures += 1
+                      print("  ERR alias=" + str(alias) + ": " + repr(e), flush=True)
 
-              echo "--- Updating restricted keys ---"
-              updated=0
-              failed=0
-              echo "$TOKENS" | while IFS= read -r token; do
-                [ -z "$token" ] && continue
-                echo "Updating key ${token:0:12}... → models=[] (all models)"
-                UPD_BODY=""
-                UPD_CODE=$(curl -s -w '%{http_code}' -o /tmp/upd.json \
-                  -X POST "$BASE/key/update" \
-                  -H "Authorization: Bearer $LITELLM_MASTER_KEY" \
-                  -H "Content-Type: application/json" \
-                  -d "{\"key\": \"$token\", \"models\": []}") || true
-                UPD_BODY=$(cat /tmp/upd.json 2>/dev/null || echo "")
-                if [ "$UPD_CODE" = "200" ]; then
-                  echo "  OK (HTTP $UPD_CODE)"
-                else
-                  echo "  WARN: HTTP $UPD_CODE — response: $(echo "$UPD_BODY" | head -c 200)"
->>>>>>> origin/main
-                fi
-              done
-              echo "=== hook complete ==="
+              print("=== hook complete (" + str(len(restricted) - failures) + " updated, " +
+                    str(failures) + " failed) ===", flush=True)
+              sys.exit(0)
           env:
             - name: LITELLM_MASTER_KEY
               valueFrom:
@@ -191,6 +186,6 @@ spec:
             capabilities:
               drop: ["ALL"]
           resources:
-            requests: { cpu: "10m", memory: "32Mi" }
-            limits:   { cpu: "250m", memory: "128Mi" }
+            requests: { cpu: "10m", memory: "64Mi" }
+            limits:   { cpu: "250m", memory: "256Mi" }
 {{- end }}

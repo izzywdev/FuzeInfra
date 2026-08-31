@@ -299,8 +299,18 @@ litellmSettings:
   modify_params: true
   num_retries: 2
   request_timeout: 600
-  # Console logging — logs request metadata, model, and failure reason to stdout
-  # (captured by Loki via Promtail). Keys are auto-redacted by LiteLLM.
+  # Console logging — request metadata, chosen model, and failure reason to
+  # stdout (collected by Promtail into Loki).
+  #
+  # TEMPORARY / DIAGNOSTIC. These were turned on to debug the virtual-key 403
+  # deadlock and should be dialled back once that is settled:
+  #   set_verbose + LITELLM_LOG=DEBUG are very chatty at prod request volume;
+  #   log_raw_request_response emits the raw upstream request/response bodies,
+  #   which means PROMPT AND COMPLETION CONTENT lands in Loki. Upstream masks
+  #   api-key fields, but do not treat that as a guarantee — this is not a
+  #   setting to leave on indefinitely on a shared gateway.
+  # Prefer `list-models` / `test-model` via .github/workflows/litellm-admin.yml
+  # for routine questions; it answers them without logging traffic at all.
   set_verbose: true
   log_raw_request_response: true
   json_logs: true

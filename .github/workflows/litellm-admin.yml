@@ -1,0 +1,97 @@
+# litellm-admin — on-demand introspection and repair of the LiteLLM gateway's
+# virtual keys, without a deploy.
+#
+# WHY THIS EXISTS. Answering "does the FUZE_KEY have a models restriction?" used
+# to require editing a PostSync hook, merging it, waiting for deploy-prod, then
+# waiting for an Argo sync to run the Job — ~15 minutes per question, and the
+# answer was repeatedly "the hook's image has no curl". This runs the same logic
+# against the ALREADY-RUNNING pod in about a minute, and works even when the
+# chart is failing to render (which is exactly when you most need to look).
+#
+# It complements, and does not replace, the PostSync hook in
+# helm/litellm/templates/job-sync-key-models.yaml: the hook is the durable
+# GitOps reconciliation that runs on every sync, this is the interactive probe.
+# Both share the same intent (`models: []` == all models); this one just answers
+# now. Deliberately NOT wired to repository_dispatch, unlike cluster-query:
+# `clear-key-models` MUTATES gateway state, so it stays behind workflow_dispatch,
+# which needs Actions:write on FuzeInfra.
+#
+# SECRETS. The master key is never read out of the cluster — the script runs
+# INSIDE the pod, which already has LITELLM_MASTER_KEY in its environment. Only
+# hashed-token prefixes are printed. FuzeInfra job logs are public; treat any
+# change to the printed output as a security review.
+name: litellm-admin
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: 'What to do'
+        required: true
+        type: choice
+        default: list-keys
+        options:
+          - list-keys           # aliases + model-restriction counts (read-only)
+          - list-models         # models the gateway currently serves (read-only)
+          - clear-key-models    # MUTATES: set models=[] (all models) on every key
+          - test-model          # mint a temp key, call `model`, delete it
+      model:
+        description: 'Model name for test-model (e.g. claude-opus-4-8)'
+        required: false
+        default: 'claude-opus-4-8'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: litellm-admin
+  cancel-in-progress: false
+
+jobs:
+  admin:
+    name: ${{ inputs.action }}
+    runs-on: staging
+    environment: production
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - uses: azure/setup-kubectl@829323503d1be3d00ca8346e5391ca0b07a9ab0d # v5.1.0
+
+      - name: Configure kubectl
+        env:
+          KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
+        run: |
+          set -euo pipefail
+          if [ -z "$KUBE_CONFIG" ]; then echo "::error::KUBE_CONFIG unset"; exit 1; fi
+          mkdir -p "$HOME/.kube"
+          printf '%s' "$KUBE_CONFIG" | base64 -d > "$HOME/.kube/config"
+          chmod 600 "$HOME/.kube/config"
+          echo "KUBECONFIG=$HOME/.kube/config" >> "$GITHUB_ENV"
+
+      - name: Run admin action in the litellm pod
+        env:
+          ACTION: ${{ inputs.action }}
+          MODEL: ${{ inputs.model }}
+        run: |
+          set -euo pipefail
+
+          # Resolve a running pod explicitly rather than `exec deploy/litellm`,
+          # so the log names the pod that answered — during a rollout there can
+          # be two, and "which pod said that" has mattered here before.
+          pod=$(kubectl -n fuzeinfra get pods \
+                  -l app.kubernetes.io/name=litellm \
+                  --field-selector=status.phase=Running \
+                  -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+          if [ -z "$pod" ]; then
+            echo "::error::no Running litellm pod found in namespace fuzeinfra"
+            kubectl -n fuzeinfra get pods -l app.kubernetes.io/name=litellm || true
+            exit 1
+          fi
+          echo "Target pod: $pod"
+          echo
+
+          # The script is passed as a single -c argument and the action/model as
+          # separate argv elements. kubectl exec uses exec form (no shell in the
+          # container), so the model name cannot be interpreted as a command.
+          kubectl -n fuzeinfra exec "$pod" -c litellm -- \
+            python3 -c "$(cat scripts/litellm_admin.py)" "$ACTION" "$MODEL"
