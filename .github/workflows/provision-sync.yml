@@ -1,3 +1,4 @@
+# fuze:managed template=provision-sync.yml baseline=main digest=sha256:813f59d209d1dacc01ad833f0309cebadba3cefb8f37becd574bce3a1d431e56
 name: Sync Managed Agents on merge
 
 # Per-repo caller (stamped by sdlc-bootstrap, ONLY for repos that declare `roles` in
