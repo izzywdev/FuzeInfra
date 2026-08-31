@@ -1,0 +1,107 @@
+name: Verify fuze-agent App permissions
+
+# Settles one question that cannot be answered from a workstation: does the
+# `fuze-agent` GitHub App installation actually hold `workflows: write`?
+#
+# WHY IT MATTERS. governance-sync reconciles `.github/workflows/**` ONLY when it
+# holds a workflows-capable App token, and falls back to detect-only otherwise.
+# That fallback is deliberate and silent -- a good failure mode, a terrible
+# diagnostic: "reconcile found no drift" and "reconcile is not permitted to write
+# workflows" look identical from outside. This tells them apart.
+#
+# WHY IT RUNS HERE AND NOT ON A LAPTOP. `GET /repos/{o}/{r}/installation` requires
+# App JWT auth, which requires the App's PRIVATE KEY. Reading that key out to a
+# workstation to answer a config question is the move that put LITELLM_MASTER_KEY
+# into a public job log on 2026-07-29. The check runs where the key already lives.
+# No token and no key is ever printed -- only a yes/no verdict.
+#
+# HOW THE PROBE WORKS. actions/create-github-app-token accepts `permission-<name>`
+# inputs to scope a token DOWN. Requesting a permission the installation does not
+# hold makes the action fail. So asking for a workflows-scoped token is a
+# definitive capability test that mutates nothing -- unlike "try to push a
+# workflow file and see", which would answer the question by changing a repo.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Probe — request a token scoped to workflows:write
+        id: probe
+        continue-on-error: true
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.FUZE_AGENT_APP_ID }}
+          private-key: ${{ secrets.FUZE_AGENT_APP_PRIVATE_KEY }}
+          owner: izzywdev
+          permission-workflows: write
+
+      - name: Baseline — request an unscoped token (proves the App itself works)
+        id: baseline
+        continue-on-error: true
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.FUZE_AGENT_APP_ID }}
+          private-key: ${{ secrets.FUZE_AGENT_APP_PRIVATE_KEY }}
+          owner: izzywdev
+
+      - name: Verdict
+        env:
+          PROBE: ${{ steps.probe.outcome }}
+          BASELINE: ${{ steps.baseline.outcome }}
+          GH_TOKEN: ${{ steps.baseline.outputs.token }}
+        run: |
+          set -euo pipefail
+
+          {
+            echo "### fuze-agent App — capability probe"
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "$BASELINE" != "success" ]; then
+            echo "::error::Could not mint ANY installation token. The App secrets are wrong, the App is not installed under izzywdev, or the private key has been rotated. This is not a permissions question — fix the App wiring first."
+            echo "- **Baseline token:** FAILED — App wiring is broken, permissions are moot." >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+
+          COUNT=$(gh api /installation/repositories --jq '.total_count')
+          {
+            echo "- **Baseline token:** minted OK"
+            echo "- **Repositories in this installation:** ${COUNT}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "$PROBE" = "success" ]; then
+            {
+              echo "- **\`workflows: write\`:** ✅ GRANTED"
+              echo ""
+              echo "governance-sync will reconcile \`.github/workflows/**\` on repos whose"
+              echo "stamped copy carries the \`fuze:managed\` marker."
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::notice::workflows:write is granted — reconcile is live."
+          else
+            {
+              echo "- **\`workflows: write\`:** ❌ NOT granted"
+              echo ""
+              echo "governance-sync will silently fall back to DETECT-ONLY for"
+              echo "\`.github/workflows/**\` and reconcile nothing. Grant the permission at"
+              echo "\`https://github.com/settings/apps/<app-slug>/permissions\` (Repository"
+              echo "permissions → Workflows → Read and write), then accept the request on"
+              echo "the installation — a permission change is not live until the"
+              echo "installation accepts it, which is the step most often missed."
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::warning::workflows:write is NOT granted — workflow reconcile is inert."
+          fi
+
+          {
+            echo ""
+            echo "<details><summary>Repositories covered</summary>"
+            echo ""
+            gh api /installation/repositories --paginate --jq '.repositories[].full_name' | sed 's/^/- /'
+            echo ""
+            echo "</details>"
+          } >> "$GITHUB_STEP_SUMMARY"
