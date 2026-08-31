@@ -213,11 +213,12 @@ def gateway():
 
 def _load_admin(port):
     os.environ["LITELLM_MASTER_KEY"] = "sk-test-not-a-real-key"
-    os.environ["LITELLM_PORT"] = str(port)
+    os.environ["LITELLM_BASE_URL"] = f"http://127.0.0.1:{port}"
+    os.environ.pop("LITELLM_PORT", None)
     spec = importlib.util.spec_from_file_location("litellm_admin", ADMIN)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
-    # The module resolves BASE at import time from LITELLM_PORT.
+    # BASE is resolved at import time; confirm the override took.
     assert mod.BASE.endswith(str(port)), mod.BASE
     return mod
 

@@ -9,15 +9,15 @@ have curl". Four of those cycles were spent on questions ("does the key have a
 models restriction?", "what does /key/list actually return?") that this script
 answers in about 60 seconds via `kubectl exec` into the already-running pod.
 
-It is shipped INTO the pod by .github/workflows/litellm-admin.yml
-(`kubectl exec deploy/litellm -- python3 -c "$(cat this-file)" <action> [arg]`).
-Running there is what makes it cheap and safe:
-  * the pod already holds LITELLM_MASTER_KEY in its env, so no credential is
-    read out of the cluster, put on a command line, or handed to a runner;
-  * it reaches the gateway over localhost, so it needs no ingress, no
-    Cloudflare Access service token, and no NetworkPolicy change;
+It is run by .github/workflows/litellm-admin.yml on the `staging` ARC runner,
+which sits in the cluster and reaches the gateway over its ClusterIP Service.
+That keeps it cheap:
+  * no ingress, no Cloudflare Access service token — arc-runners is already on
+    the gateway's networkPolicy.allowedNamespaces;
   * stdlib only, so there is nothing to install (the failure mode that broke
-    the PostSync hooks twice — see helm/litellm/templates/job-sync-key-models.yaml).
+    the PostSync hooks twice — see helm/litellm/templates/job-sync-key-models.yaml);
+  * it can also be run INSIDE the pod (see BASE below), where no key is needed
+    on the caller at all — preferable when the cluster allows exec.
 
 SECRET DISCIPLINE — FuzeInfra job logs are PUBLIC.
 Nothing here ever prints a credential. `/key/list` returns the HASHED token and
@@ -41,7 +41,20 @@ import sys
 import urllib.error
 import urllib.request
 
-BASE = "http://127.0.0.1:" + os.environ.get("LITELLM_PORT", "4000")
+# Where the gateway is. Two supported call sites, in order of preference:
+#   1. From the `staging` ARC runner over cluster DNS
+#      (http://litellm.fuzeinfra.svc.cluster.local:4000). arc-runners is on the
+#      gateway's networkPolicy.allowedNamespaces precisely so CI can do this —
+#      a2a-maintain.yml has used this path for a while.
+#   2. From inside the litellm pod over localhost (kubectl exec), which needs no
+#      key on the caller because the pod already holds one.
+# (2) is currently NOT usable on this cluster: the API server cannot reach the
+# kubelet on the node hosting the pod ("error dialing backend: ... :10250,
+# code 502"), which breaks exec, logs and port-forward alike. (1) is unaffected
+# because it is ordinary pod-to-pod traffic that never touches the kubelet.
+BASE = os.environ.get("LITELLM_BASE_URL") or (
+    "http://127.0.0.1:" + os.environ.get("LITELLM_PORT", "4000")
+)
 MASTER = os.environ.get("LITELLM_MASTER_KEY", "")
 # Defence in depth: the workflow already passes this as a distinct argv element
 # (kubectl exec uses exec form, so no shell ever sees it), but a model name is
