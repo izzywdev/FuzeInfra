@@ -52,6 +52,12 @@ DEFAULT_MATCH = r"(?i)^(fuze|mendys)"
 DEFAULT_POLICY = "governance/secrets-policy.json"
 WORKFLOW_DIR = ".github/workflows"
 
+#: Minted per run by GitHub itself; never configured, so never "missing".
+BUILT_IN = {"GITHUB_TOKEN"}
+SECRET_REF = re.compile(r"secrets\.([A-Z][A-Z0-9_]{2,})")
+#: `uses: izzywdev/FuzeSDLC/.github/workflows/<file>@<ref>` -- a reusable-workflow call.
+REUSABLE_CALL = re.compile(r"uses:\s*izzywdev/FuzeSDLC/\.github/workflows/([\w.-]+)@")
+
 # --------------------------------------------------------------------------
 # gh plumbing
 # --------------------------------------------------------------------------
@@ -98,6 +104,16 @@ def _list_key(obj):
         if isinstance(obj.get(key), list):
             return key
     return None
+
+
+def gh_raw(path: str) -> str:
+    """Fetch a file's raw body through the contents API. Empty string on failure."""
+    proc = subprocess.run(
+        ["gh", "api", "-H", "Accept: application/vnd.github.raw", path],
+        capture_output=True,
+        text=True,
+    )
+    return proc.stdout if proc.returncode == 0 else ""
 
 
 def _gh_once(path: str):
@@ -168,7 +184,41 @@ def _safe(path: str, *, paginate: bool = False, default=None):
         return default, {"path": exc.path, "status": exc.status, "detail": exc.body}
 
 
-def collect_repo(owner: str, repo: dict) -> dict:
+def _canonical_refs(canonical: str, filename: str) -> set:
+    """Secret names referenced by a FuzeSDLC reusable/template, read from a local checkout.
+
+    A caller with `secrets: inherit` needs the CALLEE's secrets even though its own file
+    names none -- telegram-pr-merged.yml is the standing example: 22 repos carry it, it
+    mentions no secret, and it hard-fails without TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID.
+    Scanning only each repo's own text misses every one of those.
+    """
+    if not canonical:
+        return set()
+    for sub in (".github/workflows", "workflow-templates"):
+        path = os.path.join(canonical, sub, filename)
+        if os.path.exists(path):
+            with open(path, encoding="utf-8", errors="replace") as fh:
+                return set(SECRET_REF.findall(fh.read())) - BUILT_IN
+    return set()
+
+
+def scan_workflow_refs(full: str, files: list, canonical: str) -> dict:
+    """{workflow filename: [secret names it needs]} for one repo, inherit-calls resolved."""
+    refs = {}
+    for fname in files:
+        body = gh_raw(f"repos/{full}/contents/{WORKFLOW_DIR}/{fname}")
+        if not body:
+            continue
+        names = set(SECRET_REF.findall(body)) - BUILT_IN
+        if "secrets: inherit" in body:
+            for callee in REUSABLE_CALL.findall(body):
+                names |= _canonical_refs(canonical, callee)
+        if names:
+            refs[fname] = sorted(names)
+    return refs
+
+
+def collect_repo(owner: str, repo: dict, *, scan: bool = True, canonical: str = "") -> dict:
     full = f"{owner}/{repo['name']}"
     out = dict(repo)
     out["full_name"] = full
@@ -219,6 +269,18 @@ def collect_repo(owner: str, repo: dict) -> dict:
     out["workflows"] = sorted(
         e["name"] for e in (listing or []) if e.get("name", "").endswith((".yml", ".yaml"))
     ) if isinstance(listing, list) else []
+
+    # What the repo's workflows actually ASK FOR. Declared policy says what SHOULD be
+    # there; this says what the running CI will look for and not find.
+    out["workflow_refs"] = (
+        scan_workflow_refs(full, out["workflows"], canonical) if scan else {}
+    )
+    referenced = {n for names in out["workflow_refs"].values() for n in names}
+    present = {s["name"] for s in out["actions_secrets"]}
+    present |= {n for names in out["environments"].values() for n in names}
+    out["referenced"] = sorted(referenced)
+    out["referenced_missing"] = sorted(referenced - present)
+    out["unreferenced"] = sorted(present - referenced) if scan else []
 
     return out
 
@@ -473,6 +535,43 @@ def render_markdown(report: dict) -> str:
             add(f"| `{r['name']}` | {r['source']} | {_fmt(r['unexpected_in'], 12)} |")
         add("")
 
+    wanted = [(r["name"], r["referenced_missing"]) for r in repos if r.get("referenced_missing")]
+    if wanted:
+        by_secret = {}
+        for repo, names in wanted:
+            for name in names:
+                by_secret.setdefault(name, []).append(repo)
+        add("## Referenced but absent — what CI asks for and will not find")
+        add("")
+        add(
+            "Derived from the workflow bodies themselves (including `secrets: inherit` into "
+            "FuzeSDLC reusables), not from the policy. A name here is referenced by a workflow "
+            "in that repo and has no value set, so the step fails, skips, or silently degrades."
+        )
+        add("")
+        add("| Secret | Repos | Where |")
+        add("|---|---|---|")
+        for name in sorted(by_secret, key=lambda n: (-len(by_secret[n]), n)):
+            hits = by_secret[name]
+            add(f"| `{name}` | {len(hits)} | {_fmt(hits, 10)} |")
+        add("")
+
+    orphaned = [(r["name"], r["unreferenced"]) for r in repos if r.get("unreferenced")]
+    if orphaned:
+        add("## Present but referenced by no workflow")
+        add("")
+        add(
+            "Not automatically deletable: many are consumed by the DEPLOYED application "
+            "(sealed into a k8s Secret, read at runtime) rather than by CI. Confirm the "
+            "consumer before removing any of these."
+        )
+        add("")
+        add("| Repo | Secrets |")
+        add("|---|---|")
+        for repo, names in orphaned:
+            add(f"| `{repo}` | {_fmt(names, 10)} |")
+        add("")
+
     unclassified = [r for r in rows if not r["classified"]]
     add("## Unclassified secrets (no policy rule)")
     add("")
@@ -542,6 +641,18 @@ def main() -> int:
     ap.add_argument("--policy", default=DEFAULT_POLICY)
     ap.add_argument("--json", dest="json_out", help="write the full machine-readable report here")
     ap.add_argument("--markdown", dest="md_out", help="write the human report here (default stdout)")
+    ap.add_argument(
+        "--no-scan-workflows",
+        dest="scan",
+        action="store_false",
+        help="skip reading workflow bodies (much faster, but loses the referenced-but-absent report)",
+    )
+    ap.add_argument(
+        "--canonical",
+        default="",
+        help="path to a FuzeSDLC checkout, so `secrets: inherit` calls into its reusables "
+        "can be resolved to the secrets they actually need",
+    )
     ap.add_argument("--jobs", type=int, default=8)
     ap.add_argument("--strict", action="store_true", help="exit 2 if any required secret is missing")
     args = ap.parse_args()
@@ -560,7 +671,18 @@ def main() -> int:
     print(f"[info] scanning {len(repos)} repos...", file=sys.stderr)
 
     with ThreadPoolExecutor(max_workers=args.jobs) as pool:
-        collected = list(pool.map(lambda r: collect_repo(args.owner, r), repos))
+        collected = list(
+            pool.map(
+                lambda r: collect_repo(args.owner, r, scan=args.scan, canonical=args.canonical),
+                repos,
+            )
+        )
+    if args.scan and not args.canonical:
+        print(
+            "[warn] --canonical not given: `secrets: inherit` into FuzeSDLC reusables cannot be "
+            "resolved, so the referenced-but-absent report will understate the gaps",
+            file=sys.stderr,
+        )
     if args.onboarded_only:
         collected = [r for r in collected if r["onboarded"]]
 
