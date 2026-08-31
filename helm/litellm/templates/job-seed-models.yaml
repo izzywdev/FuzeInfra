@@ -53,8 +53,8 @@ spec:
               until curl -sf "$BASE/health/readiness" >/dev/null 2>&1; do
                 attempts=$((attempts + 1))
                 if [ "$attempts" -ge 60 ]; then
-                  echo "LiteLLM not ready after 5 minutes — aborting."
-                  exit 1
+                  echo "LiteLLM not ready after 5 minutes — skipping (will retry next sync)."
+                  exit 0
                 fi
                 sleep 5
               done
