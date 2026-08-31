@@ -23,6 +23,8 @@ metadata:
     "helm.sh/hook": post-upgrade,post-install
     "helm.sh/hook-weight": "10"
     "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+    "argocd.argoproj.io/hook": PostSync
+    "argocd.argoproj.io/hook-delete-policy": BeforeHookCreation,HookSucceeded
 spec:
   ttlSecondsAfterFinished: 600
   backoffLimit: 3
@@ -62,7 +64,13 @@ spec:
                 exit 0
               }
 
-              TOKENS=$(echo "$RESP" | jq -r '.keys[]? | select(.models != null and (.models | length) > 0) | .token' 2>/dev/null)
+              TOP_KEYS=$(echo "$RESP" | jq -r 'keys_unsorted | join(", ")' 2>/dev/null || echo "not-json")
+              echo "Response top-level keys: $TOP_KEYS"
+
+              TOKENS=$(echo "$RESP" | jq -r '
+                (.keys // .data // [])[]
+                | select(.models != null and (.models | length) > 0)
+                | .token' 2>/dev/null)
 
               if [ -z "$TOKENS" ]; then
                 echo "No keys with model restrictions found. Nothing to update."
@@ -71,14 +79,16 @@ spec:
 
               echo "$TOKENS" | while IFS= read -r token; do
                 [ -z "$token" ] && continue
-                short="${token%%????????????????????????}"
                 echo "Updating key ${token:0:8}... → models=[] (all models)"
-                curl -sf -X POST "$BASE/key/update" \
+                HTTP_CODE=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/key/update" \
                   -H "Authorization: Bearer $LITELLM_MASTER_KEY" \
                   -H "Content-Type: application/json" \
-                  -d "{\"key\": \"$token\", \"models\": []}" >/dev/null 2>&1 \
-                  && echo "  OK" \
-                  || echo "  WARN: update failed"
+                  -d "{\"key\": \"$token\", \"models\": []}")
+                if [ "$HTTP_CODE" = "200" ]; then
+                  echo "  OK (HTTP $HTTP_CODE)"
+                else
+                  echo "  WARN: update returned HTTP $HTTP_CODE"
+                fi
               done
               echo "Sync complete."
           env:
