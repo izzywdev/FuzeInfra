@@ -140,7 +140,16 @@ jobs:
             TodoWrite
           claude_args: >-
             --permission-mode bypassPermissions
-            --max-turns 60
+            # 60 was too tight and produced the worst possible outcome: the sweep
+            # SUCCEEDED (is_error:false, 62 turns, Governance reconciliation issue
+            # #759 created) and the action then failed the step anyway with
+            # "Claude reported a successful result after 62 turns, exceeding the
+            # configured maximum of 60". A budget that fails a run which did its job
+            # teaches people to ignore the red, which is exactly what the
+            # deliverable-verification step above exists to prevent. Raised with
+            # headroom; the deliverable check -- not the turn count -- is what
+            # decides whether this run counted.
+            --max-turns 150
           prompt: |
             You are the **platform-governance** agent running the nightly **governance-reconciliation**
             sweep for the repository ${{ github.repository }}. Follow the governance-reconciliation skill.
