@@ -153,6 +153,27 @@ spec:
             - name: PROXY_BASE_URL
               value: {{ .Values.sso.proxyBaseUrl | quote }}
             {{- end }}
+            {{- if .Values.storeModelInDB }}
+            - name: STORE_MODEL_IN_DB
+              value: "True"
+            {{- end }}
+            {{- if .Values.redis.enabled }}
+            - name: REDIS_HOST
+              value: {{ .Values.redis.host | quote }}
+            - name: REDIS_PORT
+              value: {{ .Values.redis.port | quote }}
+            {{- if .Values.redis.db }}
+            - name: REDIS_DB
+              value: {{ .Values.redis.db | quote }}
+            {{- end }}
+            {{- if .Values.redis.passwordSecret }}
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.redis.passwordSecret }}
+                  key: {{ .Values.redis.passwordKey | default "REDIS_PASSWORD" }}
+            {{- end }}
+            {{- end }}
             {{- if .Values.database.enabled }}
             # ORDER IS LOAD-BEARING: Kubernetes only expands $(VAR) references to
             # variables declared EARLIER in this list, so these two must precede

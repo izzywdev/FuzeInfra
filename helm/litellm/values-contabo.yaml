@@ -127,6 +127,17 @@ sso:
   # rotation actually restarts the pod.
   secretRotation: "2026-08-20"
 
+# Redis — use FuzeInfra's shared Redis (fuzeinfra-redis), database 3.
+# No password: the ACL `default` user has no auth, and LiteLLM doesn't need
+# dangerous commands. A dedicated ACL user can be added later via the Redis
+# onboarding flow (governance/datastore-allocations.md).
+redis:
+  enabled: true
+
+# DB-based model storage — seeds the full OpenAI + Gemini catalog on every
+# sync so consumers can request any listed model without a values.yaml change.
+storeModelInDB: true
+
 # NOTE ON NODE PINNING: FuzeFront's own values-prod.yaml pins a `litellm`
 # affinity to node `fuzefront-node-2`. That node does not exist in this cluster
 # (Contabo nodes are vmi* / fuzeinfra-elastic-*), and that block belonged to the

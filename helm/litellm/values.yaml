@@ -461,3 +461,99 @@ sso:
   scope: "openid profile email groups"
   secretName: litellm-oidc
   secretKey: CLIENT_SECRET
+
+# -----------------------------------------------------------------------------
+# Redis — shared state for rate limiting, response caching, router cooldowns,
+# budget enforcement, and virtual-key cache invalidation.
+#
+# FuzeInfra already runs Redis at fuzeinfra-redis:6379 (ACL-enabled, no-auth
+# default user). LiteLLM gets its own database number for isolation — the
+# shared server, not a separate instance.
+#
+# When disabled, LiteLLM still runs — rate limits become per-worker, caching
+# is in-memory, and the startup warning can be suppressed. A built-in circuit
+# breaker (default: 5 failures → 60s fast-fail → probe) protects against
+# Redis outages at runtime.
+# -----------------------------------------------------------------------------
+redis:
+  enabled: false
+  host: fuzeinfra-redis
+  port: 6379
+  db: 3
+  # When the Redis instance requires auth (e.g. a dedicated ACL user), supply
+  # the password from a k8s Secret. Leave empty to connect without auth (the
+  # no-auth `default` ACL user on FuzeInfra's Redis).
+  passwordSecret: ""
+  passwordKey: REDIS_PASSWORD
+
+# -----------------------------------------------------------------------------
+# DB-based model storage.
+#
+# When true, models added via the admin UI or API are persisted in Postgres
+# (LiteLLM_ProxyModelTable) and loaded on every config-refresh cycle alongside
+# the config.yaml model_list. The two sources are ADDITIVE, not exclusive:
+# config.yaml models keep working; DB models are additional deployments.
+#
+# Requires database.enabled. Provider credentials for DB models are encrypted
+# at rest using LITELLM_SALT_KEY (falls back to LITELLM_MASTER_KEY). Once
+# models are stored, NEVER rotate the salt key — doing so renders all
+# encrypted credentials unreadable.
+# -----------------------------------------------------------------------------
+storeModelInDB: false
+
+# -----------------------------------------------------------------------------
+# Model seeding — full OpenAI + Gemini catalogs added to the DB as a PostSync
+# hook on every Argo sync. Requires storeModelInDB: true and database.enabled.
+#
+# These are models consumers can request DIRECTLY through the gateway. They
+# coexist with config.yaml models (which carry the fallback chain + drop_params
+# config). The seed job is idempotent: it skips models whose name already
+# exists (either in YAML model_list or in the DB).
+#
+# Every name here MUST be a real, API-verified model ID — not a speculative
+# one. A model that 404s at the provider is silent dead weight until a consumer
+# hits it and gets a confusing error. Err on the side of fewer verified models
+# over a long list of hopefuls.
+# -----------------------------------------------------------------------------
+seedModels:
+  # --- OpenAI -----------------------------------------------------------------
+  - name: gpt-4.1-nano
+    provider: openai/gpt-4.1-nano
+    keyEnv: OPENAI_API_KEY
+  - name: gpt-4o
+    provider: openai/gpt-4o
+    keyEnv: OPENAI_API_KEY
+  - name: gpt-4o-mini
+    provider: openai/gpt-4o-mini
+    keyEnv: OPENAI_API_KEY
+  - name: o3
+    provider: openai/o3
+    keyEnv: OPENAI_API_KEY
+  - name: o3-mini
+    provider: openai/o3-mini
+    keyEnv: OPENAI_API_KEY
+  - name: o4-mini
+    provider: openai/o4-mini
+    keyEnv: OPENAI_API_KEY
+  - name: text-embedding-3-large
+    provider: openai/text-embedding-3-large
+    keyEnv: OPENAI_API_KEY
+  # --- Gemini (pinned production versions) ------------------------------------
+  - name: gemini-2.5-pro
+    provider: gemini/gemini-2.5-pro
+    keyEnv: GEMINI_API_KEY
+  - name: gemini-2.5-flash
+    provider: gemini/gemini-2.5-flash
+    keyEnv: GEMINI_API_KEY
+  - name: gemini-2.5-flash-lite
+    provider: gemini/gemini-2.5-flash-lite
+    keyEnv: GEMINI_API_KEY
+  - name: gemini-3.7-flash
+    provider: gemini/gemini-3.7-flash
+    keyEnv: GEMINI_API_KEY
+  - name: gemini-3.5-flash
+    provider: gemini/gemini-3.5-flash
+    keyEnv: GEMINI_API_KEY
+  - name: gemini-3.5-flash-lite
+    provider: gemini/gemini-3.5-flash-lite
+    keyEnv: GEMINI_API_KEY
