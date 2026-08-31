@@ -55,8 +55,12 @@ WORKFLOW_DIR = ".github/workflows"
 #: Minted per run by GitHub itself; never configured, so never "missing".
 BUILT_IN = {"GITHUB_TOKEN"}
 SECRET_REF = re.compile(r"secrets\.([A-Z][A-Z0-9_]{2,})")
-#: `uses: izzywdev/FuzeSDLC/.github/workflows/<file>@<ref>` -- a reusable-workflow call.
-REUSABLE_CALL = re.compile(r"uses:\s*izzywdev/FuzeSDLC/\.github/workflows/([\w.-]+)@")
+#: `uses: <owner>/<repo>/.github/workflows/<file>@<ref>` -- a reusable-workflow call.
+#: Deliberately NOT pinned to FuzeSDLC: three repos (FuzeFront, MendysRobotics,
+#: MendysRoboticsWP) still call the pre-FuzeSDLC reusables in izzywdev/AITools with
+#: `secrets: inherit`. A FuzeSDLC-only pattern silently resolved none of those, which is
+#: exactly the class of gap this scan exists to close.
+REUSABLE_CALL = re.compile(r"uses:\s*([\w.-]+)/([\w.-]+)/\.github/workflows/([\w.-]+)@")
 
 # --------------------------------------------------------------------------
 # gh plumbing
@@ -184,35 +188,45 @@ def _safe(path: str, *, paginate: bool = False, default=None):
         return default, {"path": exc.path, "status": exc.status, "detail": exc.body}
 
 
-def _canonical_refs(canonical: str, filename: str) -> set:
-    """Secret names referenced by a FuzeSDLC reusable/template, read from a local checkout.
+def _callee_refs(owner: str, repo: str, filename: str, canonical: str, cache: dict) -> set:
+    """Secret names a called reusable workflow needs.
 
     A caller with `secrets: inherit` needs the CALLEE's secrets even though its own file
     names none -- telegram-pr-merged.yml is the standing example: 22 repos carry it, it
     mentions no secret, and it hard-fails without TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID.
     Scanning only each repo's own text misses every one of those.
+
+    FuzeSDLC is resolved from the local `--canonical` checkout (it is private, and this
+    avoids a network round-trip per caller); anything else is fetched once and cached.
     """
-    if not canonical:
-        return set()
-    for sub in (".github/workflows", "workflow-templates"):
-        path = os.path.join(canonical, sub, filename)
-        if os.path.exists(path):
-            with open(path, encoding="utf-8", errors="replace") as fh:
-                return set(SECRET_REF.findall(fh.read())) - BUILT_IN
-    return set()
+    key = f"{owner}/{repo}/{filename}"
+    if key in cache:
+        return cache[key]
+    body = ""
+    if repo.lower() == "fuzesdlc" and canonical:
+        for sub in (".github/workflows", "workflow-templates"):
+            path = os.path.join(canonical, sub, filename)
+            if os.path.exists(path):
+                with open(path, encoding="utf-8", errors="replace") as fh:
+                    body = fh.read()
+                break
+    if not body:
+        body = gh_raw(f"repos/{owner}/{repo}/contents/{WORKFLOW_DIR}/{filename}")
+    cache[key] = set(SECRET_REF.findall(body)) - BUILT_IN
+    return cache[key]
 
 
 def scan_workflow_refs(full: str, files: list, canonical: str) -> dict:
     """{workflow filename: [secret names it needs]} for one repo, inherit-calls resolved."""
-    refs = {}
+    refs, cache = {}, {}
     for fname in files:
         body = gh_raw(f"repos/{full}/contents/{WORKFLOW_DIR}/{fname}")
         if not body:
             continue
         names = set(SECRET_REF.findall(body)) - BUILT_IN
         if "secrets: inherit" in body:
-            for callee in REUSABLE_CALL.findall(body):
-                names |= _canonical_refs(canonical, callee)
+            for owner_, repo_, callee in REUSABLE_CALL.findall(body):
+                names |= _callee_refs(owner_, repo_, callee, canonical, cache)
         if names:
             refs[fname] = sorted(names)
     return refs
