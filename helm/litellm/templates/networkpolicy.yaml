@@ -18,6 +18,7 @@ App Launcher tile 502s. Deriving it here rather than asking the operator to
 remember it in values is the whole point.
 */ -}}
 {{- $allowed := .Values.networkPolicy.allowedNamespaces | default list -}}
+{{- $allowed = append $allowed .Release.Namespace -}}
 {{- if .Values.ingress.enabled -}}
 {{- $allowed = append $allowed (.Values.ingress.controllerNamespace | default "kube-system") -}}
 {{- end -}}
