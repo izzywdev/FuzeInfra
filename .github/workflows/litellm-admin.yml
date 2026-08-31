@@ -55,43 +55,38 @@ jobs:
     steps:
       - uses: actions/checkout@v7.0.1
 
-      - uses: azure/setup-kubectl@829323503d1be3d00ca8346e5391ca0b07a9ab0d # v5.1.0
-
-      - name: Configure kubectl
-        env:
-          KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
-        run: |
-          set -euo pipefail
-          if [ -z "$KUBE_CONFIG" ]; then echo "::error::KUBE_CONFIG unset"; exit 1; fi
-          mkdir -p "$HOME/.kube"
-          printf '%s' "$KUBE_CONFIG" | base64 -d > "$HOME/.kube/config"
-          chmod 600 "$HOME/.kube/config"
-          echo "KUBECONFIG=$HOME/.kube/config" >> "$GITHUB_ENV"
-
-      - name: Run admin action in the litellm pod
+      # Talks to the gateway over cluster DNS, NOT via `kubectl exec`.
+      #
+      # The first cut of this workflow did exec into the pod, so that the master
+      # key never had to leave the cluster. That does not work here: the API
+      # server cannot reach the kubelet on the node hosting the pod —
+      #   error dialing backend: proxy error ... dialing <node>:10250, code 502
+      # — which breaks exec, logs AND port-forward for anything scheduled there.
+      # (Worth knowing independently: it means `kubectl logs` on that node is
+      # also unavailable, so reading a PostSync hook's output can fail for
+      # reasons that have nothing to do with the hook.)
+      #
+      # Pod-to-pod traffic never touches the kubelet, so this path is unaffected.
+      # `runs-on: staging` is an ARC pod in arc-runners, which is on the
+      # gateway's networkPolicy.allowedNamespaces exactly so CI can reach it;
+      # a2a-maintain.yml has used this route for a while.
+      - name: Run admin action against the gateway
         env:
           ACTION: ${{ inputs.action }}
           MODEL: ${{ inputs.model }}
+          LITELLM_BASE_URL: http://litellm.fuzeinfra.svc.cluster.local:4000
+          # Admin endpoints (/key/list, /key/update) require the master key; a
+          # scoped virtual key cannot read or modify other keys. Passed as env
+          # so it never appears on a command line, and Actions masks it in logs.
+          LITELLM_MASTER_KEY: ${{ secrets.LITELLM_MASTER_KEY }}
         run: |
           set -euo pipefail
-
-          # Resolve a running pod explicitly rather than `exec deploy/litellm`,
-          # so the log names the pod that answered — during a rollout there can
-          # be two, and "which pod said that" has mattered here before.
-          pod=$(kubectl -n fuzeinfra get pods \
-                  -l app.kubernetes.io/name=litellm \
-                  --field-selector=status.phase=Running \
-                  -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
-          if [ -z "$pod" ]; then
-            echo "::error::no Running litellm pod found in namespace fuzeinfra"
-            kubectl -n fuzeinfra get pods -l app.kubernetes.io/name=litellm || true
+          if [ -z "${LITELLM_MASTER_KEY:-}" ]; then
+            echo "::error::LITELLM_MASTER_KEY repo secret is not set — admin endpoints need it."
             exit 1
           fi
-          echo "Target pod: $pod"
+          echo "Gateway: $LITELLM_BASE_URL"
           echo
-
-          # The script is passed as a single -c argument and the action/model as
-          # separate argv elements. kubectl exec uses exec form (no shell in the
-          # container), so the model name cannot be interpreted as a command.
-          kubectl -n fuzeinfra exec "$pod" -c litellm -- \
-            python3 -c "$(cat scripts/litellm_admin.py)" "$ACTION" "$MODEL"
+          # Action and model are separate argv elements, never interpolated into
+          # the script body.
+          python3 scripts/litellm_admin.py "$ACTION" "$MODEL"
