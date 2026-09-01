@@ -576,3 +576,87 @@ def test_no_findings_files_nothing_and_exits_zero(monkeypatch):
     monkeypatch.setattr(wd, "collect_pvc_usage", lambda p, cfg: ([], "prometheus"))
     monkeypatch.setattr(wd, "create_issue", lambda *a, **k: pytest.fail("filed an issue with no findings"))
     assert wd.main(["--repo", "izzywdev/FuzeInfra"]) == 0
+
+
+# ---------------------------------------------------------------------------
+# 9. noise containment learned from the first live runs
+# ---------------------------------------------------------------------------
+
+def _multi_container_stuck_pod():
+    """A pod wedged on a volume attach: every container reports waiting."""
+    return {
+        "metadata": {"name": "fuzeinfra-kafka-0", "namespace": "fuzeinfra"},
+        "spec": {"nodeName": "vmi3396106"},
+        "status": {
+            "phase": "Pending",
+            "startTime": _ts(22 * 60),
+            "initContainerStatuses": [{
+                "name": "init-chown-data", "ready": False, "restartCount": 0,
+                "state": {"waiting": {"reason": "PodInitializing"}},
+            }],
+            "containerStatuses": [{
+                "name": "kafka", "ready": False, "restartCount": 0,
+                "state": {"waiting": {"reason": "PodInitializing",
+                                      "message": "already mounted or mount point busy"}},
+            }],
+        },
+    }
+
+
+def test_one_containercreating_finding_per_pod_not_per_container():
+    """One stuck mount is one condition.
+
+    The per-container shape filed `fuzeinfra-kafka-0:kafka` and
+    `fuzeinfra-kafka-0:init-chown-data` as two issues for one wedged pod on
+    2026-09-01 — noise that dilutes exactly the tracker it is trying to fill.
+    """
+    findings = wd.detect_stuck_container_creating(
+        {"items": [_multi_container_stuck_pod()]}, CFG, NOW)
+    assert len(findings) == 1
+    assert findings[0].subject == "fuzeinfra/fuzeinfra-kafka-0"
+    assert findings[0].facts["containers"] == ["kafka", "init-chown-data"]
+    # The diagnostic message is still carried, from whichever container has one.
+    assert findings[0].facts["waiting_message"] == "already mounted or mount point busy"
+
+
+def test_open_issue_ceiling_stops_filing_until_something_is_closed(monkeypatch):
+    """max_per_run alone only spreads a backlog out; the ceiling bounds it.
+
+    At 10 per run every 15 minutes, the 55 conditions the first live run found
+    would all have been filed within ~1.5h regardless. Nothing new is filed
+    while `max_open` issues are already open.
+    """
+    apps = {"items": [argo_app("fuzeinfra-prod", "Running", 37 * 60, "waiting for healthy state")]}
+    filed = []
+    already_open = [{"number": n, "url": f"u{n}", "title": f"[watchdog] x: {n}", "body": ""}
+                    for n in range(CFG["issues"]["max_open"])]
+
+    monkeypatch.setattr(wd, "collect_cluster_state", lambda cfg: (apps, {"items": []}))
+    monkeypatch.setattr(wd, "collect_pvc_usage", lambda p, cfg: ([], "prometheus"))
+    monkeypatch.setattr(wd, "list_open_watchdog_issues", lambda repo, label: already_open)
+    monkeypatch.setattr(wd, "ensure_label", lambda *a, **k: pytest.fail("touched labels with no slot"))
+    monkeypatch.setattr(wd, "create_issue", lambda *a, **k: filed.append(a) or "url")
+    monkeypatch.setattr(wd, "dispatch_terminate_op", lambda *a, **k: None)
+
+    exit_code = wd.main(["--repo", "izzywdev/FuzeInfra"])
+
+    assert filed == []
+    # Detection is NOT capped: the condition is still reported and the run is red.
+    assert exit_code == 1
+
+
+def test_ceiling_leaves_room_for_a_partial_batch(monkeypatch):
+    apps = {"items": [argo_app(f"app-{i}", "Running", 100, "stuck") for i in range(9)]}
+    filed = []
+    already_open = [{"number": n, "url": "u", "title": "t", "body": ""}
+                    for n in range(CFG["issues"]["max_open"] - 3)]
+
+    monkeypatch.setattr(wd, "collect_cluster_state", lambda cfg: (apps, {"items": []}))
+    monkeypatch.setattr(wd, "collect_pvc_usage", lambda p, cfg: ([], "prometheus"))
+    monkeypatch.setattr(wd, "list_open_watchdog_issues", lambda repo, label: already_open)
+    monkeypatch.setattr(wd, "ensure_label", lambda *a, **k: None)
+    monkeypatch.setattr(wd, "create_issue", lambda *a, **k: filed.append(a) or "url")
+    monkeypatch.setattr(wd, "dispatch_terminate_op", lambda *a, **k: None)
+
+    wd.main(["--repo", "izzywdev/FuzeInfra"])
+    assert len(filed) == 3
