@@ -94,9 +94,24 @@ jobs:
             https://github.com/yannh/kubernetes-json-schema.git /tmp/k8s-schemas
           cd /tmp/k8s-schemas && git sparse-checkout set "v1.29.0-standalone-strict"
 
-      - name: Render & validate (local + aws overlays)
+      # values-contabo.yaml IS INCLUDED DELIBERATELY. It used to be omitted, which
+      # made PROD the one overlay CI never schema-validated -- so a manifest that
+      # could not be applied to prod could still merge with this gate green.
+      #
+      # That is not hypothetical. The Prometheus Deployment reached main rendering
+      # `nodeSelector` TWICE (#816 and #817 each added a block to the same pod spec;
+      # neither conflicted textually, so git merged both). Duplicate mapping keys are
+      # a YAML unmarshal ERROR -- `key "nodeSelector" already set in map` -- which
+      # invalidates the entire resource, so Argo could not apply the very Deployment
+      # both PRs existed to repair. This job passed on every one of those commits,
+      # because the duplicate only materialises once `prometheus.nodeSelector` is SET,
+      # and it is set only in values-contabo.yaml; under local/aws both
+      # `{{- with .Values.prometheus.nodeSelector }}` blocks render to nothing and the
+      # manifest is well-formed. (#819 fixed that instance; this closes the gap that
+      # let it merge.) Every overlay-gated value has the same shape.
+      - name: Render & validate (local + aws + contabo overlays)
         run: |
-          for overlay in values-local.yaml values-aws.yaml; do
+          for overlay in values-local.yaml values-aws.yaml values-contabo.yaml; do
             echo "::group::$overlay"
             helm template fuzeinfra helm/fuzeinfra -f "helm/fuzeinfra/$overlay" \
               --namespace fuzeinfra \
