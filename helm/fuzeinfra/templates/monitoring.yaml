@@ -163,13 +163,6 @@ spec:
         {{- include "fuzeinfra.labels" . | nindent 8 }}
         {{- include "fuzeinfra.selectorLabels" (dict "component" "prometheus" "root" $) | nindent 8 }}
     spec:
-      {{- with .Values.prometheus.nodeSelector }}
-      # Pin to durable (Longhorn-disk) nodes. Longhorn only registers a
-      # node.longhorn.io object for nodes running longhorn-manager; a pod
-      # scheduled elsewhere can never attach its volume.
-      nodeSelector:
-        {{- toYaml . | nindent 8 }}
-      {{- end }}
       serviceAccountName: fuzeinfra-monitoring
       securityContext:
         fsGroup: 65534
