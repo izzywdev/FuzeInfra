@@ -549,7 +549,7 @@ jobs:
 
       - name: dry_run — upload artifact
         if: ${{ inputs.dry_run }}
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@v7.0.1
         with:
           name: ca-cutover-dry-run-${{ github.run_id }}
           path: /tmp/ca-cutover-dry-run
