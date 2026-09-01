@@ -280,6 +280,27 @@ class Decision:
     warning: str = ""
 
 
+def needs_liveness(facts: RepoFacts) -> bool:
+    """Would `decide_runner` have to consult `online_runners` to answer for this repo?
+
+    Pure, and deliberately mirrors `decide_runner`'s precedence order rather than
+    re-deriving it: every arm ABOVE the liveness check answers without a probe, so a failed
+    probe on those repos is irrelevant and must not count as blindness. A public repo is
+    answered by visibility; an undeclared pool by the documented default; a pinned repo by
+    the operator. Only "private, has a declared pool, not pinned" actually needs the probe.
+
+    Used by `run_decide` to tell a TRANSIENT probe failure (a few repos) from a SYSTEMATIC
+    one (every repo that needed it) — see `SystematicBlindness`.
+    """
+    if facts.capability == "cluster":
+        return False
+    if facts.pinned:
+        return False
+    if not facts.private:
+        return False
+    return bool(facts.declared_pool)
+
+
 def decide_runner(facts: RepoFacts) -> Decision:
     """#249's precedence order, unchanged, minus the budget arm.
 
@@ -810,6 +831,10 @@ def run_decide(slugs: List[str], policy: Policy, *, apply: bool, hub: str) -> in
     state = load_state(read_variable(hub, STATE_VAR_DECIDE))
     warnings = 0
     writes = 0
+    # See `SystematicBlindness` below for why these two are counted separately from
+    # `warnings`, which also counts conditions that are not blindness at all.
+    needed_liveness = 0
+    blind = 0
 
     for slug in slugs:
         try:
@@ -828,6 +853,11 @@ def run_decide(slugs: List[str], policy: Policy, *, apply: bool, hub: str) -> in
             online_runners=facts.online_runners,
             pinned=slug in policy.pinned,
         )
+
+        if needs_liveness(facts):
+            needed_liveness += 1
+            if facts.online_runners is None:
+                blind += 1
 
         decision = decide_runner(facts)
         current = read_variable(slug, RUNNER_VAR)
@@ -859,7 +889,37 @@ def run_decide(slugs: List[str], policy: Policy, *, apply: bool, hub: str) -> in
 
     if apply:
         write_variable(hub, STATE_VAR_DECIDE, dump_state(state))
-    print(f"\ndecide: {len(slugs)} repo(s), {writes} write(s), {warnings} warning(s)")
+    print(f"\ndecide: {len(slugs)} repo(s), {writes} write(s), {warnings} warning(s), "
+          f"{blind}/{needed_liveness} liveness probe(s) unverified")
+
+    # ==================================================================================
+    # SystematicBlindness — the run must be RED when it could not see ANYTHING.
+    # ==================================================================================
+    # Per repo, an unverified probe is a keep-current + warn, and that is right: a single
+    # 500 must not migrate a repo, and a partial outage must not take the watcher down.
+    #
+    # But when EVERY repo that needed a probe failed it, that is not a blip, it is a
+    # missing grant — and the run exiting 0 is precisely the failure this whole design
+    # refuses. Observed live on the first dispatch after the port (run 33517478654): the
+    # fuze-agent App had no `administration: read`, so all 14 private repos with a declared
+    # pool came back `online=None`, the watcher wrote nothing anywhere, and the job
+    # reported SUCCESS. runner-watch.yml's own header names that outcome — "a clean-looking
+    # no-op that publishes nothing and hides that it is publishing nothing" — but its guard
+    # only checked that a token was MINTED, which says nothing about its scopes.
+    #
+    # ALL rather than a ratio, deliberately: `all` can only be reached by a systematic
+    # cause, so this can never redden a run for a handful of flaky probes. Repos that never
+    # needed liveness (public, no declared pool, pinned) are excluded by `needs_liveness`,
+    # so a fleet of entirely public repos does not trip it either — needed_liveness is 0
+    # and the branch is skipped.
+    if needed_liveness and blind == needed_liveness:
+        print(f"::error title=runner-watch::Liveness could not be verified for ANY of the "
+              f"{needed_liveness} repo(s) whose decision depends on it. That is not a "
+              f"transient probe failure, it is a missing grant: the fuze-agent App needs "
+              f"`administration: read` to read repos/<slug>/actions/runners. Nothing was "
+              f"written and nothing could have been. Failing rather than reporting a "
+              f"green run that looked at the whole fleet and saw none of it.")
+        return 1
     return 0
 
 

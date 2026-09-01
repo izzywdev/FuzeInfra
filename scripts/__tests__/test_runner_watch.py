@@ -657,5 +657,118 @@ class FleetPreflight(unittest.TestCase):
             self.pf.preflight(["FuzeHub"])
 
 
+# ======================================================================================
+# Systematic blindness - the run must be RED when it could not see ANYTHING
+# ======================================================================================
+
+class NeedsLiveness(unittest.TestCase):
+    """`needs_liveness` decides which repos a failed probe actually MATTERS for. It must
+    mirror decide_runner's precedence order exactly: every arm above the liveness check
+    answers without a probe, so counting those repos as "blind" would let a fleet of public
+    repos trip a systematic-blindness failure that has nothing to do with any grant."""
+
+    def test_only_a_private_repo_with_a_declared_pool_needs_a_probe(self):
+        self.assertTrue(rw.needs_liveness(facts(private=True, declared_pool="fuze-runner")))
+
+    def test_a_public_repo_is_answered_by_visibility_alone(self):
+        self.assertFalse(rw.needs_liveness(facts(private=False, declared_pool="fuze-runner")))
+
+    def test_no_declared_pool_is_answered_by_the_documented_default(self):
+        self.assertFalse(rw.needs_liveness(facts(private=True, declared_pool="")))
+
+    def test_an_operator_pin_is_answered_by_the_operator(self):
+        self.assertFalse(rw.needs_liveness(
+            facts(private=True, declared_pool="fuze-runner", pinned=True)))
+
+    def test_a_capability_pin_beats_liveness_so_needs_no_probe(self):
+        self.assertFalse(rw.needs_liveness(
+            facts(private=True, declared_pool="fuze-runner", capability="cluster")))
+
+    def test_it_agrees_with_decide_runner_about_who_reaches_the_probe(self):
+        """The two must not drift. For any repo where needs_liveness() is False,
+        decide_runner must reach an answer even with online_runners=None - i.e. it must NOT
+        return the "liveness UNVERIFIED" decision."""
+        for kw in (dict(private=False, declared_pool="fuze-runner"),
+                   dict(private=True, declared_pool=""),
+                   dict(private=True, declared_pool="fuze-runner", pinned=True),
+                   dict(private=True, declared_pool="fuze-runner", capability="cluster")):
+            f = facts(online_runners=None, **kw)
+            self.assertFalse(rw.needs_liveness(f), kw)
+            self.assertNotIn("UNVERIFIED", rw.decide_runner(f).reason, kw)
+        f = facts(private=True, declared_pool="fuze-runner", online_runners=None)
+        self.assertTrue(rw.needs_liveness(f))
+        self.assertIn("UNVERIFIED", rw.decide_runner(f).reason)
+
+
+class SystematicBlindnessFailsTheRun(unittest.TestCase):
+    """Per repo, an unverified probe is keep-current + warn, and that is correct. But when
+    EVERY repo that needed a probe failed it, nothing was written and nothing COULD have
+    been - and a green run there is the exact "looked at the whole fleet and saw none of
+    it" outcome the design refuses.
+
+    Observed live on the first dispatch after the port (run 33517478654): the fuze-agent App
+    had no `administration: read`, all 14 private repos with a declared pool came back
+    online=None, and the job reported SUCCESS.
+
+    `run_decide` is driven here with its network layer stubbed, so these stay offline."""
+
+    def setUp(self):
+        self.calls = []
+        self._probe, self._read, self._write = rw.probe_repo, rw.read_variable, rw.write_variable
+        rw.read_variable = lambda slug, name: None
+        rw.write_variable = lambda slug, name, value: self.calls.append((slug, name, value))
+        self.addCleanup(self._restore)
+
+    def _restore(self):
+        rw.probe_repo, rw.read_variable, rw.write_variable = self._probe, self._read, self._write
+
+    def stub(self, mapping):
+        rw.probe_repo = lambda slug: mapping[slug]
+
+    def test_all_probes_failed_on_repos_that_needed_them_is_a_FAILURE(self):
+        self.stub({
+            "izzywdev/A": rw.RepoFacts("izzywdev/A", private=True,
+                                       declared_pool="a", online_runners=None),
+            "izzywdev/B": rw.RepoFacts("izzywdev/B", private=True,
+                                       declared_pool="b", online_runners=None),
+        })
+        rc = rw.run_decide(["izzywdev/A", "izzywdev/B"], rw.Policy(),
+                           apply=False, hub="izzywdev/FuzeInfra")
+        self.assertEqual(rc, 1, "a fleet-wide blind run must not exit 0")
+
+    def test_a_partial_probe_failure_is_still_a_success(self):
+        """One repo down is a blip, not a missing grant. Reddening the run there would
+        train everyone to ignore the result - the same reason deploy-prod deliberately does
+        not gate on health."""
+        self.stub({
+            "izzywdev/A": rw.RepoFacts("izzywdev/A", private=True,
+                                       declared_pool="a", online_runners=None),
+            "izzywdev/B": rw.RepoFacts("izzywdev/B", private=True,
+                                       declared_pool="b", online_runners=3),
+        })
+        rc = rw.run_decide(["izzywdev/A", "izzywdev/B"], rw.Policy(),
+                           apply=False, hub="izzywdev/FuzeInfra")
+        self.assertEqual(rc, 0)
+
+    def test_an_all_public_fleet_does_not_trip_it(self):
+        """No repo needed a probe, so `blind == needed == 0`. Guarding on `needed_liveness`
+        being non-zero is what stops "nobody needed liveness" reading as "nobody could see"."""
+        self.stub({
+            "izzywdev/A": rw.RepoFacts("izzywdev/A", private=False, online_runners=None),
+            "izzywdev/B": rw.RepoFacts("izzywdev/B", private=False, online_runners=None),
+        })
+        rc = rw.run_decide(["izzywdev/A", "izzywdev/B"], rw.Policy(),
+                           apply=False, hub="izzywdev/FuzeInfra")
+        self.assertEqual(rc, 0)
+
+    def test_check_mode_writes_nothing_even_while_failing(self):
+        """The failure path must not become a write path. In check mode a blind run reports
+        and exits non-zero; it must still not touch a single variable."""
+        self.stub({"izzywdev/A": rw.RepoFacts("izzywdev/A", private=True,
+                                              declared_pool="a", online_runners=None)})
+        rw.run_decide(["izzywdev/A"], rw.Policy(), apply=False, hub="izzywdev/FuzeInfra")
+        self.assertEqual(self.calls, [])
+
+
 if __name__ == "__main__":
     unittest.main()
