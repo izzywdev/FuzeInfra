@@ -431,11 +431,11 @@
       "capability": "workflows",
       "mode": "stamped",
       "sourcePath": "workflow-templates/design-approval.yml",
-      "sourceSha256": "ee6fa15c16a2c5df69e184e9817da9a80fd7a68cff9f9d9cc23c6b4da376040f",
-      "renderedSha256": "ee6fa15c16a2c5df69e184e9817da9a80fd7a68cff9f9d9cc23c6b4da376040f",
+      "sourceSha256": "338c4e5f5c36e24c6262049bc42add7d0a87e75a8e60e5147ba4b34a9a8b3c03",
+      "renderedSha256": "338c4e5f5c36e24c6262049bc42add7d0a87e75a8e60e5147ba4b34a9a8b3c03",
       "renderVars": {
         "defaultBranch": "main",
-        "baselineRef": "v1"
+        "baselineRef": "main"
       }
     },
     ".github/workflows/design-review-notify.yml": {
@@ -477,11 +477,11 @@
       "capability": "workflows",
       "mode": "stamped",
       "sourcePath": "workflow-templates/gate-frames-stamped.yml",
-      "sourceSha256": "69fd04a77f3dc79a15756aa43bc1b4cd2ae760952b6b6d85e6846cd4b81539da",
-      "renderedSha256": "69fd04a77f3dc79a15756aa43bc1b4cd2ae760952b6b6d85e6846cd4b81539da",
+      "sourceSha256": "f05b8ae6236234be5823b29b1952e42597203bdd728e5b6fd2f39eba9e5f2d52",
+      "renderedSha256": "f05b8ae6236234be5823b29b1952e42597203bdd728e5b6fd2f39eba9e5f2d52",
       "renderVars": {
         "defaultBranch": "main",
-        "baselineRef": "v1"
+        "baselineRef": "main"
       }
     },
     ".github/workflows/gate-fuze-code-action.yml": {
@@ -500,11 +500,11 @@
       "capability": "workflows",
       "mode": "stamped",
       "sourcePath": "workflow-templates/gate-line-endings.yml",
-      "sourceSha256": "474b74ef31a3c8fceacb6a420e66d4482df4996360b8e3f123e60c3084ce8f6e",
-      "renderedSha256": "474b74ef31a3c8fceacb6a420e66d4482df4996360b8e3f123e60c3084ce8f6e",
+      "sourceSha256": "34ef9bb7115a04e0c89aee0d4dfb931c197fe060a2a26cc1eb1cd406438ffad0",
+      "renderedSha256": "34ef9bb7115a04e0c89aee0d4dfb931c197fe060a2a26cc1eb1cd406438ffad0",
       "renderVars": {
         "defaultBranch": "main",
-        "baselineRef": "v1"
+        "baselineRef": "main"
       }
     },
     ".github/workflows/gate-required-checks.yml": {
@@ -580,11 +580,11 @@
       "capability": "workflows",
       "mode": "stamped",
       "sourcePath": "workflow-templates/label-sync.yml",
-      "sourceSha256": "e9b72448e00bf4c7c04ac23fc03d0b10f7aa2f225b9d410667e1ffac5a493362",
-      "renderedSha256": "e9b72448e00bf4c7c04ac23fc03d0b10f7aa2f225b9d410667e1ffac5a493362",
+      "sourceSha256": "5239b224bf31be3ca576cbf6d5997d64cdcade5ebbf2248235e78b96e08990be",
+      "renderedSha256": "5239b224bf31be3ca576cbf6d5997d64cdcade5ebbf2248235e78b96e08990be",
       "renderVars": {
         "defaultBranch": "main",
-        "baselineRef": "v1"
+        "baselineRef": "main"
       }
     },
     ".github/workflows/mcp-maintain.yml": {
@@ -614,11 +614,11 @@
       "capability": "workflows",
       "mode": "stamped",
       "sourcePath": "workflow-templates/pages-frames.yml",
-      "sourceSha256": "3eb01d66ca9eb8c7b9a6541a6488542dd39b7412d18a28446aceb90e83ee4563",
-      "renderedSha256": "3eb01d66ca9eb8c7b9a6541a6488542dd39b7412d18a28446aceb90e83ee4563",
+      "sourceSha256": "60c15de0d9140ba98f2cceeb5fa2e164459f11a23daf629ff0fc9cd4b37901d5",
+      "renderedSha256": "60c15de0d9140ba98f2cceeb5fa2e164459f11a23daf629ff0fc9cd4b37901d5",
       "renderVars": {
         "defaultBranch": "main",
-        "baselineRef": "v1"
+        "baselineRef": "main"
       }
     },
     ".github/workflows/provision-sync.yml": {
@@ -637,30 +637,34 @@
       "capability": "workflows",
       "mode": "stamped",
       "sourcePath": "workflow-templates/provision.yml",
-      "sourceSha256": "4e10fe252ccc733378834c8e4cee2b5ccf854ab3dc2fe6416ade445f5368424a",
-      "renderedSha256": "4e10fe252ccc733378834c8e4cee2b5ccf854ab3dc2fe6416ade445f5368424a",
+      "sourceSha256": "c37ec54f2f7f3be17cfcbf635916c0c8ebacd66ec66c3ef8b93bb005abcf5eb8",
+      "renderedSha256": "c37ec54f2f7f3be17cfcbf635916c0c8ebacd66ec66c3ef8b93bb005abcf5eb8",
       "renderVars": {
         "defaultBranch": "main",
-        "baselineRef": "v1"
+        "baselineRef": "main"
       }
     },
     ".github/workflows/publish-expert.yml": {
       "capability": "workflows",
       "mode": "stamped",
       "sourcePath": "workflow-templates/publish-expert.yml",
-      "sourceSha256": "06027343bf44190cacbd84241ada036a6556c288411d9ed0b2da0991d35aef87",
-      "renderedSha256": "06027343bf44190cacbd84241ada036a6556c288411d9ed0b2da0991d35aef87",
+      "sourceSha256": "fbe9545c87c74889d38818235a3159e4032cdfe7f62b7332d7b39b7c52a9c7ca",
+      "renderedSha256": "fbe9545c87c74889d38818235a3159e4032cdfe7f62b7332d7b39b7c52a9c7ca",
       "renderVars": {
         "defaultBranch": "main",
-        "baselineRef": "v1"
+        "baselineRef": "main"
       }
     },
     ".github/workflows/telegram-pr-merged.yml": {
       "capability": "workflows",
       "mode": "stamped",
       "sourcePath": "workflow-templates/telegram-pr-merged.yml",
-      "sourceSha256": "d7b161e66268ee150ccda2726176449262f608b4ee29e397051709aa4c2a3ecc",
-      "renderedSha256": "d7b161e66268ee150ccda2726176449262f608b4ee29e397051709aa4c2a3ecc"
+      "sourceSha256": "676f316f97914f2969046f2fe195310d44b9cf85d779b5c3a059fa8e35a54732",
+      "renderedSha256": "676f316f97914f2969046f2fe195310d44b9cf85d779b5c3a059fa8e35a54732",
+      "renderVars": {
+        "defaultBranch": "main",
+        "baselineRef": "main"
+      }
     },
     ".npmrc": {
       "capability": "npm-registry",

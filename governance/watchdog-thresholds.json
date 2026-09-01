@@ -49,7 +49,13 @@
     "label": "deploy-watchdog",
     "label_color": "B60205",
     "mention": "@fuze",
-    "title_prefix": "[watchdog]"
+    "title_prefix": "[watchdog]",
+    "max_per_run": 10,
+    "max_open": 20,
+    "$max_open": "Hard ceiling on how many watchdog issues may be OPEN at once, across all runs. max_per_run alone only spreads a backlog out: at 10 per run every 15 minutes, the 55 conditions the first live run found would all be filed within ~1.5h anyway (measured 2026-09-01 — two live runs filed 20). The ceiling makes the backlog drain-driven instead of time-driven: nothing new is filed until something is closed, so the tracker stays a list someone can actually work. Detection is still never capped — everything appears in the run summary and the run still goes red.",
+    "$max_per_run": "Ceiling on issues FILED per run — every finding is always reported in the run summary and the run still goes red, only the issue creation is rate-limited. Measured need: the first live dry-run against prod (2026-09-01) returned 55 distinct conditions, most of them long-standing consumer-namespace crash loops. Filing 55 issues at once produces exactly the muting this file's dedup section exists to prevent. Findings above the cap are filed on subsequent runs as earlier ones are closed, which ramps in worst-first instead of dumping.",
+    "priority": ["stuck-argo-op", "pvc-nearing-full", "stuck-containercreating", "chronic-crashloop"],
+    "$priority": "Filing order under the cap. The stuck Argo op is first because it is the one condition that blocks EVERY other deploy — it froze the fleet for 2d11h — and PVC pressure is second because it is the only warning that arrives before a volume fills."
   },
 
   "fail_on_findings": true,

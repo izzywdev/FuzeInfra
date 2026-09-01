@@ -1,3 +1,22 @@
+# fuze:fork — deliberately NOT `fuze:managed`, so governance-sync never reconciles it.
+#
+# The canonical (94 lines) is a generic chart linter: discover helm/*/Chart.yaml and
+# deploy/helm/*/Chart.yaml, `helm lint`, `helm template | kubeconform` per overlay. This
+# repo OWNS the chart the rest of the family deploys onto, so its copy (194 lines) also
+# asserts contracts the canonical has no notion of. FuzeInfra-only steps:
+#
+#   * `runs-on: staging` — the in-cluster ARC runner.
+#   * "Validate + unit-test Prometheus alert rules" — promtool check + rule unit tests.
+#   * "Cache Kubernetes JSON schemas (v1.29.0)" — kubeconform schema cache.
+#   * "Render & validate LiteLLM (gate forced on)" — renders the service whose `enabled`
+#     gate is off in the base values, so the disabled path is still schema-checked.
+#   * "Assert the LiteLLM consumer contract" and "Assert the Kafka advertised-listener
+#     contract" — chart-level invariants that consuming repos depend on and that a plain
+#     `helm lint` cannot express.
+#
+# Stamping would delete all four assertions and move the job off the in-cluster runner,
+# while the remaining generic lint kept reporting green.
+
 name: Helm Chart Validation
 
 on:

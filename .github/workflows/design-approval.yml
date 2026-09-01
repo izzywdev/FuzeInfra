@@ -1,3 +1,4 @@
+# fuze:managed template=design-approval.yml baseline=main digest=sha256:941a0601f96d593057cff1f9666eae878074a159ada756443bb59a0dacd68404
 name: design-approval
 
 # Turns an in-frame "Approve" click into a verified, signed manifest flip.
@@ -50,7 +51,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       # Actions pinned to immutable commit SHAs (repo hardening standard).
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           # frames + the manifest we flip live on the default branch
           ref: ${{ github.event.repository.default_branch }}
@@ -59,7 +60,7 @@ jobs:
         with:
           node-version: '24.x'
 
-      - uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea  # v7.0.1
+      - uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3  # v9.0.0
         id: decide
         with:
           script: |
@@ -281,7 +282,7 @@ jobs:
           echo "::error::could not push the approval after 3 attempts (${DEFAULT_BRANCH} moving too fast, or the DeployKey bypass/deploy key was removed)"
           exit 1
 
-      - uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea  # v7.0.1
+      - uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3  # v9.0.0
         if: steps.decide.outputs.flip == 'true'
         with:
           script: |

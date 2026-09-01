@@ -46,10 +46,17 @@ jobs:
         run: |
           set -euo pipefail
           export KUBECONFIG="$HOME/.kube/config"
+          # Do NOT rely on a context default namespace here: `argocd login --core`
+          # below rewrites the kubeconfig context ("Context 'kubernetes' updated"),
+          # which drops it. Every kubectl call in this job therefore names -n argocd
+          # explicitly. Without that, Step 3 failed with `applications.argoproj.io
+          # "fuzeinfra-prod" not found` AFTER steps 1-2 had already terminated the op —
+          # the job reported failure on a terminate that had actually worked (seen
+          # 2026-09-01, run 33512255005, dispatched by deployment-watchdog).
           kubectl config set-context --current --namespace=argocd
 
           echo "=== Current state of $APP ==="
-          kubectl get application "$APP" -o jsonpath='
+          kubectl -n argocd get application "$APP" -o jsonpath='
           phase:        {.status.operationState.phase}
           syncRevision: {.status.operationState.syncResult.revision}
           syncStatus:   {.status.sync.status}
@@ -59,7 +66,7 @@ jobs:
           echo ""
           echo ""
 
-          phase=$(kubectl get application "$APP" \
+          phase=$(kubectl -n argocd get application "$APP" \
                     -o jsonpath='{.status.operationState.phase}' 2>/dev/null || echo "")
 
           if [ "$phase" != "Running" ]; then
@@ -73,7 +80,7 @@ jobs:
 
           sleep 5
           echo "=== State after terminate-op ==="
-          phase2=$(kubectl get application "$APP" \
+          phase2=$(kubectl -n argocd get application "$APP" \
                      -o jsonpath='{.status.operationState.phase}' 2>/dev/null || echo "")
           echo "phase: $phase2"
 
@@ -83,12 +90,12 @@ jobs:
           fi
 
           echo "=== Step 2: clear .operation field to stop retries ==="
-          kubectl patch application "$APP" \
+          kubectl -n argocd patch application "$APP" \
             --type=json \
             -p '[{"op":"remove","path":"/operation"}]' 2>&1 || echo "remove /operation returned non-zero"
 
           sleep 3
-          phase3=$(kubectl get application "$APP" \
+          phase3=$(kubectl -n argocd get application "$APP" \
                      -o jsonpath='{.status.operationState.phase}' 2>/dev/null || echo "")
           echo "phase after clearing operation: $phase3"
 
@@ -98,14 +105,14 @@ jobs:
           fi
 
           echo "=== Step 3: patch status subresource directly ==="
-          kubectl patch application "$APP" \
+          kubectl -n argocd patch application "$APP" \
             --subresource=status \
             --type=merge \
             -p '{"status":{"operationState":{"phase":"Failed","message":"Force-terminated by CI: stale operation at old revision was blocking new syncs"}}}'
 
           sleep 3
           echo "=== Final state ==="
-          kubectl get application "$APP" -o jsonpath='
+          kubectl -n argocd get application "$APP" -o jsonpath='
           phase:        {.status.operationState.phase}
           syncRevision: {.status.operationState.syncResult.revision}
           syncStatus:   {.status.sync.status}

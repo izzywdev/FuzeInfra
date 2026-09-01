@@ -1,3 +1,21 @@
+# fuze:fork — deliberately NOT `fuze:managed`, so governance-sync never reconciles it.
+#
+# Shares a name with `workflow-templates/claude.yml` (87 lines, a generic mention handler).
+# This copy is 381 lines because on THIS repo the @claude responder is an infrastructure
+# operator, not a code assistant. FuzeInfra-specific content the canonical does not carry:
+#
+#   * prod cluster tooling on the runner — KUBECONFIG targeting the Contabo k3s cluster,
+#     with kubectl / helm / terraform installed;
+#   * an `--append-system-prompt` carrying the expert-first rule (invoke fuzeinfra-expert
+#     before planning) AND the GitOps guardrails that make cluster access safe: never
+#     kubectl-patch/edit a chart-managed resource (Argo selfHeal reverts it), never run
+#     destructive kubectl against prod unprompted, reconcile via chart + PR;
+#   * the self-trigger loop guard (the sentinel added after a @claude thread reached 691
+#     comments), a Telegram notification on responder failure, and the cross-repo hand-off
+#     protocol (hand remaining work to the owning repo's handler, then close here).
+#
+# Stamping this would replace an operator with a generic responder that still reports green.
+
 name: Claude (DISABLED — replaced by fuze.yml)
 
 # DEPRECATED: this direct-to-Anthropic handler is superseded by fuze.yml which
@@ -219,7 +237,7 @@ jobs:
         # final status, instead of the action failing silently with no notification.
         if: steps.preflight.outputs.ok == 'true'
         continue-on-error: true
-        uses: anthropics/claude-code-action@24dcd50c0568f0fc9e9211213a4fd2d9eb15c4e0 # v1.0.200
+        uses: anthropics/claude-code-action@a874e9ecd7bb36efdad65429c6b35815f5a08f10 # v1.0.210
         env:
           # KUBECONFIG (set above) + a real-user PAT for things GITHUB_TOKEN can't
           # do (GHCR package visibility, cross-repo gh api). The agent reads any

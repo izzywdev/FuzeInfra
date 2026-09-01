@@ -1,3 +1,21 @@
+# fuze:fork — deliberately NOT `fuze:managed`, so governance-sync never reconciles it.
+#
+# Runs IN-CLUSTER, and that is the whole divergence from `workflow-templates/governance-nightly.yml`:
+#
+#   * `runs-on: staging` — an ARC runner inside this cluster, not ubuntu-latest.
+#   * The LLM call is routed through the in-cluster LiteLLM gateway
+#     (ANTHROPIC_BASE_URL: http://litellm.fuzeinfra.svc.cluster.local:4000) authenticated
+#     with LITELLM_FUZE_KEY, so no provider key is ever held on a runner. That hostname only
+#     resolves from inside the cluster, and the canonical's shape assumes a direct provider
+#     key this repo does not hold — stamping it would move the job onto a GitHub-hosted
+#     runner with no working credential.
+#   * A key guard + a preflight that PROVES the credential path (POST /v1/messages) before
+#     spending a run, and a post-run assertion that the tracking issue was actually created
+#     or updated THIS run. That assertion is the fix for a measured vacuity bug: the step
+#     previously ran without bypassPermissions/additional_permissions, so every mutating
+#     action was silently denied while the SDK still reported is_error:false — "green" meant
+#     only "the API call did not error", never "the sweep did anything".
+
 name: Governance Nightly
 
 # platform-governance's nightly reconciliation sweep (governance-reconciliation skill):
@@ -114,7 +132,7 @@ jobs:
         # can run (and post the deliverable check) even when this step errors.
         continue-on-error: true
         if: steps.key-guard.outputs.ok == 'true' && steps.preflight.outputs.ok == 'true'
-        uses: anthropics/claude-code-action@24dcd50c0568f0fc9e9211213a4fd2d9eb15c4e0  # v1.0.200
+        uses: anthropics/claude-code-action@a874e9ecd7bb36efdad65429c6b35815f5a08f10  # v1.0.210
         env:
           # LiteLLM authenticates `Authorization: Bearer`; the action does not read
           # that from the anthropic_api_key input alone, so the key must ALSO travel

@@ -1,0 +1,49 @@
+# Unit tests for PVCFillingUp (rules/kubernetes.yml) — the early-warning tier
+# that exists because Loki OSS has no size-based retention, so an alarm is the
+# only thing that catches a filling volume before it fills. Run in CI by
+# helm-validate.yml: `promtool test rules helm/fuzeinfra/rules/tests/*_test.yml`.
+rule_files:
+  - ../kubernetes.yml
+
+evaluation_interval: 1m
+
+tests:
+  # --- the 2026-08-30 shape: fuzeinfra-loki-data climbing past 80% ---
+  # 20e9 capacity, flat; used climbs from 75% by 0.5%/min. It first exceeds 80%
+  # at t=11m, so with `for: 15m` the alert may not fire before t=26m.
+  - interval: 1m
+    name: loki PVC crosses 80% used and stays there
+    input_series:
+      - series: 'kubelet_volume_stats_capacity_bytes{namespace="fuzeinfra",persistentvolumeclaim="fuzeinfra-loki-data"}'
+        values: '20000000000+0x40'
+      - series: 'kubelet_volume_stats_used_bytes{namespace="fuzeinfra",persistentvolumeclaim="fuzeinfra-loki-data"}'
+        values: '15000000000+100000000x40'
+    alert_rule_test:
+      # `for: 15m` — must NOT page on a brief excursion above the threshold.
+      - eval_time: 20m
+        alertname: PVCFillingUp
+        exp_alerts: []
+      - eval_time: 30m
+        alertname: PVCFillingUp
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              namespace: fuzeinfra
+              persistentvolumeclaim: fuzeinfra-loki-data
+            exp_annotations:
+              summary: "PVC fuzeinfra/fuzeinfra-loki-data is 90% full"
+              description: >-
+                Act now, while there is still headroom — a volume that reaches 100% can wedge its workload and, for Loki, the whole Argo sync queue. Do BOTH, in Git only (prod is GitOps under selfHeal; never `kubectl patch` the live PVC): (1) reduce what is written — for fuzeinfra-loki-data lower limits_config.retention_period in helm/fuzeinfra/templates/configmaps-monitoring.yaml, or set loki.s3.enabled=true in values-contabo.yaml to move chunks+index off the PVC entirely; (2) if growth is legitimate, raise the matching `storage:` value in helm/fuzeinfra/values-contabo.yaml and merge — the `longhorn` class allows expansion, and growth only (the API server rejects a shrink).
+
+  # --- a healthy volume must stay silent ---
+  - interval: 1m
+    name: PVC well under threshold does not alert
+    input_series:
+      - series: 'kubelet_volume_stats_capacity_bytes{namespace="fuzeinfra",persistentvolumeclaim="fuzeinfra-prometheus-data"}'
+        values: '20000000000+0x40'
+      - series: 'kubelet_volume_stats_used_bytes{namespace="fuzeinfra",persistentvolumeclaim="fuzeinfra-prometheus-data"}'
+        values: '6000000000+0x40'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: PVCFillingUp
+        exp_alerts: []

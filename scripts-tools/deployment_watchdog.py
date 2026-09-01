@@ -333,40 +333,47 @@ def detect_stuck_container_creating(pods: dict, config: dict, now: datetime) -> 
         meta = pod.get("metadata") or {}
         if meta.get("namespace") in ignore:
             continue
-        statuses = _container_statuses(pod)
-        for cs in statuses:
+        # ONE finding per pod, not per container. A pod wedged on a volume
+        # attach reports every one of its containers as waiting, so the
+        # per-container shape filed `kafka-0:kafka` and `kafka-0:init-chown-data`
+        # as two separate issues for one stuck mount (observed 2026-09-01).
+        stuck = []
+        for cs in _container_statuses(pod):
             if cs.get("ready"):
                 continue
             waiting = (cs.get("state") or {}).get("waiting") or {}
-            if waiting.get("reason") not in reasons:
-                continue
-            started = _pod_start(pod)
-            if started is None:
-                continue
-            minutes = age_minutes(started, now)
-            if minutes <= threshold:
-                continue
-            findings.append(
-                Finding(
-                    kind=KIND_CREATING,
-                    subject=f"{_pod_subject(pod)}:{cs.get('name', '<container>')}",
-                    summary=(
-                        f"`{_pod_subject(pod)}` container `{cs.get('name')}` has been "
-                        f"{waiting.get('reason')} for {_fmt_age(minutes)} "
-                        f"(threshold {threshold:.0f}m) — likely a stuck volume attach."
-                    ),
-                    facts={
-                        "namespace": meta.get("namespace"),
-                        "pod": meta.get("name"),
-                        "container": cs.get("name"),
-                        "waiting_reason": waiting.get("reason"),
-                        "waiting_message": waiting.get("message"),
-                        "pending_minutes": round(minutes, 1),
-                        "threshold_minutes": threshold,
-                        "node": (pod.get("spec") or {}).get("nodeName"),
-                    },
-                )
+            if waiting.get("reason") in reasons:
+                stuck.append((cs, waiting))
+        if not stuck:
+            continue
+        started = _pod_start(pod)
+        if started is None:
+            continue
+        minutes = age_minutes(started, now)
+        if minutes <= threshold:
+            continue
+        reason = stuck[0][1].get("reason")
+        message = next((w.get("message") for _, w in stuck if w.get("message")), None)
+        findings.append(
+            Finding(
+                kind=KIND_CREATING,
+                subject=_pod_subject(pod),
+                summary=(
+                    f"`{_pod_subject(pod)}` has been {reason} for {_fmt_age(minutes)} "
+                    f"(threshold {threshold:.0f}m) — likely a stuck volume attach."
+                ),
+                facts={
+                    "namespace": meta.get("namespace"),
+                    "pod": meta.get("name"),
+                    "containers": [cs.get("name") for cs, _ in stuck],
+                    "waiting_reason": reason,
+                    "waiting_message": message,
+                    "pending_minutes": round(minutes, 1),
+                    "threshold_minutes": threshold,
+                    "node": (pod.get("spec") or {}).get("nodeName"),
+                },
             )
+        )
     return findings
 
 
@@ -420,6 +427,22 @@ def detect_pvc_pressure(usage: Sequence[dict], config: dict) -> list[Finding]:
 # --------------------------------------------------------------------------
 # dedup
 # --------------------------------------------------------------------------
+
+def prioritize(findings, priority=None):
+    """Worst-first order for filing under the per-run cap.
+
+    The stuck Argo op comes first because it is the one condition that blocks
+    EVERY other deploy; PVC pressure second because it is the only warning that
+    arrives before a volume fills (after that nothing inside the pod can free
+    it). Unknown kinds sort last but are never dropped.
+    """
+    order = list(priority or [KIND_ARGO, KIND_PVC, KIND_CREATING, KIND_CRASHLOOP])
+
+    def rank(finding):
+        return (order.index(finding.kind) if finding.kind in order else len(order), finding.key)
+
+    return sorted(findings, key=rank)
+
 
 def filter_new_findings(
     findings: Iterable[Finding], open_issues: Iterable[dict], title_prefix: str = "[watchdog]"
@@ -954,11 +977,32 @@ def main(argv: Sequence[str] | None = None) -> int:
     new, duplicates = filter_new_findings(findings, open_issues, prefix)
     for finding, issue in duplicates:
         lines.append(f"- `{finding.key}` — already tracked by {issue.get('url')} (not re-filed)")
-    if new:
+
+    # Cap issue CREATION (never detection): the first live run against prod
+    # returned 55 distinct conditions. Filing 55 issues at once is the muting
+    # failure in a different shape. Everything is still reported in the summary
+    # and the run still goes red; the overflow files on later runs.
+    max_per_run = int(issues_cfg.get("max_per_run", 10))
+    # Global ceiling on OPEN watchdog issues. max_per_run alone only spreads a
+    # backlog out over time (10 every 15 minutes files 55 within ~1.5h anyway);
+    # the ceiling makes draining, not the clock, the thing that opens a slot.
+    max_open = int(issues_cfg.get("max_open", 20))
+    slots = max(0, min(max_per_run, max_open - len(open_issues)))
+    ordered = prioritize(new, issues_cfg.get("priority"))
+    to_file, overflow = ordered[:slots], ordered[slots:]
+    if overflow:
+        lines.append(
+            f"- {len(overflow)} further condition(s) detected but NOT filed this run "
+            f"(open={len(open_issues)}, max_open={max_open}, max_per_run={max_per_run}); "
+            f"they file once open issues are closed:"
+        )
+        lines += [f"  - `{f.key}` — {f.summary}" for f in overflow]
+
+    if to_file:
         ensure_label(args.repo, label, issues_cfg.get("label_color", "B60205"))
 
     argo_cfg = config.get("argo_stuck_op") or {}
-    for finding in new:
+    for finding in to_file:
         actions: list[str] = []
         if finding.kind == KIND_ARGO and argo_cfg.get("auto_terminate", True):
             workflow = argo_cfg.get("auto_terminate_workflow", "argo-terminate-op.yml")
@@ -985,12 +1029,19 @@ def main(argv: Sequence[str] | None = None) -> int:
     return 1 if config.get("fail_on_findings", True) else 0
 
 
-if __name__ == "__main__":
+def run(argv: Sequence[str] | None = None) -> int:
+    """Process entrypoint. Returns the exit code instead of exiting, so the
+    blind-fails-loudly path is itself unit-testable (it is the property that
+    makes this tool worth having)."""
     try:
-        sys.exit(main())
+        return main(argv)
     except (ClusterUnreachable, UnsafeCommand, GitHubError) as error:
         # FAIL LOUDLY. Never exit 0 on a path where the watchdog could not look:
         # "all clear" and "could not check" must not look the same.
         print(f"::error::deployment watchdog could not complete: {error}")
         write_summary(f"## Deployment-freeze watchdog FAILED\n\n`{error}`\n")
-        sys.exit(2)
+        return 2
+
+
+if __name__ == "__main__":
+    sys.exit(run())
