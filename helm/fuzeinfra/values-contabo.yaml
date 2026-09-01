@@ -248,7 +248,7 @@ loki:
   # StatefulSet, so it is no longer in that rule's scope.
   #
   # WHY 5Gi WAS NOT SURVIVABLE, and why this is not merely a tuning nit. Loki
-  # retains 744h (31 days) of fleet logs and compacts them on a schedule
+  # retained 744h (31 days) of fleet logs and compacted them on a schedule
   # (compactor.retention_enabled, configmaps-monitoring.yaml). 31 days of logs
   # from 22 repos' workloads does not fit in 5Gi, so the volume filled — and a
   # FULL Loki volume is self-sealing, because retention is enforced BY the
@@ -264,12 +264,37 @@ loki:
   # it silently — including the cluster-autoscaler maxSize raise that fleet-wide
   # CI was waiting on. A monitoring component took the delivery pipeline down by
   # filling a disk. Size this generously; it is not where to economise.
+  #
+  # Retention is now 336h (14 days, configmaps-monitoring.yaml) and s3.enabled is
+  # true below, so this volume no longer holds the retention window at all. Kept
+  # at 20Gi deliberately: it is the WAL + tsdb-shipper cache + compactor scratch,
+  # and Loki OSS has no size-based retention, so headroom is still the only thing
+  # standing between a write spike and a stuck pod. The new PVCFillingUp alert
+  # (rules/kubernetes.yml, 80%) is what catches that now.
   storage: 20Gi
   s3:
-    # Flipping this to true is the real remedy for unbounded growth, not a bigger
-    # disk: chunks+index move to Contabo Object Storage and the PVC stops being
-    # the constraint. Still human-gated on the loki-s3 SealedSecret.
-    enabled: false            # human-gated flip (needs the loki-s3 SealedSecret)
+    # ON since 2026-09-01. This — not a bigger disk — is the real remedy for
+    # unbounded growth: chunks + index live in Contabo Object Storage, so the PVC
+    # stops being the constraint and can no longer wedge Loki (and, through Loki's
+    # health, the whole Argo sync queue). The PVC above still exists and still
+    # matters: Loki keeps its WAL, the tsdb-shipper active/cache directories and
+    # the compactor working_directory on local disk, so it is sized for working
+    # set rather than for the full retention window.
+    #
+    # No longer "human-gated". The gate was never a safeguard — it was a flag
+    # waiting on a human to seal a secret, which is a defect in an autonomous
+    # SDLC. The credential was fetched from the Contabo API (NOT the panel; the
+    # API also requires x-request-id to be a valid UUID), verified against
+    # eu2.contabostorage.com/fuzeinfra-loki with a list + put/head/delete
+    # round-trip, and sealed OFFLINE against the committed public cert
+    # (deploy/sealed-secrets/sealing-cert.pem) into
+    # deploy/sealed-secrets/loki-s3-credentials.yaml -> SealedSecret
+    # fuzeinfra/loki-s3, which the fuzeinfra-sealed-secrets Argo app syncs.
+    # Ordering note: that SealedSecret ships in the SAME commit as this flip, and
+    # monitoring.yaml wires the keys via secretKeyRef, so if the Secret is not yet
+    # materialised the Loki pod stays Pending on the missing Secret rather than
+    # starting with an empty credential and looping on S3 auth errors.
+    enabled: true
     endpoint: "eu2.contabostorage.com"
     region: "default"
     bucket: "fuzeinfra-loki"

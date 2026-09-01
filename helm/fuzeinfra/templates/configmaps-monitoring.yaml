@@ -277,7 +277,18 @@ data:
       ingestion_rate_mb: 16
       ingestion_burst_size_mb: 32
       max_query_length: 721h
-      retention_period: 744h
+      # 336h = 14 days. Deliberately shortened from 744h (31 days) on 2026-09-01.
+      # Loki OSS has NO size-based retention — only time — so this number, not the
+      # PVC size, is the only knob that bounds growth from inside Loki. 31 days of
+      # fleet logs from 22 repos overran a 5Gi volume, and a FULL Loki volume is
+      # self-sealing (retention is enforced by the compactor, the compactor runs
+      # inside Loki, and Loki cannot start on a full disk): it crash-looped 694
+      # times over 2d11h and wedged an Argo sync in phase=Running for 37 hours,
+      # silently freezing every prod deployment behind it. Two weeks is the
+      # explicit decision — it covers the incident investigations this serves.
+      # Shrinking this is safe and takes effect on the compactor's next run;
+      # chunks older than the window are deleted, not orphaned.
+      retention_period: 336h
 
     compactor:
       working_directory: /loki/compactor
