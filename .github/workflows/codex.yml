@@ -1,3 +1,23 @@
+# fuze:fork — deliberately NOT `fuze:managed`, so governance-sync never reconciles it.
+#
+# Two independent reasons, either one sufficient:
+#
+# 1. The canonical is NOT part of the governance standard. `scripts/bootstrap/caps/workflows.py`
+#    lists codex.yml in NOT_INSTALLED: "opt-in @codex delegation to a third-party provider.
+#    Not a governance standard, so it is not installed by default." A repo that opted in owns
+#    its copy.
+#
+# 2. This copy carries FuzeInfra-specific credential and reporting behaviour:
+#      * the FuzeSDLC guidance checkout and the publish checkout both use
+#        `token: secrets.GH_TOKEN` — the publish job needs workflow-file write, which the
+#        default App token does not have, and the canonical's read-only FUZESDLC_DEPLOY_KEY
+#        cannot push;
+#      * the `report` job's `if:` is narrowed to genuine, trusted @codex delegations. The
+#        canonical's `if: always()` fires on EVERY issue comment, so unrelated comments
+#        produce misleading red runs against a job that was intentionally skipped;
+#      * newer SHA pins than the canonical (actions/upload-artifact v7.0.1,
+#        actions/download-artifact v8.0.1, a newer openai/codex-action).
+
 name: Codex
 
 # Runs implementation work on GitHub-hosted infrastructure when a trusted

@@ -1,3 +1,21 @@
+# fuze:fork — deliberately NOT `fuze:managed`, so governance-sync never reconciles it.
+#
+# Same in-cluster divergence as governance-nightly.yml in this repo:
+#
+#   * `runs-on: staging` — ARC runner inside this cluster.
+#   * LLM traffic routed through the in-cluster LiteLLM gateway
+#     (http://litellm.fuzeinfra.svc.cluster.local:4000, ANTHROPIC_AUTH_TOKEN =
+#     LITELLM_FUZE_KEY) rather than a provider key on the runner. That hostname does not
+#     resolve off-cluster.
+#   * `github_token: ${{ secrets.GH_TOKEN }}` passed explicitly to claude-code-action,
+#     because the OIDC -> App-token exchange it would otherwise perform fails on the
+#     staging runners.
+#   * The self-propagating adoption path files ONE idempotent **@fuze** build issue (this
+#     repo's mention convention — see fuze.yml); the canonical says @claude.
+#
+# Reconciling this would move the job to ubuntu-latest with no reachable gateway and no
+# valid credential, and it would still report green when it skipped.
+
 name: Nightly Integration
 
 # ADLC govern-loop, integration arm (sibling of governance-nightly.yml).
