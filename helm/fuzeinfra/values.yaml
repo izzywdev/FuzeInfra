@@ -645,7 +645,19 @@ loki:
   enabled: true
   image: grafana/loki:3.2.0
   port: 3100
+  # Size of the STANDALONE PVC `fuzeinfra-loki-data` (monitoring.yaml). Loki runs as
+  # a Deployment (strategy: Recreate) precisely so this value is live: a standalone
+  # PVC is expandable, unlike a StatefulSet volumeClaimTemplate, so changing this in
+  # Git and letting Argo sync is the supported way to resize Loki's disk. Growth
+  # only — the API server rejects a shrink. On a class without
+  # allowVolumeExpansion the change is rejected too, which is a visible failure
+  # rather than the previous silent no-op.
   storage: 5Gi
+  # Optional scheduling / limits passthrough. Empty by default so the rendered pod
+  # spec is unchanged unless an overlay sets them.
+  resources: {}
+  nodeSelector: {}
+  tolerations: []
   # Optional S3-compatible object store backend for Loki chunks + index.
   # When disabled (default) Loki uses on-disk filesystem storage (the PVC above).
   # When enabled, chunk+index storage moves to the configured bucket — keeping

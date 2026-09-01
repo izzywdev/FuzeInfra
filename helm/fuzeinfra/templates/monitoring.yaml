@@ -517,15 +517,66 @@ spec:
       port: {{ .Values.loki.port }}
       targetPort: 3100
 ---
+{{- /*
+     Loki's data volume is a STANDALONE PersistentVolumeClaim, deliberately NOT a
+     StatefulSet volumeClaimTemplate.
+
+     WHY: a StatefulSet's .spec.volumeClaimTemplates is immutable — the API server
+     rejects any change to it ("updates to statefulset spec for fields other than
+     'replicas', 'ordinals', 'template', ... are forbidden"), and this chart's Argo
+     Application additionally hides that field from the sync entirely
+     (ignoreDifferences + RespectIgnoreDifferences, argocd/applications/fuzeinfra-prod.yaml).
+     The combination made `loki.storage` INERT: raising it 5Gi -> 20Gi in Git changed
+     nothing on the running cluster, and the live volume could only be grown by a
+     direct `kubectl patch pvc` — precisely the out-of-band mutation GitOps exists to
+     eliminate. A standalone PVC's spec.resources.requests.storage IS mutable (the
+     `longhorn` class sets allowVolumeExpansion: true), so `loki.storage` below is now
+     the real, enforced size: change it in Git, Argo applies it, Longhorn expands.
+
+     That STS ignoreDifferences rule is NOT Loki-specific — it is keyed on
+     `kind: StatefulSet` with no name, and postgres/mongodb/neo4j/kafka/elasticsearch/
+     redis/rabbitmq/prometheus/alertmanager/chromadb all depend on it to protect real
+     data (2026-07-24 incident). It is left exactly as-is; Loki simply stops being a
+     StatefulSet and therefore stops being in its scope.
+
+     Deletion protection: `helm.sh/resource-policy: keep` stops a Helm uninstall from
+     removing it, and Argo's `Prune=false` stops an Argo prune from removing it. A
+     chart change can disable Loki without destroying its volume. Shrinking `storage`
+     is rejected by the API server (expansion only) — that is intended.
+*/}}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: fuzeinfra-loki-data
+  labels:
+    {{- include "fuzeinfra.labels" . | nindent 4 }}
+    {{- include "fuzeinfra.selectorLabels" (dict "component" "loki" "root" $) | nindent 4 }}
+  annotations:
+    helm.sh/resource-policy: keep
+    argocd.argoproj.io/sync-options: Prune=false
+spec:
+  accessModes: ["ReadWriteOnce"]
+  {{- include "fuzeinfra.storageClass" . | nindent 2 }}
+  resources:
+    requests:
+      storage: {{ .Values.loki.storage }}
+---
 apiVersion: apps/v1
-kind: StatefulSet
+kind: Deployment
 metadata:
   name: fuzeinfra-loki
   labels:
     {{- include "fuzeinfra.labels" . | nindent 4 }}
 spec:
-  serviceName: fuzeinfra-loki
   replicas: 1
+  # Recreate, NOT RollingUpdate. LOAD-BEARING: the data volume is ReadWriteOnce, so
+  # a rolling update deadlocks — the new pod cannot mount the claim while the old
+  # pod still holds it, the old pod is never terminated because the new one never
+  # becomes Ready, and the rollout hangs until it is manually unstuck. Recreate
+  # tears the old pod down first. The cost is a short logging gap on every restart,
+  # which is the correct trade for a single-replica, single-binary Loki.
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       {{- include "fuzeinfra.selectorLabels" (dict "component" "loki" "root" $) | nindent 6 }}
@@ -575,21 +626,25 @@ spec:
               port: 3100
             initialDelaySeconds: 20
             periodSeconds: 10
+          {{- with .Values.loki.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      {{- with .Values.loki.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.loki.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       volumes:
         - name: config
           configMap:
             name: fuzeinfra-loki-config
-  volumeClaimTemplates:
-    - apiVersion: v1
-      kind: PersistentVolumeClaim
-      metadata:
-        name: data
-      spec:
-        accessModes: ["ReadWriteOnce"]
-        {{- include "fuzeinfra.storageClass" . | nindent 8 }}
-        resources:
-          requests:
-            storage: {{ .Values.loki.storage }}
+        - name: data
+          persistentVolumeClaim:
+            claimName: fuzeinfra-loki-data
 {{- end }}
 
 {{- /* ===================== Promtail (DaemonSet) ===================== */ -}}
