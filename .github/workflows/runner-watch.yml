@@ -101,10 +101,19 @@
 #   actions:        write  (cancel + re-dispatch a stranded run)        [fleet repos]
 #   contents:       read   (reading governance/ruleset-fleet.json)      [FuzeSDLC]
 #   metadata:       read
-# If the token cannot be minted, or the fleet list cannot be read, the job FAILS. It does not
-# degrade: a watcher that sweeps an empty fleet and reports green is worse than a red one.
-# If a per-repo probe fails, the script does NOT invent an answer either — it keeps that
-# repo's current value and warns loudly. See decide_runner()'s `online_runners is None`.
+# THREE THINGS FAIL THE JOB RATHER THAN DEGRADING, because a watcher that reports green
+# while blind is worse than one that is red:
+#   * the token cannot be minted;
+#   * the fleet list cannot be read (an unknown fleet must never sweep clean);
+#   * liveness could not be verified for ANY repo whose decision depends on it — see
+#     run_decide()'s `SystematicBlindness` block. Note the mint check above proves only that
+#     a token EXISTS, which says nothing about its scopes: on the first dispatch after the
+#     port the App had no `administration: read`, every probe failed, and the job reported
+#     SUCCESS having written nothing anywhere. That is the hole this third check closes.
+# A PARTIAL probe failure is still a success on purpose: the script keeps that repo's
+# current value and warns loudly rather than inventing an answer (see decide_runner()'s
+# `online_runners is None`), and reddening a run for a few flaky probes would train
+# everyone to ignore the result.
 #
 # NOT IN SCOPE (stage 2): budget awareness / reserve floor / CI_BUDGET_TOKEN. Before that
 # is written, re-verify the billing endpoint — `GET /users/{owner}/settings/billing/actions`
