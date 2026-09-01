@@ -88,6 +88,45 @@ groups:
           summary: "PVC {{ $labels.namespace }}/{{ $labels.persistentvolumeclaim }} stuck Pending"
           description: "PersistentVolumeClaim has not been bound for 5 minutes."
 
+      # EARLY WARNING for PVC growth, deliberately ahead of PVCAlmostFull below.
+      # This exists because Loki OSS has NO size-based retention — only time
+      # (limits_config.retention_period) — so nothing inside Loki reacts to "the
+      # disk is filling"; an alarm is the only mechanism that catches it before
+      # it fills. And a full Loki volume is self-sealing: retention is enforced
+      # by the compactor, the compactor runs inside Loki, and Loki cannot start
+      # on a full disk. On 2026-08-30 that crash-looped 694 times over 2d11h and
+      # wedged an Argo sync in phase=Running for 37 hours, silently freezing
+      # every prod deployment queued behind it.
+      #
+      # Expressed as used/capacity (not available/capacity) so the threshold
+      # reads the same way as the incident did. 80% on a 20Gi volume leaves ~4Gi
+      # of headroom — hours, not minutes, at fleet log rates.
+      #
+      # Requires the `kubernetes-nodes` scrape job (kubelet /metrics via the
+      # apiserver proxy) to be up; kubelet_volume_stats_* comes from the kubelet,
+      # not cAdvisor, and is not subject to the cadvisor keep-list.
+      - alert: PVCFillingUp
+        expr: |
+          kubelet_volume_stats_used_bytes
+          / kubelet_volume_stats_capacity_bytes > 0.80
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "PVC {{ $labels.namespace }}/{{ $labels.persistentvolumeclaim }} is {{ $value | humanizePercentage }} full"
+          description: >-
+            Act now, while there is still headroom — a volume that reaches 100%
+            can wedge its workload and, for Loki, the whole Argo sync queue.
+            Do BOTH, in Git only (prod is GitOps under selfHeal; never
+            `kubectl patch` the live PVC): (1) reduce what is written — for
+            fuzeinfra-loki-data lower limits_config.retention_period in
+            helm/fuzeinfra/templates/configmaps-monitoring.yaml, or set
+            loki.s3.enabled=true in values-contabo.yaml to move chunks+index off
+            the PVC entirely; (2) if growth is legitimate, raise the matching
+            `storage:` value in helm/fuzeinfra/values-contabo.yaml and merge —
+            the `longhorn` class allows expansion, and growth only (the API
+            server rejects a shrink).
+
       - alert: PVCAlmostFull
         expr: |
           kubelet_volume_stats_available_bytes
