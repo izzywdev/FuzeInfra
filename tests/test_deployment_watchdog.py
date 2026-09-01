@@ -520,3 +520,59 @@ def test_workflow_has_no_failure_swallowing():
     assert "continue-on-error" not in body
     assert "|| true" not in body
     assert "exit 0" not in body
+
+
+# ---------------------------------------------------------------------------
+# 8. per-run issue cap — measured against the real cluster, not invented
+# ---------------------------------------------------------------------------
+
+def test_stuck_argo_op_files_first_under_the_cap():
+    """The op that blocks every other deploy must never lose a slot to a crash loop."""
+    crashloops = wd.detect_chronic_crashloop(
+        {"items": [pod(f"api-{i}", restarts=600, reason="CrashLoopBackOff", ready=False,
+                       start_minutes_ago=900) for i in range(20)]},
+        CFG, NOW,
+    )
+    stuck = _stuck_finding()
+    ordered = wd.prioritize(crashloops + [stuck], CFG["issues"]["priority"])
+    assert ordered[0] is stuck
+
+
+def test_end_to_end_caps_issues_filed_reports_everything_and_dispatches_terminate(monkeypatch):
+    """Detection is never capped; only issue CREATION is.
+
+    The first live dry-run against prod returned 55 distinct conditions. Filing
+    55 issues at once is the muting failure in a different shape, so the run
+    files the worst `max_per_run` and lists the rest in the summary.
+    """
+    apps = {"items": [argo_app("fuzeinfra-prod", "Running", 37 * 60,
+                               "waiting for healthy state of apps/StatefulSet/fuzeinfra-loki")]}
+    pods = {"items": [pod(f"api-{i}", restarts=600, reason="CrashLoopBackOff", ready=False,
+                          start_minutes_ago=900) for i in range(20)]}
+    filed: list[tuple[str, str]] = []
+    dispatched: list[str] = []
+
+    monkeypatch.setattr(wd, "collect_cluster_state", lambda cfg: (apps, pods))
+    monkeypatch.setattr(wd, "collect_pvc_usage", lambda p, cfg: ([], "prometheus"))
+    monkeypatch.setattr(wd, "list_open_watchdog_issues", lambda repo, label: [])
+    monkeypatch.setattr(wd, "ensure_label", lambda *a, **k: None)
+    monkeypatch.setattr(wd, "create_issue",
+                        lambda repo, label, title, body: filed.append((title, body)) or "url")
+    monkeypatch.setattr(wd, "dispatch_terminate_op",
+                        lambda repo, wf, app, ref="main": dispatched.append(app))
+
+    exit_code = wd.main(["--repo", "izzywdev/FuzeInfra"])
+
+    assert exit_code == 1  # findings -> red run, so the freeze is visible in Actions
+    assert len(filed) == CFG["issues"]["max_per_run"] < 21
+    # The stuck op took the first slot and triggered the sanctioned terminate.
+    assert filed[0][0] == "[watchdog] stuck-argo-op: fuzeinfra-prod"
+    assert dispatched == ["fuzeinfra-prod"]
+    assert "argo-terminate-op.yml" in filed[0][1]
+
+
+def test_no_findings_files_nothing_and_exits_zero(monkeypatch):
+    monkeypatch.setattr(wd, "collect_cluster_state", lambda cfg: ({"items": []}, {"items": []}))
+    monkeypatch.setattr(wd, "collect_pvc_usage", lambda p, cfg: ([], "prometheus"))
+    monkeypatch.setattr(wd, "create_issue", lambda *a, **k: pytest.fail("filed an issue with no findings"))
+    assert wd.main(["--repo", "izzywdev/FuzeInfra"]) == 0

@@ -421,6 +421,22 @@ def detect_pvc_pressure(usage: Sequence[dict], config: dict) -> list[Finding]:
 # dedup
 # --------------------------------------------------------------------------
 
+def prioritize(findings, priority=None):
+    """Worst-first order for filing under the per-run cap.
+
+    The stuck Argo op comes first because it is the one condition that blocks
+    EVERY other deploy; PVC pressure second because it is the only warning that
+    arrives before a volume fills (after that nothing inside the pod can free
+    it). Unknown kinds sort last but are never dropped.
+    """
+    order = list(priority or [KIND_ARGO, KIND_PVC, KIND_CREATING, KIND_CRASHLOOP])
+
+    def rank(finding):
+        return (order.index(finding.kind) if finding.kind in order else len(order), finding.key)
+
+    return sorted(findings, key=rank)
+
+
 def filter_new_findings(
     findings: Iterable[Finding], open_issues: Iterable[dict], title_prefix: str = "[watchdog]"
 ) -> tuple[list[Finding], list[tuple[Finding, dict]]]:
@@ -957,8 +973,22 @@ def main(argv: Sequence[str] | None = None) -> int:
     if new:
         ensure_label(args.repo, label, issues_cfg.get("label_color", "B60205"))
 
+    # Cap issue CREATION (never detection): the first live run against prod
+    # returned 55 distinct conditions. Filing 55 issues at once is the muting
+    # failure in a different shape. Everything is still reported in the summary
+    # and the run still goes red; the overflow files on later runs.
+    max_per_run = int(issues_cfg.get("max_per_run", 10))
+    ordered = prioritize(new, issues_cfg.get("priority"))
+    to_file, overflow = ordered[:max_per_run], ordered[max_per_run:]
+    if overflow:
+        lines.append(
+            f"- {len(overflow)} further condition(s) detected but NOT filed this run "
+            f"(max_per_run={max_per_run}); they file on a later run as earlier ones close:"
+        )
+        lines += [f"  - `{f.key}` — {f.summary}" for f in overflow]
+
     argo_cfg = config.get("argo_stuck_op") or {}
-    for finding in new:
+    for finding in to_file:
         actions: list[str] = []
         if finding.kind == KIND_ARGO and argo_cfg.get("auto_terminate", True):
             workflow = argo_cfg.get("auto_terminate_workflow", "argo-terminate-op.yml")
