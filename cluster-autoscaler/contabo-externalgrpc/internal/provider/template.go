@@ -48,10 +48,20 @@ var productSpecs = map[string]productSpec{
 // needs to determine whether a pending pod would fit on a *future* elastic node.
 // The template MUST mirror exactly what the real node gets from cloud-init:
 //   - label fuzeinfra.io/pool=elastic
+//   - label node-role=workload
 //   - taint fuzeinfra.io/elastic=true:PreferNoSchedule
 //
 // If the labels or taints diverge from what cloud-init sets, CA's scheduling
 // simulation will be incorrect, leading to wrong scale-up (or no scale-up) decisions.
+//
+// node-role=workload in particular is load-bearing in BOTH directions. The real
+// node needs it because the product workloads select on it
+// (nodeSelector: {node-role: workload}); this simulated node needs it because CA
+// decides whether a pending pod WOULD fit on a future elastic node by scheduling
+// it against this template. Add the label only to cloud-init and CA will never
+// scale up for a workload-selecting pod, even though the node it would create
+// would have accepted it. TestElasticNodeLabelParity enforces that both sides
+// move together.
 func (s *Server) NodeGroupTemplateNodeInfo(ctx context.Context, req *protos.NodeGroupTemplateNodeInfoRequest) (*protos.NodeGroupTemplateNodeInfoResponse, error) {
 	spec, ok := productSpecs[s.cfg.ProductID]
 	if !ok {
@@ -64,9 +74,13 @@ func (s *Server) NodeGroupTemplateNodeInfo(ctx context.Context, req *protos.Node
 		ObjectMeta: metav1.ObjectMeta{
 			Name: nodeName,
 			// Labels must exactly match what the real elastic node receives at k3s agent join time.
-			// Task 14 (cloud-init) applies the same labels; keep them in sync.
+			// deploy/elastic-userdata*.template applies the same --node-label flags; keep
+			// them in sync (TestElasticNodeLabelParity fails the build if they drift).
+			// The kubernetes.io/* entries are well-known labels the kubelet sets itself,
+			// not --node-label flags, so the parity check ignores that prefix.
 			Labels: map[string]string{
 				"fuzeinfra.io/pool":      "elastic",
+				"node-role":              "workload",
 				"kubernetes.io/hostname": nodeName,
 				"kubernetes.io/os":       "linux",
 				"kubernetes.io/arch":     "amd64",
