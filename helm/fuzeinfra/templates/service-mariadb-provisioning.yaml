@@ -1,0 +1,182 @@
+{{- /*
+============================ Per-service MariaDB provisioning ============================
+Declarative, GitOps-reconciled, idempotent provisioning of per-service MariaDB
+users + databases on the shared `fuzeinfra-mariadb` server. This is the MariaDB
+twin of `service-db-provisioning.yaml` (Postgres) and
+`service-mongo-provisioning.yaml` (MongoDB); same contract, same guarantees.
+
+For each entry in `.Values.serviceMariadbDatabases` (that is `enabled`) this Job:
+  1. ensures database `<database>` exists (utf8mb4 / utf8mb4_unicode_ci);
+  2. ensures user `<user>`@`<host>` exists and (re)syncs its password to match
+     the value the consuming service already sealed (so its DATABASE_URL /
+     WORDPRESS_DB_PASSWORD connects);
+  3. grants that user ALL PRIVILEGES on `<database>`.* — and nothing else.
+
+Design notes:
+  - The Job runs in the `fuzeinfra` namespace, so the MariaDB ROOT credential
+    never leaves this namespace and never lands in git. The per-service password
+    is read via `secretKeyRef` from a Secret the consuming repo seals FOR the
+    `fuzeinfra` namespace (e.g. `mendys-wp-db-credentials`). Only Secret NAMES
+    and KEYS are committed here.
+  - post-install/post-upgrade + Argo PostSync hooks: provisioning runs AFTER the
+    MariaDB StatefulSet exists (a pre-* hook would race an absent/unready DB).
+    An explicit `mariadb-admin ping` wait loop guards startup.
+  - Idempotent: re-runs on every sync must not fail. `CREATE DATABASE IF NOT
+    EXISTS` + `CREATE USER IF NOT EXISTS` (MariaDB >= 10.1) + an unconditional
+    `ALTER USER ... IDENTIFIED BY` so a rotated sealed password propagates.
+  - Injection safety: MariaDB has no server-side `format(%I)` equivalent, so
+    identifiers are validated against a strict charset in-script and the Job
+    fails loudly on anything else. Passwords are single-quote/backslash escaped
+    and are never passed on a command line (`MYSQL_PWD` env, not `-p`).
+  - There is no MySQL/MariaDB analogue of Postgres' `PUBLIC` grant: a freshly
+    created database is reachable by nobody but root until granted, so no
+    equivalent REVOKE step is needed.
+
+GITOPS GATE (same hard gate as Postgres): the hook is a SINGLE Job pod that
+mounts EVERY enabled entry's password via `secretKeyRef` (optional: false), so
+ONE missing Secret fails the whole pod with CreateContainerConfigError and
+blocks every other entry. Flip an entry to `enabled: true` only in the SAME
+change that lands its sealed Secret — never before.
+*/ -}}
+{{- if .Values.serviceMariadbDatabases }}
+{{- $enabled := list -}}
+{{- range .Values.serviceMariadbDatabases }}
+  {{- if .enabled }}{{- $enabled = append $enabled . }}{{- end }}
+{{- end }}
+{{- if $enabled }}
+{{- if not .Values.mariadb.enabled }}
+{{- fail "fuzeinfra: serviceMariadbDatabases has enabled entries but mariadb.enabled is false — the provisioning Job would wait forever for a server that is not deployed. Enable the mariadb engine in this overlay, or gate the entries off." }}
+{{- end }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: fuzeinfra-service-mariadb-provision
+  labels:
+    {{- include "fuzeinfra.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "1"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+    "argocd.argoproj.io/hook": PostSync
+    "argocd.argoproj.io/hook-delete-policy": BeforeHookCreation
+spec:
+  backoffLimit: 6
+  template:
+    metadata:
+      labels:
+        {{- include "fuzeinfra.labels" . | nindent 8 }}
+        {{- include "fuzeinfra.selectorLabels" (dict "component" "service-mariadb-provision" "root" $) | nindent 8 }}
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: provision
+          image: {{ .Values.serviceMariadbProvisioning.image | default .Values.mariadb.image }}
+          imagePullPolicy: {{ include "fuzeinfra.pullPolicy" . }}
+          env:
+            # --- MariaDB root (admin) — local to the fuzeinfra namespace ---
+            - name: DB_HOST
+              value: {{ .Values.serviceMariadbProvisioning.host | default "fuzeinfra-mariadb" | quote }}
+            - name: DB_PORT
+              value: {{ .Values.mariadb.port | quote }}
+            - name: ADMIN_USER
+              value: {{ .Values.serviceMariadbProvisioning.adminUser | default "root" | quote }}
+            - name: ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.serviceMariadbProvisioning.adminSecret.name | default .Values.mariadb.rootSecret.name | default (include "fuzeinfra.secretName" .) }}
+                  key: {{ .Values.serviceMariadbProvisioning.adminSecret.passwordKey | default .Values.mariadb.rootSecret.key | default "MARIADB_ROOT_PASSWORD" }}
+            {{- /* One password env per enabled service, sourced from that
+                   service's Secret sealed for the fuzeinfra namespace. */ -}}
+            {{- range $enabled }}
+            - name: SVC_PW_{{ .name | upper | replace "-" "_" }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ required (printf "serviceMariadbDatabases[%s].passwordSecret.name is required" .name) .passwordSecret.name }}
+                  key: {{ required (printf "serviceMariadbDatabases[%s].passwordSecret.key is required" .name) .passwordSecret.key }}
+            {{- end }}
+          command:
+            - bash
+            - -c
+            - |
+              set -euo pipefail
+              # MYSQL_PWD, not -p<pw>: the password must never appear in the
+              # container's process table or in the Job log.
+              export MYSQL_PWD="$ADMIN_PASSWORD"
+
+              mariadb_admin_sql() {
+                mariadb --protocol=TCP -h "$DB_HOST" -P "$DB_PORT" -u "$ADMIN_USER" --batch --skip-column-names
+              }
+
+              echo "Waiting for MariaDB at ${DB_HOST}:${DB_PORT} ..."
+              until mariadb-admin --protocol=TCP -h "$DB_HOST" -P "$DB_PORT" -u "$ADMIN_USER" ping --silent >/dev/null 2>&1; do
+                sleep 3
+              done
+              echo "MariaDB is ready."
+
+              # Identifiers are interpolated into SQL, so they are whitelisted
+              # rather than escaped. Anything outside the charset is a config
+              # error and fails the Job loudly instead of being quoted away.
+              require_ident() {
+                case "$2" in
+                  ''|*[!A-Za-z0-9_]*)
+                    echo "FATAL: $1 '$2' is not a valid MariaDB identifier ([A-Za-z0-9_]+)" >&2
+                    exit 1 ;;
+                esac
+              }
+              require_host() {
+                case "$1" in
+                  ''|*[!A-Za-z0-9_.%-]*)
+                    echo "FATAL: host '$1' is not a valid MariaDB host pattern" >&2
+                    exit 1 ;;
+                esac
+              }
+              # Escape backslash first, then single quote — order matters.
+              sql_escape() { printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e "s/'/\\\\'/g"; }
+
+              # provision <database> <user> <password> <host> <charset> <collation>
+              provision() {
+                local db="$1" user="$2" pw="$3" host="$4" charset="$5" collation="$6"
+                require_ident "database" "$db"
+                require_ident "user" "$user"
+                require_ident "charset" "$charset"
+                require_ident "collation" "$collation"
+                require_host "$host"
+                if [ -z "$pw" ]; then
+                  echo "FATAL: empty password for user '$user' — is the sealed Secret key correct?" >&2
+                  exit 1
+                fi
+                local epw
+                epw="$(sql_escape "$pw")"
+                echo "== Provisioning user='${user}'@'${host}' database='${db}' =="
+
+                # 1) Database (idempotent). utf8mb4 so WordPress/Laravel-class
+                #    consumers get 4-byte-safe text by default.
+                printf 'CREATE DATABASE IF NOT EXISTS `%s` CHARACTER SET %s COLLATE %s;\n' \
+                  "$db" "$charset" "$collation" | mariadb_admin_sql
+
+                # 2) User: create if absent, then ALWAYS re-sync the password so
+                #    it matches what the consuming service sealed (rotation).
+                printf 'CREATE USER IF NOT EXISTS `%s`@`%s` IDENTIFIED BY '\''%s'\'';\n' \
+                  "$user" "$host" "$epw" | mariadb_admin_sql
+                printf 'ALTER USER `%s`@`%s` IDENTIFIED BY '\''%s'\'';\n' \
+                  "$user" "$host" "$epw" | mariadb_admin_sql
+
+                # 3) Least privilege: full rights inside its own database only.
+                #    No global grants, no other schema. (MariaDB has no PUBLIC
+                #    grant, so nothing needs revoking.)
+                printf 'GRANT ALL PRIVILEGES ON `%s`.* TO `%s`@`%s`;\nFLUSH PRIVILEGES;\n' \
+                  "$db" "$user" "$host" | mariadb_admin_sql
+
+                echo "== Done user='${user}' database='${db}' =="
+              }
+
+              {{- range $enabled }}
+              provision {{ .database | quote }} {{ .user | quote }} "${SVC_PW_{{ .name | upper | replace "-" "_" }}}" {{ .host | default "%" | quote }} {{ .charset | default "utf8mb4" | quote }} {{ .collation | default "utf8mb4_unicode_ci" | quote }}
+              {{- end }}
+
+              echo "All MariaDB service databases provisioned."
+          resources:
+            requests: { cpu: 50m, memory: 64Mi }
+            limits:   { cpu: 250m, memory: 256Mi }
+{{- end }}
+{{- end }}

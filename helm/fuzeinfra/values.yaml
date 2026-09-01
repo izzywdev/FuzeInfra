@@ -50,6 +50,12 @@ credentials:
   neo4j:
     user: neo4j
     password: password123
+  mariadb:
+    # Root password for the shared MariaDB engine. Same model as the other
+    # engines here: a placeholder for kind/dev. Real environments override it
+    # or supply `credentials.existingSecret` / `mariadb.rootSecret` pointing at
+    # a SealedSecret. Never commit a real value.
+    rootPassword: mariadb_dev_password
   rabbitmq:
     user: admin
     password: admin123
@@ -221,6 +227,49 @@ serviceMongoDatabases:
 serviceChromaCollections: []
 
 # -----------------------------------------------------------------------------
+# Per-service MariaDB provisioning.
+#
+# The MariaDB twin of `serviceDbProvisioning` / `serviceDatabases` above. Exists
+# so consuming repos that need a MySQL-protocol store (WordPress, Laravel, and
+# anything else that cannot speak Postgres) stop shipping their OWN MariaDB
+# StatefulSet + PVC and instead get a least-privilege user + database on the
+# shared `fuzeinfra-mariadb` engine.
+#
+# Same cross-namespace secret contract as Postgres: the hook Job runs in the
+# `fuzeinfra` namespace so the MariaDB ROOT credential never leaves it, and the
+# per-service password is read by `secretKeyRef` from a Secret the consuming
+# repo seals FOR the `fuzeinfra` namespace. Only Secret NAMES + KEYS here.
+serviceMariadbProvisioning:
+  # Client image. Empty -> falls back to `mariadb.image` (which ships the
+  # `mariadb` / `mariadb-admin` clients), so the client version always matches
+  # the server.
+  image: ""
+  host: fuzeinfra-mariadb    # in-namespace DNS of the shared MariaDB Service
+  adminUser: root
+  # Where the admin (root) password comes from. Empty name/passwordKey ->
+  # `mariadb.rootSecret` -> the chart-managed `fuzeinfra-secrets`.
+  adminSecret:
+    name: ""
+    passwordKey: ""
+
+# List of MariaDB service databases to provision. Each entry gates itself.
+#   name:      logical service name (used to derive the password env var)
+#   user:      MariaDB user to ensure (convention: <svc>_svc)
+#   database:  database to ensure; the user gets ALL PRIVILEGES on it and
+#              nothing else
+#   host:      OPTIONAL grant host pattern (default "%": any pod in the cluster
+#              network; the credential, not the source IP, is the boundary)
+#   charset / collation: OPTIONAL (default utf8mb4 / utf8mb4_unicode_ci)
+#   passwordSecret.{name,key}: the per-service Secret (sealed for the
+#     `fuzeinfra` namespace by the consumer repo) holding the user password.
+#
+# HARD GATE: `enabled: true` only in the SAME change that lands the sealed
+# Secret. One missing Secret fails the single provisioning pod with
+# CreateContainerConfigError and blocks every other entry in the list.
+serviceMariadbDatabases: []
+
+
+# -----------------------------------------------------------------------------
 # Ingress (replaces the docker-compose nginx reverse proxy). Web UIs are exposed
 # at <service>.<global.domain>. Requires an ingress controller (ingress-nginx),
 # installed by the bootstrap scripts for kind and as an EKS addon path.
@@ -274,6 +323,34 @@ mongoExpress:
   enabled: true
   image: mongo-express:latest
   port: 8081
+
+# Shared MariaDB engine (MySQL protocol). OFF in the base defaults and opted
+# into per environment, because it is the newest engine here and every existing
+# overlay was sized without it — see values-local.yaml / values-contabo.yaml.
+#
+# It exists so consumers needing a MySQL-protocol store (WordPress, Laravel,
+# ...) stop running their own MariaDB StatefulSet on their own PVC. Per-service
+# users/databases are provisioned declaratively via `serviceMariadbDatabases`.
+mariadb:
+  enabled: false
+  # 11.4 is the current MariaDB LTS. Pinned to a minor series (not `latest`) so
+  # an unattended pull can never move the server across a major version under a
+  # live datadir.
+  image: mariadb:11.4
+  port: 3306
+  storage: 5Gi
+  # Optional durable-node pin (empty by default; set on overlays with a durable
+  # Longhorn node pool). See postgres.nodeSelector.
+  nodeSelector: {}
+  # Where the root password is read from. Empty -> the chart-managed
+  # `fuzeinfra-secrets` (key MARIADB_ROOT_PASSWORD). Point at a SealedSecret in
+  # any real environment.
+  rootSecret:
+    name: ""
+    key: ""
+  resources:
+    requests: { cpu: 100m, memory: 256Mi }
+    limits:   { cpu: "1",  memory: 1Gi }
 
 redis:
   # Optional durable-node pin (empty by default; set on overlays with a
