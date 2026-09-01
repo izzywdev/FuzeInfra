@@ -116,21 +116,32 @@ WHERE THIS RUNS  (the instance moved to FuzeInfra; the reasoning above did not c
 This file was authored in FuzeSDLC (PR #269) and the RUNNABLE INSTANCE was moved to
 FuzeInfra before it ever ran on a schedule. One fact forced it:
 
-    FuzeSDLC is PRIVATE, so its GitHub-hosted minutes are METERED — and that budget is
-    exhausted. A hosted job in a private repo whose account budget is gone does not fail,
-    it NEVER STARTS: `runner_id: 0`, zero steps, no log, "The job was not started because
-    an Actions budget is preventing further use".
+    FuzeSDLC is PRIVATE, so its GitHub-hosted minutes are METERED. A hosted job in a
+    private repo whose account budget is gone does not fail, it NEVER STARTS:
+    `runner_id: 0`, zero steps, no log, "The job was not started because an Actions
+    budget is preventing further use".
 
 Every job of this watcher is hardcoded `ubuntu-latest` on purpose (a chooser that runs on
 the pool it evaluates cannot report that pool down), so the watcher is hosted-only by
-design — and BUDGET EXHAUSTION IS ONE OF THE TWO CONDITIONS IT EXISTS TO DETECT. In a
-private hub it is therefore guaranteed to be dead in exactly the scenario it was written
-for. FuzeInfra is PUBLIC, where Actions is free and unmetered, so the same hosted-only
-design has no billing dependency at all; it is also the infra repo, which makes fleet
-runner health its natural domain.
+design — and BUDGET EXHAUSTION IS ONE OF THE TWO CONDITIONS IT EXISTS TO DETECT. A
+hosted-only watcher in a metered repo therefore has an availability dependency CORRELATED
+WITH THE FAILURE IT DETECTS: the budget running out both raises the alarm and silences it.
+FuzeInfra is PUBLIC, where Actions is free and unmetered, so the same hosted-only design
+has no billing dependency at all; it is also the infra repo, which makes fleet runner
+health its natural domain.
 
     gh api repos/izzywdev/FuzeSDLC --jq .private   => true
     gh api repos/izzywdev/FuzeInfra --jq .private   => false
+
+MEASURED, NOT ASSUMED (2026-09-01). The move was prompted by a report that FuzeSDLC's
+budget was exhausted and its hosted jobs were failing instantly. That symptom is NOT
+present as of the port — FuzeSDLC's `ubuntu-latest` jobs currently succeed with real
+runner ids and full step lists. The structural argument does not depend on it (metered vs
+free is a property of the repo, not of this week's balance), so the move stands; the
+framing is corrected here rather than repeated. The OTHER detected condition, meanwhile,
+IS live in the authoring repo right now: PR #269's own CI has 15+ jobs `queued` 32-38
+minutes with `runner_id: 0` against `fuze-runner` — precisely what `stranded_runs()`
+selects, and precisely the never-reporting required check this design exists to end.
 
 Three consequences, all of them mechanical rather than design changes:
 

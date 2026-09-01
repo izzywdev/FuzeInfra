@@ -28,14 +28,37 @@
 #     "The job was not started because an Actions budget is preventing further use."
 #   * ONE OF THE TWO CONDITIONS THIS WATCHER EXISTS TO DETECT IS BUDGET EXHAUSTION.
 #
-# So in a private hub this workflow is guaranteed to be dead in exactly the scenario it was
-# written for. That is not hypothetical: FuzeSDLC's budget is exhausted right now, and its
-# hosted jobs fail instantly with zero steps and no log. FuzeInfra is PUBLIC, so hosted
-# Actions is free and unmetered and the same hosted-only design carries no billing
-# dependency at all. It is also the infra repo, which makes fleet runner health its domain.
+# So a hosted-only watcher in a metered repo has an availability dependency CORRELATED WITH
+# THE FAILURE IT DETECTS: the budget running out both triggers the alarm and disables it.
+# FuzeInfra is PUBLIC, so hosted Actions is free and unmetered and the same hosted-only
+# design carries no billing dependency at all. It is also the infra repo, which makes fleet
+# runner health its domain.
 #
 #     gh api repos/izzywdev/FuzeSDLC --jq .private   => true
 #     gh api repos/izzywdev/FuzeInfra --jq .private   => false
+#
+# HONEST STATE OF THAT ARGUMENT, MEASURED 2026-09-01 rather than assumed. The move was
+# prompted by a report that FuzeSDLC's Actions budget was exhausted and its hosted jobs were
+# failing instantly with zero steps. THAT SYMPTOM IS NOT PRESENT RIGHT NOW — FuzeSDLC's
+# `ubuntu-latest` jobs are succeeding with real runner ids and full step lists:
+#
+#     gate-actionlint-templates  success  runner_id=1000211611  steps=5   labels=ubuntu-latest
+#     gate-secret-sourcing       success  runner_id=1000211610  steps=7   labels=ubuntu-latest
+#
+# The structural argument above does not depend on that symptom being live, which is why the
+# move still stands: metered-vs-free is a property of the repo, not of this week's balance.
+# But the OTHER of the two conditions this watcher detects IS live, in the authoring repo, at
+# the moment of the port — FuzeSDLC PR #269's own CI has 15+ jobs sitting `queued` for 32-38
+# minutes with `runner_id: 0` on the `fuze-runner` pool:
+#
+#     queued 38m  gate-version         [fuze-runner]
+#     queued 38m  gate-toolchain       [fuze-runner]
+#     queued 32m  gate-build           [fuze-runner]   ... and a dozen more
+#
+# That is exactly the shape `stranded_runs()` selects (queued past the 20m threshold with no
+# runner assigned), and exactly the "required check stuck at Expected - waiting for status to
+# be reported" deadlock the whole design exists to end. The problem is real and current; only
+# the budget half of the framing was stale.
 #
 # FuzeInfra is also `excluded` in governance/ruleset-fleet.json, so the hub is not in its own
 # fleet and the watcher never writes its own CI_RUNNER_LABELS.
