@@ -10,6 +10,12 @@ on:
     branches: [main]
     paths:
       - 'cluster-autoscaler/contabo-externalgrpc/**'
+      - '.github/workflows/ca-provider-image.yml'
+      # TestValuesContaboUserDataB64Parity asserts the cloud-init this overlay
+      # ships (userDataTemplateB64) still matches deploy/elastic-userdata.template.
+      # Without this path the guard would miss the exact PR that breaks it: one
+      # that re-encodes the base64 and touches nothing under the Go module.
+      - 'helm/fuzeinfra/values-contabo.yaml'
   workflow_dispatch:
 
 permissions:
@@ -17,8 +23,42 @@ permissions:
   packages: write
 
 jobs:
+  # Nothing ran `go test` for this module before, which meant the provider's own
+  # unit tests -- including the cloud-init/CA-simulation label parity guards that
+  # exist precisely to stop a silent scale-up regression -- were only ever run on
+  # a developer's machine, if at all. Gate the image on them: an image that fails
+  # its tests must not be promoted to :latest, because :latest is what
+  # values-contabo.yaml pins and Argo rolls into prod.
+  test:
+    name: go test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7.0.1
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          # Matches the `go` directive in
+          # cluster-autoscaler/contabo-externalgrpc/go.mod and the golang:1.25
+          # builder in that module's Dockerfile.
+          go-version: '1.25'
+          cache-dependency-path: cluster-autoscaler/contabo-externalgrpc/go.sum
+
+      - name: go vet
+        working-directory: cluster-autoscaler/contabo-externalgrpc
+        run: go vet ./...
+
+      # Run from the module dir but inside the full checkout:
+      # TestValuesContaboUserDataB64Parity walks up to helm/fuzeinfra/values-contabo.yaml
+      # to prove the base64 prod actually ships still matches the source template.
+      - name: go test
+        working-directory: cluster-autoscaler/contabo-externalgrpc
+        run: go test ./... -count=1
+
   build-and-push:
     name: Build & push image
+    needs: test
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
