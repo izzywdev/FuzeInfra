@@ -1,0 +1,57 @@
+{
+  "$doc": "Thresholds for scripts-tools/deployment_watchdog.py (.github/workflows/deployment-watchdog.yml). Written after the 2026-08-30..09-01 fleet-deployment freeze, in which every individual component reported 'running' while prod deployment was frozen for 2d11h and nothing alerted. Each detection below is one link of that incident chain, so tuning a threshold to 0/false is a decision to stop watching that link — say why in the PR.",
+
+  "argo_stuck_op": {
+    "$doc": "INCIDENT LINK 2 — the highest-value signal. Argo's sync of fuzeinfra-prod blocks on resource health, so one permanently-unhealthy StatefulSet wedged a single sync operation in phase=Running for 37 hours ('waiting for healthy state of apps/StatefulSet/fuzeinfra-loki and 1 more resources'). Argo will not start a new sync while an operation is in flight, so EVERY prod change queued silently behind it — including the cluster-autoscaler maxSize raise that fleet-wide CI was blocked on. Nothing in the fleet watched for this.",
+    "enabled": true,
+    "running_minutes": 45,
+    "$running_minutes": "A healthy fuzeinfra-prod sync measures ~5 minutes end to end (see CLAUDE.md, 'Wait for ArgoCD syncs to land' uses SYNC_WAIT_TIMEOUT=300s per app). 45 is ~9x that: long enough that a slow-but-progressing sync, a hook still running, or a rollout mid-flight is never flagged, short enough that a wedged operation is caught the same hour instead of two days later.",
+    "namespace": "argocd",
+    "auto_terminate": true,
+    "$auto_terminate": "Dispatches the existing .github/workflows/argo-terminate-op.yml (input: app). Terminating a stale op is safe and reversible — Argo simply re-syncs from git, which is the desired state anyway — so this is the one sanctioned WRITE the watchdog may make. It fires only after running_minutes has already elapsed, and the issue it files says it fired. Nothing else is ever auto-patched or auto-deleted.",
+    "auto_terminate_workflow": "argo-terminate-op.yml",
+    "auto_terminate_ref": "main"
+  },
+
+  "crashloop": {
+    "$doc": "INCIDENT LINK 1 — fuzeinfra-loki crash-looped 694 times over 2d11h ('mkdir /loki/tsdb-shipper-active/scratch/...: no space left on device') and could never recover on its own: retention is enforced by the compactor, the compactor runs inside Loki, and Loki cannot start on a full disk. A self-sealing crash loop never resolves, so a restart count that keeps climbing is the signal.",
+    "enabled": true,
+    "restart_count": 50,
+    "$restart_count": "Loki was at 694. A rollout, an OOM burst or a dependency flap produces single or low-double-digit restarts; 50 with no recovery is chronic by construction.",
+    "crashloop_minutes": 60,
+    "$crashloop_minutes": "Age of a pod that is currently in CrashLoopBackOff and has never become Ready. Approximate on purpose: kubernetes exposes the last termination time, not 'time since the loop started', and the pod-age approximation is only consulted while the container IS in CrashLoopBackOff and was never Ready, so a pod that ran fine for a week and broke a minute ago is not flagged by it.",
+    "ignore_namespaces": []
+  },
+
+  "container_creating": {
+    "$doc": "Catches the stale-mount class ('already mounted or mount point busy') that kept Loki down for a further 14h AFTER the full disk was fixed. The pod exists, the Deployment/StatefulSet exists, everything reports 'running' at the controller level — and the pod never starts.",
+    "enabled": true,
+    "minutes": 30,
+    "$minutes": "Image pulls of multi-GB images on a cold node legitimately take minutes; a volume attach that has not completed in 30 is stuck, not slow.",
+    "reasons": ["ContainerCreating", "PodInitializing"],
+    "ignore_namespaces": []
+  },
+
+  "pvc_pressure": {
+    "$doc": "THE ROTATE-BY-VOLUME REQUIREMENT. Loki has no size-based retention — retention is time-based and compactor-enforced — so once the volume fills there is no in-process mechanism that can free it. An alarm BEFORE it fills is the only mechanism there is. Source of truth is Prometheus (kubelet_volume_stats_*); the kubectl-exec-df fallback exists only so a Prometheus outage does not silently turn this detection off.",
+    "enabled": true,
+    "used_ratio": 0.80,
+    "prometheus_namespace": "fuzeinfra",
+    "prometheus_service": "fuzeinfra-prometheus",
+    "prometheus_port": 9090,
+    "prometheus_query": "kubelet_volume_stats_used_bytes / kubelet_volume_stats_capacity_bytes",
+    "allow_exec_df_fallback": true,
+    "$allow_exec_df_fallback": "`kubectl exec <pod> -- df` is read-only in effect but is still an exec; it is restricted to a fixed argv (df -P -B1 <mountPath>) with validated names, is used ONLY when Prometheus is unreachable, and the run says which source it used. If both sources fail the watchdog FAILS — it never reports all-clear while blind."
+  },
+
+  "issues": {
+    "$doc": "One issue per distinct condition, deduplicated on the '<!-- watchdog-key: ... -->' marker in the body (and on the exact title as a second layer). A watchdog that files 40 duplicate issues gets muted, which is the same outcome as not existing.",
+    "label": "deploy-watchdog",
+    "label_color": "B60205",
+    "mention": "@fuze",
+    "title_prefix": "[watchdog]"
+  },
+
+  "fail_on_findings": true,
+  "$fail_on_findings": "The run goes red when something is detected, so the freeze is visible in the Actions list even to someone who does not read issues. Separate from the blind-failure path: an unreachable cluster / unusable Prometheus+fallback always exits non-zero, because a watchdog that goes green when blind is worse than no watchdog."
+}

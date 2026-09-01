@@ -224,12 +224,28 @@ kafkaUi:
 #      commit it, let Argo sync.
 #   3. Flip loki.s3.enabled -> true here, commit, let Argo sync.
 loki:
-  # 20Gi, not the 5Gi base default. Recorded here because the live volume was
-  # ALREADY expanded to 20Gi out-of-band on 2026-08-31 and Git must not disagree
-  # with the cluster: a StatefulSet's volumeClaimTemplates are immutable, so an
-  # existing PVC can only be grown by patching the PVC directly — but a STS that
-  # is ever recreated reads THIS value, and at 5Gi it would land straight back in
-  # the failure below.
+  # 20Gi, not the 5Gi base default — and as of the Deployment conversion this
+  # value is ENFORCED rather than aspirational.
+  #
+  # HOW IT WORKS NOW. Loki is a Deployment (strategy: Recreate) whose data volume
+  # is the standalone PVC `fuzeinfra-loki-data`, declared as its own template in
+  # helm/fuzeinfra/templates/monitoring.yaml. A standalone PVC's
+  # spec.resources.requests.storage is mutable and the `longhorn` class sets
+  # allowVolumeExpansion: true, so resizing Loki's disk is now an ordinary GitOps
+  # change: edit the number below, merge to main, Argo applies the PVC patch and
+  # Longhorn expands the volume. Growth only — the API server rejects a shrink.
+  #
+  # WHAT THIS REPLACED. Loki used to be a StatefulSet, so its storage came from
+  # volumeClaimTemplates — an immutable field, additionally hidden from the sync by
+  # the chart's Argo ignoreDifferences + RespectIgnoreDifferences. This number was
+  # therefore INERT: raising it 5Gi -> 20Gi changed nothing on the running cluster,
+  # and the live volume only reached 20Gi via a direct `kubectl patch pvc` on
+  # 2026-08-31 — exactly the out-of-band mutation GitOps exists to eliminate.
+  # That ignoreDifferences rule is deliberately UNTOUCHED: it is keyed on
+  # `kind: StatefulSet` with no name, and postgres/mongodb/neo4j/kafka/
+  # elasticsearch/redis/rabbitmq/prometheus/alertmanager/chromadb all still need it
+  # to protect real data after the 2026-07-24 incident. Loki is simply no longer a
+  # StatefulSet, so it is no longer in that rule's scope.
   #
   # WHY 5Gi WAS NOT SURVIVABLE, and why this is not merely a tuning nit. Loki
   # retains 744h (31 days) of fleet logs and compacts them on a schedule
