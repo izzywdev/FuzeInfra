@@ -259,6 +259,9 @@ postgres:
     limits:   { cpu: "1",  memory: 1Gi }
 
 mongodb:
+  # Optional durable-node pin (empty by default; set on overlays with a
+  # durable Longhorn node pool). See postgres.nodeSelector.
+  nodeSelector: {}
   enabled: true
   image: mongo:7
   port: 27017
@@ -273,6 +276,9 @@ mongoExpress:
   port: 8081
 
 redis:
+  # Optional durable-node pin (empty by default; set on overlays with a
+  # durable Longhorn node pool). See postgres.nodeSelector.
+  nodeSelector: {}
   enabled: true
   image: redis:7-alpine
   port: 6379
@@ -324,6 +330,9 @@ serviceNeo4jInstances: []
 #       limits: {cpu: "1", memory: 2Gi}
 
 elasticsearch:
+  # Optional durable-node pin (empty by default; set on overlays with a
+  # durable Longhorn node pool). See postgres.nodeSelector.
+  nodeSelector: {}
   enabled: true
   image: docker.elastic.co/elasticsearch/elasticsearch:8.8.0
   port: 9200
@@ -334,6 +343,9 @@ elasticsearch:
     limits:   { cpu: "1",  memory: 2Gi }
 
 chromadb:
+  # Optional durable-node pin (empty by default; set on overlays with a
+  # durable Longhorn node pool). See postgres.nodeSelector.
+  nodeSelector: {}
   enabled: true
   # 0.5.23 is the last OSS release with the built-in token auth provider used
   # below. Never use `latest`: auth behavior and client/server APIs must match.
@@ -361,6 +373,9 @@ chromadb:
 # Kafka in KRaft mode (no ZooKeeper) - fixes the ZooKeeper startup races and
 # deprecation warnings from the docker-compose ZooKeeper-based setup.
 kafka:
+  # Optional durable-node pin (empty by default; set on overlays with a
+  # durable Longhorn node pool). See postgres.nodeSelector.
+  nodeSelector: {}
   enabled: true
   image: confluentinc/cp-kafka:7.6.1
   port: 9092
@@ -471,6 +486,9 @@ kafkaUi:
     debugLogging: false
 
 rabbitmq:
+  # Optional durable-node pin (empty by default; set on overlays with a
+  # durable Longhorn node pool). See postgres.nodeSelector.
+  nodeSelector: {}
   # Source RABBITMQ_DEFAULT_PASS from a dedicated Secret instead of the
   # chart-managed fuzeinfra-secrets. Empty name keeps existing behaviour.
   # Only honoured on a FRESH broker — see templates/messaging.yaml.
@@ -487,6 +505,9 @@ rabbitmq:
 # Monitoring & logging
 # -----------------------------------------------------------------------------
 prometheus:
+  # Optional durable-node pin (empty by default; set on overlays with a
+  # durable Longhorn node pool). See postgres.nodeSelector.
+  nodeSelector: {}
   enabled: true
   image: prom/prometheus:latest
   port: 9090
@@ -601,6 +622,9 @@ grafana:
       limits:   { cpu: 100m, memory: 128Mi }
 
 alertmanager:
+  # Optional durable-node pin (empty by default; set on overlays with a
+  # durable Longhorn node pool). See postgres.nodeSelector.
+  nodeSelector: {}
   enabled: true
   image: prom/alertmanager:latest
   port: 9093

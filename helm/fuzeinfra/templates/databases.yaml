@@ -127,6 +127,13 @@ spec:
         {{- include "fuzeinfra.labels" . | nindent 8 }}
         {{- include "fuzeinfra.selectorLabels" (dict "component" "mongodb" "root" $) | nindent 8 }}
     spec:
+      {{- with .Values.mongodb.nodeSelector }}
+      # Pin to durable (Longhorn-disk) nodes. Longhorn only registers a
+      # node.longhorn.io object for nodes running longhorn-manager; a pod
+      # scheduled elsewhere can never attach its volume.
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       {{- include "fuzeinfra.dbSpread" $ | nindent 6 }}
       containers:
         - name: mongodb
@@ -210,6 +217,13 @@ spec:
         {{- include "fuzeinfra.labels" . | nindent 8 }}
         {{- include "fuzeinfra.selectorLabels" (dict "component" "redis" "root" $) | nindent 8 }}
     spec:
+      {{- with .Values.redis.nodeSelector }}
+      # Pin to durable (Longhorn-disk) nodes. Longhorn only registers a
+      # node.longhorn.io object for nodes running longhorn-manager; a pod
+      # scheduled elsewhere can never attach its volume.
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       {{- if .Values.redis.acl.enabled }}
       initContainers:
         # Ensure an ACL file exists on the PVC before redis starts, seeded with
@@ -418,6 +432,13 @@ spec:
         {{- include "fuzeinfra.labels" . | nindent 8 }}
         {{- include "fuzeinfra.selectorLabels" (dict "component" "elasticsearch" "root" $) | nindent 8 }}
     spec:
+      {{- with .Values.elasticsearch.nodeSelector }}
+      # Pin to durable (Longhorn-disk) nodes. Longhorn only registers a
+      # node.longhorn.io object for nodes running longhorn-manager; a pod
+      # scheduled elsewhere can never attach its volume.
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       initContainers:
         # Elasticsearch requires vm.max_map_count >= 262144.
         - name: sysctl
@@ -530,6 +551,13 @@ spec:
         {{- include "fuzeinfra.labels" . | nindent 8 }}
         {{- include "fuzeinfra.selectorLabels" (dict "component" "chromadb" "root" $) | nindent 8 }}
     spec:
+      {{- with .Values.chromadb.nodeSelector }}
+      # Pin to durable (Longhorn-disk) nodes. Longhorn only registers a
+      # node.longhorn.io object for nodes running longhorn-manager; a pod
+      # scheduled elsewhere can never attach its volume.
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       initContainers:
         - name: render-auth-config
           image: {{ .Values.chromadb.image }}
