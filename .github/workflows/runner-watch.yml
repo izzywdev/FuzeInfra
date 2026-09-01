@@ -1,0 +1,386 @@
+# fuze:fork — DELIBERATELY NOT `fuze:managed`. DO NOT STAMP THIS FILE.
+#
+# This is the RUNNING INSTANCE of the fleet runner-selection watcher. It is FuzeInfra-owned
+# and is NOT reconciled from a canonical FuzeSDLC template — there is no
+# `workflow-templates/runner-watch.yml` to reconcile it against, and there must never be
+# one: this workflow is a singleton fleet ORCHESTRATOR (it writes other repos' variables and
+# cancels their runs), not a per-repo gate that every repo should carry a copy of. A sweep
+# that "fixes" this file by stamping or templating it would fan a fleet-wide mutator out
+# across the whole fleet.
+#
+# The AUTHORING home of scripts/runner_watch.py is FuzeSDLC (PR #269). The governance
+# STANDARDS it implements — governance/required-checks.md §2.2.1 and governance/ci-runners.md
+# — stay in FuzeSDLC and were deliberately NOT copied here: the hub owns the standard, this
+# repo runs the instance. If the script changes there, port the change; no automation does it.
+#
+# ==========================================================================================
+# WHY THE INSTANCE RUNS HERE AND NOT IN THE HUB — do not "tidy" this back to FuzeSDLC
+# ==========================================================================================
+# Every job below is hardcoded `runs-on: ubuntu-latest`, because a chooser that runs on the
+# pool it evaluates cannot report that pool down — and this workflow is also the RECOVERY
+# path, so a watcher stranded on a dead pool takes down the only mechanism that could
+# unstrand the fleet. Same reasoning that keeps arc-register.yml hosted.
+#
+# Hosted-only has a price, and WHERE it is paid decides whether this watcher works at all:
+#
+#   * In a PRIVATE repo, hosted minutes are metered, and a hosted job whose account budget
+#     is exhausted does not fail — it NEVER STARTS. `runner_id: 0`, zero steps, no log:
+#     "The job was not started because an Actions budget is preventing further use."
+#   * ONE OF THE TWO CONDITIONS THIS WATCHER EXISTS TO DETECT IS BUDGET EXHAUSTION.
+#
+# So a hosted-only watcher in a metered repo has an availability dependency CORRELATED WITH
+# THE FAILURE IT DETECTS: the budget running out both triggers the alarm and disables it.
+# FuzeInfra is PUBLIC, so hosted Actions is free and unmetered and the same hosted-only
+# design carries no billing dependency at all. It is also the infra repo, which makes fleet
+# runner health its domain.
+#
+#     gh api repos/izzywdev/FuzeSDLC --jq .private   => true
+#     gh api repos/izzywdev/FuzeInfra --jq .private   => false
+#
+# HONEST STATE OF THAT ARGUMENT, MEASURED 2026-09-01 rather than assumed. The move was
+# prompted by a report that FuzeSDLC's Actions budget was exhausted and its hosted jobs were
+# failing instantly with zero steps. THAT SYMPTOM IS NOT PRESENT RIGHT NOW — FuzeSDLC's
+# `ubuntu-latest` jobs are succeeding with real runner ids and full step lists:
+#
+#     gate-actionlint-templates  success  runner_id=1000211611  steps=5   labels=ubuntu-latest
+#     gate-secret-sourcing       success  runner_id=1000211610  steps=7   labels=ubuntu-latest
+#
+# The structural argument above does not depend on that symptom being live, which is why the
+# move still stands: metered-vs-free is a property of the repo, not of this week's balance.
+# But the OTHER of the two conditions this watcher detects IS live, in the authoring repo, at
+# the moment of the port — FuzeSDLC PR #269's own CI has 15+ jobs sitting `queued` for 32-38
+# minutes with `runner_id: 0` on the `fuze-runner` pool:
+#
+#     queued 38m  gate-version         [fuze-runner]
+#     queued 38m  gate-toolchain       [fuze-runner]
+#     queued 32m  gate-build           [fuze-runner]   ... and a dozen more
+#
+# That is exactly the shape `stranded_runs()` selects (queued past the 20m threshold with no
+# runner assigned), and exactly the "required check stuck at Expected - waiting for status to
+# be reported" deadlock the whole design exists to end. The problem is real and current; only
+# the budget half of the framing was stale.
+#
+# FuzeInfra is also `excluded` in governance/ruleset-fleet.json, so the hub is not in its own
+# fleet and the watcher never writes its own CI_RUNNER_LABELS.
+#
+# ==========================================================================================
+# WHAT IT DOES
+# ==========================================================================================
+# Decides which runner each fleet repo's jobs should use, publishes that decision as the repo
+# variable CI_RUNNER_LABELS, and recovers the runs a previous wrong decision already
+# stranded. Full reasoning: scripts/runner_watch.py's module docstring. Operator levers:
+# governance/runner-watch.json. Targets: FuzeSDLC's governance/ruleset-fleet.json — the same
+# fleet list its ruleset_sync / repo_settings_sync / prune_merged_branches read, fetched at
+# run time (see "Materialise the fleet target list") rather than copied here, so a repo
+# joining the fleet joins the watcher with no second list to remember.
+#
+# WHY A WATCHER AND NOT A REUSABLE WORKFLOW. The closed PR FuzeSDLC#249 made this same
+# decision as a reusable workflow consumed via `uses:` + `needs:`. Its decision LOGIC was
+# right and is reused here almost unchanged; its delivery shape had two defects that no
+# care inside the workflow could fix: it added a job to every workflow run in the fleet,
+# and a PRIVATE hub's reusable workflow cannot be resolved from a PUBLIC consumer at all
+# (FuzeInfra#758 — FuzeSDLC#261 inlined two workflows for exactly this reason, and five of
+# this fleet's repos are public). Both defects vanish if the answer is precomputed:
+#
+#     runs-on: ${{ vars.CI_RUNNER_LABELS || 'ubuntu-latest' }}
+#
+# Zero extra jobs, no cross-repo resolution, and a LITERAL hosted default — so a repo whose
+# variable is unset, or this watcher stopping entirely, degrades to today's behaviour rather
+# than to a deadlock. FuzeSDLC's governance/required-checks.md §2.2 sanctions that form and
+# scripts/gate_required_checks.py's `runner_finding()` already accepts it; C3 is satisfied
+# by the pattern, not weakened for it (asserted in
+# scripts/__tests__/test_runner_watch.py::ConsumptionPatternSatisfiesC3).
+#
+# TOKEN. The liveness probe reads `repos/<slug>/actions/runners` for `status == "online"`,
+# because PODS BEING RUNNING IS NOT PROOF A RUNNER REGISTERED. That listing needs
+# `administration: read`, which the default GITHUB_TOKEN does NOT carry, and the whole point
+# is cross-repo anyway. So this runs as the org-wide `fuze-agent` App
+# (FuzeSDLC governance/hardening-convention.md §8). The App installation needs:
+#   administration: read   (the runners listing — the liveness probe)   [fleet repos]
+#   variables:      write  (publishing CI_RUNNER_LABELS; and this repo's state variables)
+#   actions:        write  (cancel + re-dispatch a stranded run)        [fleet repos]
+#   contents:       read   (reading governance/ruleset-fleet.json)      [FuzeSDLC]
+#   metadata:       read
+# If the token cannot be minted, or the fleet list cannot be read, the job FAILS. It does not
+# degrade: a watcher that sweeps an empty fleet and reports green is worse than a red one.
+# If a per-repo probe fails, the script does NOT invent an answer either — it keeps that
+# repo's current value and warns loudly. See decide_runner()'s `online_runners is None`.
+#
+# NOT IN SCOPE (stage 2): budget awareness / reserve floor / CI_BUDGET_TOKEN. Before that
+# is written, re-verify the billing endpoint — `GET /users/{owner}/settings/billing/actions`
+# currently returns `410 This endpoint has been moved`, so any stage-2 design that assumes
+# it yields included_minutes/total_minutes_used starts from a fact that is no longer true.
+
+name: Runner Watch
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "check (report only, writes nothing) | apply (publish CI_RUNNER_LABELS and recover stranded runs)"
+        required: false
+        type: choice
+        options: [check, apply]
+        default: check
+      repos:
+        description: "Comma-separated owner/name slugs to target — empty = the whole fleet (FuzeSDLC governance/ruleset-fleet.json)"
+        required: false
+        type: string
+        default: ""
+      stranded_minutes:
+        description: "Override how long a job must be queued with NO runner before recovery cancels + re-dispatches its run (default: governance/runner-watch.json)"
+        required: false
+        type: string
+        default: ""
+  schedule:
+    # Every 30 minutes. The cadence is a deliberate three-way trade, stated so the next
+    # person changing it knows what they are trading:
+    #   * RECOVERY LATENCY — a run must be queued `stranded_minutes` (20) before it is a
+    #     candidate, so worst-case rescue is ~50 minutes. Unbounded improvement over
+    #     "forever", which is the alternative.
+    #   * CONVERGENCE — hysteresis is 2 consecutive agreeing runs, so a genuine runner
+    #     change lands within ~1 hour.
+    #   * COST — FuzeInfra is PUBLIC, so hosted minutes here are free and unmetered and this
+    #     arm no longer binds (it did in the private hub this moved from). 48 ticks/day is
+    #     still the right cadence on latency grounds alone; the */5 cadence that would make
+    #     recovery feel instant buys latency nobody is waiting on, at 10x the API traffic
+    #     against every repo in the fleet.
+    #
+    # THREE PROPERTIES OF GitHub's `schedule:` THAT BITE PEOPLE WHO EDIT THIS BLOCK:
+    #   1. A scheduled workflow ONLY EVER FIRES FROM THE DEFAULT BRANCH's copy of the file.
+    #      Editing the cron on a branch changes nothing until it merges to `main`, and this
+    #      workflow does not tick at all until then — verify a change with
+    #      `workflow_dispatch`, never by waiting for a branch's cron.
+    #   2. Schedules are BEST-EFFORT, not guaranteed: GitHub delays or drops them under
+    #      load, worst at the top of the hour when everyone's `0 * * * *` lands at once.
+    #      `13,43` is deliberately off-peak. Do not "tidy" it to `0,30`.
+    #   3. GitHub DISABLES a repo's scheduled workflows after 60 days with no repository
+    #      activity. Not a live risk for FuzeInfra (it commits many times a week), but it is
+    #      why a scheduled watcher must never be parked in a dormant repo.
+    - cron: "13,43 * * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  # NEVER cancel-in-progress: this workflow writes durable state (the hysteresis counter and
+  # the recovered-run ledger, both hub repo variables) and cancelling a run mid-write would
+  # lose the increment — which reads downstream as "this value has never been seen before"
+  # and silently re-arms the very flap the counter exists to prevent.
+  group: runner-watch
+  cancel-in-progress: false
+
+env:
+  # The fleet target list lives in FuzeSDLC and is fetched at run time (see "Materialise
+  # the fleet target list"). Only the SOURCE is workflow-level; the destination path is set
+  # per step, because it uses `runner.temp` and the `runner` context does NOT exist at
+  # workflow or job level - actionlint rejects it there, and at run time it would silently
+  # expand to the empty string, i.e. write the fleet list to "/ruleset-fleet.json".
+  FLEET_SOURCE_REPO: izzywdev/FuzeSDLC
+  FLEET_SOURCE_PATH: governance/ruleset-fleet.json
+
+jobs:
+  decide:
+    name: decide and publish CI_RUNNER_LABELS
+    # ALWAYS GitHub-hosted, never an expression. See the header.
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    outputs:
+      mode: ${{ steps.mode.outputs.mode }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5
+        with:
+          python-version: "3.12"
+
+      - name: Resolve mode (the schedule is READ-ONLY)
+        id: mode
+        env:
+          EVENT: ${{ github.event_name }}
+          INPUT_MODE: ${{ inputs.mode }}
+        run: |
+          set -euo pipefail
+          # apply is only ever reached by an explicit human dispatch, the same safety shape
+          # prune-merged-branches.yml uses for its destructive mode. A timer must not be
+          # able to rewrite the fleet's runners or cancel anybody's build on its own.
+          MODE=check
+          if [ "$EVENT" = "workflow_dispatch" ] && [ "$INPUT_MODE" = "apply" ]; then
+            MODE=apply
+          fi
+          echo "mode=$MODE" >> "$GITHUB_OUTPUT"
+          echo "mode=$MODE"
+
+      - name: Mint the fuze-agent App token
+        id: token
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349  # v2
+        continue-on-error: true
+        with:
+          app-id: ${{ secrets.FUZE_AGENT_APP_ID }}
+          private-key: ${{ secrets.FUZE_AGENT_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+
+      - name: Require a token that can actually probe liveness
+        env:
+          APP_TOKEN: ${{ steps.token.outputs.token }}
+        run: |
+          set -euo pipefail
+          if [ -z "${APP_TOKEN:-}" ]; then
+            echo "::error title=runner-watch::Could not mint the fuze-agent App token (FUZE_AGENT_APP_ID / FUZE_AGENT_APP_PRIVATE_KEY). The default GITHUB_TOKEN lacks administration:read, so every liveness probe would fail and the watcher would take the keep-current branch on every repo — a clean-looking no-op that publishes nothing and hides that it is publishing nothing. Failing loudly instead."
+            exit 1
+          fi
+
+      - name: Materialise the fleet target list from the hub of record
+        env:
+          GH_TOKEN: ${{ steps.token.outputs.token }}
+          # Written OUTSIDE the checkout so it can never be mistaken for - or committed
+          # as - a vendored second copy of the hub's list.
+          FLEET_FILE: ${{ runner.temp }}/ruleset-fleet.json
+        run: |
+          set -euo pipefail
+          # The fleet list is NOT vendored into this repo on purpose: a second copy is a
+          # second thing to forget, and the watcher's claim is that a repo joining the fleet
+          # joins the watcher with no second list. Read it from FuzeSDLC, where ruleset_sync
+          # / repo_settings_sync / prune_merged_branches read it too.
+          #
+          # NO FALLBACK, NO `|| true`. If this cannot be read the fleet is unknown, and a
+          # watcher that proceeds with an unknown fleet sweeps zero repos and reports a
+          # clean run — the exact silent-blindness failure the whole design refuses.
+          if ! gh api "repos/${FLEET_SOURCE_REPO}/contents/${FLEET_SOURCE_PATH}" \
+                 -H "Accept: application/vnd.github.raw+json" > "$FLEET_FILE"; then
+            echo "::error title=runner-watch::Could not read ${FLEET_SOURCE_REPO}/${FLEET_SOURCE_PATH}. The fuze-agent App needs contents:read on ${FLEET_SOURCE_REPO} (a PRIVATE repo). Without the fleet list the watcher does not know which repos to look at; refusing to sweep an unknown fleet and call it green."
+            exit 1
+          fi
+          python3 scripts/runner_watch_fleet_preflight.py "$FLEET_FILE"
+
+      - name: Decide
+        env:
+          GH_TOKEN: ${{ steps.token.outputs.token }}
+          MODE: ${{ steps.mode.outputs.mode }}
+          TARGET_REPOS: ${{ inputs.repos }}
+          RUNNER_WATCH_HUB: ${{ github.repository }}
+          FLEET_FILE: ${{ runner.temp }}/ruleset-fleet.json
+        run: |
+          set -euo pipefail
+          FLAG=--check
+          [ "$MODE" = "apply" ] && FLAG=--apply
+          ARGS=()
+          if [ -n "${TARGET_REPOS:-}" ]; then ARGS+=(--repos "$TARGET_REPOS"); fi
+          echo "::notice title=runner-watch::scripts/runner_watch.py decide $FLAG"
+          python3 scripts/runner_watch.py decide "$FLAG" \
+            --fleet-file "$FLEET_FILE" "${ARGS[@]}" \
+            | tee runner-watch-decide.txt
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "### runner-watch — decide"
+            echo
+            echo '```'
+            tail -c 60000 runner-watch-decide.txt 2>/dev/null || echo "(no output)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  recover:
+    name: recover stranded runs
+    # `needs: decide`, and that ordering is load-bearing, not cosmetic. Recovery works by
+    # cancel + re-dispatch, and the re-dispatch reads vars.CI_RUNNER_LABELS afresh. Running
+    # it BEFORE the decision has been published would re-dispatch the run onto the same
+    # value that stranded it — a cancelled build bought for nothing.
+    needs: decide
+    # `!cancelled()` rather than `success()`: a decide job that failed (an unreachable API,
+    # a bad token) is exactly when runs are most likely to be stranded, and the recovery
+    # sweep is independently safe — its selector never touches a run with work in flight
+    # and never touches the same run twice.
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5
+        with:
+          python-version: "3.12"
+
+      - name: Mint the fuze-agent App token
+        id: token
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349  # v2
+        continue-on-error: true
+        with:
+          app-id: ${{ secrets.FUZE_AGENT_APP_ID }}
+          private-key: ${{ secrets.FUZE_AGENT_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+
+      - name: Require a token that can cancel and re-dispatch
+        env:
+          APP_TOKEN: ${{ steps.token.outputs.token }}
+        run: |
+          set -euo pipefail
+          if [ -z "${APP_TOKEN:-}" ]; then
+            echo "::error title=runner-watch::Could not mint the fuze-agent App token. Recovery needs actions:write on the fleet repos to cancel and re-dispatch a stranded run; the default GITHUB_TOKEN has no cross-repo reach at all. Failing loudly rather than sweeping zero runs and reporting green."
+            exit 1
+          fi
+
+      - name: Materialise the fleet target list from the hub of record
+        env:
+          GH_TOKEN: ${{ steps.token.outputs.token }}
+          # Written OUTSIDE the checkout so it can never be mistaken for - or committed
+          # as - a vendored second copy of the hub's list.
+          FLEET_FILE: ${{ runner.temp }}/ruleset-fleet.json
+        run: |
+          set -euo pipefail
+          # Fetched per job rather than passed between them: an artifact hop would be a
+          # second failure mode for a file that costs one API call. Same no-fallback rule
+          # as the decide job — see its copy of this step.
+          if ! gh api "repos/${FLEET_SOURCE_REPO}/contents/${FLEET_SOURCE_PATH}" \
+                 -H "Accept: application/vnd.github.raw+json" > "$FLEET_FILE"; then
+            echo "::error title=runner-watch::Could not read ${FLEET_SOURCE_REPO}/${FLEET_SOURCE_PATH}. The fuze-agent App needs contents:read on ${FLEET_SOURCE_REPO} (a PRIVATE repo). Refusing to sweep an unknown fleet and call it green."
+            exit 1
+          fi
+          python3 scripts/runner_watch_fleet_preflight.py "$FLEET_FILE"
+
+      - name: Recover
+        env:
+          GH_TOKEN: ${{ steps.token.outputs.token }}
+          MODE: ${{ needs.decide.outputs.mode }}
+          EVENT: ${{ github.event_name }}
+          INPUT_MODE: ${{ inputs.mode }}
+          TARGET_REPOS: ${{ inputs.repos }}
+          STRANDED_MINUTES: ${{ inputs.stranded_minutes }}
+          RUNNER_WATCH_HUB: ${{ github.repository }}
+          FLEET_FILE: ${{ runner.temp }}/ruleset-fleet.json
+        run: |
+          set -euo pipefail
+          # Recompute rather than trusting the upstream output alone: `if: !cancelled()`
+          # means this job also runs when `decide` FAILED, in which case its output is
+          # empty — and an empty MODE must resolve to check, never to apply.
+          MODE="${MODE:-}"
+          if [ -z "$MODE" ]; then
+            MODE=check
+            if [ "$EVENT" = "workflow_dispatch" ] && [ "$INPUT_MODE" = "apply" ]; then
+              MODE=apply
+            fi
+          fi
+          FLAG=--check
+          [ "$MODE" = "apply" ] && FLAG=--apply
+          ARGS=()
+          if [ -n "${TARGET_REPOS:-}" ]; then ARGS+=(--repos "$TARGET_REPOS"); fi
+          if [ -n "${STRANDED_MINUTES:-}" ]; then
+            ARGS+=(--stranded-minutes "$STRANDED_MINUTES")
+          fi
+          echo "::notice title=runner-watch::scripts/runner_watch.py recover $FLAG"
+          python3 scripts/runner_watch.py recover "$FLAG" \
+            --fleet-file "$FLEET_FILE" "${ARGS[@]}" \
+            | tee runner-watch-recover.txt
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "### runner-watch — recover"
+            echo
+            echo '```'
+            tail -c 60000 runner-watch-recover.txt 2>/dev/null || echo "(no output)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
