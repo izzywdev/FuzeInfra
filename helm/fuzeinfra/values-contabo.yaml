@@ -918,3 +918,12 @@ chromadb:
   # its volume (FailedAttachVolume: node.longhorn.io "..." not found).
   nodeSelector:
     node.longhorn.io/create-default-disk: "true"
+
+# Pin kube-state-metrics to a DURABLE (VLAN) node. It had been landing on
+# autoscaler-managed elastic nodes, which are billing-reaped out from under it and
+# whose kubelet the API server cannot reach — `kubectl logs` there fails with
+# `proxy error ... dialing <ip>:10250, code 502`, so the component was both
+# evictable-at-random and impossible to debug. Same selector the databases use.
+kubeStateMetrics:
+  nodeSelector:
+    node.longhorn.io/create-default-disk: "true"
