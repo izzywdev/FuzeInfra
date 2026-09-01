@@ -280,8 +280,18 @@ runs:
       with:
         litellm-base-url: ${{ inputs.litellm-base-url }}
         litellm-key: ${{ inputs.litellm-key }}
-        fallback-vendor: anthropic
+        # `fallback-chain` (not the long-removed `fallback-vendor`, which
+        # llm-endpoint silently ignored as an unexpected input — the pin to a
+        # one-vendor chain was therefore never actually applied). ALL THREE keys
+        # are forwarded: with only the anthropic key wired, llm-endpoint resolved
+        # a single-vendor chain and took the direct api.anthropic.com path, which
+        # by its own design has no rollover — so an invalid/exhausted
+        # ANTHROPIC_API_KEY hard-failed rung 1 instead of advancing. Forwarding
+        # openai/gemini lets it start the runner-local LiteLLM whose
+        # router_settings.fallbacks auto-advance past a dead anthropic leg.
         fallback-anthropic-key: ${{ inputs.anthropic-api-key }}
+        fallback-openai-key: ${{ inputs.openai-api-key }}
+        fallback-gemini-key: ${{ inputs.gemini-api-key }}
 
     # RUNG 1 — claude-code-action, credentialed via LiteLLM-or-direct-Anthropic
     # (see llm step above). Gated on the llm step's own outcome, not on raw input
