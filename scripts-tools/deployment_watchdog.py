@@ -333,40 +333,47 @@ def detect_stuck_container_creating(pods: dict, config: dict, now: datetime) -> 
         meta = pod.get("metadata") or {}
         if meta.get("namespace") in ignore:
             continue
-        statuses = _container_statuses(pod)
-        for cs in statuses:
+        # ONE finding per pod, not per container. A pod wedged on a volume
+        # attach reports every one of its containers as waiting, so the
+        # per-container shape filed `kafka-0:kafka` and `kafka-0:init-chown-data`
+        # as two separate issues for one stuck mount (observed 2026-09-01).
+        stuck = []
+        for cs in _container_statuses(pod):
             if cs.get("ready"):
                 continue
             waiting = (cs.get("state") or {}).get("waiting") or {}
-            if waiting.get("reason") not in reasons:
-                continue
-            started = _pod_start(pod)
-            if started is None:
-                continue
-            minutes = age_minutes(started, now)
-            if minutes <= threshold:
-                continue
-            findings.append(
-                Finding(
-                    kind=KIND_CREATING,
-                    subject=f"{_pod_subject(pod)}:{cs.get('name', '<container>')}",
-                    summary=(
-                        f"`{_pod_subject(pod)}` container `{cs.get('name')}` has been "
-                        f"{waiting.get('reason')} for {_fmt_age(minutes)} "
-                        f"(threshold {threshold:.0f}m) — likely a stuck volume attach."
-                    ),
-                    facts={
-                        "namespace": meta.get("namespace"),
-                        "pod": meta.get("name"),
-                        "container": cs.get("name"),
-                        "waiting_reason": waiting.get("reason"),
-                        "waiting_message": waiting.get("message"),
-                        "pending_minutes": round(minutes, 1),
-                        "threshold_minutes": threshold,
-                        "node": (pod.get("spec") or {}).get("nodeName"),
-                    },
-                )
+            if waiting.get("reason") in reasons:
+                stuck.append((cs, waiting))
+        if not stuck:
+            continue
+        started = _pod_start(pod)
+        if started is None:
+            continue
+        minutes = age_minutes(started, now)
+        if minutes <= threshold:
+            continue
+        reason = stuck[0][1].get("reason")
+        message = next((w.get("message") for _, w in stuck if w.get("message")), None)
+        findings.append(
+            Finding(
+                kind=KIND_CREATING,
+                subject=_pod_subject(pod),
+                summary=(
+                    f"`{_pod_subject(pod)}` has been {reason} for {_fmt_age(minutes)} "
+                    f"(threshold {threshold:.0f}m) — likely a stuck volume attach."
+                ),
+                facts={
+                    "namespace": meta.get("namespace"),
+                    "pod": meta.get("name"),
+                    "containers": [cs.get("name") for cs, _ in stuck],
+                    "waiting_reason": reason,
+                    "waiting_message": message,
+                    "pending_minutes": round(minutes, 1),
+                    "threshold_minutes": threshold,
+                    "node": (pod.get("spec") or {}).get("nodeName"),
+                },
             )
+        )
     return findings
 
 
@@ -970,22 +977,29 @@ def main(argv: Sequence[str] | None = None) -> int:
     new, duplicates = filter_new_findings(findings, open_issues, prefix)
     for finding, issue in duplicates:
         lines.append(f"- `{finding.key}` — already tracked by {issue.get('url')} (not re-filed)")
-    if new:
-        ensure_label(args.repo, label, issues_cfg.get("label_color", "B60205"))
 
     # Cap issue CREATION (never detection): the first live run against prod
     # returned 55 distinct conditions. Filing 55 issues at once is the muting
     # failure in a different shape. Everything is still reported in the summary
     # and the run still goes red; the overflow files on later runs.
     max_per_run = int(issues_cfg.get("max_per_run", 10))
+    # Global ceiling on OPEN watchdog issues. max_per_run alone only spreads a
+    # backlog out over time (10 every 15 minutes files 55 within ~1.5h anyway);
+    # the ceiling makes draining, not the clock, the thing that opens a slot.
+    max_open = int(issues_cfg.get("max_open", 20))
+    slots = max(0, min(max_per_run, max_open - len(open_issues)))
     ordered = prioritize(new, issues_cfg.get("priority"))
-    to_file, overflow = ordered[:max_per_run], ordered[max_per_run:]
+    to_file, overflow = ordered[:slots], ordered[slots:]
     if overflow:
         lines.append(
             f"- {len(overflow)} further condition(s) detected but NOT filed this run "
-            f"(max_per_run={max_per_run}); they file on a later run as earlier ones close:"
+            f"(open={len(open_issues)}, max_open={max_open}, max_per_run={max_per_run}); "
+            f"they file once open issues are closed:"
         )
         lines += [f"  - `{f.key}` — {f.summary}" for f in overflow]
+
+    if to_file:
+        ensure_label(args.repo, label, issues_cfg.get("label_color", "B60205"))
 
     argo_cfg = config.get("argo_stuck_op") or {}
     for finding in to_file:
