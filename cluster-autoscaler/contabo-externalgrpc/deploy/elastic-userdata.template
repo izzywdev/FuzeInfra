@@ -91,4 +91,15 @@ runcmd:
   # IMPORTANT note above). The pool label + PreferNoSchedule taint mirror
   # NodeGroupTemplateNodeInfo's scale-from-zero simulation (internal/provider/template.go)
   # exactly — keep them in sync if either side changes.
-  - [ sh, -c, "set -a; . /etc/k3s-agent.env; set +a; curl -sfL https://get.k3s.io | sh -s - agent --node-name '{{.NodeName}}' --kubelet-arg 'provider-id=contabo://{{.NodeName}}' --node-label 'fuzeinfra.io/pool=elastic' --node-taint 'fuzeinfra.io/elastic=true:PreferNoSchedule'" ]
+  #
+  # node-role=workload is what the product workloads' nodeSelector targets
+  # (fuzekeys/fuzebi/fuzehub/fuzedeploy/fuzeexecutive). k3s applies --node-label
+  # at agent REGISTRATION ONLY, so a hand-applied `kubectl label` evaporates on
+  # the next scale event -- the label has to be born with the node. It is also
+  # the Terraform default role for consumer-requested nodes
+  # (modules/contabo-k3s-node/variables.tf: `role = optional(string, "workload")`,
+  # emitted as `--node-label node-role=<role>` by that module's main.tf), so an
+  # autoscaled elastic node now carries the same role identity as a declared one.
+  # Parity with template.go's Labels map is enforced by TestElasticNodeLabelParity
+  # (internal/provider/label_parity_test.go), not just by this comment.
+  - [ sh, -c, "set -a; . /etc/k3s-agent.env; set +a; curl -sfL https://get.k3s.io | sh -s - agent --node-name '{{.NodeName}}' --kubelet-arg 'provider-id=contabo://{{.NodeName}}' --node-label 'fuzeinfra.io/pool=elastic' --node-label 'node-role=workload' --node-taint 'fuzeinfra.io/elastic=true:PreferNoSchedule'" ]

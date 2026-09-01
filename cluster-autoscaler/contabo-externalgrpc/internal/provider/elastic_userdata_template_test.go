@@ -80,6 +80,15 @@ func TestElasticUserDataTemplate_RendersValidCloudConfig(t *testing.T) {
 		"--node-name 'fuzeinfra-elastic-a1b2c3d4'",
 		"--kubelet-arg 'provider-id=contabo://fuzeinfra-elastic-a1b2c3d4'",
 		"--node-label 'fuzeinfra.io/pool=elastic'",
+		// node-role=workload is the label the product workloads' nodeSelector
+		// targets. k3s only applies --node-label at agent REGISTRATION, so if
+		// this flag is ever dropped the label cannot be recovered by relabelling
+		// -- every node the pool creates from then on is unschedulable for
+		// fuzekeys/fuzebi/fuzehub/fuzedeploy/fuzeexecutive, and a hand-applied
+		// `kubectl label` evaporates at the next scale event.
+		// TestElasticNodeLabelParity additionally checks this against the CA
+		// scale-from-zero simulation in template.go.
+		"--node-label 'node-role=workload'",
 		"--node-taint 'fuzeinfra.io/elastic=true:PreferNoSchedule'",
 		// Pinned to the same channel as the baseline module (v1.36, per
 		// #318/#366) rather than a floating "stable" channel, so an elastic
