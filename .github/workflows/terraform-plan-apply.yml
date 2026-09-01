@@ -220,7 +220,7 @@ jobs:
 
       - name: Post plan as PR comment
         if: always() && steps.detect.outputs.tf == 'true' && github.event.pull_request.head.repo.fork != true
-        uses: actions/github-script@v9
+        uses: actions/github-script@v9.0.0
         with:
           script: |
             const fs = require('fs');
