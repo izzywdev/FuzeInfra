@@ -44,6 +44,19 @@ change that lands its sealed Secret — never before.
   {{- if .enabled }}{{- $enabled = append $enabled . }}{{- end }}
 {{- end }}
 {{- if $enabled }}
+{{- /* Render-time identifier validation. The runtime script also guards these
+       (require_ident/require_host), but by then the value has already been
+       interpolated into a bash command line, where a backtick or $( ) is SHELL
+       injection before it is ever SQL injection. Rejecting at template time
+       means `helm lint`/CI catches a bad allocation before it can be merged. */ -}}
+{{- range $enabled }}
+{{- if not (regexMatch "^[A-Za-z0-9-]+$" .name) }}{{ fail (printf "serviceMariadbDatabases[].name %q must match ^[A-Za-z0-9-]+$ (it becomes an env var name)" .name) }}{{ end }}
+{{- if not (regexMatch "^[A-Za-z0-9_]+$" (.database | toString)) }}{{ fail (printf "serviceMariadbDatabases[%s].database %q must match ^[A-Za-z0-9_]+$" .name (.database | toString)) }}{{ end }}
+{{- if not (regexMatch "^[A-Za-z0-9_]+$" (.user | toString)) }}{{ fail (printf "serviceMariadbDatabases[%s].user %q must match ^[A-Za-z0-9_]+$" .name (.user | toString)) }}{{ end }}
+{{- if not (regexMatch "^[A-Za-z0-9_.%-]+$" (.host | default "%" | toString)) }}{{ fail (printf "serviceMariadbDatabases[%s].host %q must match ^[A-Za-z0-9_.%%-]+$" .name (.host | toString)) }}{{ end }}
+{{- if not (regexMatch "^[A-Za-z0-9_]+$" (.charset | default "utf8mb4" | toString)) }}{{ fail (printf "serviceMariadbDatabases[%s].charset %q must match ^[A-Za-z0-9_]+$" .name (.charset | toString)) }}{{ end }}
+{{- if not (regexMatch "^[A-Za-z0-9_]+$" (.collation | default "utf8mb4_unicode_ci" | toString)) }}{{ fail (printf "serviceMariadbDatabases[%s].collation %q must match ^[A-Za-z0-9_]+$" .name (.collation | toString)) }}{{ end }}
+{{- end }}
 {{- if not .Values.mariadb.enabled }}
 {{- fail "fuzeinfra: serviceMariadbDatabases has enabled entries but mariadb.enabled is false — the provisioning Job would wait forever for a server that is not deployed. Enable the mariadb engine in this overlay, or gate the entries off." }}
 {{- end }}
@@ -99,16 +112,27 @@ spec:
             - -c
             - |
               set -euo pipefail
-              # MYSQL_PWD, not -p<pw>: the password must never appear in the
-              # container's process table or in the Job log.
-              export MYSQL_PWD="$ADMIN_PASSWORD"
+
+              # The root password is handed to the client through a 0600
+              # defaults-file on tmpfs (/dev/shm), never as -p<pw> (which would
+              # put it in the container's process table) and never as MYSQL_PWD
+              # (which MariaDB 11 treats as a "passwordless login" and then
+              # prints a --ssl-verify-server-cert warning on every invocation).
+              # --defaults-extra-file MUST be the first option on the command line.
+              ADMIN_CNF=/dev/shm/mariadb-admin.cnf
+              cleanup() { rm -f "$ADMIN_CNF"; }
+              trap cleanup EXIT
+              cnf_escape() { printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'; }
+              ( umask 077; printf '[client]\npassword="%s"\n' "$(cnf_escape "$ADMIN_PASSWORD")" > "$ADMIN_CNF" )
 
               mariadb_admin_sql() {
-                mariadb --protocol=TCP -h "$DB_HOST" -P "$DB_PORT" -u "$ADMIN_USER" --batch --skip-column-names
+                mariadb --defaults-extra-file="$ADMIN_CNF" --protocol=TCP \
+                  -h "$DB_HOST" -P "$DB_PORT" -u "$ADMIN_USER" --batch --skip-column-names
               }
 
               echo "Waiting for MariaDB at ${DB_HOST}:${DB_PORT} ..."
-              until mariadb-admin --protocol=TCP -h "$DB_HOST" -P "$DB_PORT" -u "$ADMIN_USER" ping --silent >/dev/null 2>&1; do
+              until mariadb-admin --defaults-extra-file="$ADMIN_CNF" --protocol=TCP \
+                    -h "$DB_HOST" -P "$DB_PORT" -u "$ADMIN_USER" ping --silent >/dev/null 2>&1; do
                 sleep 3
               done
               echo "MariaDB is ready."

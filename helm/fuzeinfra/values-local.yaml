@@ -14,6 +14,16 @@ ingress:
   tls:
     enabled: false
 
+# Shared MariaDB engine — ON locally so the kind stack mirrors prod and a
+# consumer can develop against fuzeinfra-mariadb instead of its own engine.
+# Root password comes from the chart-managed fuzeinfra-secrets placeholder.
+mariadb:
+  enabled: true
+  storage: 2Gi
+  resources:
+    requests: { cpu: 50m,  memory: 256Mi }
+    limits:   { cpu: 500m, memory: 768Mi }
+
 # Smaller footprint for laptops.
 elasticsearch:
   javaOpts: "-Xms256m -Xmx256m"
