@@ -8,7 +8,7 @@ node's block storage. S3 has exactly three roles on this platform:
 
 | Use | Bucket | Mechanism | Default |
 |-----|--------|-----------|---------|
-| Loki log chunks + index | `fuzeinfra-loki` | Loki native S3 backend | off |
+| Loki log chunks + index | `fuzeinfra-loki` | Loki native S3 backend | **on** (prod, since 2026-09-01) |
 | Scheduled DB backup dumps | `fuzeinfra-backups` | backup CronJobs (this chart) | off |
 | Application blob storage | `fuzeinfra-blobs` | app SDK (S3 client) | n/a |
 
@@ -27,20 +27,30 @@ the existing Contabo OAuth2 provider). Credentials are **never** created with
 
 Loki's S3 backend is already wired in the chart (`loki.s3.*` in `values.yaml`,
 consumed by `templates/configmaps-monitoring.yaml` and `templates/monitoring.yaml`).
-On the prod overlay (`values-contabo.yaml`) the endpoint/bucket are filled in and
-the switch is `loki.s3.enabled`, kept **false** until the credential SealedSecret
-exists (flipping it on without the secret would crash-loop Loki).
+On the prod overlay (`values-contabo.yaml`) `loki.s3.enabled` is **true** as of
+2026-09-01, backed by the `loki-s3` SealedSecret
+(`deploy/sealed-secrets/loki-s3-credentials.yaml`, keys `LOKI_S3_ACCESS_KEY_ID` /
+`LOKI_S3_SECRET_ACCESS_KEY`).
 
-**Enable (human-gated):**
-
-1. Fetch the S3 key pair for `fuzeinfra-loki` from the Contabo panel.
-2. Seal it offline into a SealedSecret named `loki-s3` in the `fuzeinfra`
-   namespace with keys `LOKI_S3_ACCESS_KEY_ID` / `LOKI_S3_SECRET_ACCESS_KEY`.
-   Commit it; let Argo sync.
-3. Set `loki.s3.enabled: true` in `values-contabo.yaml`; commit; let Argo sync.
+This was previously described here as a "human-gated" flip. It was not a
+safeguard — a flag waiting on a human to seal a secret is a defect in an
+autonomous SDLC, and while it waited, the on-disk fallback filled its PVC and
+wedged prod delivery for 37 hours. The reproduction/rotation path is documented
+in `deploy/sealed-secrets/loki-s3-credentials.yaml.template`; note the key pair
+comes from the **Contabo API**, not the panel, and every API call needs an
+`x-request-id` header that is a valid UUID.
 
 There is **no** log migration — existing on-disk chunks age out under the Loki
 retention policy; new chunks land in S3.
+
+**Bounding growth.** S3 removes the disk ceiling but not the need for a bound —
+Loki OSS has **no size-based retention, only time**. Two mechanisms apply:
+
+- `limits_config.retention_period` = **336h (14 days)**, enforced by the
+  compactor (`configmaps-monitoring.yaml`).
+- the **`PVCFillingUp`** alert (`helm/fuzeinfra/rules/kubernetes.yml`) at 80%
+  used, which is the only thing that catches a filling volume *before* it fills.
+  Loki still keeps its WAL, tsdb-shipper cache and compactor scratch on the PVC.
 
 ---
 
