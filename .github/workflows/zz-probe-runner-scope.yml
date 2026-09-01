@@ -1,0 +1,99 @@
+# TEMPORARY DIAGNOSTIC — deleted before this branch is merged. Do not stamp, do not require.
+#
+# Answers one question empirically instead of by guessing: WHICH existing FuzeInfra secret
+# can read `GET /repos/{owner}/{repo}/actions/runners`, the endpoint the Runner Watch
+# liveness probe depends on (it needs `administration: read`, which the fuze-agent App
+# installation does not currently carry — see issue #811).
+#
+# SAFETY — FuzeInfra's job logs are PUBLIC.
+#   * No token VALUE is ever printed, interpolated into a URL, or written to a file.
+#     Each candidate is passed to curl through an env var and consumed by a header.
+#   * Only the secret NAME and the HTTP STATUS CODE are emitted.
+#   * `-o /dev/null` discards every response body: the runners listing itself is not
+#     sensitive, but a 200 body from some other endpoint could be, and discarding
+#     unconditionally means no future edit to this file can start leaking one.
+#   * Trigger is `push` on this one branch only, so it never runs on main and cannot
+#     become a scheduled credential prober.
+#
+# `push` rather than `workflow_dispatch` deliberately: workflow_dispatch is only offered
+# for workflows already on the DEFAULT branch, so a dispatch-triggered probe could not run
+# until it had been merged — which is exactly the ordering this is meant to avoid.
+
+name: zz-probe-runner-scope
+
+on:
+  push:
+    branches: [devops/runner-watch-probe-token]
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      # A PRIVATE fleet repo with a declared pool — the case the watcher actually needs.
+      # Known to have 1 online runner when read with a credential that has the scope.
+      TARGET: izzywdev/FuzeHub
+    steps:
+      - name: Mint the fuze-agent App token (the current, failing path)
+        id: app
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349  # v2
+        continue-on-error: true
+        with:
+          app-id: ${{ secrets.FUZE_AGENT_APP_ID }}
+          private-key: ${{ secrets.FUZE_AGENT_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+
+      - name: Probe each candidate against the runners endpoint
+        env:
+          APP_TOKEN: ${{ steps.app.outputs.token }}
+          GH_RELEASE_PAT: ${{ secrets.GH_RELEASE_PAT }}
+          GH_TOKEN_SECRET: ${{ secrets.GH_TOKEN }}
+          GH_TF_TOKEN: ${{ secrets.GH_TF_TOKEN }}
+          FUZESDLC_AGENT_PUSH_TOKEN: ${{ secrets.FUZESDLC_AGENT_PUSH_TOKEN }}
+          RUNNER_PROBE_TOKEN: ${{ secrets.RUNNER_PROBE_TOKEN }}
+        run: |
+          set -uo pipefail
+
+          probe () {
+            local name="$1" tok="$2" path="$3"
+            if [ -z "$tok" ]; then
+              printf '  %-28s %-46s %s\n' "$name" "$path" "NOT SET"
+              return
+            fi
+            local code
+            code=$(curl -sS -o /dev/null -w '%{http_code}' \
+              -H "Authorization: Bearer $tok" \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              "https://api.github.com/$path" || echo "ERR")
+            printf '  %-28s %-46s %s\n' "$name" "$path" "$code"
+          }
+
+          echo "Endpoint that the liveness probe needs (administration: read):"
+          echo
+          printf '  %-28s %-46s %s\n' "SECRET NAME" "ENDPOINT" "HTTP"
+          printf '  %-28s %-46s %s\n' "---------------------------" "---------------------------------------------" "----"
+          for n in APP_TOKEN GH_RELEASE_PAT GH_TOKEN_SECRET GH_TF_TOKEN FUZESDLC_AGENT_PUSH_TOKEN RUNNER_PROBE_TOKEN; do
+            probe "$n" "${!n:-}" "repos/$TARGET/actions/runners"
+          done
+
+          echo
+          echo "Control — an endpoint every valid credential can read (proves the token is live at all):"
+          echo
+          for n in APP_TOKEN GH_RELEASE_PAT GH_TOKEN_SECRET GH_TF_TOKEN FUZESDLC_AGENT_PUSH_TOKEN RUNNER_PROBE_TOKEN; do
+            probe "$n" "${!n:-}" "repos/$TARGET"
+          done
+
+          echo
+          echo "The other two grants the watcher needs, so one run answers all three:"
+          echo
+          for n in APP_TOKEN GH_RELEASE_PAT GH_TOKEN_SECRET GH_TF_TOKEN FUZESDLC_AGENT_PUSH_TOKEN RUNNER_PROBE_TOKEN; do
+            probe "$n" "${!n:-}" "repos/$TARGET/actions/variables"
+          done
+
+          echo
+          echo "200 = has the scope. 403 = authenticated but NOT granted. 404 = no visibility."
+          echo "401 = bad/expired credential. Read the control block before concluding."
