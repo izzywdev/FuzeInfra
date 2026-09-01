@@ -47,6 +47,13 @@ spec:
         {{- include "fuzeinfra.labels" . | nindent 8 }}
         {{- include "fuzeinfra.selectorLabels" (dict "component" "kafka" "root" $) | nindent 8 }}
     spec:
+      {{- with .Values.kafka.nodeSelector }}
+      # Pin to durable (Longhorn-disk) nodes. Longhorn only registers a
+      # node.longhorn.io object for nodes running longhorn-manager; a pod
+      # scheduled elsewhere can never attach its volume.
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       # Confluent Kafka runs as uid 1000; fsGroup makes k8s chown the fresh
       # Longhorn data volume to gid 1000 on mount (else the ext4 PV is root-owned
       # and Kafka fails its writable preflight and CrashLoops).
@@ -477,6 +484,13 @@ spec:
         {{- include "fuzeinfra.labels" . | nindent 8 }}
         {{- include "fuzeinfra.selectorLabels" (dict "component" "rabbitmq" "root" $) | nindent 8 }}
     spec:
+      {{- with .Values.rabbitmq.nodeSelector }}
+      # Pin to durable (Longhorn-disk) nodes. Longhorn only registers a
+      # node.longhorn.io object for nodes running longhorn-manager; a pod
+      # scheduled elsewhere can never attach its volume.
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       containers:
         - name: rabbitmq
           image: {{ .Values.rabbitmq.image }}

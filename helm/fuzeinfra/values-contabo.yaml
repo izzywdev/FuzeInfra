@@ -61,6 +61,12 @@ postgres:
   nodeSelector:
     node.longhorn.io/create-default-disk: "true"
 mongodb:
+  # Pin to durable Longhorn-disk nodes. longhorn-manager only runs on the 3
+  # durable nodes, so Longhorn registers node.longhorn.io objects only there;
+  # a stateful pod scheduled onto an ephemeral elastic node can NEVER attach
+  # its volume (FailedAttachVolume: node.longhorn.io "..." not found).
+  nodeSelector:
+    node.longhorn.io/create-default-disk: "true"
   storage: 10Gi
   resources:
     requests: {cpu: 100m, memory: 256Mi}
@@ -88,6 +94,12 @@ serviceNeo4jInstances:
       requests: {cpu: 200m, memory: 1Gi}
       limits: {cpu: "1", memory: 2Gi}
 redis:
+  # Pin to durable Longhorn-disk nodes. longhorn-manager only runs on the 3
+  # durable nodes, so Longhorn registers node.longhorn.io objects only there;
+  # a stateful pod scheduled onto an ephemeral elastic node can NEVER attach
+  # its volume (FailedAttachVolume: node.longhorn.io "..." not found).
+  nodeSelector:
+    node.longhorn.io/create-default-disk: "true"
   storage: 2Gi
   resources:
     requests: {cpu: 50m, memory: 128Mi}
@@ -97,6 +109,12 @@ redis:
 # PVCs are RETAINED (no prune, no data loss) — set replicas back to 1 to restore.
 # mongo / neo4j / postgres / redis / kafka / chromadb / monitoring stay running.
 elasticsearch:
+  # Pin to durable Longhorn-disk nodes. longhorn-manager only runs on the 3
+  # durable nodes, so Longhorn registers node.longhorn.io objects only there;
+  # a stateful pod scheduled onto an ephemeral elastic node can NEVER attach
+  # its volume (FailedAttachVolume: node.longhorn.io "..." not found).
+  nodeSelector:
+    node.longhorn.io/create-default-disk: "true"
   replicas: 0
   storage: 20Gi
   javaOpts: "-Xms512m -Xmx512m"
@@ -104,6 +122,12 @@ elasticsearch:
     requests: {cpu: 250m, memory: 1Gi}
     limits: {cpu: "1", memory: 1536Mi}
 rabbitmq:
+  # Pin to durable Longhorn-disk nodes. longhorn-manager only runs on the 3
+  # durable nodes, so Longhorn registers node.longhorn.io objects only there;
+  # a stateful pod scheduled onto an ephemeral elastic node can NEVER attach
+  # its volume (FailedAttachVolume: node.longhorn.io "..." not found).
+  nodeSelector:
+    node.longhorn.io/create-default-disk: "true"
   replicas: 0 # TEMP headroom (#93) — restore to 1 when the node has capacity
   # Strong credential from deploy/sealed-secrets/fuzeinfra-app-credentials.yaml,
   # replacing the chart default "admin123" that prod was otherwise rendering.
@@ -115,8 +139,20 @@ rabbitmq:
     name: fuzeinfra-app-credentials
     key: RABBITMQ_PASSWORD
 kafka:
+  # Pin to durable Longhorn-disk nodes. longhorn-manager only runs on the 3
+  # durable nodes, so Longhorn registers node.longhorn.io objects only there;
+  # a stateful pod scheduled onto an ephemeral elastic node can NEVER attach
+  # its volume (FailedAttachVolume: node.longhorn.io "..." not found).
+  nodeSelector:
+    node.longhorn.io/create-default-disk: "true"
   storage: 10Gi
 prometheus:
+  # Pin to durable Longhorn-disk nodes. longhorn-manager only runs on the 3
+  # durable nodes, so Longhorn registers node.longhorn.io objects only there;
+  # a stateful pod scheduled onto an ephemeral elastic node can NEVER attach
+  # its volume (FailedAttachVolume: node.longhorn.io "..." not found).
+  nodeSelector:
+    node.longhorn.io/create-default-disk: "true"
   storage: 20Gi
   # Let downstream apps ship Prometheus alert/recording rules from their own
   # namespaces via ConfigMaps labeled `prometheus_rule: "1"`.
@@ -224,6 +260,12 @@ kafkaUi:
 #      commit it, let Argo sync.
 #   3. Flip loki.s3.enabled -> true here, commit, let Argo sync.
 loki:
+  # Pin to durable Longhorn-disk nodes. longhorn-manager only runs on the 3
+  # durable nodes, so Longhorn registers node.longhorn.io objects only there;
+  # a stateful pod scheduled onto an ephemeral elastic node can NEVER attach
+  # its volume (FailedAttachVolume: node.longhorn.io "..." not found).
+  nodeSelector:
+    node.longhorn.io/create-default-disk: "true"
   # 20Gi, not the 5Gi base default — and as of the Deployment conversion this
   # value is ENFORCED rather than aspirational.
   #
@@ -860,3 +902,19 @@ serviceChromaCollections:
 nodeConfigurator:
   preferIPv4:
     enabled: true
+
+# Stateful services not otherwise overridden here still need the durable pin.
+alertmanager:
+  # Pin to durable Longhorn-disk nodes. longhorn-manager only runs on the 3
+  # durable nodes, so Longhorn registers node.longhorn.io objects only there;
+  # a stateful pod scheduled onto an ephemeral elastic node can NEVER attach
+  # its volume (FailedAttachVolume: node.longhorn.io "..." not found).
+  nodeSelector:
+    node.longhorn.io/create-default-disk: "true"
+chromadb:
+  # Pin to durable Longhorn-disk nodes. longhorn-manager only runs on the 3
+  # durable nodes, so Longhorn registers node.longhorn.io objects only there;
+  # a stateful pod scheduled onto an ephemeral elastic node can NEVER attach
+  # its volume (FailedAttachVolume: node.longhorn.io "..." not found).
+  nodeSelector:
+    node.longhorn.io/create-default-disk: "true"
