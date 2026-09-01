@@ -148,11 +148,13 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  # The fleet target list lives in FuzeSDLC and is fetched into the workspace at run time.
-  # Written OUTSIDE the checkout so it can never be mistaken for a committed second copy.
+  # The fleet target list lives in FuzeSDLC and is fetched at run time (see "Materialise
+  # the fleet target list"). Only the SOURCE is workflow-level; the destination path is set
+  # per step, because it uses `runner.temp` and the `runner` context does NOT exist at
+  # workflow or job level - actionlint rejects it there, and at run time it would silently
+  # expand to the empty string, i.e. write the fleet list to "/ruleset-fleet.json".
   FLEET_SOURCE_REPO: izzywdev/FuzeSDLC
   FLEET_SOURCE_PATH: governance/ruleset-fleet.json
-  FLEET_FILE: ${{ runner.temp }}/ruleset-fleet.json
 
 jobs:
   decide:
@@ -208,6 +210,9 @@ jobs:
       - name: Materialise the fleet target list from the hub of record
         env:
           GH_TOKEN: ${{ steps.token.outputs.token }}
+          # Written OUTSIDE the checkout so it can never be mistaken for - or committed
+          # as - a vendored second copy of the hub's list.
+          FLEET_FILE: ${{ runner.temp }}/ruleset-fleet.json
         run: |
           set -euo pipefail
           # The fleet list is NOT vendored into this repo on purpose: a second copy is a
@@ -231,6 +236,7 @@ jobs:
           MODE: ${{ steps.mode.outputs.mode }}
           TARGET_REPOS: ${{ inputs.repos }}
           RUNNER_WATCH_HUB: ${{ github.repository }}
+          FLEET_FILE: ${{ runner.temp }}/ruleset-fleet.json
         run: |
           set -euo pipefail
           FLAG=--check
@@ -296,6 +302,9 @@ jobs:
       - name: Materialise the fleet target list from the hub of record
         env:
           GH_TOKEN: ${{ steps.token.outputs.token }}
+          # Written OUTSIDE the checkout so it can never be mistaken for - or committed
+          # as - a vendored second copy of the hub's list.
+          FLEET_FILE: ${{ runner.temp }}/ruleset-fleet.json
         run: |
           set -euo pipefail
           # Fetched per job rather than passed between them: an artifact hop would be a
@@ -317,6 +326,7 @@ jobs:
           TARGET_REPOS: ${{ inputs.repos }}
           STRANDED_MINUTES: ${{ inputs.stranded_minutes }}
           RUNNER_WATCH_HUB: ${{ github.repository }}
+          FLEET_FILE: ${{ runner.temp }}/ruleset-fleet.json
         run: |
           set -euo pipefail
           # Recompute rather than trusting the upstream output alone: `if: !cancelled()`
