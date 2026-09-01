@@ -143,6 +143,22 @@ jobs:
           anthropic_api_key: ${{ secrets.LITELLM_FUZE_KEY }}
           # github_token bypasses the OIDC→App token exchange that fails on staging runners.
           github_token: ${{ secrets.GH_TOKEN }}
+          # allowed_bots: `fuzeone-bot`, the identity GitHub attributes this repo's
+          # SCHEDULED runs to. Left empty, claude-code-action's human-actor check aborts
+          # this step ~1s in, BEFORE any request reaches the LiteLLM gateway configured
+          # in `env:` directly above:
+          #   "Workflow initiated by non-human actor: fuzeone-bot (actor not found on
+          #    GitHub). Add bot to allowed_bots list or use '*' to allow all bots."
+          # Measured on run 33505900409 (2026-09-01), whose failing autofix job prints
+          # ANTHROPIC_BASE_URL: http://litellm.fuzeinfra.svc.cluster.local:4000 in the
+          # same env block it dies in — the gateway was wired; the run never used it.
+          # `fuzeone-bot` 404s on GET /users/..., which routes it to the `catch` branch of
+          # claude-code-action src/github/validation/actor.ts — that branch still consults
+          # isAllowedBot(), so a literal login suffices and `*` is not needed. NOT `*`:
+          # this repo runs dependabot, and `*` would let any bot-authored event start an
+          # agent run holding the gateway key and repo write. A cron cannot be triggered
+          # by dependabot, so naming the one scheduler identity keeps the gate meaningful.
+          allowed_bots: fuzeone-bot
           # THE FIX: without these, every mutating tool call (git push, gh pr/issue
           # create, file edits) sits behind an interactive approval gate that nothing
           # can clear in headless CI and is silently denied — the sweep could read
