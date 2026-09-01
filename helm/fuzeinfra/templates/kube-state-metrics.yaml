@@ -59,6 +59,20 @@ rules:
     resources:
       - poddisruptionbudgets
     verbs: ["list", "watch"]
+  # kube-state-metrics v2 collects admission webhook configurations by DEFAULT.
+  # Without these two the collectors are dead and the log fills, once per resync,
+  # forever, with:
+  #   Failed to watch *v1.ValidatingWebhookConfiguration: ... is forbidden:
+  #   User "system:serviceaccount:fuzeinfra:fuzeinfra-kube-state-metrics" cannot
+  #   list resource "validatingwebhookconfigurations" ... at the cluster scope
+  # It is not fatal -- the pod still goes Ready -- which is exactly why it went
+  # unnoticed: the only symptom is missing kube_validatingwebhookconfiguration_*
+  # / kube_mutatingwebhookconfiguration_* series plus permanent error spam.
+  - apiGroups: ["admissionregistration.k8s.io"]
+    resources:
+      - validatingwebhookconfigurations
+      - mutatingwebhookconfigurations
+    verbs: ["list", "watch"]
   - apiGroups: ["certificates.k8s.io"]
     resources:
       - certificatesigningrequests
