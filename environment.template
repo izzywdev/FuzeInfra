@@ -37,6 +37,11 @@ REDIS_HOST=localhost
 REDIS_PORT=6379
 REDIS_PASSWORD=redis_secure_password
 
+# MariaDB Configuration (shared MySQL-protocol engine)
+MARIADB_HOST=localhost
+MARIADB_PORT=3306
+MARIADB_ROOT_PASSWORD=your_secure_mariadb_password
+
 # Neo4j Configuration
 NEO4J_HOST=localhost
 NEO4J_HTTP_PORT=7474
