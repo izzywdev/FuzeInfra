@@ -269,6 +269,23 @@ jobs:
           TARGET_REPOS: ${{ inputs.repos }}
           RUNNER_WATCH_HUB: ${{ github.repository }}
           FLEET_FILE: ${{ runner.temp }}/ruleset-fleet.json
+          # THE LIVENESS PROBE'''S CREDENTIAL, and nothing else'''s. Restored from #249,
+          # which declared an optional `runner-probe-token` secret for exactly this and
+          # which this port had dropped - making the whole watcher depend on one App
+          # permission that measurement showed was not granted. Probing every candidate
+          # against repos/izzywdev/FuzeHub/actions/runners (run 33521833116, status codes
+          # only - logs here are PUBLIC):
+          #     App token  403   (live: 200 on repos/<slug>, just not granted)
+          #     GH_TOKEN   200
+          #     GH_TF_TOKEN 200
+          #     GH_RELEASE_PAT / FUZESDLC_AGENT_PUSH_TOKEN  404 (no visibility at all)
+          # GH_TOKEN is the fallback because it is this repo'''s established cross-repo
+          # credential and it measurably has the scope; RUNNER_PROBE_TOKEN stays the named
+          # lever so a narrower, dedicated token can replace it without a code change.
+          # runner_watch.py applies this to the runners listing ONLY - variable writes and
+          # cancel/rerun keep the App token, so a token supplied to OBSERVE runners can
+          # never cancel a build.
+          RUNNER_PROBE_TOKEN: ${{ secrets.RUNNER_PROBE_TOKEN || secrets.GH_TOKEN }}
         run: |
           set -euo pipefail
           FLAG=--check

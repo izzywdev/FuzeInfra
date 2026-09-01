@@ -723,7 +723,10 @@ class SystematicBlindnessFailsTheRun(unittest.TestCase):
         rw.probe_repo, rw.read_variable, rw.write_variable = self._probe, self._read, self._write
 
     def stub(self, mapping):
-        rw.probe_repo = lambda slug: mapping[slug]
+        # Accepts probe_token so this stub keeps verifying the REAL call signature - if
+        # run_decide stops threading the probe token through, this fails rather than
+        # silently testing a shape production no longer uses.
+        rw.probe_repo = lambda slug, probe_token=None: mapping[slug]
 
     def test_all_probes_failed_on_repos_that_needed_them_is_a_FAILURE(self):
         self.stub({
@@ -768,6 +771,132 @@ class SystematicBlindnessFailsTheRun(unittest.TestCase):
                                               declared_pool="a", online_runners=None)})
         rw.run_decide(["izzywdev/A"], rw.Policy(), apply=False, hub="izzywdev/FuzeInfra")
         self.assertEqual(self.calls, [])
+
+
+# ======================================================================================
+# The probe-token escape hatch (restored from #249)
+# ======================================================================================
+
+class ProbeTokenIsScopedToTheProbe(unittest.TestCase):
+    """RUNNER_PROBE_TOKEN exists because the liveness probe needs `administration: read`
+    and the fuze-agent App does not have it (measured: App 403, GH_TOKEN 200 on
+    repos/<slug>/actions/runners). The hatch must widen exactly ONE read and nothing else -
+    a PAT handed in to observe runners must not become a PAT that can cancel builds.
+
+    Driven against the real `_gh` seam with subprocess stubbed, so these stay offline."""
+
+    def setUp(self):
+        self.seen = []
+        self._run = rw.subprocess.run
+
+        class Res:
+            returncode = 0
+            stdout = "0"
+            stderr = ""
+
+        def fake_run(argv, **kw):
+            env = kw.get("env")
+            self.seen.append((list(argv), (env or {}).get("GH_TOKEN") if env else None))
+            return Res()
+
+        rw.subprocess.run = fake_run
+        self.addCleanup(lambda: setattr(rw.subprocess, "run", self._run))
+
+    def token_for(self, needle):
+        """The GH_TOKEN override the call containing `needle` ran under (None = ambient)."""
+        for argv, tok in self.seen:
+            if any(needle in a for a in argv):
+                return tok
+        raise AssertionError("no call matching %r in %r" % (needle, self.seen))
+
+    def test_the_runners_listing_runs_under_the_probe_token(self):
+        rw.probe_repo("izzywdev/X", probe_token="PROBE")
+        self.assertEqual(self.token_for("actions/runners"), "PROBE")
+
+    def test_no_other_call_in_the_probe_uses_it(self):
+        """The repo metadata read and the manifest read must stay on the ambient token.
+        Only the runners listing needs the extra scope."""
+        rw.probe_repo("izzywdev/X", probe_token="PROBE")
+        self.assertIsNone(self.token_for("contents/.fuze/manifest.json"))
+        meta = [tok for argv, tok in self.seen
+                if argv[:3] == ["gh", "api", "repos/izzywdev/X"]]
+        self.assertEqual(meta, [None], "the metadata read must not use the probe token")
+
+    def test_writes_and_cancels_never_receive_it(self):
+        """write_variable / run cancel / run rerun take no token argument at all, so there
+        is no code path by which the probe credential reaches a mutation."""
+        rw.write_variable("izzywdev/X", "CI_RUNNER_LABELS", "ubuntu-latest")
+        for argv, tok in self.seen:
+            self.assertIsNone(tok, "a mutation ran under an overridden token: %r" % (argv,))
+
+    def test_absent_probe_token_falls_back_to_the_ambient_credential(self):
+        """The hatch is an OVERRIDE, not a requirement. Unset, everything behaves exactly
+        as it did before it existed."""
+        rw.probe_repo("izzywdev/X")
+        for argv, tok in self.seen:
+            self.assertIsNone(tok)
+
+    def test_an_empty_probe_token_is_treated_as_absent(self):
+        """An unset GitHub secret interpolates to the empty string, not to nothing. Empty
+        must mean ambient, never `GH_TOKEN=""` - which would authenticate as nobody and
+        turn a working ambient probe into a 401."""
+        rw.probe_repo("izzywdev/X", probe_token="")
+        for argv, tok in self.seen:
+            self.assertIsNone(tok)
+
+
+class ProbeTokenDoesNotSoftenTheFailure(unittest.TestCase):
+    """The hatch exists so the probe can SUCCEED without waiting on a browser - never so
+    that failing to probe can pass for success. #810's semantics must survive it."""
+
+    def setUp(self):
+        self._probe, self._read, self._write = rw.probe_repo, rw.read_variable, rw.write_variable
+        rw.read_variable = lambda slug, name: None
+        rw.write_variable = lambda slug, name, value: None
+        self.addCleanup(lambda: (
+            setattr(rw, "probe_repo", self._probe),
+            setattr(rw, "read_variable", self._read),
+            setattr(rw, "write_variable", self._write)))
+
+    def test_a_probe_token_that_still_cannot_see_anything_is_still_exit_1(self):
+        rw.probe_repo = lambda slug, probe_token=None: rw.RepoFacts(
+            slug, private=True, declared_pool="p", online_runners=None)
+        rc = rw.run_decide(["izzywdev/A"], rw.Policy(), apply=False,
+                           hub="izzywdev/FuzeInfra", probe_token="PROBE")
+        self.assertEqual(rc, 1, "a supplied probe token must not make blindness green")
+
+    def test_a_working_probe_token_produces_a_real_decision(self):
+        rw.probe_repo = lambda slug, probe_token=None: rw.RepoFacts(
+            slug, private=True, declared_pool="p",
+            online_runners=(3 if probe_token else None))
+        rc = rw.run_decide(["izzywdev/A"], rw.Policy(), apply=False,
+                           hub="izzywdev/FuzeInfra", probe_token="PROBE")
+        self.assertEqual(rc, 0)
+
+
+class WorkflowSuppliesTheProbeToken(unittest.TestCase):
+
+    @classmethod
+    def setUpClass(cls):
+        with open(WORKFLOW, encoding="utf-8") as fh:
+            cls.body = fh.read()
+
+    def test_the_decide_job_passes_a_probe_token_with_a_working_fallback(self):
+        """RUNNER_PROBE_TOKEN is the named lever; GH_TOKEN is the credential measured to
+        actually carry the scope today (App=403, GH_TOKEN=200). Without the fallback the
+        hatch would exist but be unset, which is the blocked state it was added to end."""
+        self.assertIn("RUNNER_PROBE_TOKEN", self.body)
+        self.assertIn("secrets.RUNNER_PROBE_TOKEN || secrets.GH_TOKEN", self.body)
+
+    def test_the_recover_job_does_not_get_it(self):
+        """Recovery cancels and re-dispatches. It has no liveness probe, so handing it the
+        broader credential would widen a mutation's blast radius for no benefit."""
+        import yaml
+        with open(WORKFLOW, encoding="utf-8") as fh:
+            wf = yaml.safe_load(fh)
+        for st in wf["jobs"]["recover"]["steps"]:
+            self.assertNotIn("RUNNER_PROBE_TOKEN", str(st.get("env", {})),
+                             "recover must not receive the probe token")
 
 
 if __name__ == "__main__":

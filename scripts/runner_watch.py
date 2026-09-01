@@ -165,6 +165,45 @@ watcher never writes its own CI_RUNNER_LABELS. That was already true before the 
 is the correct shape either way.
 
 ===========================================================================================
+THE PROBE-TOKEN ESCAPE HATCH  (restored from #249, which had it and this port dropped)
+===========================================================================================
+
+#249's `workflow_call` declared:
+
+    secrets:
+      runner-probe-token:
+        description: Token with `administration: read` for the liveness probe. Optional;
+          without it the declared runner is used and liveness is reported as unverified.
+
+Dropping it made the whole watcher depend on ONE App permission, and measurement showed
+that dependency was already unmet. Probing every candidate credential against
+`GET /repos/izzywdev/FuzeHub/actions/runners` (run 33521833116; status codes only, no
+values, logs here are public):
+
+    APP_TOKEN                   403      <- authenticated (200 on repos/<slug>) but NOT granted
+    GH_TOKEN                    200
+    GH_TF_TOKEN                 200
+    GH_RELEASE_PAT              404      <- no visibility into the repo at all
+    FUZESDLC_AGENT_PUSH_TOKEN   404
+
+So `RUNNER_PROBE_TOKEN` is read from the environment and used for the runners listing ONLY
+(see `probe_repo`). Precedence, set in runner-watch.yml: `RUNNER_PROBE_TOKEN` -> `GH_TOKEN`
+-> the App token as ambient fallback. Two properties of that ordering matter:
+
+  * IT IS AN OVERRIDE, NOT A REQUIREMENT. Unset, the probe runs under the ambient token
+    exactly as before. Nothing about the fail-safe changes.
+  * IT DOES NOT SOFTEN THE FAILURE. An unverified probe on ONE repo is still a
+    keep-current + warn; unverified on EVERY repo that needed it is still `exit 1`
+    (`SystematicBlindness` in `run_decide`). The hatch exists so the probe can SUCCEED
+    without waiting on a browser, not so that failing to probe can pass for success.
+
+Deliberately NOT widened: the override applies to a single read. Variable writes and
+cancel/rerun keep the App token, so a PAT supplied to observe runners cannot cancel a
+build. Note the same measurement found the App also 403s on `actions/variables`, so
+`--apply` cannot write `CI_RUNNER_LABELS` yet; that is tracked separately and is why apply
+has not been run.
+
+===========================================================================================
 OUT OF SCOPE HERE (stage 2)
 ===========================================================================================
 
@@ -721,19 +760,38 @@ class GhError(RuntimeError):
     pass
 
 
-def _gh(args: Sequence[str]) -> str:
-    res = subprocess.run(["gh", *args], capture_output=True, text=True, check=False)
+#: Env var carrying an OPTIONAL credential used for the liveness probe alone. See
+#: `probe_repo` and the module docstring's "THE PROBE-TOKEN ESCAPE HATCH".
+PROBE_TOKEN_ENV = "RUNNER_PROBE_TOKEN"
+
+
+def _gh(args: Sequence[str], token: Optional[str] = None) -> str:
+    """Run `gh`. With `token`, run that ONE call under a different credential.
+
+    The override is scoped to a single subprocess env rather than exported process-wide,
+    so a token handed in for a read cannot silently widen the blast radius of every other
+    call in the run. Nothing here ever logs `token`: FuzeInfra's job logs are PUBLIC, and
+    `gh`'s own error text (surfaced in GhError) is stderr, which does not echo the
+    credential.
+    """
+    env = None
+    if token:
+        env = dict(os.environ)
+        env["GH_TOKEN"] = token
+        env.pop("GITHUB_TOKEN", None)  # gh prefers GH_TOKEN, but leave nothing ambiguous.
+    res = subprocess.run(["gh", *args], capture_output=True, text=True, check=False,
+                         env=env)
     if res.returncode != 0:
         raise GhError(f"gh {' '.join(args)} failed ({res.returncode}): {res.stderr.strip()}")
     return res.stdout
 
 
-def _gh_json(args: Sequence[str]):
-    out = _gh(args)
+def _gh_json(args: Sequence[str], token: Optional[str] = None):
+    out = _gh(args, token=token)
     return json.loads(out) if out.strip() else None
 
 
-def probe_repo(slug: str) -> RepoFacts:
+def probe_repo(slug: str, probe_token: Optional[str] = None) -> RepoFacts:
     """Assemble one repo's facts from the live API.
 
     The liveness probe asks `repos/<slug>/actions/runners` for `status == "online"`,
@@ -762,8 +820,14 @@ def probe_repo(slug: str) -> RepoFacts:
 
     online: Optional[int] = None
     try:
+        # `probe_token` (RUNNER_PROBE_TOKEN) is applied HERE and nowhere else. This is the
+        # only call in the module that needs `administration: read`, so it is the only one
+        # that should be able to run under a broader credential. Everything else — the
+        # variable writes, the cancel/rerun — keeps the ambient App token, which is what
+        # keeps a PAT handed in for a READ from becoming a PAT that can cancel builds.
         runners = _gh_json(["api", f"repos/{slug}/actions/runners", "--paginate",
-                            "--jq", '[.runners[]? | select(.status=="online")] | length'])
+                            "--jq", '[.runners[]? | select(.status=="online")] | length'],
+                           token=probe_token)
         if isinstance(runners, int):
             online = runners
         elif isinstance(runners, list):
@@ -826,7 +890,8 @@ def queued_jobs(slug: str) -> List[JobFacts]:
 # Drivers
 # ======================================================================================
 
-def run_decide(slugs: List[str], policy: Policy, *, apply: bool, hub: str) -> int:
+def run_decide(slugs: List[str], policy: Policy, *, apply: bool, hub: str,
+               probe_token: Optional[str] = None) -> int:
     """Job A. Returns a process exit code."""
     state = load_state(read_variable(hub, STATE_VAR_DECIDE))
     warnings = 0
@@ -838,7 +903,7 @@ def run_decide(slugs: List[str], policy: Policy, *, apply: bool, hub: str) -> in
 
     for slug in slugs:
         try:
-            facts = probe_repo(slug)
+            facts = probe_repo(slug, probe_token=probe_token)
         except GhError as exc:
             print(f"::warning title=runner-watch::{slug}: unreachable ({exc}). Left "
                   f"untouched — an unreachable repo is never treated as compliant.")
@@ -1012,7 +1077,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         slugs = fleet_repos(args.fleet_file)
 
     if args.mode == "decide":
-        return run_decide(slugs, policy, apply=args.apply, hub=args.hub)
+        return run_decide(slugs, policy, apply=args.apply, hub=args.hub,
+                          probe_token=os.environ.get(PROBE_TOKEN_ENV) or None)
     return run_recover(slugs, policy, apply=args.apply, hub=args.hub)
 
 
