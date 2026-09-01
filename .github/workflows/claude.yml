@@ -180,6 +180,24 @@ jobs:
         run: |
           git ls-remote origin 'refs/heads/claude/*' | awk '{print $2}' | sort > /tmp/branches-before.txt
 
+      # Credential resolution, replacing the hard-coded `secrets.ANTHROPIC_API_KEY`
+      # this workflow used to carry. That key is what produced "Your credit balance is
+      # too low to access the Anthropic API" while the in-cluster gateway was serving
+      # normally, and it is why the header above says this hatch "must NOT be re-enabled
+      # without updating ANTHROPIC_API_KEY to a funded key". It no longer depends on one:
+      # llm-endpoint probes the in-cluster LiteLLM gateway first and falls back to a
+      # directly-configured vendor only when the gateway is unreachable from this runner
+      # (which, on `ubuntu-latest`, it is).
+      - name: Resolve LLM endpoint (LiteLLM in-cluster, vendor fallback)
+        id: llm
+        uses: ./.github/actions/llm-endpoint
+        with:
+          litellm-key: ${{ secrets.LITELLM_FUZE_KEY }}
+          fallback-chain: ${{ vars.FUZE_LLM_FALLBACK_CHAIN || 'anthropic,openai,gemini' }}
+          fallback-anthropic-key: ${{ secrets.ANTHROPIC_API_KEY }}
+          fallback-openai-key: ${{ secrets.OPENAI_API_KEY }}
+          fallback-gemini-key: ${{ secrets.GEMINI_API_KEY }}
+
       # PREVENTION (item a): the responder has silently died when the very FIRST
       # Anthropic API call failed — the run reported is_error after ~200ms having
       # done nothing (num_turns=1, $0), then the action's own post-processing threw
@@ -192,21 +210,25 @@ jobs:
       # context beta the action may append ([1m]) is a header, not a model string —
       # if entitlement for that is the culprit the detect+alert path below still
       # catches it.
-      - name: Preflight — Anthropic API reachable & key valid
+      - name: Preflight — resolved LLM endpoint reachable & credential valid
         id: preflight
         env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          # Whatever llm-endpoint picked: the in-cluster gateway, or a vendor
+          # fallback when the gateway is unreachable from this runner.
+          LLM_BASE_URL: ${{ steps.llm.outputs.base-url }}
+          LLM_AUTH_TOKEN: ${{ steps.llm.outputs.auth-token }}
         run: |
           set -uo pipefail
-          if [ -z "${ANTHROPIC_API_KEY:-}" ]; then
+          if [ -z "${LLM_AUTH_TOKEN:-}" ]; then
             echo "ok=false" >> "$GITHUB_OUTPUT"
-            echo "reason=ANTHROPIC_API_KEY secret is empty or unset" >> "$GITHUB_OUTPUT"
-            echo "::error::ANTHROPIC_API_KEY secret is empty or unset"
+            echo "reason=llm-endpoint resolved no usable credential (neither LITELLM_FUZE_KEY nor a fallback vendor key is set)" >> "$GITHUB_OUTPUT"
+            echo "::error::llm-endpoint resolved no usable credential (neither LITELLM_FUZE_KEY nor a fallback vendor key is set)"
             exit 0
           fi
           code=$(curl -sS -o /tmp/preflight.json -w '%{http_code}' --max-time 20 \
-            -X POST https://api.anthropic.com/v1/messages \
-            -H "x-api-key: ${ANTHROPIC_API_KEY}" \
+            -X POST "${LLM_BASE_URL}/v1/messages" \
+            -H "x-api-key: ${LLM_AUTH_TOKEN}" \
+            -H "authorization: Bearer ${LLM_AUTH_TOKEN}" \
             -H "anthropic-version: 2023-06-01" \
             -H "content-type: application/json" \
             -d '{"model":"claude-opus-4-8","max_tokens":1,"messages":[{"role":"user","content":"ping"}]}' \
@@ -215,19 +237,19 @@ jobs:
           case "$code" in
             200)
               echo "ok=true" >> "$GITHUB_OUTPUT"
-              echo "Anthropic API preflight OK" ;;
+              echo "LLM preflight OK (mode=${{ steps.llm.outputs.mode }}, vendor=${{ steps.llm.outputs.vendor }})" ;;
             400|401|402|403)
               # Deterministic, will-fail-every-time: invalid key, no credits, or the
               # model/beta isn't entitled. Don't enter the run — go straight to alert.
               [ -z "$err" ] && err="HTTP $code"
               echo "ok=false" >> "$GITHUB_OUTPUT"
-              echo "reason=Anthropic API rejected preflight (HTTP $code): $err" >> "$GITHUB_OUTPUT"
-              echo "::error::Anthropic API rejected preflight (HTTP $code): $err" ;;
+              echo "reason=Resolved LLM endpoint rejected preflight (HTTP $code): $err" >> "$GITHUB_OUTPUT"
+              echo "::error::Resolved LLM endpoint rejected preflight (HTTP $code): $err" ;;
             *)
               # Transient (429/5xx/timeout/000): don't block — let the action attempt
               # and lean on its own retries. If it still fails, detect+alert covers it.
               echo "ok=true" >> "$GITHUB_OUTPUT"
-              echo "::warning::Anthropic API preflight inconclusive (HTTP $code) — proceeding; the action has its own retries." ;;
+              echo "::warning::LLM preflight inconclusive (HTTP $code) — proceeding; the action has its own retries." ;;
           esac
 
       - name: Run Claude
@@ -245,8 +267,15 @@ jobs:
           # the cluster via kubectl — nothing extra to inject here.
           KUBECONFIG: ${{ env.KUBECONFIG }}
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
+          # The resolved endpoint. LiteLLM authenticates `Authorization: Bearer`,
+          # which the action does not derive from the anthropic_api_key input
+          # alone, so the credential must ALSO travel as ANTHROPIC_AUTH_TOKEN —
+          # the same requirement already spelled out in fuze.yml and
+          # governance-nightly.yml.
+          ANTHROPIC_BASE_URL: ${{ steps.llm.outputs.base-url }}
+          ANTHROPIC_AUTH_TOKEN: ${{ steps.llm.outputs.auth-token }}
         with:
-          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          anthropic_api_key: ${{ steps.llm.outputs.auth-token }}
           # Allow Bash (kubectl/helm/terraform/gh) + file tools + Task (so it can
           # spawn the fuzeinfra-expert / devops-engineer agents from .claude/agents).
           # --permission-mode bypassPermissions is REQUIRED for headless infra ops:
