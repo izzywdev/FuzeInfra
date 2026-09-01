@@ -803,6 +803,14 @@ nodeExporter:
 nodeConfigurator:
   preferIPv4:
     enabled: false
+  # Blacklist Longhorn's block devices in /etc/multipath.conf and restart multipathd.
+  # multipathd claiming those devices is the root cause behind BOTH Longhorn stuck-volume
+  # signatures ("already mounted or mount point busy", and mke2fs "apparently in use by
+  # the system"); Longhorn flags it itself as Multipathd=False / MultipathdIsRunning on
+  # every node. OFF by default because it restarts a host daemon: a human enables it and
+  # verifies `multipath -t` plus the Longhorn node condition flipping to True.
+  multipathBlacklist:
+    enabled: false
   image: docker.io/busybox:1.36.1
 
 kubeStateMetrics:
