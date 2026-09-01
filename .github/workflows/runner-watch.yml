@@ -213,7 +213,7 @@ jobs:
 
       - name: Mint the fuze-agent App token
         id: token
-        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349  # v2
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1  # v3.2.0
         continue-on-error: true
         with:
           app-id: ${{ secrets.FUZE_AGENT_APP_ID }}
@@ -305,7 +305,7 @@ jobs:
 
       - name: Mint the fuze-agent App token
         id: token
-        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349  # v2
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1  # v3.2.0
         continue-on-error: true
         with:
           app-id: ${{ secrets.FUZE_AGENT_APP_ID }}
