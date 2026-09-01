@@ -902,6 +902,38 @@ serviceChromaCollections:
 nodeConfigurator:
   preferIPv4:
     enabled: true
+  # ENABLED. multipathd claims Longhorn's /dev/sd* devices, and Longhorn has been
+  # reporting it on EVERY Longhorn node while nothing acted on it:
+  #
+  #   Multipathd=False  MultipathdIsRunning
+  #   "multipathd is running with a known issue that affects Longhorn"
+  #   fuzeinfra-ci-runner-1  False     mendys-worker-1  False
+  #   vmi3383846             False     vmi3396106       False
+  #
+  # It produces BOTH stuck-volume signatures seen in this cluster:
+  #   * "already mounted or mount point busy"        — Loki, x4458 over 6d7h
+  #   * mke2fs "apparently in use by the system"     — Prometheus, on a BRAND NEW volume
+  #
+  # This is why fuzeinfra-prometheus-0 sat ContainerCreating for 9 DAYS, which left
+  # Prometheus with no endpoints — so every rule under helm/fuzeinfra/rules/ was
+  # inert, including the PVCFillingUp alert added to catch the very disk-full
+  # condition that took Loki down. The monitoring layer was dark the whole time.
+  #
+  # CORRECTS THE CONCLUSION OF #773. Converting a StatefulSet to a Deployment +
+  # fresh PVC did NOT fix this class; it only sidesteps it when the new device wins
+  # the race against multipathd. Loki won. Prometheus, converted identically in
+  # #816, LOST — its replacement volume attached healthy and then failed to FORMAT.
+  # Since #814 made longhorn the default StorageClass, that race now applies to
+  # every new volume in the cluster, not just these two.
+  #
+  # RISK: this restarts multipathd on all four Longhorn nodes. It was gated off
+  # because it touches a host daemon and could not be tested in advance. Verify
+  # after Argo syncs:
+  #   multipath -t | grep -A2 blacklist
+  #   the Longhorn node condition Multipathd flipping False -> True
+  #   fuzeinfra-prometheus reaching Running/Ready
+  multipathBlacklist:
+    enabled: true
 
 # Stateful services not otherwise overridden here still need the durable pin.
 alertmanager:
