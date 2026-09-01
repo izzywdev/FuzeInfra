@@ -35,6 +35,26 @@ PR (or provisioning run) that creates an allocation. See
 > repo seals a `<app>-db-credentials` Secret (key `password`) FOR the
 > `fuzeinfra` namespace, matching the password behind its own `DATABASE_URL`.
 
+## MariaDB (shared `fuzeinfra-mariadb`)
+
+MySQL-protocol engine for consumers that cannot use Postgres (WordPress,
+Laravel, ...). Provisioned declaratively by the `fuzeinfra-service-mariadb-provision`
+PostSync Job from `serviceMariadbDatabases`. Each user gets
+`ALL PRIVILEGES ON <database>.*` and nothing else.
+
+| App | User | Database | Consumer repo | Status |
+|---|---|---|---|---|
+| mendys-wp | `mendys_wp_svc` | `mendys_wp` | izzywdev/mendys-wp | **declared, gated off** — waiting on the consumer to seal `mendys-wp-db-credentials` (key `password`) FOR the `fuzeinfra` namespace |
+
+> mendys-wp currently runs its **own** `mendys-wp-mariadb` StatefulSet in the
+> `mendys-wp` namespace, whose PVC was on `local-path` and was destroyed by a
+> node reinstall. That is the drift this engine exists to close. Migration is a
+> two-step handshake owned by the consumer repo — seal the credential first,
+> flip `enabled: true` second, in the same PR as the sealed Secret. See
+> `docs/consuming-repos/MARIADB_PROVISIONING.md`.
+
+Host: `fuzeinfra-mariadb.fuzeinfra.svc.cluster.local:3306`
+
 ## Redis (shared `fuzeinfra-redis`)
 
 | App | ACL user | Key prefix | DB index | Consumer repo | Status |

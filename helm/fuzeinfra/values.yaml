@@ -857,6 +857,15 @@ backups:
     image: mongo:7              # ships mongodump
     host: fuzeinfra-mongodb
     port: 27017
+  # Tracks the mariadb engine gate: off wherever mariadb.enabled is false, on
+  # in the overlays that run it (see values-contabo.yaml).
+  mariadb:
+    enabled: false
+    schedule: ""
+    image: mariadb:11.4         # ships mariadb-dump
+    host: fuzeinfra-mariadb
+    port: 3306
+    user: root
   neo4j:
     enabled: true
     schedule: ""

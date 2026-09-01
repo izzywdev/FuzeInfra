@@ -388,6 +388,10 @@ backups:
     schedule: "20 2 * * *"   # 02:20 UTC
   neo4j:
     schedule: "40 2 * * *"   # 02:40 UTC
+  # Follows mariadb.enabled: true above. Staggered clear of the other three.
+  mariadb:
+    enabled: true
+    schedule: "0 3 * * *"    # 03:00 UTC
   s3:
     endpoint: "https://eu2.contabostorage.com"
     region: "default"
