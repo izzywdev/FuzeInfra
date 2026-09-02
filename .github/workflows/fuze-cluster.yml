@@ -1,4 +1,4 @@
-# fuze:managed template=fuze-cluster.yml baseline=v1 digest=sha256:eb98f6bdc6dfe89cd42ab887ef6b42448a669b77a3f7a0dea199291c9e92c786
+# fuze:managed template=fuze-cluster.yml baseline=v1 digest=sha256:36fcf18c964d82a50d6f3ce65243b4e754ed135df828e814f4f2564597e492b1
 name: Fuze (cluster-capable)
 
 # THE PRIVILEGED HALF OF THE `@fuze` ENTRYPOINT. Identical trigger surface to
@@ -107,6 +107,15 @@ jobs:
           terraform_version: "1.6.6"
           terraform_wrapper: false
 
+      # fuze:secret-sourcing KUBE_CONFIG=repo-owned
+      #
+      # REPO-OWNED, emphatically not fleet-provisioned, and the distinction is the whole
+      # security argument of this file. A fleet-sourced secret is pushed to every onboarded
+      # repo by scripts/provision_secrets.py; fleet-sourcing a prod kubeconfig would undo the
+      # split this template exists to create — the CONDITIONAL gate would keep the workflow
+      # out of 21 repos while the credential itself landed in all of them. It is set by hand,
+      # in the one repo that owns the cluster, and gate-secret-sourcing is what forces that
+      # choice to be written down rather than inferred.
       - name: Configure kubectl (prod cluster)
         id: kube
         env:
@@ -245,7 +254,7 @@ jobs:
               printf 'The responder errored before finishing your request, so **no changes were made and no branch was created**.\n\n'
               printf -- '- **Reason:** %s\n' "$REASON"
               printf -- '- **Run log:** %s\n\n' "$RUN_URL"
-              printf 'This notice is automated and will **not** retry on its own. Re-trigger by posting a new comment mentioning `@fuze` once the cause is fixed.\n'
+              printf 'This notice is automated and will **not** retry on its own. Re-trigger by posting a new comment mentioning @fuze once the cause is fixed.\n'
             } > "${RUNNER_TEMP}/fuze-fail.md"
             gh issue comment "$ISSUE" --repo "$REPO" --body-file "${RUNNER_TEMP}/fuze-fail.md" \
               && echo "posted failure notice to #$ISSUE" || echo "::warning::could not comment on #$ISSUE"

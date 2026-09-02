@@ -465,8 +465,8 @@
       "capability": "workflows",
       "mode": "stamped",
       "sourcePath": "workflow-templates/fuze-cluster.yml",
-      "sourceSha256": "f8ee2070dd43b796de34d25d011b3326bdbaad494a10ed08d896f304344c34c2",
-      "renderedSha256": "f8ee2070dd43b796de34d25d011b3326bdbaad494a10ed08d896f304344c34c2",
+      "sourceSha256": "44a6f4661807933d6d13d1383e4af9c4208ef7251d1a7c72cdc142f8d6b45312",
+      "renderedSha256": "44a6f4661807933d6d13d1383e4af9c4208ef7251d1a7c72cdc142f8d6b45312",
       "renderVars": {
         "defaultBranch": "main",
         "baselineRef": "v1",
@@ -490,8 +490,8 @@
       "capability": "workflows",
       "mode": "stamped",
       "sourcePath": "workflow-templates/fuze.yml",
-      "sourceSha256": "065a77cf5f8fe1838ea09a0c7529d3fc2e5e68b1e026dc5ed8acd93e56597638",
-      "renderedSha256": "065a77cf5f8fe1838ea09a0c7529d3fc2e5e68b1e026dc5ed8acd93e56597638",
+      "sourceSha256": "083f92f56b71eaba17639093f285b2662a36a29025c8b4af35d0105950a61cb9",
+      "renderedSha256": "083f92f56b71eaba17639093f285b2662a36a29025c8b4af35d0105950a61cb9",
       "renderVars": {
         "defaultBranch": "main",
         "baselineRef": "v1",
