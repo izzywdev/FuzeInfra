@@ -13,6 +13,10 @@ import (
 // fakeCloud is a test double implementing contabo.Client.
 type fakeCloud struct {
 	instances []contabo.Instance
+	// deleted records every numeric Contabo id passed to Delete, in call
+	// order, so a test can assert WHICH instance was reclaimed rather than
+	// only that the count changed.
+	deleted []int64
 }
 
 func (f *fakeCloud) ListByTag(_ context.Context, _ string) ([]contabo.Instance, error) {
@@ -40,6 +44,7 @@ func (f *fakeCloud) Create(_ context.Context, req contabo.CreateReq) (contabo.In
 }
 
 func (f *fakeCloud) Delete(_ context.Context, id int64) error {
+	f.deleted = append(f.deleted, id)
 	for i, inst := range f.instances {
 		if inst.ID == id {
 			f.instances = append(f.instances[:i], f.instances[i+1:]...)

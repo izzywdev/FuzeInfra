@@ -102,4 +102,21 @@ runcmd:
   # autoscaled elastic node now carries the same role identity as a declared one.
   # Parity with template.go's Labels map is enforced by TestElasticNodeLabelParity
   # (internal/provider/label_parity_test.go), not just by this comment.
-  - [ sh, -c, "set -a; . /etc/k3s-agent.env; set +a; curl -sfL https://get.k3s.io | sh -s - agent --node-name '{{.NodeName}}' --kubelet-arg 'provider-id=contabo://{{.NodeName}}' --node-label 'fuzeinfra.io/pool=elastic' --node-label 'node-role=workload' --node-taint 'fuzeinfra.io/elastic=true:PreferNoSchedule'" ]
+  #
+  # PRIVATE VLAN. The baseline nodes were cut over to net 60932 (control plane is
+  # 10.0.0.6), but autoscaler-created nodes were still joining off-VLAN, which is
+  # why all five elastic kubelets were unreachable (no exec/logs/port-forward)
+  # while the three baseline nodes were fine -- a split exactly along VLAN
+  # membership. Ordering the add-on and attaching is NOT sufficient on its own:
+  # without --node-ip k3s advertises the PUBLIC address, so the kubelet stays
+  # unreachable even once the node is on the VLAN, and without --flannel-iface the
+  # overlay keeps using the public interface.
+  #
+  # The private IP is assigned by Contabo AFTER create+attach, so it cannot be
+  # templated in at render time -- it is read off the interface at boot instead.
+  # Wait up to 5 minutes for eth1 to carry an address.
+  - [ sh, -c, "for i in $(seq 1 60); do ip -4 -o addr show eth1 2>/dev/null | grep -q 'inet ' && break; sleep 5; done" ]
+  # Allow the VLAN subnet outright: WireGuard (51820/udp), kubelet (10250) and the
+  # API (6443) all traverse it once the node is private.
+  - [ sh, -c, "ufw allow from 10.0.0.0/24 || true" ]
+  - [ sh, -c, "set -a; . /etc/k3s-agent.env; set +a; PRIV=$(ip -4 -o addr show eth1 2>/dev/null | awk '{print $4}' | cut -d/ -f1); if [ -n \"$PRIV\" ]; then NETARGS=\"--node-ip $PRIV --flannel-iface eth1\"; else NETARGS=''; echo 'WARNING: eth1 has no address after 300s - joining WITHOUT --node-ip; this node will have an unreachable kubelet' >&2; fi; curl -sfL https://get.k3s.io | sh -s - agent $NETARGS --node-name '{{.NodeName}}' --kubelet-arg 'provider-id=contabo://{{.NodeName}}' --node-label 'fuzeinfra.io/pool=elastic' --node-label 'node-role=workload' --node-taint 'fuzeinfra.io/elastic=true:PreferNoSchedule'" ]
