@@ -390,6 +390,28 @@ variable "private_network_region" {
   default     = "EU"
 }
 
+# ---------------------------------------------------------------------------
+# The numeric id of the live private network (60932).
+#
+# enable_private_network / private_network_name above govern the CONTROL-PLANE
+# resource in private-network.tf. This variable is what worker/CI node sets are
+# placed on: it is handed to modules/contabo-k3s-node as private_network_id,
+# which turns on the eth1 / --node-ip / --flannel-iface / off-VLAN-quarantine
+# half of that module's cloud-init WITHOUT declaring a network resource, so a
+# plan can never detach a member Terraform did not author.
+#
+# Membership itself (and the paid per-instance add-on) is ordered out-of-band by
+# the ca-private-net workflow: action=upgrade then action=assign. The assign may
+# land after the node has booted and may reboot it; the node join is a systemd
+# oneshot that re-runs every boot until it succeeds on the VLAN, so a late
+# assign repairs the node with no further human step.
+# ---------------------------------------------------------------------------
+variable "node_private_network_id" {
+  description = "Contabo private-network id (60932) that worker/CI nodes are placed on. 0 disables private networking for those node sets. Membership + the paid per-instance add-on are ordered out-of-band via the ca-private-net workflow."
+  type        = number
+  default     = 60932
+}
+
 variable "private_iface" {
   description = "Private NIC device name inside the VPS that the Contabo VPC attaches as (eth1 on a 2-NIC Ubuntu 24.04 image). Used for netplan bring-up and k3s --flannel-iface."
   type        = string

@@ -17,3 +17,12 @@ runners/arc/*.sh text eol=lf
 # so a Windows run stores it CRLF and gate-line-endings hard-fails the PR that touched it.
 # Measured: FuzeInfra#771, `i/crlf  .fuze/installed.json`.
 .fuze/*.json text eol=lf
+
+# Node cloud-init is shipped verbatim to Contabo as `userData` and executed by
+# cloud-init on Linux. A CRLF checkout puts a stray  in the join script's
+# shebang, and - worse - changes the bytes that ca-cutover.yml base64-encodes,
+# so the blob in values-contabo.yaml no longer matches the template and
+# tests/test_elastic_userdata_vlan.py fails for a reason that looks nothing like
+# a line-ending problem.
+cluster-autoscaler/contabo-externalgrpc/deploy/*.template text eol=lf
+modules/contabo-k3s-node/cloud-init.tftpl text eol=lf

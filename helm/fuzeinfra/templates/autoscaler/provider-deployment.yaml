@@ -20,6 +20,14 @@ spec:
         # The GitOps-pinned rollout token prevents a stale pod from retaining
         # an older provisioning implementation.
         checksum/provider-image: {{ .Values.clusterAutoscaler.provider.imageRollout | quote }}
+        # The cloud-init userdata is passed to the pod as an ENV VAR, so a change
+        # to it alone would NOT restart the pod: Argo would update the Deployment
+        # spec, see no change in the pod template, and the running provider would
+        # keep minting nodes from the OLD template indefinitely. That is the same
+        # shape of silent no-op as the imageRollout hazard above, and it is how a
+        # userdata fix can look deployed while not being. Hashing the value into an
+        # annotation makes every userdata change roll the pod automatically.
+        checksum/provider-userdata: {{ .Values.clusterAutoscaler.provider.userDataTemplateB64 | sha256sum | trunc 16 | quote }}
       labels:
         {{- include "fuzeinfra.labels" . | nindent 8 }}
         {{- include "fuzeinfra.selectorLabels" (dict "component" "contabo-ca-provider" "root" $) | nindent 8 }}

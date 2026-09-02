@@ -1,37 +1,42 @@
 #cloud-config
-# Canonical cloud-init UserData template for Contabo elastic (autoscaler-managed)
-# nodes. This file is NOT read directly by the provider — it is a source
-# artifact that an operator base64-encodes into the Helm value
-# clusterAutoscaler.provider.userDataTemplateB64 (see helm/fuzeinfra/values-contabo.yaml),
-# which the contabo-externalgrpc server decodes into USER_DATA_TEMPLATE_B64 /
-# provider.Config.UserDataTmpl and renders once per new instance via
-# internal/provider/scale.go's renderUserData.
+# Canonical cloud-init UserData for Contabo elastic (autoscaler-managed) nodes.
 #
-# Template variables available (Go text/template, exec'd per node at create
-# time — see renderUserData in internal/provider/scale.go):
-#   {{.NodeName}}     - the elastic instance name, e.g. fuzeinfra-elastic-3
-#   {{.K3SServerURL}} - the k3s server URL to join (from K3S_SERVER_URL env)
-#   {{.K3SNodeToken}} - the k3s agent join token (from K3S_NODE_TOKEN env)
+# ==> THIS FILE IS THE SOURCE OF TRUTH. EDIT IT, NEVER THE BASE64 VALUE ALONE. <==
+# ca-cutover.yml (USERDATA_TEMPLATE_PATH) substitutes __SSH_PUBLIC_KEY__ with the
+# NODE_SSH_PUBLIC_KEY secret, base64-encodes the result, and writes it to
+# clusterAutoscaler.provider.userDataTemplateB64 in values-contabo.yaml; the
+# provider decodes that into UserDataTmpl and renders it per instance
+# (renderUserData, internal/provider/scale.go). ca-salvage-enroll.yml reinstalls
+# instances straight from THIS path. PR #830 patched only the base64 blob, so the
+# next ca-cutover run would have reverted it and salvage-enroll kept minting
+# off-VLAN nodes; tests/test_elastic_userdata_vlan.py now fails on that drift.
 #
-# IMPORTANT: --kubelet-arg 'provider-id=contabo://{{.NodeName}}' is what makes
-# Cluster Autoscaler's scale-down correlation work. CA identifies which k8s
-# Node to delete via Node.Spec.ProviderID, which NodeGroupNodes (size.go)
-# reports as "contabo://<name>" — a name-based scheme, NOT the numeric Contabo
-# instance id, because the numeric id is not known to the node at boot/join
-# time. If this flag is dropped or the name doesn't match, scale-down breaks:
-# CA will never find a matching node to delete.
+# EVERY BYTE HERE IS SHIPPED TO THE NODE AS API `userData` - keep it lean and put
+# rationale in docs/design/off-vlan-node-failure-policy.md, not in comments here.
 #
-# SSH ACCESS: the FuzeInfra Contabo account has zero registered SSH-key
-# secrets (only a type=password secret exists), so instance creation does NOT
-# reference Contabo's sshKeys mechanism (internal/contabo/client.go omits
-# "sshKeys" from the create request when SSHKeyID is unset — see
-# ca-cutover.yml GATE B, which now warns rather than fails when no matching
-# ssh secret is found). Instead, break-glass SSH access is granted the same
-# way the existing baseline nodes get it (modules/contabo-k3s-node/cloud-init.tftpl):
-# authorizing a public key directly via cloud-init's `users:` block below. The
-# literal token __SSH_PUBLIC_KEY__ is substituted with the real
-# NODE_SSH_PUBLIC_KEY secret at base64-encode time (ca-cutover.yml) — it is
-# NEVER committed as a real key and never echoed to a log.
+# Go text/template vars (rendered per node): {{.NodeName}}, {{.K3SServerURL}},
+# {{.K3SNodeToken}}.
+#   * --kubelet-arg provider-id=contabo://{{.NodeName}} is what lets CA correlate
+#     this k8s Node to this VPS for scale-down (NodeGroupNodes, size.go). Drop it
+#     and scale-down silently stops working.
+#   * node-role=workload is the product workloads' nodeSelector target; k3s
+#     applies --node-label at REGISTRATION ONLY, so it must be born with the node
+#     (parity guarded by internal/provider/label_parity_test.go).
+#   * Break-glass SSH comes from the users: block (the account has no registered
+#     Contabo SSH-key secret - see ca-cutover.yml GATE B).
+#
+# PRIVATE VLAN (net 60932, 10.0.0.0/22) - three things must ALL happen:
+#   1. the paid add-on ordered at create (addOns.privateNetworking),
+#   2. the instance ASSIGNED to 60932 after create, and
+#   3. this file bringing eth1 up + handing k3s --node-ip/--flannel-iface.
+# (3) used to be incomplete: the previous revision WAITED for an address on eth1
+# but never CONFIGURED eth1, and cloud-init's fallback netcfg only brings up the
+# primary NIC - so the wait could never succeed and every node fell through to
+# "join anyway". (2) runs AFTER createInstance returns, while this cloud-init is
+# already running, and MAY REBOOT the node; `runcmd` is once-per-instance, so the
+# join lives in a systemd oneshot that re-runs every boot until it succeeds on the
+# VLAN, and the wait loop re-applies netplan each poll. The reboot thus becomes
+# the REPAIR trigger rather than the failure mode.
 
 users:
   - name: root
@@ -45,10 +50,9 @@ write_files:
   # table, so the token never shows up in `ps`/cloud-init logs as a CLI arg.
   # INSTALL_K3S_CHANNEL is pinned to "v1.36" to mirror
   # modules/contabo-k3s-node's k3s_channel default (see its variables.tf,
-  # updated by FuzeInfra#318/#366) — same minor as the fleet, which is live
-  # on v1.36.2+k3s1 across all 4 nodes including the control-plane. An agent
-  # more than one minor ahead/behind the server is unsupported, so this must
-  # track whatever channel the baseline module pins.
+  # updated by FuzeInfra#318/#366) — same minor as the fleet. An agent more
+  # than one minor ahead/behind the server is unsupported, so this must track
+  # whatever channel the baseline module pins.
   - path: /etc/k3s-agent.env
     permissions: "0600"
     owner: root:root
@@ -57,14 +61,184 @@ write_files:
       K3S_TOKEN={{.K3SNodeToken}}
       INSTALL_K3S_CHANNEL=v1.36
 
+  # Prefer IPv4 over IPv6 in glibc address selection (RFC 6724 10.3) so GHCR
+  # pulls are not TCP-reset on Contabo IPv6 CDN paths (FuzeInfra#616). The
+  # node-configurator DaemonSet does this cluster-wide, but only once it
+  # schedules; writing it here covers first boot to then - exactly the window in
+  # which the node pulls its first images.
+  # NOTE: this does NOT fix the dual `2a02:c207:...::1` InternalIP seen live on
+  # fuzeinfra-ci-runner-2 / fuzeinfra-prod-elastic-v2-c056a22a. That is k3s
+  # auto-detecting both address families in the absence of --node-ip; only an
+  # explicit --node-ip (below) fixes it.
+  - path: /etc/gai.conf
+    permissions: "0644"
+    owner: root:root
+    content: |
+      precedence ::ffff:0:0/96  100
+
+  # Private VPC NIC. Contabo attaches the private network as eth1. `optional:
+  # true` means boot never blocks when the per-instance VPC add-on has not been
+  # ordered or the assign has not landed yet.
+  - path: /etc/netplan/60-eth1-private.yaml
+    permissions: "0600"
+    owner: root:root
+    content: |
+      network:
+        version: 2
+        ethernets:
+          eth1:
+            dhcp4: true
+            optional: true
+
+  - path: /usr/local/sbin/fuzeinfra-vlan-join.sh
+    permissions: "0750"
+    owner: root:root
+    content: |
+      #!/bin/sh
+      # Wait for the private VLAN NIC, then join k3s bound to it.
+      #
+      # Runs from fuzeinfra-vlan-join.service on EVERY boot until it has
+      # succeeded on the VLAN (sentinel /etc/fuzeinfra-vlan-joined). That is
+      # deliberate: the Contabo private-network ASSIGN happens after
+      # createInstance returns and may reboot the node, so a one-shot cloud-init
+      # runcmd is not a safe place for this work.
+      #
+      # FAILURE POLICY: QUARANTINE - neither fail-soft (join off-VLAN and warn
+      # into a log nobody reads) nor fail-loud (refuse to join, the durable
+      # module's policy). The node DOES register, so the failure is visible in
+      # `kubectl get nodes` and CA does not thrash-and-bill, but it registers
+      # UNSCHEDULABLE so it can never poison a workload:
+      #     --node-label fuzeinfra.io/vlan=absent
+      #     --node-taint  fuzeinfra.io/off-vlan=true:NoSchedule
+      # The healthy path is labelled symmetrically (fuzeinfra.io/vlan=present)
+      # so "no label at all" is itself detectable. Alerts:
+      # helm/fuzeinfra/templates/prometheus-rules-nodes.yaml. Full rationale:
+      # docs/design/off-vlan-node-failure-policy.md.
+      set -u
+
+      IFACE=eth1
+      PUBIFACE=eth0
+      WAIT_SECS=600
+      POLL_SECS=5
+      VLAN_SENTINEL=/etc/fuzeinfra-vlan-joined
+      LOGF=/var/log/fuzeinfra-vlan-join.log
+
+      log() { echo "[fuzeinfra-vlan-join] $(date -u +%Y-%m-%dT%H:%M:%SZ) $*" >>"$LOGF" 2>&1; echo "[fuzeinfra-vlan-join] $*" >&2; }
+
+      if [ -f "$VLAN_SENTINEL" ]; then
+        log "already joined on the private VLAN; nothing to do"
+        exit 0
+      fi
+
+      ip4_of() { ip -4 -o addr show "$1" 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -n 1; }
+
+      # Wait for eth1 to carry an IPv4. Re-apply netplan on every poll: the vNIC
+      # can appear only once the post-create private-network ASSIGN lands, which
+      # is after the first netplan apply ran (the assign-before-boot race).
+      DEADLINE=$(( $(date +%s) + WAIT_SECS ))
+      PRIV=""
+      while : ; do
+        PRIV=$(ip4_of "$IFACE")
+        [ -n "$PRIV" ] && break
+        [ "$(date +%s)" -ge "$DEADLINE" ] && break
+        netplan apply >/dev/null 2>&1 || true
+        sleep "$POLL_SECS"
+      done
+      PUB=$(ip4_of "$PUBIFACE")
+
+      if [ -n "$PRIV" ]; then
+        log "private NIC $IFACE has $PRIV (public $PUB) - joining ON the VLAN"
+      else
+        log "FATAL: $IFACE has no IPv4 after ${WAIT_SECS}s. The private-networking add-on or the network assign did not land. Joining QUARANTINED (NoSchedule) so this node is visible in kubectl get nodes but carries no workload."
+      fi
+
+      # ---- repair path -----------------------------------------------------
+      # k3s already installed => a previous boot joined, very likely off-VLAN
+      # before the assign rebooted us. If the VLAN is up now, rewrite the agent
+      # config and restart rather than re-running the installer.
+      if [ -f /etc/systemd/system/k3s-agent.service ]; then
+        if [ -z "$PRIV" ]; then
+          log "k3s-agent already present and still no VLAN; leaving it alone (still quarantined)"
+          exit 0
+        fi
+        log "k3s-agent already present and the VLAN is now up - repairing node-ip/flannel-iface and restarting"
+        mkdir -p /etc/rancher/k3s
+        {
+          echo "# Written by fuzeinfra-vlan-join.sh after a post-assign reboot."
+          echo "node-ip: $PRIV"
+          echo "flannel-iface: $IFACE"
+          [ -n "$PUB" ] && echo "node-external-ip: $PUB"
+        } > /etc/rancher/k3s/config.yaml
+        systemctl restart k3s-agent || log "WARNING: k3s-agent restart failed"
+        touch "$VLAN_SENTINEL"
+        log "repaired. NOTE: k3s applies node labels/taints at REGISTRATION ONLY, so an operator must clear the quarantine marks: kubectl label node {{.NodeName}} fuzeinfra.io/vlan=present --overwrite && kubectl taint node {{.NodeName}} fuzeinfra.io/off-vlan-"
+        exit 0
+      fi
+
+      # ---- first join ------------------------------------------------------
+      set -a
+      . /etc/k3s-agent.env
+      set +a
+
+      NETARGS=""
+      VLANARGS="--node-label fuzeinfra.io/vlan=absent --node-taint fuzeinfra.io/off-vlan=true:NoSchedule"
+      if [ -n "$PRIV" ]; then
+        NETARGS="--node-ip $PRIV --flannel-iface $IFACE"
+        [ -n "$PUB" ] && NETARGS="$NETARGS --node-external-ip $PUB"
+        VLANARGS="--node-label fuzeinfra.io/vlan=present"
+      fi
+
+      # Deliberately ONE line. TestElasticNodeLabelParity and
+      # TestValuesContaboUserDataB64Parity locate the join by scanning for the
+      # single line that installs the k3s agent, then parse the --node-label
+      # flags off it to compare against the CA scale-from-zero simulation in
+      # internal/provider/template.go. Wrapping this across backslash-continued
+      # lines makes those guards parse zero labels and the parity contract
+      # silently stops being checked. (Those scanners match on the installer URL
+      # plus the agent subcommand, so no comment here may contain both.)
+      curl -sfL https://get.k3s.io | sh -s - agent $NETARGS $VLANARGS --node-name '{{.NodeName}}' --kubelet-arg 'provider-id=contabo://{{.NodeName}}' --node-label 'fuzeinfra.io/pool=elastic' --node-label 'node-role=workload' --node-taint 'fuzeinfra.io/elastic=true:PreferNoSchedule'
+      RC=$?
+
+      if [ "$RC" -ne 0 ]; then
+        log "k3s agent install exited $RC - the unit will retry on the next boot"
+        exit "$RC"
+      fi
+      if [ -n "$PRIV" ]; then
+        touch "$VLAN_SENTINEL"
+        log "joined on the private VLAN as {{.NodeName}} ($PRIV)"
+      else
+        log "joined QUARANTINED as {{.NodeName}}; no sentinel written, so a later boot (e.g. once the assign lands) repairs this node"
+      fi
+      exit 0
+
+  - path: /etc/systemd/system/fuzeinfra-vlan-join.service
+    permissions: "0644"
+    owner: root:root
+    content: |
+      [Unit]
+      Description=FuzeInfra: wait for the private VLAN NIC and join k3s
+      # Runs on every boot until /etc/fuzeinfra-vlan-joined exists. This is what
+      # makes the join survive the reboot the post-create Contabo
+      # private-network assign can trigger - cloud-init runcmd would not.
+      After=network-online.target
+      Wants=network-online.target
+      ConditionPathExists=!/etc/fuzeinfra-vlan-joined
+
+      [Service]
+      Type=oneshot
+      RemainAfterExit=no
+      ExecStart=/usr/local/sbin/fuzeinfra-vlan-join.sh
+      TimeoutStartSec=1200
+
+      [Install]
+      WantedBy=multi-user.target
+
 runcmd:
   # --- Longhorn node prerequisites (OPT-IN, commented OFF by default) ---
   # Longhorn attaches volumes over iSCSI and serves RWX over NFS, so any node that
   # may host a Longhorn replica or mount a Longhorn-backed volume needs the iSCSI
   # initiator + NFS client + /var/lib/longhorn. Left COMMENTED so a merge is a
-  # no-op: this file is a source artifact an operator must base64-encode into
-  # clusterAutoscaler.provider.userDataTemplateB64 (values-contabo.yaml) for it to
-  # take effect. Uncomment + re-encode ONLY when enabling Longhorn AND elastic
+  # no-op. Uncomment + re-run ca-cutover ONLY when enabling Longhorn AND elastic
   # nodes are allowed to run Longhorn-backed pods (see
   # docs/design/longhorn-storage.md §3/§4.1 — replicas are normally pinned to
   # DURABLE baseline nodes, off billing-reaped elastic nodes).
@@ -72,51 +246,25 @@ runcmd:
   # - [ sh, -c, "DEBIAN_FRONTEND=noninteractive apt-get install -y open-iscsi nfs-common || true" ]
   # - [ sh, -c, "systemctl enable --now iscsid || true" ]
   # - [ sh, -c, "mkdir -p /var/lib/longhorn" ]
-  # Host firewall: agent needs to reach the API (6443) outbound and accept
-  # kubelet (10250) from the server, plus whichever flannel backend the
-  # cluster is actually running. The live prod cluster runs flannel
-  # wireguard-native on ALL nodes (FuzeInfra#366), so an elastic agent MUST
-  # allow 51820/udp or it can register with the API server but never pass
-  # WireGuard pod-overlay traffic — the likely reason a prior elastic
-  # instance never truly joined. 8472/udp (VXLAN) is kept too since it's
-  # harmless and mirrors the baseline module's firewall rules.
+  #
+  # Host firewall: the agent must reach the API (6443) outbound and accept
+  # kubelet (10250), plus whichever flannel backend the cluster runs. The live
+  # prod cluster runs flannel wireguard-native on ALL nodes (FuzeInfra#366), so
+  # an elastic agent MUST allow 51820/udp or it can register with the API server
+  # but never pass WireGuard pod-overlay traffic. 8472/udp (VXLAN) is kept too
+  # since it is harmless and mirrors the baseline module's rules.
   - [ sh, -c, "ufw allow 22/tcp || true" ]
   - [ sh, -c, "ufw allow 10250/tcp || true" ]
   - [ sh, -c, "ufw allow 8472/udp || true" ]
   - [ sh, -c, "ufw allow 51820/udp || true" ]
+  # Allow the whole VLAN: WireGuard (51820/udp), kubelet (10250) and the API
+  # (6443) all traverse it once the node is private. The network is a /22
+  # (10.0.0.0/22 — terraform/contabo/private-network.tf); the previous /24 would
+  # have silently blackholed every peer allocated 10.0.1.x-10.0.3.x.
+  - [ sh, -c, "ufw allow from 10.0.0.0/22 || true" ]
   - [ sh, -c, "ufw --force enable || true" ]
-  # Join as a k3s agent using the join secrets written above. --node-name and
-  # --kubelet-arg=provider-id are what let NodeGroupNodes/NodeGroupDeleteNodes
-  # correlate this k8s Node back to this exact Contabo VPS by name (see the
-  # IMPORTANT note above). The pool label + PreferNoSchedule taint mirror
-  # NodeGroupTemplateNodeInfo's scale-from-zero simulation (internal/provider/template.go)
-  # exactly — keep them in sync if either side changes.
-  #
-  # node-role=workload is what the product workloads' nodeSelector targets
-  # (fuzekeys/fuzebi/fuzehub/fuzedeploy/fuzeexecutive). k3s applies --node-label
-  # at agent REGISTRATION ONLY, so a hand-applied `kubectl label` evaporates on
-  # the next scale event -- the label has to be born with the node. It is also
-  # the Terraform default role for consumer-requested nodes
-  # (modules/contabo-k3s-node/variables.tf: `role = optional(string, "workload")`,
-  # emitted as `--node-label node-role=<role>` by that module's main.tf), so an
-  # autoscaled elastic node now carries the same role identity as a declared one.
-  # Parity with template.go's Labels map is enforced by TestElasticNodeLabelParity
-  # (internal/provider/label_parity_test.go), not just by this comment.
-  #
-  # PRIVATE VLAN. The baseline nodes were cut over to net 60932 (control plane is
-  # 10.0.0.6), but autoscaler-created nodes were still joining off-VLAN, which is
-  # why all five elastic kubelets were unreachable (no exec/logs/port-forward)
-  # while the three baseline nodes were fine -- a split exactly along VLAN
-  # membership. Ordering the add-on and attaching is NOT sufficient on its own:
-  # without --node-ip k3s advertises the PUBLIC address, so the kubelet stays
-  # unreachable even once the node is on the VLAN, and without --flannel-iface the
-  # overlay keeps using the public interface.
-  #
-  # The private IP is assigned by Contabo AFTER create+attach, so it cannot be
-  # templated in at render time -- it is read off the interface at boot instead.
-  # Wait up to 5 minutes for eth1 to carry an address.
-  - [ sh, -c, "for i in $(seq 1 60); do ip -4 -o addr show eth1 2>/dev/null | grep -q 'inet ' && break; sleep 5; done" ]
-  # Allow the VLAN subnet outright: WireGuard (51820/udp), kubelet (10250) and the
-  # API (6443) all traverse it once the node is private.
-  - [ sh, -c, "ufw allow from 10.0.0.0/24 || true" ]
-  - [ sh, -c, "set -a; . /etc/k3s-agent.env; set +a; PRIV=$(ip -4 -o addr show eth1 2>/dev/null | awk '{print $4}' | cut -d/ -f1); if [ -n \"$PRIV\" ]; then NETARGS=\"--node-ip $PRIV --flannel-iface eth1\"; else NETARGS=''; echo 'WARNING: eth1 has no address after 300s - joining WITHOUT --node-ip; this node will have an unreachable kubelet' >&2; fi; curl -sfL https://get.k3s.io | sh -s - agent $NETARGS --node-name '{{.NodeName}}' --kubelet-arg 'provider-id=contabo://{{.NodeName}}' --node-label 'fuzeinfra.io/pool=elastic' --node-label 'node-role=workload' --node-taint 'fuzeinfra.io/elastic=true:PreferNoSchedule'" ]
+  # Bring the private NIC up, then hand the join to the systemd unit. The unit —
+  # not runcmd — owns the join precisely so a post-assign reboot re-runs it.
+  - [ sh, -c, "netplan apply || true" ]
+  - [ sh, -c, "systemctl daemon-reload" ]
+  - [ sh, -c, "systemctl enable --now fuzeinfra-vlan-join.service" ]
