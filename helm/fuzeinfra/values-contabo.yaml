@@ -658,7 +658,7 @@ clusterAutoscaler:
     #   kubectl -n fuzeinfra get pod -l app=fuzeinfra-contabo-ca-provider     #     -o jsonpath='{.items[*].status.containerStatuses[*].imageID}'
     # and if it does not match, bump this value again in a follow-up PR. That
     # is why this is a free-form marker rather than strictly the build SHA.
-    imageRollout: "nodegroupfornode-providerid-wedge-fix-2026-09-02"
+    imageRollout: "canceldate-dateonly-fix-2026-09-02"
     existingSecret: fuzeinfra-ca-provider
     # Current Contabo create-instance catalog: Cloud VPS 4 (4 vCPU / 8 GiB).
     # V92 is a retired SKU and fails ordering with "No offer was found".
