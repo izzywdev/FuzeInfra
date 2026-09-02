@@ -148,7 +148,7 @@ variable "private_network_id" {
   # cutover: ci-workers.tf simply never mentioned private networking.
   # Secure-by-default also covers callers that do not exist yet, which a
   # per-caller fix cannot. Set 0 to opt out deliberately.
-  default     = 60932
+  default = 60932
 
   validation {
     condition     = var.private_network_id == 0 || var.private_network_name == ""

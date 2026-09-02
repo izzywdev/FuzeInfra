@@ -144,7 +144,7 @@ write_files:
       set +a
 
       # Role taints are baked in by Terraform. Built as one variable rather than
-      # backslash-continued lines so a false %{ if } branch can never leave a
+      # backslash-continued lines so a false conditional branch can never leave a
       # dangling continuation.
       ROLETAINT="%{ if role == "elastic" }--node-taint fuzeinfra.io/elastic=true:PreferNoSchedule%{ endif }%{ if role == "ci" }--node-taint fuzeinfra.io/ci=true:NoSchedule%{ endif }"
 
