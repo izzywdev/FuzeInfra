@@ -176,6 +176,73 @@ jobs:
         working-directory: consumer/deploy/terraform
         run: terraform apply -auto-approve -input=false
 
+      # ---------------------------------------------------------------------
+      # Put the new nodes ON the private VLAN (net 60932).
+      #
+      # modules/contabo-k3s-node now renders the private half of cloud-init by
+      # default (private_network_id), so the node brings eth1 up and joins with
+      # --node-ip/--flannel-iface. But cloud-init cannot give itself MEMBERSHIP:
+      # the paid per-instance add-on and the network assign are Contabo API
+      # calls, and only this handler holds the credentials. Without this step a
+      # consumer node would wait for an eth1 nobody ever attaches and then
+      # self-quarantine (NoSchedule) - visible, but useless.
+      #
+      # Order is enforced by Contabo: assign BEFORE upgrade returns HTTP 402.
+      # Both calls are idempotent, and the assign may reboot the node - which is
+      # fine, and is in fact the repair path: the join is a systemd oneshot that
+      # re-runs on every boot until it succeeds on the VLAN.
+      #
+      # Non-fatal on purpose: a failure here leaves a QUARANTINED node that the
+      # NodeQuarantinedOffVLAN / NodeOffPrivateVLAN alerts surface, which beats
+      # failing the whole request after the VPS has already been billed.
+      # ---------------------------------------------------------------------
+      - name: Enroll nodes on the private VLAN (add-on + assign)
+        if: steps.validate.outputs.decision == 'apply'
+        working-directory: consumer/deploy/terraform
+        continue-on-error: true
+        env:
+          CID: ${{ secrets.CONTABO_CLIENT_ID }}
+          CSEC: ${{ secrets.CONTABO_CLIENT_SECRET }}
+          CUSER: ${{ secrets.CONTABO_API_USER }}
+          CPASS: ${{ secrets.CONTABO_API_PASSWORD }}
+          PRIVATE_NETWORK_ID: "60932"
+        run: |
+          set -uo pipefail
+          IDS=$(terraform output -json node_ids 2>/dev/null | jq -r '.[]?' || true)
+          if [ -z "$IDS" ]; then echo "no node_ids output; nothing to enroll"; exit 0; fi
+
+          TOK=$(curl -sS -X POST -H "Content-Type: application/x-www-form-urlencoded" \
+            "https://auth.contabo.com/auth/realms/contabo/protocol/openid-connect/token" \
+            --data-urlencode "client_id=${CID}" --data-urlencode "client_secret=${CSEC}" \
+            --data-urlencode "username=${CUSER}" --data-urlencode "password=${CPASS}" \
+            --data-urlencode "grant_type=password" | jq -r .access_token)
+          [ -n "$TOK" ] && [ "$TOK" != "null" ] || { echo "::warning::Contabo auth failed; nodes stay quarantined"; exit 0; }
+
+          # x-request-id MUST be a UUID - Contabo 400s on anything else.
+          api() { curl -sS -H "Authorization: Bearer $TOK" \
+            -H "x-request-id: $(cat /proc/sys/kernel/random/uuid)" \
+            -H "Content-Type: application/json" "$@"; }
+
+          for ID in $IDS; do
+            echo "=== instance $ID ==="
+            UC=$(api -o /tmp/up.json -w '%{http_code}' -X POST -d '{"privateNetworking":{}}' \
+              "https://api.contabo.com/v1/compute/instances/${ID}/upgrade")
+            echo "  upgrade (order add-on) -> HTTP $UC"
+            case "$UC" in
+              2*) ;;
+              *) grep -qiE 'already|ordered' /tmp/up.json && echo "  (already ordered, ok)" || echo "  body: $(cat /tmp/up.json)" ;;
+            esac
+
+            AC=$(api -o /tmp/as.json -w '%{http_code}' -X POST \
+              "https://api.contabo.com/v1/private-networks/${PRIVATE_NETWORK_ID}/instances/${ID}")
+            echo "  assign to network ${PRIVATE_NETWORK_ID} -> HTTP $AC"
+            case "$AC" in
+              2*) ;;
+              *) grep -qiE 'already|assigned|exist' /tmp/as.json && echo "  (already assigned, ok)" \
+                   || echo "::warning::assign failed for instance $ID: $(cat /tmp/as.json)" ;;
+            esac
+          done
+
       - name: Configure kubectl
         if: steps.validate.outputs.decision == 'apply'
         run: |

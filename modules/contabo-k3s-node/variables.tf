@@ -139,9 +139,16 @@ variable "enable_longhorn_prereqs" {
 # it succeeds on the VLAN, so a late assign repairs the node by itself.
 # ---------------------------------------------------------------------------
 variable "private_network_id" {
-  description = "Contabo private-network id to place nodes on (e.g. 60932). Enables the private-networking half of cloud-init without Terraform managing network membership. 0 disables. Mutually exclusive with private_network_name."
+  description = "Contabo private-network id to place nodes on. Enables the private-networking half of cloud-init without Terraform managing network membership. 0 disables. Mutually exclusive with private_network_name."
   type        = number
-  default     = 0
+  # DEFAULT ON (60932 = the live prod VLAN). This module exists only to join
+  # FuzeInfra prod k3s and prod is VLAN-only, so off-VLAN is never the correct
+  # answer -- it must not be what a caller gets by saying nothing. That silence
+  # is exactly how fuzeinfra-ci-runner-2 was born off-VLAN two days after the
+  # cutover: ci-workers.tf simply never mentioned private networking.
+  # Secure-by-default also covers callers that do not exist yet, which a
+  # per-caller fix cannot. Set 0 to opt out deliberately.
+  default     = 60932
 
   validation {
     condition     = var.private_network_id == 0 || var.private_network_name == ""
