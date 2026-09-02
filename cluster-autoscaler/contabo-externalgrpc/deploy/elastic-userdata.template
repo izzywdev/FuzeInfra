@@ -61,14 +61,15 @@ write_files:
       K3S_TOKEN={{.K3SNodeToken}}
       INSTALL_K3S_CHANNEL=v1.36
 
-  # Prefer IPv4 over IPv6 in glibc address selection (RFC 6724 §10.3). Two
-  # reasons, both observed in prod:
-  #   * GHCR pulls TCP-reset on Contabo IPv6 CDN paths (FuzeInfra#616), and
-  #   * without an explicit --node-ip, k3s auto-detects BOTH families and
-  #     registers a dual InternalIP — exactly the `2a02:c207:...::1` InternalIP
-  #     seen live on fuzeinfra-ci-runner-2 and fuzeinfra-prod-elastic-v2-c056a22a.
-  # The control plane has had this since provisioning.tf; the node paths did not.
-  # Written before k3s installs so containerd inherits it from first boot.
+  # Prefer IPv4 over IPv6 in glibc address selection (RFC 6724 10.3) so GHCR
+  # pulls are not TCP-reset on Contabo IPv6 CDN paths (FuzeInfra#616). The
+  # node-configurator DaemonSet does this cluster-wide, but only once it
+  # schedules; writing it here covers first boot to then - exactly the window in
+  # which the node pulls its first images.
+  # NOTE: this does NOT fix the dual `2a02:c207:...::1` InternalIP seen live on
+  # fuzeinfra-ci-runner-2 / fuzeinfra-prod-elastic-v2-c056a22a. That is k3s
+  # auto-detecting both address families in the absence of --node-ip; only an
+  # explicit --node-ip (below) fixes it.
   - path: /etc/gai.conf
     permissions: "0644"
     owner: root:root

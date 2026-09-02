@@ -2,6 +2,13 @@ locals {
   # Key the instances by request name so adding/removing a request only touches
   # that node (a positional list would force-recreate everything after an insert).
   requests = { for r in var.requests : r.name => r }
+
+  # Private networking is on when the caller either asks this module to CREATE a
+  # network (private_network_name) or points at an EXISTING one to attach to
+  # (private_network_id). Only the former creates a contabo_private_network;
+  # membership for the latter is ordered out-of-band by the ca-private-net
+  # workflow, so Terraform can never detach a member it did not author.
+  private_network_enabled = var.private_network_name != "" || var.private_network_id > 0
 }
 
 # ---------------------------------------------------------------------------
@@ -28,7 +35,7 @@ resource "contabo_instance" "node" {
     enable_longhorn_prereqs = var.enable_longhorn_prereqs
     # Private networking (Contabo VPC): bring up the private NIC + route k3s
     # over it only when the caller opted into a private network by name.
-    private_network_enabled = var.private_network_name != ""
+    private_network_enabled = local.private_network_enabled
     private_iface           = var.private_iface
     # node-role=<role> first (the contract label), then any extra labels.
     node_labels = join(" ", concat(

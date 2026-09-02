@@ -1,7 +1,21 @@
 #cloud-config
-# Rendered per node by the contabo-k3s-node module.
-# cloud-init runs this once on first boot; it joins the VPS to the existing
-# k3s cluster as an agent and applies the requested node labels.
+# Rendered per node by the contabo-k3s-node module (CI runners via
+# terraform/contabo/ci-workers.tf, consumer node-requests via
+# .github/workflows/infra-request-handler.yml).
+#
+# cloud-init runs this once on first boot. The k3s JOIN itself, however, lives in
+# a systemd oneshot that re-runs on EVERY boot until it succeeds on the private
+# VLAN — see the FuzeInfra#830 follow-up: the Contabo private-network ASSIGN
+# happens after the instance exists and MAY REBOOT it, and `runcmd` is
+# once-per-instance, so a reboot mid-runcmd can leave the join half-done and
+# never retried. Making the reboot re-run the join turns it into the repair
+# trigger instead of the failure mode.
+#
+# FAILURE POLICY when the private NIC never appears: QUARANTINE, not silence and
+# not refusal. The node joins so it is visible in `kubectl get nodes`, but joins
+# with `fuzeinfra.io/vlan=absent` + a NoSchedule taint so it carries no workload.
+# Rationale + the measured cost of an off-VLAN node:
+# docs/design/off-vlan-node-failure-policy.md.
 users:
   - name: root
     ssh_authorized_keys:
@@ -19,11 +33,23 @@ write_files:
       K3S_URL=${k3s_server_url}
       K3S_TOKEN=${k3s_node_token}
       INSTALL_K3S_CHANNEL=${k3s_channel}
+
+  # Prefer IPv4 over IPv6 in glibc address selection (RFC 6724 10.3) so GHCR
+  # pulls are not TCP-reset on Contabo IPv6 CDN paths (FuzeInfra#616). The
+  # node-configurator DaemonSet does this cluster-wide, but only once it
+  # schedules; this covers first boot to then, the window in which the node
+  # pulls its first images.
+  - path: /etc/gai.conf
+    permissions: "0644"
+    owner: root:root
+    content: |
+      precedence ::ffff:0:0/96  100
 %{ if private_network_enabled ~}
   # Persistent bring-up of the private NIC (Contabo VPC attaches as ${private_iface}).
   # `optional: true` means boot never hangs when the per-instance VPC add-on has
-  # not been purchased. NOTE: that add-on is a MANUAL Contabo panel purchase
-  # (HTTP 402 otherwise) that Terraform cannot order.
+  # not been purchased. NOTE: that add-on is ordered out-of-band for this module
+  # (the `ca-private-net` workflow's `upgrade` + `assign` actions) — see
+  # variables.tf `private_network_id`.
   - path: /etc/netplan/60-eth1-private.yaml
     permissions: "0600"
     owner: root:root
@@ -36,27 +62,150 @@ write_files:
             optional: true
 %{ endif ~}
 
+  - path: /usr/local/sbin/fuzeinfra-node-join.sh
+    permissions: "0750"
+    owner: root:root
+    content: |
+      #!/bin/sh
+      # Join this VPS to the k3s cluster. Run by fuzeinfra-node-join.service on
+      # every boot until /etc/fuzeinfra-node-joined exists.
+      set -u
+      SENTINEL=/etc/fuzeinfra-node-joined
+      LOGF=/var/log/fuzeinfra-node-join.log
+      log() { echo "[fuzeinfra-node-join] $(date -u +%Y-%m-%dT%H:%M:%SZ) $*" >>"$LOGF" 2>&1; echo "[fuzeinfra-node-join] $*" >&2; }
+
+      [ -f "$SENTINEL" ] && { log "already joined; nothing to do"; exit 0; }
+
+      ip4_of() { ip -4 -o addr show "$1" 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -n 1; }
+
+      NETARGS=""
+      VLANARGS=""
+%{ if private_network_enabled ~}
+      # Wait for the private NIC to carry an IPv4. netplan is re-applied on each
+      # poll because the vNIC can materialise only once the out-of-band
+      # private-network ASSIGN lands, which is after the first apply ran.
+      WAIT_SECS=600
+      DEADLINE=$(( $(date +%s) + WAIT_SECS ))
+      PRIV=""
+      while : ; do
+        PRIV=$(ip4_of ${private_iface})
+        [ -n "$PRIV" ] && break
+        [ "$(date +%s)" -ge "$DEADLINE" ] && break
+        netplan apply >/dev/null 2>&1 || true
+        sleep 5
+      done
+      PUB=$(ip4_of eth0)
+
+      if [ -n "$PRIV" ]; then
+        log "private NIC ${private_iface} has $PRIV (public $PUB) - joining ON the VLAN"
+        NETARGS="--flannel-iface ${private_iface} --node-ip $PRIV"
+        [ -n "$PUB" ] && NETARGS="$NETARGS --node-external-ip $PUB"
+        VLANARGS="--node-label fuzeinfra.io/vlan=present"
+      else
+        log "FATAL: ${private_iface} has no IPv4 after $${WAIT_SECS}s - the private-networking add-on or the network assign did not land. Joining QUARANTINED (NoSchedule)."
+        VLANARGS="--node-label fuzeinfra.io/vlan=absent --node-taint fuzeinfra.io/off-vlan=true:NoSchedule"
+      fi
+
+      # Repair path: a previous boot already joined (very likely off-VLAN, before
+      # the assign rebooted us). If the VLAN is up now, rewrite the agent config
+      # and restart instead of re-running the installer.
+      if [ -f /etc/systemd/system/k3s-agent.service ]; then
+        if [ -z "$PRIV" ]; then
+          log "k3s-agent present and still no VLAN; leaving it alone (still quarantined)"
+          exit 0
+        fi
+        log "k3s-agent present and the VLAN is now up - repairing node-ip/flannel-iface"
+        mkdir -p /etc/rancher/k3s
+        {
+          echo "# Written by fuzeinfra-node-join.sh after a post-assign reboot."
+          echo "node-ip: $PRIV"
+          echo "flannel-iface: ${private_iface}"
+          [ -n "$PUB" ] && echo "node-external-ip: $PUB"
+        } > /etc/rancher/k3s/config.yaml
+        systemctl restart k3s-agent || log "WARNING: k3s-agent restart failed"
+        touch "$SENTINEL"
+        log "repaired. k3s applies labels/taints at REGISTRATION ONLY, so an operator must clear the quarantine marks: kubectl label node ${node_name} fuzeinfra.io/vlan=present --overwrite && kubectl taint node ${node_name} fuzeinfra.io/off-vlan-"
+        exit 0
+      fi
+%{ else ~}
+      # Private networking not requested for this node set. Nothing to wait for.
+      # The node is deliberately left unlabelled for fuzeinfra.io/vlan so the
+      # NodeMissingVLANLabel alert can surface it as an un-audited provisioning
+      # path rather than silently passing as healthy.
+      if [ -f /etc/systemd/system/k3s-agent.service ]; then
+        log "k3s-agent already present; nothing to do"
+        touch "$SENTINEL"
+        exit 0
+      fi
+%{ endif ~}
+
+      set -a
+      . /etc/k3s-agent.env
+      set +a
+
+      # Role taints are baked in by Terraform. Built as one variable rather than
+      # backslash-continued lines so a false %{ if } branch can never leave a
+      # dangling continuation.
+      ROLETAINT="%{ if role == "elastic" }--node-taint fuzeinfra.io/elastic=true:PreferNoSchedule%{ endif }%{ if role == "ci" }--node-taint fuzeinfra.io/ci=true:NoSchedule%{ endif }"
+
+      curl -sfL https://get.k3s.io | sh -s - agent $NETARGS $VLANARGS $ROLETAINT --node-name '${node_name}' --node-label 'fuzeinfra.io/pool=${role}' ${node_labels}
+      RC=$?
+      if [ "$RC" -ne 0 ]; then
+        log "k3s agent install exited $RC - the unit retries on the next boot"
+        exit "$RC"
+      fi
+%{ if private_network_enabled ~}
+      if [ -n "$PRIV" ]; then
+        touch "$SENTINEL"
+        log "joined on the private VLAN as ${node_name} ($PRIV)"
+      else
+        log "joined QUARANTINED as ${node_name}; no sentinel written, so a later boot (once the assign lands) repairs this node"
+      fi
+%{ else ~}
+      touch "$SENTINEL"
+      log "joined as ${node_name} (private networking not requested)"
+%{ endif ~}
+      exit 0
+
+  - path: /etc/systemd/system/fuzeinfra-node-join.service
+    permissions: "0644"
+    owner: root:root
+    content: |
+      [Unit]
+      Description=FuzeInfra: join this node to the k3s cluster
+      After=network-online.target
+      Wants=network-online.target
+      ConditionPathExists=!/etc/fuzeinfra-node-joined
+
+      [Service]
+      Type=oneshot
+      RemainAfterExit=no
+      ExecStart=/usr/local/sbin/fuzeinfra-node-join.sh
+      TimeoutStartSec=1200
+
+      [Install]
+      WantedBy=multi-user.target
+
 runcmd:
 %{ if enable_longhorn_prereqs ~}
   # Longhorn node prerequisites (gated by enable_longhorn_prereqs, default off).
   # Longhorn attaches volumes over iSCSI and serves RWX over NFS, so the node
   # needs the iSCSI initiator (+ iscsid running), the NFS client, and a data dir.
-  # Missing these → the Longhorn engine pod CrashLoops on attach. See
-  # docs/design/longhorn-storage.md §3.
+  # Missing these -> the Longhorn engine pod CrashLoops on attach. See
+  # docs/design/longhorn-storage.md 3.
   - [ sh, -c, "DEBIAN_FRONTEND=noninteractive apt-get update -y || true" ]
   - [ sh, -c, "DEBIAN_FRONTEND=noninteractive apt-get install -y open-iscsi nfs-common || true" ]
   - [ sh, -c, "systemctl enable --now iscsid || true" ]
   - [ sh, -c, "mkdir -p /var/lib/longhorn" ]
 %{ endif ~}
 %{ if private_network_enabled ~}
-  # Apply the private-NIC netplan before joining so k3s can bind its overlay/
-  # node-ip to the private interface (no-op / harmless when the NIC is absent).
+  # Apply the private-NIC netplan (no-op / harmless when the NIC is absent).
+  # The join unit re-applies it while it waits, so this is only the fast path.
   - [ sh, -c, "netplan apply || true" ]
-  # `netplan apply` returns before the DHCP lease lands. Block until the private
-  # NIC actually has an IPv4 (up to 60s) so the k3s join below never computes an
-  # empty --node-ip and joins with a broken/misadvertised address (FuzeInfra#668).
-  # Fail loudly rather than join the cluster with no node-ip.
-  - [ sh, -c, "for i in $(seq 1 60); do ip -4 -o addr show ${private_iface} 2>/dev/null | grep -q 'inet ' && break; sleep 1; done; ip -4 -o addr show ${private_iface} 2>/dev/null | grep -q 'inet ' || { echo 'FATAL: ${private_iface} has no IPv4 after 60s; refusing to join k3s with an empty --node-ip'; exit 1; }" ]
+  # Allow the whole VLAN: WireGuard (51820/udp), kubelet (10250) and the API
+  # (6443) all traverse it once the node is private. The network is a /22
+  # (10.0.0.0/22 - terraform/contabo/private-network.tf).
+  - [ sh, -c, "ufw allow from 10.0.0.0/22 || true" ]
 %{ endif ~}
   # Host firewall: agent needs to reach the API (6443) outbound and accept
   # kubelet (10250), the flannel VXLAN overlay (8472/udp), and the flannel
@@ -68,11 +217,7 @@ runcmd:
   - [ sh, -c, "ufw allow 8472/udp || true" ]
   - [ sh, -c, "ufw allow 51820/udp || true" ]
   - [ sh, -c, "ufw --force enable || true" ]
-  # Join as a k3s agent and label the node. Secrets come from the env file above;
-  # --node-name and the labels are baked in by Terraform per request.
-  # For elastic nodes, also apply a PreferNoSchedule taint to keep stateless workloads there.
-  # When private networking is on, resolve the private (${private_iface}) and public
-  # (eth0) IPv4s at runtime and hand them to k3s: --flannel-iface keeps the overlay
-  # on the private net, --node-ip is the private address, --node-external-ip keeps
-  # the public IP advertised. IPs are unquoted (single IPv4, no spaces).
-  - [ sh, -c, "set -a; . /etc/k3s-agent.env; set +a;%{ if private_network_enabled } PRIVIP=$(ip -4 -o addr show ${private_iface} 2>/dev/null | awk '{print $4}' | cut -d/ -f1); PUBIP=$(ip -4 -o addr show eth0 2>/dev/null | awk '{print $4}' | cut -d/ -f1);%{ endif } curl -sfL https://get.k3s.io | sh -s - agent --node-name '${node_name}' --node-label 'fuzeinfra.io/pool=${role}' ${node_labels}%{ if private_network_enabled } --flannel-iface ${private_iface} --node-ip $PRIVIP --node-external-ip $PUBIP%{ endif }%{ if role == "elastic" } --node-taint 'fuzeinfra.io/elastic=true:PreferNoSchedule'%{ endif }%{ if role == "ci" } --node-taint 'fuzeinfra.io/ci=true:NoSchedule'%{ endif }" ]
+  # Hand the join to the systemd unit. The unit - not runcmd - owns the join
+  # precisely so a post-assign reboot re-runs it rather than losing it.
+  - [ sh, -c, "systemctl daemon-reload" ]
+  - [ sh, -c, "systemctl enable --now fuzeinfra-node-join.service" ]
