@@ -11,7 +11,7 @@
     ".fuze/manifest.json",
     ".github/workflows/"
   ],
-  "baselineRef": "main",
+  "baselineRef": "v1",
   "agents": [
     "contract-designer",
     "backend-engineer",
