@@ -47,7 +47,24 @@ func (s *Server) NodeGroupIncreaseSize(ctx context.Context, req *protos.NodeGrou
 		return nil, status.Errorf(codes.Unavailable, "NodeGroupIncreaseSize: listing elastic instances by name prefix %q: %v", s.cfg.NamePrefix, err)
 	}
 
-	currentByPrefix := len(prefixInstances)
+	// The CAP counts only instances that still hold a slot. A cancelled
+	// instance keeps running and keeps matching ListByNamePrefix until the
+	// end of its paid month (Contabo has no immediate-terminate API — see
+	// internal/contabo.Client.Delete), so counting it here would make the
+	// pool unable to replace capacity it just released, for up to a month.
+	// See liveElasticInstances in size.go for the full rationale and the
+	// deliberate spend trade-off.
+	//
+	// This does NOT weaken the anti-runaway guard below: an instance only
+	// acquires a CancelDate because we explicitly cancelled it. The untagged
+	// orphan this cap exists to catch has no CancelDate and still counts.
+	//
+	// NOTE: usedNames below is deliberately built from the UNFILTERED list.
+	// Contabo keeps a cancelled instance's display name reserved until it is
+	// actually terminated and 400s on a duplicate name, so name-collision
+	// avoidance must consider cancelled instances even though the cap does
+	// not (see uniqueInstanceName).
+	currentByPrefix := len(liveElasticInstances(prefixInstances))
 	s.mu.Lock()
 	reserved := s.inFlight
 	s.mu.Unlock()
@@ -289,6 +306,22 @@ func (s *Server) NodeGroupDeleteNodes(ctx context.Context, req *protos.NodeGroup
 	// lookup after already having deleted some nodes.
 	ids := make([]int64, len(req.Nodes))
 	for i, node := range req.Nodes {
+		// STRICT on purpose, and asymmetric with NodeGroupForNode.
+		//
+		// NodeGroupForNode tolerates a bare, scheme-less identifier because
+		// it is a read-only classification and because CA's synthetic fake
+		// node for a never-joined instance puts the scheme in Name as well
+		// as ProviderID (see elasticInstanceName in nodegroups.go). This is
+		// a DESTRUCTIVE, billable path, so it stays fail-closed: an id that
+		// is not in our "contabo://<name>" scheme is a malformed request,
+		// not something to coerce into a delete target.
+		//
+		// The strictness costs nothing for the reclaim path this PR
+		// unblocks: CA populates ProviderID on the synthetic fake node with
+		// the scheme-qualified instance Id, so it parses cleanly here. See
+		// TestNodeGroupDeleteNodes_ReclaimsUnregisteredFakeNode (reclaim
+		// works) and TestDeleteNodes_MalformedProviderIDRejected (a bare
+		// name is still refused).
 		name, err := parseContaboNodeName(node.ProviderID)
 		if err != nil {
 			return nil, status.Errorf(codes.InvalidArgument, "NodeGroupDeleteNodes: parsing ProviderID %q: %v", node.ProviderID, err)
