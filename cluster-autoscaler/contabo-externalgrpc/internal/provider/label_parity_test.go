@@ -32,6 +32,15 @@ var elasticUserDataTemplates = []string{
 
 // nodeLabelFlagRe matches a `--node-label 'key=value'` flag as written in the
 // k3s agent join line of the cloud-init templates.
+//
+// DELIBERATELY OUTSIDE THIS CONTRACT: fuzeinfra.io/vlan. The elastic join line
+// passes it via the shell variable $VLANARGS, whose value depends on whether the
+// private NIC came up, so it is a runtime STATUS label rather than a scheduling
+// label -- a quarantined node carries vlan=absent plus a NoSchedule taint, and
+// the CA simulation must describe the node CA expects to get, not that one. No
+// workload selects on it, so excluding it cannot cause the scale-up/scale-down
+// mismatches this test exists to prevent. Alerting on it lives in
+// helm/fuzeinfra/rules/nodes.yml, not here.
 var nodeLabelFlagRe = regexp.MustCompile(`--node-label\s+'([^'=]+)=([^']*)'`)
 
 // TestElasticNodeLabelParity is the drift guard that replaces a comment.

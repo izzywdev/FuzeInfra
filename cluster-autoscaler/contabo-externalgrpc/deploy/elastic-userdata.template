@@ -188,14 +188,15 @@ write_files:
         VLANARGS="--node-label fuzeinfra.io/vlan=present"
       fi
 
-      curl -sfL https://get.k3s.io | sh -s - agent \
-        $NETARGS \
-        --node-name '{{.NodeName}}' \
-        --kubelet-arg 'provider-id=contabo://{{.NodeName}}' \
-        --node-label 'fuzeinfra.io/pool=elastic' \
-        --node-label 'node-role=workload' \
-        $VLANARGS \
-        --node-taint 'fuzeinfra.io/elastic=true:PreferNoSchedule'
+      # Deliberately ONE line. TestElasticNodeLabelParity and
+      # TestValuesContaboUserDataB64Parity locate the join by scanning for the
+      # single line that installs the k3s agent, then parse the --node-label
+      # flags off it to compare against the CA scale-from-zero simulation in
+      # internal/provider/template.go. Wrapping this across backslash-continued
+      # lines makes those guards parse zero labels and the parity contract
+      # silently stops being checked. (Those scanners match on the installer URL
+      # plus the agent subcommand, so no comment here may contain both.)
+      curl -sfL https://get.k3s.io | sh -s - agent $NETARGS $VLANARGS --node-name '{{.NodeName}}' --kubelet-arg 'provider-id=contabo://{{.NodeName}}' --node-label 'fuzeinfra.io/pool=elastic' --node-label 'node-role=workload' --node-taint 'fuzeinfra.io/elastic=true:PreferNoSchedule'
       RC=$?
 
       if [ "$RC" -ne 0 ]; then
