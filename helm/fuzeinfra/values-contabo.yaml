@@ -1040,7 +1040,14 @@ nodeConfigurator:
   # should match Longhorn's devices specifically (vendor/product or wwid) rather
   # than all of sd*, and roll out to ONE non-control-plane node first.
   multipathBlacklist:
-    enabled: false
+    enabled: true
+    # STAGE ONE: fuzeinfra-ci-runner-1 only. It is a Longhorn node, it is NOT the
+    # control plane, and it carries no database PVC -- so if the multipathd restart
+    # misbehaves the blast radius is CI capacity, not etcd. Widen to the remaining
+    # Longhorn nodes (mendys-worker-1, vmi3396106, then vmi3383846 LAST) only after
+    # volumes are observed attaching and formatting cleanly here.
+    rolloutNodes:
+      - fuzeinfra-ci-runner-1
 
 # Stateful services not otherwise overridden here still need the durable pin.
 alertmanager:

@@ -65,13 +65,27 @@ metadata:
     {{- include "fuzeinfra.labels" . | nindent 4 }}
 data:
   multipath.conf: |
-    # Managed by FuzeInfra (helm/fuzeinfra/templates/node-configurator.yaml).
+    # Managed by FuzeInfra (multipath-blacklist v2: vendor/product)
+    # Source: helm/fuzeinfra/templates/node-configurator.yaml. The parenthesised
+    # version above is LOAD-BEARING: the init container greps for it verbatim to
+    # decide whether a node is already up to date. Change the content and you MUST
+    # bump the version in both places, or nodes silently keep the old file.
     # Keeps multipathd from grabbing Longhorn's /dev/sd* devices, which makes
     # MountVolume.MountDevice fail with "already mounted or mount point busy" and
     # mke2fs fail with "apparently in use by the system".
     # Source: https://longhorn.io/kb/troubleshooting-volume-with-multipath
+    # Narrow by DEVICE IDENTITY, not by devnode. Measured on vmi3383846:
+    #     sda  vendor=[QEMU] model=[QEMUHARDDISK]   <- the node ROOT disk
+    #     sdb..sde vendor=[IET] model=[VIRTUAL-DISK] <- Longhorn iSCSI
+    # The previous rule was devnode "^sd[a-z0-9]+", which also told multipathd
+    # to ignore sda -- the host root disk -- on every node including the etcd
+    # control plane. Matching vendor/product hits exactly Longhorn's devices
+    # and leaves the root disk alone.
     blacklist {
-        devnode "^sd[a-z0-9]+"
+        device {
+            vendor "IET"
+            product "VIRTUAL-DISK"
+        }
     }
 {{- end }}
 ---
@@ -91,7 +105,9 @@ spec:
         {{- include "fuzeinfra.labels" . | nindent 8 }}
         {{- include "fuzeinfra.selectorLabels" (dict "component" "node-configurator" "root" $) | nindent 8 }}
       annotations:
-        checksum/config: {{ printf "%v-%v" .Values.nodeConfigurator.preferIPv4.enabled .Values.nodeConfigurator.multipathBlacklist.enabled | sha256sum }}
+        # Includes the rollout set: changing WHICH nodes are in it must restart the
+        # DaemonSet, or the change reaches nothing.
+        checksum/config: {{ printf "%v-%v-%v" .Values.nodeConfigurator.preferIPv4.enabled .Values.nodeConfigurator.multipathBlacklist.enabled (join "," .Values.nodeConfigurator.multipathBlacklist.rolloutNodes) | sha256sum }}
     spec:
       # hostPID lets the multipath init container nsenter PID 1 and restart multipathd
       # on the host. Harmless when that feature is gated off.
@@ -127,10 +143,27 @@ spec:
             - -c
             - |
               set -eu
-              MARKER='Managed by FuzeInfra'
+              # STAGED ROLLOUT. rolloutNodes empty => every node. Otherwise only the
+              # named nodes are touched, so this can be proven on one non-control-plane
+              # node before it goes near the node running etcd. The DaemonSet itself
+              # stays fleet-wide so preferIPv4 is unaffected by the staging.
+              ROLLOUT="{{ join "," .Values.nodeConfigurator.multipathBlacklist.rolloutNodes }}"
+              if [ -n "$ROLLOUT" ]; then
+                case ",$ROLLOUT," in
+                  *",$NODE_NAME,"*) : ;;
+                  *) echo "node $NODE_NAME not in multipath rollout set [$ROLLOUT]; skipping"; exit 0 ;;
+                esac
+              fi
+              # VERSIONED marker. The old guard matched a bare "Managed by FuzeInfra",
+              # so once ANY version was written the init container exited 0 forever and
+              # a corrected blacklist could never reach a node that already had the old
+              # one. vmi3383846 is in exactly that state today: it carries the broad
+              # devnode rule, written and never revisited. Bump MARKER whenever the
+              # ConfigMap content changes.
+              MARKER='Managed by FuzeInfra (multipath-blacklist v2: vendor/product)'
               TARGET=/host-etc/multipath.conf
               if [ -f "$TARGET" ] && grep -q "$MARKER" "$TARGET"; then
-                echo "multipath.conf already managed by FuzeInfra; nothing to do"
+                echo "multipath.conf already at $MARKER; nothing to do"
                 exit 0
               fi
               if [ -f "$TARGET" ] && [ ! -f "$TARGET.pre-fuzeinfra" ]; then
@@ -150,6 +183,11 @@ spec:
               else
                 echo "multipathd not active on this node; config staged only"
               fi
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
           volumeMounts:
             - name: host-etc
               mountPath: /host-etc

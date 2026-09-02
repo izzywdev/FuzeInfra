@@ -897,6 +897,11 @@ nodeConfigurator:
   # verifies `multipath -t` plus the Longhorn node condition flipping to True.
   multipathBlacklist:
     enabled: false
+    # Staged rollout. EMPTY = every node the DaemonSet runs on. Name one or more
+    # nodes to touch only those -- prove the change on a non-control-plane node
+    # before it goes near the node running etcd. The DaemonSet stays fleet-wide
+    # regardless, so preferIPv4 is unaffected by staging this.
+    rolloutNodes: []
   image: docker.io/busybox:1.36.1
 
 kubeStateMetrics:
