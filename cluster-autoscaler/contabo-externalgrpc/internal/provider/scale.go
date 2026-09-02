@@ -289,9 +289,17 @@ func (s *Server) NodeGroupDeleteNodes(ctx context.Context, req *protos.NodeGroup
 	// lookup after already having deleted some nodes.
 	ids := make([]int64, len(req.Nodes))
 	for i, node := range req.Nodes {
-		name, err := parseContaboNodeName(node.ProviderID)
-		if err != nil {
-			return nil, status.Errorf(codes.InvalidArgument, "NodeGroupDeleteNodes: parsing ProviderID %q: %v", node.ProviderID, err)
+		// Resolve via elasticInstanceName (nodegroups.go) rather than
+		// ProviderID alone. CA's synthetic fake node for a never-joined
+		// instance carries the scheme-qualified id in BOTH Name and
+		// ProviderID, and a real node carries the bare name in Name; this
+		// helper accepts either form so the reclaim path that
+		// NodeGroupForNode now unblocks cannot fail one step later on a
+		// parse. The fail-closed membership check below is unchanged and is
+		// what actually keeps a non-elastic node undeletable.
+		name := elasticInstanceName(node)
+		if name == "" {
+			return nil, status.Errorf(codes.InvalidArgument, "NodeGroupDeleteNodes: node has no usable identifier (ProviderID=%q, Name=%q)", node.GetProviderID(), node.GetName())
 		}
 
 		inst, ok := elasticByName[name]
