@@ -647,7 +647,18 @@ clusterAutoscaler:
     # has a tagged release (see cluster-autoscaler/contabo-externalgrpc).
     image: ghcr.io/izzywdev/fuzeinfra-contabo-ca-provider:latest
     # Bump with the provider image build SHA so Argo rolls the :latest pod.
-    imageRollout: "740d7d11a7a2083d990bd6a8c722eff3725e0441"
+    #
+    # ORDERING HAZARD, read before relying on this. On merge to main two
+    # workflows race: ca-provider-image.yml builds and pushes :latest (minutes),
+    # while deploy-prod triggers the Argo sync (seconds). If Argo wins, the pod
+    # restarts and re-pulls the OLD :latest, this annotation is already at its
+    # new value, and nothing ever rolls it again -- the change looks deployed
+    # and is not. After merging a provider change, VERIFY the running pod's
+    # image digest matches the digest ca-provider-image.yml just pushed:
+    #   kubectl -n fuzeinfra get pod -l app=fuzeinfra-contabo-ca-provider     #     -o jsonpath='{.items[*].status.containerStatuses[*].imageID}'
+    # and if it does not match, bump this value again in a follow-up PR. That
+    # is why this is a free-form marker rather than strictly the build SHA.
+    imageRollout: "nodegroupfornode-providerid-wedge-fix-2026-09-02"
     existingSecret: fuzeinfra-ca-provider
     # Current Contabo create-instance catalog: Cloud VPS 4 (4 vCPU / 8 GiB).
     # V92 is a retired SKU and fails ordering with "No offer was found".
