@@ -953,8 +953,27 @@ nodeConfigurator:
   #   multipath -t | grep -A2 blacklist
   #   the Longhorn node condition Multipathd flipping False -> True
   #   fuzeinfra-prometheus reaching Running/Ready
+  # REVERTED 2026-09-01 ~22:35Z. Enabling this correlates in time with the prod
+  # control plane becoming unreachable: TCP 6443 open but the TLS handshake timing
+  # out, from BOTH an external host and an in-cluster runner, starting after the
+  # 22:17:30Z deploy (the 21:52:27Z deploy was fine).
+  #
+  # Plausible mechanism, NOT verified on-node -- the cluster is unreachable, which
+  # is the symptom itself. The rendered blacklist is `devnode "^sd[a-z0-9]+"`, i.e.
+  # EVERY /dev/sd* device, and an on-node check earlier today found `dm-0 = mpatha`
+  # on these hosts. If a filesystem on vmi3383846 -- the control-plane node running
+  # etcd -- was mounted through that multipath map, dropping the map stalls its
+  # disk, which stalls etcd, which presents exactly as a TLS handshake timeout.
+  #
+  # Turning this off does NOT by itself repair a node: the DaemonSet has already
+  # written /etc/multipath.conf. Recovery is restoring the backup the script took
+  # at /etc/multipath.conf.pre-fuzeinfra and restarting multipathd (console/SSH).
+  #
+  # The underlying Prometheus/Longhorn mount bug is REAL and still unfixed. A retry
+  # should match Longhorn's devices specifically (vendor/product or wwid) rather
+  # than all of sd*, and roll out to ONE non-control-plane node first.
   multipathBlacklist:
-    enabled: true
+    enabled: false
 
 # Stateful services not otherwise overridden here still need the durable pin.
 alertmanager:
