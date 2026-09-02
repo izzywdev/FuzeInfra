@@ -59,6 +59,7 @@ def setup_environment_ci():
             'your_secure_mongodb_password': generate_secure_password(),
             'your_secure_admin_ui_password': generate_secure_password(),
             'your_secure_redis_password': generate_secure_password(),
+            'your_secure_mariadb_password': generate_secure_password(),
             'your_secure_neo4j_password': generate_secure_password(),
             'your_secure_rabbitmq_password': generate_secure_password(),
             'your_secure_grafana_password': generate_secure_password(),

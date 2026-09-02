@@ -668,3 +668,110 @@ spec:
           requests:
             storage: {{ .Values.chromadb.storage }}
 {{- end }}
+
+{{- /* ============================ MariaDB ============================ */ -}}
+{{- if .Values.mariadb.enabled }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: fuzeinfra-mariadb
+  labels:
+    {{- include "fuzeinfra.labels" . | nindent 4 }}
+    {{- include "fuzeinfra.selectorLabels" (dict "component" "mariadb" "root" $) | nindent 4 }}
+spec:
+  clusterIP: None
+  selector:
+    {{- include "fuzeinfra.selectorLabels" (dict "component" "mariadb" "root" $) | nindent 4 }}
+  ports:
+    - name: mariadb
+      port: {{ .Values.mariadb.port }}
+      targetPort: 3306
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: fuzeinfra-mariadb
+  labels:
+    {{- include "fuzeinfra.labels" . | nindent 4 }}
+spec:
+  serviceName: fuzeinfra-mariadb
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "fuzeinfra.selectorLabels" (dict "component" "mariadb" "root" $) | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        cluster-autoscaler.kubernetes.io/safe-to-evict: "false"
+      labels:
+        {{- include "fuzeinfra.labels" . | nindent 8 }}
+        {{- include "fuzeinfra.selectorLabels" (dict "component" "mariadb" "root" $) | nindent 8 }}
+    spec:
+      {{- with .Values.mariadb.nodeSelector }}
+      # Pin to durable (Longhorn-disk) nodes. Longhorn only registers a
+      # node.longhorn.io object for nodes running longhorn-manager; a pod
+      # scheduled elsewhere can never attach its volume
+      # (FailedAttachVolume: node.longhorn.io "..." not found).
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- include "fuzeinfra.dbSpread" $ | nindent 6 }}
+      containers:
+        - name: mariadb
+          image: {{ .Values.mariadb.image }}
+          imagePullPolicy: {{ include "fuzeinfra.pullPolicy" . }}
+          env:
+            - name: MARIADB_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.mariadb.rootSecret.name | default (include "fuzeinfra.secretName" .) }}
+                  key: {{ .Values.mariadb.rootSecret.key | default "MARIADB_ROOT_PASSWORD" }}
+            # Root may connect from other pods (the provisioning Job, admin
+            # tooling). The image otherwise restricts root to localhost.
+            - name: MARIADB_ROOT_HOST
+              value: "%"
+            # Run mariadb-upgrade automatically when the datadir was written by
+            # an older server version, so an image bump is not a manual step.
+            - name: MARIADB_AUTO_UPGRADE
+              value: "1"
+          ports:
+            - containerPort: 3306
+              name: mariadb
+          volumeMounts:
+            # subPath (not the volume root) because a freshly formatted ext4
+            # Longhorn volume contains lost+found, and the MariaDB entrypoint
+            # refuses to initialise a non-empty datadir.
+            - name: data
+              mountPath: /var/lib/mysql
+              subPath: data
+          readinessProbe:
+            exec:
+              # healthcheck.sh ships in the official image; --connect proves the
+              # socket answers and --innodb_initialized proves recovery is done.
+              command: ["healthcheck.sh", "--connect", "--innodb_initialized"]
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+          livenessProbe:
+            exec:
+              command: ["healthcheck.sh", "--connect"]
+            initialDelaySeconds: 60
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 5
+          resources:
+            {{- toYaml .Values.mariadb.resources | nindent 12 }}
+  volumeClaimTemplates:
+    - apiVersion: v1
+      kind: PersistentVolumeClaim
+      metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        {{- include "fuzeinfra.storageClass" . | nindent 8 }}
+        resources:
+          requests:
+            storage: {{ .Values.mariadb.storage }}
+{{- end }}

@@ -1,4 +1,4 @@
-# Shared datastore provisioning (Postgres / Redis / Mongo / Neo4j / ChromaDB)
+# Shared datastore provisioning (Postgres / MariaDB / Redis / Mongo / Neo4j / ChromaDB)
 
 How a consumer repo gets a least-privilege silo on FuzeInfra's shared datastores
 — **without any credential ever appearing in plaintext in git, issues, or logs**.
@@ -66,6 +66,30 @@ gh secret set <APP>_DB_PASSWORD -R izzywdev/<consumer> -b "${PW}"
 
 Verify from inside the cluster before reporting DONE (e.g. `kubectl exec` into
 the Postgres pod and connect as the new role to the new DB).
+
+## MariaDB recipe — declarative only (no imperative path)
+
+MariaDB was added after the declarative model existed, so it has **no**
+runner-side `kubectl exec` recipe. The only supported path is the GitOps one:
+the consumer seals `<app>-db-credentials` (key `password`) for the `fuzeinfra`
+namespace, and the same PR adds an entry to `serviceMariadbDatabases` in
+`helm/fuzeinfra/values-contabo.yaml`. The `fuzeinfra-service-mariadb-provision`
+PostSync Job then creates the database + user and grants
+`ALL PRIVILEGES ON <database>.*` — idempotently, on every sync.
+
+| Thing | Name |
+|---|---|
+| MariaDB user | `<app>_svc` (grant host `%`) |
+| MariaDB database | `<app>` (utf8mb4 / utf8mb4_unicode_ci) |
+| Sealed Secret in `fuzeinfra` | `<app>-db-credentials`, key `password` |
+
+Host: `fuzeinfra-mariadb.fuzeinfra.svc.cluster.local:3306`.
+Consumer-facing instructions: `docs/consuming-repos/MARIADB_PROVISIONING.md`.
+
+The root credential never leaves the `fuzeinfra` namespace and is handed to the
+client through a 0600 tmpfs defaults-file — never `-p<pw>`, never `MYSQL_PWD`.
+Identifiers are whitelisted at render time (`^[A-Za-z0-9_]+$`) because they are
+interpolated into a shell command line before they are ever SQL.
 
 ## Redis recipe — ACL user per app, NOT the shared password
 

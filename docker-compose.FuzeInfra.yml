@@ -101,6 +101,34 @@ services:
       timeout: 5s
       retries: 5
 
+  # MariaDB (MySQL protocol) - shared engine for WordPress/Laravel-class
+  # consumers. Compose half of the dual-delivery model; the Helm half is
+  # helm/fuzeinfra/templates/databases.yaml (mariadb.enabled).
+  mariadb:
+    image: mariadb:11.4
+    container_name: fuzeinfra-mariadb
+    environment:
+      MARIADB_ROOT_PASSWORD: ${MARIADB_ROOT_PASSWORD}
+      # Root must be reachable from other containers on the FuzeInfra network
+      # (provisioning/admin tooling); the image otherwise binds root to localhost.
+      MARIADB_ROOT_HOST: '%'
+      MARIADB_AUTO_UPGRADE: '1'
+    ports:
+      - "${MARIADB_PORT:-3306}:3306"
+    volumes:
+      - mariadb_data:/var/lib/mysql
+      # Per-consumer databases/users are declared here as idempotent SQL, the
+      # local mirror of the `serviceMariadbDatabases` Helm values.
+      - ./docker/mariadb/init:/docker-entrypoint-initdb.d:ro
+    networks:
+      - FuzeInfra
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
   # Neo4j
   neo4j:
     image: neo4j:5
@@ -608,6 +636,8 @@ volumes:
     name: fuzeinfra_mongodb_data
   redis_data:
     name: fuzeinfra_redis_data
+  mariadb_data:
+    name: fuzeinfra_mariadb_data
   neo4j_data:
     name: fuzeinfra_neo4j_data
   neo4j_logs:

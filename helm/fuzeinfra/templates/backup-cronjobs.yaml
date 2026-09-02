@@ -109,6 +109,7 @@ Everything is gated OFF by default (`backups.enabled=false`).
 {{- $dbs := list
     (dict "name" "postgres" "cfg" $b.postgres)
     (dict "name" "mongodb"  "cfg" $b.mongodb)
+    (dict "name" "mariadb"  "cfg" $b.mariadb)
     (dict "name" "neo4j"    "cfg" $b.neo4j) -}}
 {{- if eq $b.sink "pvc" }}
 ---
@@ -218,6 +219,18 @@ spec:
                 - name: MONGODB_PASSWORD
                   valueFrom:
                     secretKeyRef: { name: {{ $secretName }}, key: MONGODB_PASSWORD }
+                {{- else if eq .name "mariadb" }}
+                - name: DB_HOST
+                  value: {{ .cfg.host | quote }}
+                - name: DB_PORT
+                  value: {{ .cfg.port | quote }}
+                - name: ADMIN_USER
+                  value: {{ .cfg.user | default "root" | quote }}
+                - name: ADMIN_PASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ $.Values.mariadb.rootSecret.name | default $secretName }}
+                      key: {{ $.Values.mariadb.rootSecret.key | default "MARIADB_ROOT_PASSWORD" }}
                 {{- else if eq .name "neo4j" }}
                 - name: NEO4J_HOST
                   value: {{ .cfg.host | quote }}
@@ -246,6 +259,22 @@ spec:
                     --authenticationDatabase admin --archive --gzip \
                     > /backup/dump.bin
                   echo "$PREFIX/mongodb/fuzeinfra-mongodb-$ts.archive.gz" > /backup/remote-key
+                  {{- else if eq .name "mariadb" }}
+                  # Consistent ONLINE logical dump of every database. InnoDB is
+                  # the default engine, so --single-transaction gives a
+                  # point-in-time snapshot without locking writers out.
+                  # The root password goes through a 0600 tmpfs defaults-file,
+                  # never -p<pw> (process table) — same rule as the
+                  # provisioning Job.
+                  CNF=/dev/shm/mariadb-backup.cnf
+                  ( umask 077; printf '[client]\npassword="%s"\n' \
+                      "$(printf '%s' "$ADMIN_PASSWORD" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g')" > "$CNF" )
+                  mariadb-dump --defaults-extra-file="$CNF" --protocol=TCP \
+                    -h "$DB_HOST" -P "$DB_PORT" -u "$ADMIN_USER" \
+                    --all-databases --single-transaction --routines --triggers \
+                    --events | gzip -c > /backup/dump.bin
+                  rm -f "$CNF"
+                  echo "$PREFIX/mariadb/fuzeinfra-mariadb-$ts.sql.gz" > /backup/remote-key
                   {{- else if eq .name "neo4j" }}
                   # ONLINE logical export via APOC streamed over Bolt (community
                   # edition has no online `neo4j-admin backup`; APOC ships in the

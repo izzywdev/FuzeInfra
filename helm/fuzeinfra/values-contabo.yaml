@@ -71,6 +71,24 @@ mongodb:
   resources:
     requests: {cpu: 100m, memory: 256Mi}
     limits: {cpu: "1", memory: 512Mi}
+# Shared MariaDB engine — ON in prod. Consumers needing a MySQL-protocol store
+# (WordPress and friends) must stop shipping their own MariaDB StatefulSet:
+# mendys-wp's own `mendys-wp-mariadb` STS had its PVC on `local-path` and lost
+# it to a node reinstall (2026-07-24 storage class). The shared engine's PVC is
+# Longhorn (global.storageClass, reclaimPolicy Retain) and is backed up by the
+# nightly DB backup CronJobs, which a consumer-owned engine never was.
+mariadb:
+  enabled: true
+  # Pin to durable Longhorn-disk nodes. longhorn-manager only runs on the 3
+  # durable nodes, so Longhorn registers node.longhorn.io objects only there;
+  # a stateful pod scheduled onto an ephemeral elastic node can NEVER attach
+  # its volume (FailedAttachVolume: node.longhorn.io "..." not found).
+  nodeSelector:
+    node.longhorn.io/create-default-disk: "true"
+  storage: 20Gi
+  resources:
+    requests: {cpu: 100m, memory: 256Mi}
+    limits: {cpu: "1", memory: 1Gi}
 neo4j:
   # Pin to durable Longhorn-disk nodes (same as postgres) so Neo4j never runs
   # on an ephemeral autoscaled node once products start seeding it.
@@ -370,6 +388,10 @@ backups:
     schedule: "20 2 * * *"   # 02:20 UTC
   neo4j:
     schedule: "40 2 * * *"   # 02:40 UTC
+  # Follows mariadb.enabled: true above. Staggered clear of the other three.
+  mariadb:
+    enabled: true
+    schedule: "0 3 * * *"    # 03:00 UTC
   s3:
     endpoint: "https://eu2.contabostorage.com"
     region: "default"
@@ -869,6 +891,40 @@ serviceMongoDatabases:
     user: fuzepicker_svc
     passwordSecret:
       name: fuzepicker-db-credentials
+      key: password
+# Per-service MariaDB provisioning — PROD. Helm REPLACES lists, so the full set
+# is restated here (the base values.yaml default is an empty list).
+#
+# GITOPS GATE, identical to serviceDatabases above and just as hard: the hook is
+# a SINGLE Job pod that mounts every enabled entry's password by `secretKeyRef`
+# (optional: false). ONE missing Secret fails the pod with
+# CreateContainerConfigError, blocks every other entry, and degrades the Argo
+# PostSync wave. Flip an entry to `true` ONLY in the same PR that lands its
+# sealed Secret in the `fuzeinfra` namespace.
+#
+#   - mendys-wp -> Secret `mendys-wp-db-credentials` key `password`  (ABSENT)
+#
+# mendys-wp is the reason this engine exists, but it still runs its own
+# `mendys-wp-mariadb` StatefulSet in the `mendys-wp` namespace with credentials
+# in its own `mendys-wp-db` Secret (keys MYSQL_DATABASE / MYSQL_USER /
+# MYSQL_PASSWORD / MYSQL_ROOT_PASSWORD). Migrating it is a two-step handshake
+# owned by the consumer repo, not by this PR:
+#   1. mendys-wp seals its existing MYSQL_PASSWORD value as
+#      `mendys-wp-db-credentials` (key `password`) FOR the `fuzeinfra`
+#      namespace and commits the ciphertext to deploy/sealed-secrets/.
+#   2. THEN this entry flips to `enabled: true`; the PostSync Job creates the
+#      user+database on the shared engine with that same password, mendys-wp
+#      repoints WORDPRESS_DB_HOST at
+#      fuzeinfra-mariadb.fuzeinfra.svc.cluster.local:3306, dumps/restores its
+#      data, and retires its own StatefulSet.
+# See docs/consuming-repos/MARIADB_PROVISIONING.md.
+serviceMariadbDatabases:
+  - name: mendys-wp
+    enabled: false
+    user: mendys_wp_svc
+    database: mendys_wp
+    passwordSecret:
+      name: mendys-wp-db-credentials
       key: password
 # Chroma allocations are enabled only with a matching strict-scoped
 # SealedSecret in deploy/sealed-secrets. Chroma binds each bearer token to the
