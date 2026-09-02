@@ -1,35 +1,67 @@
+# fuze:managed template=fuze.yml baseline=v1 digest=sha256:687aa20600c85f6a233c3289ff230de51fa6e6a08a3dbfe558bc07a9c764c24d
 name: Fuze
 
-# Lets maintainers delegate work to @fuze by mentioning it in an issue,
-# issue comment, PR, or review comment. Routes through the shared LiteLLM
-# gateway (not directly to any provider), so the gateway owns model routing,
-# key custody and cross-provider failover.
+# THE CANONICAL `@fuze` ENTRYPOINT. Every onboarded repo gets this file, and this is the
+# handler a human — or an automated workflow that posts a comment — reaches by mentioning
+# `@fuze` on an issue, an issue comment, a PR review or a review comment.
 #
-# PROVIDER-INDEPENDENT BY CONSTRUCTION. This handler holds NO provider key.
-# It talks only to the LiteLLM gateway with a scoped virtual key
-# (secrets.LITELLM_FUZE_KEY, minted by scripts/mint-litellm-fuze-key.sh).
-# routerSettings.fallbacks in helm/litellm/values.yaml retries the SAME
-# request against OpenAI, then Gemini, and returns a normal 200. A provider
-# billing lapse should not be able to take down every mention-triggered task.
+# WHY THIS EXISTS AS A CANONICAL TEMPLATE AT ALL. `@fuze` was a real, working entrypoint in
+# exactly ONE repo (izzywdev/FuzeInfra) and in no other, so `@fuze` in any other repo was a
+# mention nothing answered. Community issue templates already seed `@fuze — please triage.`
+# (community-templates/.github/ISSUE_TEMPLATE/*.md), and the baseline documents `@fuze` as
+# the delegation handle, so 21 of 22 repos were pointed at a handler they did not have.
 #
-# RELATIONSHIP TO @claude (claude.yml): @claude is kept as an explicit
-# escape hatch to go direct-to-Anthropic. Automated workflows (CI failure
-# triage, argo-outofsync-autofix, nightly-integration, grafana-crit-fix)
-# mention @fuze and route through the gateway. A human who explicitly types
-# @claude still gets the direct Anthropic path.
+# WHAT WAS **NOT** COPIED HERE, AND WHY THAT IS THE WHOLE POINT.
+# FuzeInfra's version of this file is CLUSTER-CAPABLE: it mounts the prod k3s kubeconfig
+# secret, installs the cluster and IaC CLIs, and runs on FuzeInfra's in-cluster ARC pool so
+# it can reach a ClusterIP-only gateway. Promoting THAT verbatim would have handed prod
+# cluster credentials to every product repo in the family — a privilege escalation dressed
+# as a sync — and would have pinned every repo's `@fuze` to a self-hosted pool only
+# FuzeInfra has, where a job does not fail but QUEUES FOREVER (governance/ci-runners.md).
+# So the capability is SPLIT:
+#   * THIS file — the baseline entrypoint, no cluster credential of any kind, on the repo's
+#     own runner. It is the only `@fuze` handler a product repo ever gets.
+#   * `workflow-templates/fuze-cluster.yml` — the privileged variant, installed ONLY into a
+#     repo whose `.fuze/manifest.json` declares `clusterOps.enabled: true` (today: FuzeInfra
+#     alone, which owns the cluster), and inert even there until `vars.FUZE_CLUSTER_ENTRYPOINT`
+#     is set. See that file's header and scripts/bootstrap/caps/workflows.py CONDITIONAL.
 #
-# CLUSTER CAPABLE: mounts the prod k3s KUBE_CONFIG so a delegated infra task
-# (apply a sealed secret, nudge an Argo sync, render+diff the chart) can run
-# autonomously on the runner without a local session open.
+# The privileged identifiers — the kubeconfig secret name, the IaC CLI name, and the
+# self-hosted pool label — are deliberately ABSENT FROM THIS FILE AS LITERAL TEXT, not merely
+# unused. Grep the three of them across a non-opted-in repo's `.github/workflows/` and the
+# `@fuze` entrypoint contributes zero hits; that is the check. Do not reintroduce those
+# strings here, not even inside a comment: to an auditor's grep a prose mention is
+# indistinguishable from a real reference, which is exactly how a checkable security property
+# decays into an unverifiable claim. The strings live in `fuze-cluster.yml` and nowhere else.
 #
-# RUNNER: staging (in-cluster ARC pods, namespace arc-runners). The gateway
-# is ClusterIP-only with a NetworkPolicy; reaching it from inside the cluster
-# avoids punching a hole for CI. arc-runners is on the gateway's
-# networkPolicy.allowedNamespaces (helm/litellm/values-contabo.yaml).
+# LLM CREDENTIAL — routed, never hardcoded. FuzeInfra's version sets
+# `ANTHROPIC_BASE_URL: http://litellm.fuzeinfra.svc.cluster.local:4000` directly. That is
+# correct for a pod inside the cluster and USELESS anywhere else: the name does not resolve
+# from a GitHub-hosted runner, so a verbatim copy would have failed DNS on 21 repos. This
+# template routes through `./.github/actions/fuze-code-action`, which resolves the endpoint
+# via `./.github/actions/llm-endpoint` — a bounded-timeout probe of the in-cluster gateway
+# that falls back to a direct vendor key when the gateway is unreachable. That fallback is
+# precisely what the FuzeInfra file lacks.
 #
-# SECURITY: gated to TRUSTED authors (OWNER/MEMBER/COLLABORATOR). Gating is
-# critical — the runner holds both prod cluster creds and an agent that can
-# act on them. An untrusted commenter must never be able to drive cluster ops.
+# HONEST LIMIT OF THAT ROUTING, stated here so nobody reads more resilience into it than
+# exists: with no `task-prompt` this is MENTION MODE, and fuze-code-action DELIBERATELY
+# disables rungs 2 and 3 there (codex-action and run-gemini-cli have no GitHub event
+# context, so a rung that "succeeds" at seeing nothing is a manufactured green). The
+# openai/gemini keys are passed below for shape-parity with the other call sites and are
+# genuinely inert on this path. In mention mode there is exactly ONE rung, and if the
+# Anthropic-or-LiteLLM leg has no working credential, this workflow fails — it does not
+# quietly answer from somewhere else.
+#
+# RELATIONSHIP TO `claude.yml`. `@claude` stays as an explicit, human-typed escape hatch to
+# the same routed path. `@fuze` is the family's DEFAULT handle and the one every doc, agent
+# and skill now names (governance/routing.md). Both files gate independently, so a comment
+# containing both mentions runs both handlers — write one or the other, not both.
+#
+# SECURITY — trusted authors only. Gate 2 restricts triggering to OWNER/MEMBER/COLLABORATOR.
+# This handler holds a repo-write token and an agent that will push branches with it; an
+# untrusted commenter must never be able to drive that. The gate is kept here even though
+# this variant holds no cluster credential, because "no cluster credential" is not the same
+# as "harmless".
 on:
   issue_comment:
     types: [created]
@@ -42,18 +74,23 @@ on:
 
 jobs:
   fuze:
-    # DEDUP: at most one run per issue/PR at a time (latest wins).
-    # cancel-in-progress collapses near-simultaneous duplicates (e.g. issues
-    # opened with labels emitting both `issues.opened` and `issues.labeled`).
+    # DEDUP: at most one run per issue/PR at a time (latest wins). cancel-in-progress
+    # collapses near-simultaneous duplicates — an issue opened WITH labels emits both
+    # `issues.opened` and `issues.labeled`, and without this both would start an agent.
     concurrency:
       group: fuze-${{ github.event.issue.number || github.event.pull_request.number }}
       cancel-in-progress: true
-    # Gate 1: @fuze is actually mentioned (or issue labeled/assigned to fuze).
-    # Gate 2 (SECURITY): trusted collaborator.
-    # Gate 3 (LOOP-BREAKER): fuze-loop-guard sentinel stops infinite retry loops.
-    #   The failure notice posted below carries this sentinel so the next
-    #   @fuze in the comment does NOT re-trigger this workflow.
+    # Gate 1: `@fuze` is actually mentioned (or the issue is labeled/assigned `fuze`).
+    # Gate 2 (SECURITY): trusted collaborator — see the header.
+    # Gate 3 (LOOP-BREAKER): the `fuze-loop-guard` sentinel. The failure notice this
+    #   workflow posts below itself contains `@fuze`, and would otherwise re-trigger the
+    #   workflow forever. DO NOT remove the sentinel from that comment body.
+    # Gate 4 (PRIVILEGE SPLIT): stand down in a repo that has activated the cluster-capable
+    #   entrypoint, so `fuze.yml` and `fuze-cluster.yml` can never both answer the same
+    #   mention. Unset/absent — every repo except an activated FuzeInfra — means THIS
+    #   handler runs, which is the fail-safe direction: the default is the UNPRIVILEGED one.
     if: |
+      vars.FUZE_CLUSTER_ENTRYPOINT != 'true' &&
       (
         (github.event_name == 'issue_comment' && contains(github.event.comment.body, '@fuze') &&
           !contains(github.event.comment.body, 'fuze-loop-guard') &&
@@ -74,226 +111,122 @@ jobs:
           github.event.assignee.login == 'fuze' &&
           contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.issue.author_association))
       )
-    runs-on: staging
+    runs-on: ubuntu-latest
     permissions:
       contents: write
       pull-requests: write
       issues: write
       id-token: write
       actions: read
-    env:
-      # Everything below is gateway addressing — no provider key, no provider hostname.
-      # Claude Code speaks the Anthropic Messages format to whatever ANTHROPIC_BASE_URL
-      # points at; LiteLLM serves that format at /v1/messages and bridges it to whichever
-      # provider the router picks. In-cluster service DNS, plain HTTP — pod network only.
-      ANTHROPIC_BASE_URL: http://litellm.fuzeinfra.svc.cluster.local:4000
-
-      # Pin EVERY alias to a name the gateway actually serves (models[].name in
-      # helm/litellm/values.yaml). Unpinned, Claude Code picks its own built-in IDs and
-      # the gateway 400s on a model it has never heard of.
-      # DISABLE_1M_CONTEXT stops the [1m] suffix from being appended — the gateway
-      # serves no such name. tests/test_litellm_fuze_routing.py asserts every name
-      # here still exists in the gateway's model list.
-      ANTHROPIC_MODEL: claude-opus-5
-      ANTHROPIC_DEFAULT_OPUS_MODEL: claude-opus-5
-      ANTHROPIC_DEFAULT_SONNET_MODEL: claude-sonnet-5
-      ANTHROPIC_DEFAULT_HAIKU_MODEL: claude-haiku-4-5
-      CLAUDE_CODE_DISABLE_1M_CONTEXT: "1"
-
-      # Pre-release capabilities are rejected with `Extra inputs are not permitted`
-      # by non-Anthropic upstreams. Suppressing them client-side lets a fallback hop
-      # to OpenAI/Gemini complete instead of 400ing the moment Anthropic is down.
-      CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS: "1"
-      # Version checks and auto-update go direct to Anthropic, not through the gateway.
-      CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
 
     steps:
       - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           fetch-depth: 1
 
-      # --- Infra tooling so @fuze can actually DO infra work -------------------
-      - name: Set up kubectl
-        uses: azure/setup-kubectl@829323503d1be3d00ca8346e5391ca0b07a9ab0d # v5.1.0
-      - name: Set up helm
-        uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
-        with:
-          version: v3.14.4
-      - name: Set up terraform
-        uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
-        with:
-          terraform_version: "1.6.6"
-          terraform_wrapper: false
-
-      - name: Configure kubectl (prod k3s)
+      - name: Checkout PR branch (when triggered from a PR)
+        if: |
+          (github.event_name == 'issue_comment' && github.event.issue.pull_request != null) ||
+          github.event_name == 'pull_request_review_comment' ||
+          github.event_name == 'pull_request_review'
+        # Every `github` context value reaches the shell through env:, never through
+        # `${{ }}` inside run:. A branch name is attacker-controlled and git permits `;`,
+        # `|`, `$`, `"` and backticks in a ref, so an interpolated head.ref executes on the
+        # runner with the job's token in scope — the documented GitHub Actions script
+        # injection. actionlint flags it as `expression`, semgrep as run-shell-injection.
         env:
-          KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          EVENT_NAME: ${{ github.event_name }}
+          REPO: ${{ github.repository }}
+          PR_NUM: ${{ github.event.issue.number }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_HEAD_REF: ${{ github.event.pull_request.head.ref }}
         run: |
-          if [ -z "$KUBE_CONFIG" ]; then
-            echo "::warning::KUBE_CONFIG secret is empty — cluster ops will be unavailable this run."
-            exit 0
+          if [ "$EVENT_NAME" = "issue_comment" ]; then
+            HEAD_SHA=$(gh api "repos/${REPO}/pulls/${PR_NUM}" --jq .head.sha)
+            HEAD_REF=$(gh api "repos/${REPO}/pulls/${PR_NUM}" --jq .head.ref)
+          else
+            HEAD_SHA="$PR_HEAD_SHA"
+            HEAD_REF="$PR_HEAD_REF"
           fi
-          mkdir -p "$HOME/.kube"
-          printf '%s' "$KUBE_CONFIG" | base64 -d > "$HOME/.kube/config"
-          chmod 600 "$HOME/.kube/config"
-          echo "KUBECONFIG=$HOME/.kube/config" >> "$GITHUB_ENV"
-          kubectl config current-context >/dev/null 2>&1 && echo "kubectl context ready"
-
-      # HARD guardrail: shadow cluster CLIs with PATH wrappers that REJECT destructive
-      # verbs against prod, enforced at the OS level regardless of what the agent is
-      # instructed to do. kubectl apply/get/label/rollout, helm template/upgrade --dry-run,
-      # terraform plan all pass through; the irreversible verbs do not.
-      - name: Install destructive-op guard shims
-        run: |
-          set -euo pipefail
-          GUARD="$HOME/guardbin"; mkdir -p "$GUARD"
-          RK="$(command -v kubectl)"; RH="$(command -v helm)"; RT="$(command -v terraform)"
-          cat > "$GUARD/kubectl" <<EOF
-          #!/usr/bin/env bash
-          for a in "\$@"; do case "\$a" in
-            delete|drain|cordon|uncordon|taint|patch|edit|replace) echo "guard: 'kubectl \$a' is blocked on this runner (prod GitOps; reconcile via chart+PR)" >&2; exit 97;; esac; done
-          exec "$RK" "\$@"
-          EOF
-          cat > "$GUARD/helm" <<EOF
-          #!/usr/bin/env bash
-          for a in "\$@"; do case "\$a" in uninstall|delete|rollback) echo "guard: 'helm \$a' is blocked on this runner" >&2; exit 97;; esac; done
-          exec "$RH" "\$@"
-          EOF
-          cat > "$GUARD/terraform" <<EOF
-          #!/usr/bin/env bash
-          for a in "\$@"; do case "\$a" in apply|destroy|import|"state") echo "guard: 'terraform \$a' is blocked on this runner (plan-only; apply via terraform-plan-apply CD)" >&2; exit 97;; esac; done
-          exec "$RT" "\$@"
-          EOF
-          chmod +x "$GUARD"/kubectl "$GUARD"/helm "$GUARD"/terraform
-          "$GUARD/kubectl" delete ns x >/dev/null 2>&1 && { echo "guard self-test FAILED (delete not blocked)"; exit 1; } || echo "guard: kubectl delete correctly blocked"
-          echo "$GUARD" >> "$GITHUB_PATH"
-
-      - name: Snapshot fuze branches before run
-        run: |
-          git ls-remote origin 'refs/heads/fuze/*' | awk '{print $2}' | sort > /tmp/branches-before.txt
-
-      - name: Fail fast if gateway key absent
-        id: key-guard
-        env:
-          KEY: ${{ secrets.LITELLM_FUZE_KEY }}
-        run: |
-          if [ -z "$KEY" ]; then
-            echo "ok=false" >> "$GITHUB_OUTPUT"
-            echo "reason=LITELLM_FUZE_KEY secret is empty or unset — mint one with scripts/mint-litellm-fuze-key.sh and set it as LITELLM_FUZE_KEY" >> "$GITHUB_OUTPUT"
-            echo "::error::LITELLM_FUZE_KEY secret is empty or unset"
-            exit 0
-          fi
-          echo "ok=true" >> "$GITHUB_OUTPUT"
-
-      # Prove the WHOLE path before spending a run on it: gateway reachable through
-      # the NetworkPolicy, key accepted, /v1/messages served, and the pinned model
-      # resolvable — including via fallback. A 200 here when Anthropic is dead is the
-      # gateway doing its job. Unlike a direct-to-Anthropic preflight, this says
-      # nothing about any one provider; any failure is a HARD STOP with a clear reason.
-      - name: Preflight — LiteLLM gateway reachable & key valid
-        id: preflight
-        if: steps.key-guard.outputs.ok == 'true'
-        env:
-          GATEWAY_KEY: ${{ secrets.LITELLM_FUZE_KEY }}
-        run: |
-          set -uo pipefail
-          code=$(curl -sS -o /tmp/preflight.json -w '%{http_code}' --max-time 30 \
-            -X POST "${ANTHROPIC_BASE_URL}/v1/messages" \
-            -H "Authorization: Bearer ${GATEWAY_KEY}" \
-            -H "anthropic-version: 2023-06-01" \
-            -H "content-type: application/json" \
-            -d "{\"model\":\"${ANTHROPIC_MODEL}\",\"max_tokens\":1,\"messages\":[{\"role\":\"user\",\"content\":\"ping\"}]}" \
-            2>/tmp/preflight.err) || true
-          [ -z "${code:-}" ] && code="000"
-          err=$(jq -r '.error.message // .message // empty' /tmp/preflight.json 2>/dev/null || true)
-          transport=$(tr -d '\r' < /tmp/preflight.err 2>/dev/null | grep -v '^$' | tail -1 || true)
-          echo "curl detail: ${transport:-<none>} (http_code=$code)"
-          [ -z "$err" ] && err="HTTP $code"
-          case "$code" in
-            200)
-              echo "ok=true" >> "$GITHUB_OUTPUT"
-              echo "LiteLLM gateway preflight OK (model ${ANTHROPIC_MODEL})" ;;
-            000)
-              echo "ok=false" >> "$GITHUB_OUTPUT"
-              {
-                echo "reason<<GHA_EOF"
-                echo "LiteLLM gateway unreachable at ${ANTHROPIC_BASE_URL} — ${transport:-no detail from curl}. Resolve-host errors mean cluster DNS from arc-runners; timeouts mean the NetworkPolicy is dropping us (arc-runners must be on networkPolicy.allowedNamespaces); connection-refused means the pod is not serving."
-                echo "GHA_EOF"
-              } >> "$GITHUB_OUTPUT" ;;
-            401|403)
-              echo "ok=false" >> "$GITHUB_OUTPUT"
-              {
-                echo "reason<<GHA_EOF"
-                echo "LiteLLM rejected the LITELLM_FUZE_KEY (HTTP $code): $err. The virtual key may be revoked, expired, or over budget. Mint a new one with scripts/mint-litellm-fuze-key.sh and set it as LITELLM_FUZE_KEY."
-                echo "GHA_EOF"
-              } >> "$GITHUB_OUTPUT" ;;
-            *)
-              echo "ok=false" >> "$GITHUB_OUTPUT"
-              {
-                echo "reason<<GHA_EOF"
-                echo "Gateway could not serve ${ANTHROPIC_MODEL} (HTTP $code): $err"
-                echo "GHA_EOF"
-              } >> "$GITHUB_OUTPUT" ;;
-          esac
+          git fetch origin "$HEAD_SHA"
+          git checkout "$HEAD_SHA"
+          echo "Checked out PR branch: $HEAD_REF @ $HEAD_SHA"
 
       - name: Run Fuze
         id: fuze
-        if: steps.key-guard.outputs.ok == 'true' && steps.preflight.outputs.ok == 'true'
-        # continue-on-error lets the detect + alert steps below run and OWN the job's
-        # final status rather than the action failing silently with no notification.
+        # continue-on-error so the detect + alert steps below run and OWN the job's final
+        # status. Without it the action fails the job outright and the requester is never
+        # told on their own thread — the failure is only visible to whoever opens the run
+        # log, which in practice is nobody.
         continue-on-error: true
-        uses: anthropics/claude-code-action@a874e9ecd7bb36efdad65429c6b35815f5a08f10 # v1.0.210
-        env:
-          # LiteLLM authenticates `Authorization: Bearer`, so the key has to travel in
-          # ANTHROPIC_AUTH_TOKEN — the action does not read that variable itself, which
-          # is why the same secret is ALSO passed as the input below: the input satisfies
-          # the action's launch check, and the copy it puts in x-api-key is ignored.
-          # Dropping either one breaks the run in two different and confusing ways.
-          ANTHROPIC_AUTH_TOKEN: ${{ secrets.LITELLM_FUZE_KEY }}
-          KUBECONFIG: ${{ env.KUBECONFIG }}
-          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+        uses: ./.github/actions/fuze-code-action
         with:
-          anthropic_api_key: ${{ secrets.LITELLM_FUZE_KEY }}
-          # github_token bypasses the OIDC→App token exchange that fails on staging runners.
-          github_token: ${{ secrets.GH_TOKEN }}
-          additional_permissions: |
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          litellm-key: ${{ secrets.LITELLM_FUZE_KEY }}
+          anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY }}
+          # Inert on this path — see MENTION MODE in the header. Passed for shape-parity
+          # with the fleet's other fuze-code-action call sites, NOT as a claimed fallback.
+          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          gemini-api-key: ${{ secrets.GEMINI_API_KEY }}
+          show-full-output: true
+          # allowed_bots — REQUIRED here, and not for the reason it is required in
+          # governance-nightly.yml. That one is a cron, whose actor is the scheduler
+          # identity. This one is mention-triggered, and a mention can legitimately be
+          # posted BY a workflow: the family's CI-failure triage, Argo out-of-sync autofix,
+          # nightly-integration and crit-alert workflows all comment `@fuze` to hand work
+          # over. The actor on that `issue_comment` event is the bot that posted it, and
+          # claude-code-action's human-actor check aborts the rung ~1s in, BEFORE any model
+          # call, with "Workflow initiated by non-human actor: <login>. Add bot to
+          # allowed_bots list or use '*' to allow all bots." — a failure that looks in a
+          # skimmed log exactly like a provider outage.
+          #
+          # Deliberately a NAMED list, never `*`. Under `*` any bot-authored event — every
+          # repo here runs dependabot — could start an agent run holding the resolved LLM
+          # credential and repo write. `fuzeone-bot` is the fleet's scheduler/automation
+          # identity; `github-actions` covers a comment posted by a workflow using the
+          # default token; `fuze-agent` is the App identity agent PRs are opened under
+          # (governance/identity-and-attribution.md). Gate 2 above still independently
+          # requires the commenter to be OWNER/MEMBER/COLLABORATOR, so this list widens
+          # only the actor-type check, never the trust check.
+          allowed-bots: "fuzeone-bot,github-actions,fuze-agent"
+          # Without these, every mutating tool call (git push, gh pr/issue create, file
+          # edits) sits behind an interactive approval gate that nothing can clear in
+          # headless CI and is silently DENIED — the agent reads the repo, reports success,
+          # and changes nothing. Measured across the fleet on exactly this defect
+          # (governance-nightly.yml's header records the numbers).
+          additional-permissions: |
             Bash
             Write
             Edit
             MultiEdit
             Task
             TodoWrite
-          claude_args: >-
+          claude-args: >-
             --permission-mode bypassPermissions
             --max-turns 60
-            --append-system-prompt "EXPERT-FIRST: begin every task by invoking the fuzeinfra-expert subagent (via Task) to load this repo's architecture/deploy/gotcha context before planning or coding. If .claude/agents/fuzeinfra-expert.md is ever missing, create it from .claude/templates/repo-expert.template.md (explore the repo to fill it in), open a PR adding it, then use it. Runner has PROD cluster access: KUBECONFIG targets the FuzeInfra Contabo k3s cluster; kubectl/helm/terraform installed; GH_TOKEN is a PAT. GitOps guardrails: prod is GitOps under ArgoCD selfHeal — never kubectl-patch/edit chart-managed resources (reverted); reconcile via chart+PR. Imperatively creating NON-chart-managed cluster Secrets to unblock go-live IS allowed. Never run destructive kubectl (delete/drain/cordon) against prod without explicit instruction. Prefer the fuzeinfra-expert and devops-engineer agents for infra delegations. End issue replies with DONE: or BLOCKED: so cross-repo monitors can key off it. CROSS-REPO HAND-OFF: if a delegated issue's REMAINING work belongs to another repo (e.g. the fix is in FuzeFront's app-of-apps, not FuzeInfra), do NOT leave it open here — open (or comment on) an issue in that repo mentioning its @fuze with full context + a STATE block, post a closing note here ('Closing on FuzeInfra's end — handed to <repo>#N, please take it on your side'), and CLOSE this issue. Only keep it open if FuzeInfra itself still has work to do."
+            --append-system-prompt "EXPERT-FIRST: begin every task by invoking this repo's <repo>-expert subagent (via Task) to load its architecture/deploy/gotcha context before planning or coding; the expert is named in .fuze/manifest.json under `expert`. Follow governance/routing.md for ownership: refuse work that belongs to another agent and name the correct owner. This runner holds NO cluster credential and NO prod access — never attempt cluster or infrastructure-as-code commands here (they are not installed and there is no credential for them); infra changes are delegated to FuzeInfra via a `@fuze` issue (CLAUDE.baseline.md 1), and cluster READS are self-service via FuzeInfra's cluster-query workflow. End issue replies with DONE: or BLOCKED: so cross-repo monitors can key off it. CROSS-REPO HAND-OFF: if a delegated issue's REMAINING work belongs to another repo, do NOT leave it open here — open (or comment on) an issue in that repo mentioning its `@fuze` with full context and a STATE block, post a closing note here, and CLOSE this issue."
 
-      # DETECT: did the responder actually fail? Three signals — a key/preflight
-      # hard-stop, the action step's own failure, or is_error in the execution log.
+      # DETECT: did the responder actually fail? Two signals — the composite action's own
+      # step outcome, and `is_error` in claude-code-action's execution log (a run can end
+      # is_error WITHOUT failing the step, which is how a dead responder reported green).
       - name: Detect Fuze failure
         id: detect
         if: always()
         env:
-          EXEC_FILE: ${{ steps.fuze.outputs.execution_file }}
-          KEY_OK: ${{ steps.key-guard.outputs.ok }}
-          KEY_REASON: ${{ steps.key-guard.outputs.reason }}
-          PREFLIGHT_OK: ${{ steps.preflight.outputs.ok }}
-          PREFLIGHT_REASON: ${{ steps.preflight.outputs.reason }}
           STEP_OUTCOME: ${{ steps.fuze.outcome }}
+          MODE: ${{ steps.fuze.outputs.mode }}
+          CONCLUSION: ${{ steps.fuze.outputs.conclusion }}
         run: |
           set -uo pipefail
           failed=false; reason=""
-          if [ "${KEY_OK:-}" != "true" ]; then
-            failed=true; reason="${KEY_REASON:-LITELLM_FUZE_KEY secret is empty or unset}"
-          elif [ "${PREFLIGHT_OK:-}" != "true" ]; then
-            failed=true; reason="${PREFLIGHT_REASON:-preflight did not pass}"
-          elif [ "${STEP_OUTCOME:-}" = "failure" ]; then
-            failed=true; reason="claude-code-action step failed"
-          elif [ -n "${EXEC_FILE:-}" ] && [ -f "$EXEC_FILE" ] && \
-               grep -Eq '"is_error"[[:space:]]*:[[:space:]]*true' "$EXEC_FILE"; then
-            turns=$(jq -rs '[.[]|.. |objects|select(.type?=="result")]|last|.num_turns // ""' "$EXEC_FILE" 2>/dev/null || true)
-            failed=true; reason="Fuze run returned is_error (num_turns=${turns:-?}) — it errored before completing the task"
+          if [ "${STEP_OUTCOME:-}" = "failure" ]; then
+            failed=true
+            reason="fuze-code-action failed (mode=${MODE:-?}, conclusion=${CONCLUSION:-?}). In mention mode there is only one rung, so this is the Anthropic-or-LiteLLM leg failing — check LITELLM_FUZE_KEY and ANTHROPIC_API_KEY on this repo."
+          elif [ "${CONCLUSION:-}" = "failure" ]; then
+            failed=true
+            reason="the responder ran and reported conclusion=failure (mode=${MODE:-?}) — it errored before completing the task"
           fi
           echo "failed=$failed" >> "$GITHUB_OUTPUT"
           {
@@ -304,18 +237,18 @@ jobs:
           if [ "$failed" = "true" ]; then
             echo "::error::@fuze responder failed: $reason"
           else
-            echo "@fuze responder completed without an error signal"
+            echo "@fuze responder completed without an error signal (mode=${MODE:-?})"
           fi
 
-      # ALERT: a failed responder pings Telegram AND tells the requester on their thread.
-      # The failure comment carries the fuze-loop-guard sentinel so it does NOT re-trigger
-      # this workflow (Gate 3 in the job `if:`). DO NOT remove that sentinel.
+      # ALERT: a failed responder tells the requester on their own thread, and pings
+      # Telegram where that is configured. Without this the requester waits on a reply that
+      # is never coming, which is indistinguishable from the agent still thinking.
       - name: Alert on Fuze failure
         if: always() && steps.detect.outputs.failed == 'true'
         env:
           TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           CHAT: ${{ secrets.TELEGRAM_CHAT_ID }}
-          GH_TOKEN: ${{ secrets.GH_TOKEN || secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
           ISSUE: ${{ github.event.issue.number || github.event.pull_request.number }}
           ACTOR: ${{ github.actor }}
@@ -323,9 +256,8 @@ jobs:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -uo pipefail
-          # 1) Telegram
           if [ -n "${TOKEN:-}" ]; then
-            TEXT=$(printf '🔴 @fuze responder FAILED\nRepo: %s\nIssue/PR: #%s\nBy: %s\nReason: %s\nRun: %s' \
+            TEXT=$(printf '@fuze responder FAILED\nRepo: %s\nIssue/PR: #%s\nBy: %s\nReason: %s\nRun: %s' \
               "$REPO" "${ISSUE:-?}" "$ACTOR" "$REASON" "$RUN_URL")
             curl -s -X POST "https://api.telegram.org/bot${TOKEN}/sendMessage" \
               --data-urlencode "chat_id=${CHAT:-}" \
@@ -333,56 +265,25 @@ jobs:
               --data "disable_web_page_preview=true" >/dev/null \
               && echo "telegram alert sent" || echo "::warning::telegram send failed"
           else
-            echo "::warning::TELEGRAM_BOT_TOKEN unset — skipping Telegram alert"
+            echo "::notice::TELEGRAM_BOT_TOKEN unset — skipping Telegram alert"
           fi
-          # 2) Tell the requester on their own thread.
-          #    LOOP-BREAKER: this comment mentions "@fuze" and would otherwise re-trigger
-          #    this workflow. The hidden fuze-loop-guard sentinel is what Gate 3 keys off
-          #    to ignore it — DO NOT remove it.
+          # LOOP-BREAKER: this comment mentions `@fuze` and would otherwise re-trigger this
+          # workflow. The hidden `fuze-loop-guard` sentinel is what Gate 3 keys off to
+          # ignore it — DO NOT remove it.
           if [ -n "${ISSUE:-}" ]; then
             {
               printf '<!-- fuze-loop-guard: automated failure notice — this comment must NOT re-trigger the Fuze workflow -->\n'
-              printf '### ⚠️ Fuze responder did not run to completion\n\n'
+              printf '### Fuze responder did not run to completion\n\n'
               printf 'The responder errored before finishing your request, so **no changes were made and no branch was created**.\n\n'
               printf -- '- **Reason:** %s\n' "$REASON"
               printf -- '- **Run log:** %s\n\n' "$RUN_URL"
-              printf 'This notice is automated and will **not** retry on its own. If the LiteLLM gateway is the problem, check the `LITELLM_FUZE_KEY` secret and gateway health (`helm/litellm/`), then re-trigger by posting a new comment mentioning `@fuze`.\n'
-            } > /tmp/fuze-fail.md
-            gh issue comment "$ISSUE" --repo "$REPO" --body-file /tmp/fuze-fail.md \
+              printf 'This notice is automated and will **not** retry on its own. Re-trigger by posting a new comment mentioning `@fuze` once the cause is fixed.\n'
+            } > "${RUNNER_TEMP}/fuze-fail.md"
+            gh issue comment "$ISSUE" --repo "$REPO" --body-file "${RUNNER_TEMP}/fuze-fail.md" \
               && echo "posted failure notice to #$ISSUE" || echo "::warning::could not comment on #$ISSUE"
           fi
 
-      - name: Open draft PR for new fuze branch
-        if: always()
-        env:
-          GH_TOKEN: ${{ secrets.GH_TOKEN }}
-        run: |
-          git ls-remote origin 'refs/heads/fuze/*' | awk '{print $2}' | sort > /tmp/branches-after.txt
-          NEW=$(comm -13 /tmp/branches-before.txt /tmp/branches-after.txt | head -1 | sed 's#refs/heads/##')
-          if [ -z "$NEW" ]; then
-            echo "No new fuze branch detected — nothing to do."
-            exit 0
-          fi
-          echo "New branch: $NEW"
-          EXISTING=$(gh pr list --repo "$GITHUB_REPOSITORY" --head "$NEW" \
-            --state open --json number --jq '.[0].number' 2>/dev/null || true)
-          if [ -n "$EXISTING" ]; then
-            echo "PR #$EXISTING already open for $NEW — skipping."
-            exit 0
-          fi
-          ISSUE=$(printf '%s' "$NEW" | sed -nE 's#^fuze/issue-0*([0-9]+).*#\1#p')
-          BODY="Auto-opened from branch \`${NEW}\`."
-          [ -n "$ISSUE" ] && BODY=$(printf '%s\n\nCloses #%s' "$BODY" "$ISSUE")
-          gh pr create \
-            --repo "$GITHUB_REPOSITORY" \
-            --base "${{ github.event.repository.default_branch }}" \
-            --head "$NEW" \
-            --draft \
-            --fill \
-            --body "$BODY" \
-            && echo "Draft PR opened for $NEW"
-
-      # Reflect the failure in the job status after alert + PR-open had a chance to run.
+      # Reflect the failure in the job status AFTER alerting had a chance to run.
       - name: Fail job if Fuze failed
         if: always() && steps.detect.outputs.failed == 'true'
         env:
