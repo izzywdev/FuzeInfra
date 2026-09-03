@@ -66,7 +66,26 @@ import sys
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(SCRIPT_DIR, "bootstrap"))
-from lib import render as rnd  # noqa: E402
+try:
+    from lib import render as rnd  # noqa: E402
+except ImportError:
+    # Fallback/self-contained implementation of parse_marker for environments
+    # without scripts/bootstrap (such as standalone consumer repo test suites).
+    import re
+    class FallbackRender:
+        @staticmethod
+        def parse_marker(text: str) -> dict | None:
+            # Matches: # fuze:managed template=<name> baseline=<ref> digest=sha256:<hash>
+            # Or other variants of the fuze:managed marker
+            match = re.search(r'#\s*fuze:managed\s+template=([^\s]+)\s+baseline=([^\s]+)\s+digest=(?:sha256:)?([^\s]+)', text)
+            if not match:
+                return None
+            return {
+                "template": match.group(1),
+                "baseline": match.group(2),
+                "digest": match.group(3)
+            }
+    rnd = FallbackRender()
 
 DEFAULT_MAX_VERSIONS_BEHIND = 3
 BASELINE_VERSION_FILE = os.path.join("governance", "baseline-version.txt")
