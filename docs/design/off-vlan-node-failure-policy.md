@@ -109,6 +109,18 @@ Concretely, for each way a node can be created:
 | Terraform (CI workers, control planes) | `contabo_instance` `add_ons { id, quantity }` at create, plus `private_network_id` | `private_network_id` wired in `ci-workers.tf`; see the note below |
 | Existing instance | `POST /v1/compute/instances/{id}/upgrade {"privateNetworking":{}}` via `ca-private-net` `action=upgrade` | wired |
 
+**The add-on id is `1477`.** That is the concrete value the Terraform
+`add_ons { id = 1477, quantity = 1 }` block needs, and it was previously
+unrecorded anywhere in this repo -- which is part of why the Terraform route
+was written off as impossible. Confirmed against the live API on 2026-09-03
+while ordering it for `fuzeinfra-ci-runner-2`:
+
+```
+POST /v1/compute/instances/203543725/upgrade  {"privateNetworking":{}}
+  -> HTTP 200
+     { "instanceId": 203543725, "addonsIds": [ 1477 ] }
+```
+
 A new provisioning path is not complete until it orders the add-on. Treat a PR
 that adds one without it the same as a PR that omits the k3s join token.
 
