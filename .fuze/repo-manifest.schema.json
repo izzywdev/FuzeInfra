@@ -705,6 +705,23 @@
         }
       }
     },
+    "clusterOps": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Cluster operations settings for FuzeInfra.",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": false
+        },
+        "runner": {
+          "type": "string"
+        },
+        "note": {
+          "type": "string"
+        }
+      }
+    },
     "dependsOn": {
       "type": "array",
       "description": "Product-to-product dependencies this repo consumes beyond the spine (e.g. FuzeService dependsOn FuzeContact, FuzeBI).",
