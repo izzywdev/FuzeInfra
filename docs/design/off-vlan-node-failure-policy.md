@@ -88,6 +88,34 @@ correctly excluded.
 
 ---
 
+## 2a. Standing provisioning policy: every node is born on the VLAN
+
+**Rule: any node provisioned into this cluster is created WITH the paid Contabo
+`privateNetworking` add-on, and attached to net 60932, as part of provisioning.
+There is no per-node cost decision and no human gate.**
+
+The add-on is a per-instance charge, so this was previously treated as a
+judgement call to be escalated each time. It is not. An off-VLAN node is not a
+cheaper node -- it is a broken one (S1: `kubectl logs`/`exec` against it fail,
+kubelet port 10250 is only reachable on the VLAN). Paying per node is the cost
+of the node working at all, so it belongs in the provisioning path, not in a
+decision queue.
+
+Concretely, for each way a node can be created:
+
+| Path | How the add-on is ordered | Status |
+|---|---|---|
+| Elastic (autoscaler) | `createInstance` body `addOns:{privateNetworking:{}}`, gated by `clusterAutoscaler.provider.privateNetworking` | wired; `true` in `values-contabo.yaml` |
+| Terraform (CI workers, control planes) | `contabo_instance` `add_ons { id, quantity }` at create, plus `private_network_id` | `private_network_id` wired in `ci-workers.tf`; see the note below |
+| Existing instance | `POST /v1/compute/instances/{id}/upgrade {"privateNetworking":{}}` via `ca-private-net` `action=upgrade` | wired |
+
+A new provisioning path is not complete until it orders the add-on. Treat a PR
+that adds one without it the same as a PR that omits the k3s join token.
+
+**This is API-orderable, not a panel purchase.** That belief caused the HTTP 402
+to be read as "blocked on a human buying something" for longer than it should
+have been. All three routes above are automated.
+
 ## 3. The assign-before-boot race
 
 `internal/contabo/client.go` `Create()` necessarily runs in this order:
@@ -179,13 +207,22 @@ ELASTIC-EXCLUSION note in `terraform/contabo/private-network.tf`.
 
 ---
 
-## 5. Remediating `fuzeinfra-ci-runner-2` — needs a human
+## 5. Remediating `fuzeinfra-ci-runner-2`
 
 This node **will not self-heal**. It is not autoscaler-managed, so the
 billing-aware reaper will never replace it, and it booted from the old cloud-init
-which has no join unit to re-run. The source path is fixed, so this cannot recur —
-but the existing node must be remediated by hand. **No destructive step was taken
-by this change.**
+which has no join unit to re-run. The source path is fixed, so this cannot recur.
+
+**It does NOT need a human to decide whether to buy the add-on** -- see the
+standing policy in section 2a; that decision is already made, for every node.
+Nor does it need a human to run the purchase: `ca-private-net`
+`action=upgrade` orders the add-on over the API, and `action=assign` attaches
+it. Option A below is a sequence of workflow dispatches, not a manual purchase.
+
+What still warrants a person choosing a moment, rather than a person choosing
+an outcome: the assign step **may reboot the node**, and it carries the ARC
+runners, so it should land in a CI-quiet window. **No destructive step was
+taken by this change.**
 
 Current state (verified):
 
