@@ -962,7 +962,7 @@ def changed_lines(repo, base_ref):
     """
     try:
         res = subprocess.run(
-            ["git", "-C", repo, "diff", "--unified=0", f"{base_ref}...HEAD"],
+            ["git", "-C", repo, "diff", "--no-ext-diff", "--unified=0", f"{base_ref}...HEAD"],
             capture_output=True, text=True, timeout=90)
     except (OSError, subprocess.SubprocessError):
         return None
