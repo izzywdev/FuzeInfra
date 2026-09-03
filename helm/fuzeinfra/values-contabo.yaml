@@ -1070,13 +1070,40 @@ nodeConfigurator:
   # than all of sd*, and roll out to ONE non-control-plane node first.
   multipathBlacklist:
     enabled: true
-    # STAGE ONE: fuzeinfra-ci-runner-1 only. It is a Longhorn node, it is NOT the
-    # control plane, and it carries no database PVC -- so if the multipathd restart
-    # misbehaves the blast radius is CI capacity, not etcd. Widen to the remaining
-    # Longhorn nodes (mendys-worker-1, vmi3396106, then vmi3383846 LAST) only after
-    # volumes are observed attaching and formatting cleanly here.
+    # STAGE TWO: + vmi3396106.
+    #
+    # Stage one (fuzeinfra-ci-runner-1) applied cleanly and is still applied --
+    # its configurator logs "multipath.conf written / multipathd restarted" while
+    # every other node logs "not in multipath rollout set; skipping". No new
+    # FailedMount/FailedAttachVolume event appeared cluster-wide.
+    #
+    # But stage one CANNOT actually prove the fix. ci-runner-1 runs no
+    # longhorn-manager pod (node.longhorn.io Ready=False, reason ManagerPodMissing,
+    # since 2026-07-26), so it hosts no replica and never attaches a Longhorn
+    # volume. It proved the rollout gate works and the restart is survivable --
+    # nothing about iSCSI device claiming.
+    #
+    # ORDER CHANGED from the original plan (mendys-worker-1 next). mendys-worker-1
+    # is ALSO Ready=False, so it cannot demonstrate an attach either. Of the four
+    # Longhorn nodes only vmi3383846 and vmi3396106 are Ready=True and host
+    # replicas, and vmi3383846 is the apiserver endpoint (161.97.118.134) -- so it
+    # stays LAST. That makes vmi3396106 the only node that can verify the change.
+    #
+    # Accepted risk: vmi3396106 is a control-plane/etcd member (3 members, quorum
+    # 2, can lose 1). The blacklist excludes only vendor IET / product
+    # VIRTUAL-DISK -- Longhorn's own iSCSI devices. The host root disk is
+    # QEMU/QEMUHARDDISK and is untouched, and restarting multipathd does not
+    # restart etcd.
+    #
+    # NOTE on the Multipathd condition: it will NOT flip to True here. Longhorn
+    # reports status=False reason=MultipathdIsRunning purely from the process
+    # being up; it never inspects multipath.conf. Verify by observing a volume
+    # attach + format cleanly, not by that condition.
+    #
+    # Widen to mendys-worker-1, then vmi3383846 LAST, only after that.
     rolloutNodes:
       - fuzeinfra-ci-runner-1
+      - vmi3396106
 
 # Stateful services not otherwise overridden here still need the durable pin.
 alertmanager:
