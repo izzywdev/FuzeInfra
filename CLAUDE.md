@@ -64,7 +64,7 @@ Prod is **Contabo single-node k3s**, namespace `fuzeinfra`, owned by **Argo CD**
 
 ## Service / port inventory
 
-Databases: **Postgres** 5432 (+pgAdmin) · **MongoDB** 27017 (+Mongo Express) · **Redis** 6379 · **Neo4j** 7474/7687 · **Elasticsearch** 9200 · **ChromaDB** 8003 (vector). Messaging: **Kafka** 29092 (+Kafka UI, Zookeeper) · **RabbitMQ** 5672/15672. Network: **dnsmasq** 53 (UI 8053, `*.dev.local`) · **Consul** 8500/8600 · **nginx** reverse proxy · **Cloudflare tunnel**. Monitoring: **Prometheus** 9090 · **Grafana** 3001 · **Alertmanager** 9093 · **Loki** 3100 · **Promtail** · **node-exporter** 9100 · **kube-state-metrics** (k8s only). Workflow: **Airflow** 8082 (init/webserver/scheduler/worker) · **Flower** 5555.
+Databases: **Postgres** 5432 (+pgAdmin) · **MariaDB** 3306 (MySQL protocol; `mariadb.enabled` gate) · **MongoDB** 27017 (+Mongo Express) · **Redis** 6379 · **Neo4j** 7474/7687 · **Elasticsearch** 9200 · **ChromaDB** 8003 (vector). Messaging: **Kafka** 29092 (+Kafka UI, Zookeeper) · **RabbitMQ** 5672/15672. Network: **dnsmasq** 53 (UI 8053, `*.dev.local`) · **Consul** 8500/8600 · **nginx** reverse proxy · **Cloudflare tunnel**. Monitoring: **Prometheus** 9090 · **Grafana** 3001 · **Alertmanager** 9093 · **Loki** 3100 · **Promtail** · **node-exporter** 9100 · **kube-state-metrics** (k8s only). Workflow: **Airflow** 8082 (init/webserver/scheduler/worker) · **Flower** 5555.
 
 ## Project-integration guide (pointers)
 

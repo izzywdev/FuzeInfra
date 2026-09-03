@@ -1,0 +1,148 @@
+# Unit tests for the private-VLAN membership alerts (helm/fuzeinfra/rules/nodes.yml).
+#
+# These encode the 2026-08-30 incident: fuzeinfra-ci-runner-2 registered
+# InternalIP 13.140.158.203 + 2a02:c207:2354:3725::1 while fuzeinfra-ci-runner-1
+# — same pool, same Terraform module — registered 10.0.0.4. Nothing alerted,
+# because nothing was looking at node addresses at all.
+#
+# The load-bearing case is `NodeOffPrivateVLAN`: it reads the node's ACTUAL
+# registered address, so it fires for a node created by any provisioning path,
+# including one nobody has audited. Every other guard in this change is
+# path-specific; this one is the backstop.
+
+rule_files:
+  - ../nodes.yml
+
+evaluation_interval: 1m
+
+tests:
+  # -------------------------------------------------------------------------
+  # The incident itself, replayed.
+  # -------------------------------------------------------------------------
+  - interval: 1m
+    name: off-VLAN node with an IPv6 InternalIP fires, on-VLAN sibling does not
+    input_series:
+      # ci-runner-2 as it actually registered: kube-state-metrics reports the
+      # IPv6 as internal_ip once k3s auto-detects both families (no --node-ip).
+      - series: 'kube_node_info{node="fuzeinfra-ci-runner-2",internal_ip="2a02:c207:2354:3725::1"}'
+        values: '1+0x30'
+      - series: 'kube_node_info{node="fuzeinfra-ci-runner-1",internal_ip="10.0.0.4"}'
+        values: '1+0x30'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: NodeOffPrivateVLAN
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              node: fuzeinfra-ci-runner-2
+              internal_ip: "2a02:c207:2354:3725::1"
+            exp_annotations:
+              summary: "Node fuzeinfra-ci-runner-2 is OFF the private VLAN (InternalIP 2a02:c207:2354:3725::1)"
+              description: >-
+                k3s registered this node on 2a02:c207:2354:3725::1 instead of an address in 10.0.0.0/22. Its kubelet is unreachable from the control plane, so logs/exec/ port-forward for every pod on it will fail with a 502. Remediation: docs/design/off-vlan-node-failure-policy.md.
+
+  - interval: 1m
+    name: off-VLAN node with a public IPv4 InternalIP also fires
+    input_series:
+      - series: 'kube_node_info{node="elastic-x",internal_ip="84.247.128.42"}'
+        values: '1+0x30'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: NodeOffPrivateVLAN
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              node: elastic-x
+              internal_ip: "84.247.128.42"
+            exp_annotations:
+              summary: "Node elastic-x is OFF the private VLAN (InternalIP 84.247.128.42)"
+              description: >-
+                k3s registered this node on 84.247.128.42 instead of an address in 10.0.0.0/22. Its kubelet is unreachable from the control plane, so logs/exec/ port-forward for every pod on it will fail with a 502. Remediation: docs/design/off-vlan-node-failure-policy.md.
+
+  # -------------------------------------------------------------------------
+  # The network is a /22, not a /24. A regex written for 10.0.0.x would page
+  # for every legitimate node allocated 10.0.1-3.x — the same off-by-one that
+  # was in the elastic userdata's `ufw allow from 10.0.0.0/24` rule.
+  # -------------------------------------------------------------------------
+  - interval: 1m
+    name: addresses across the whole 10.0.0.0/22 are treated as on-VLAN
+    input_series:
+      - series: 'kube_node_info{node="n0",internal_ip="10.0.0.2"}'
+        values: '1+0x30'
+      - series: 'kube_node_info{node="n1",internal_ip="10.0.1.77"}'
+        values: '1+0x30'
+      - series: 'kube_node_info{node="n2",internal_ip="10.0.2.5"}'
+        values: '1+0x30'
+      - series: 'kube_node_info{node="n3",internal_ip="10.0.3.254"}'
+        values: '1+0x30'
+      # Just outside the /22 — must still fire.
+      - series: 'kube_node_info{node="n4",internal_ip="10.0.4.1"}'
+        values: '1+0x30'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: NodeOffPrivateVLAN
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              node: n4
+              internal_ip: "10.0.4.1"
+            exp_annotations:
+              summary: "Node n4 is OFF the private VLAN (InternalIP 10.0.4.1)"
+              description: >-
+                k3s registered this node on 10.0.4.1 instead of an address in 10.0.0.0/22. Its kubelet is unreachable from the control plane, so logs/exec/ port-forward for every pod on it will fail with a 502. Remediation: docs/design/off-vlan-node-failure-policy.md.
+
+  # -------------------------------------------------------------------------
+  # A node that self-quarantined: cloud-init waited for eth1, gave up, and
+  # joined with vlan=absent + NoSchedule rather than pretending to be capacity.
+  # -------------------------------------------------------------------------
+  - interval: 1m
+    name: self-quarantined node fires; a healthy vlan=present node does not
+    input_series:
+      - series: 'kube_node_labels{node="elastic-quarantined",label_fuzeinfra_io_vlan="absent"}'
+        values: '1+0x30'
+      - series: 'kube_node_labels{node="elastic-healthy",label_fuzeinfra_io_vlan="present"}'
+        values: '1+0x30'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: NodeQuarantinedOffVLAN
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              node: elastic-quarantined
+              label_fuzeinfra_io_vlan: absent
+            exp_annotations:
+              summary: "Node elastic-quarantined self-quarantined: private NIC never appeared"
+              description: >-
+                cloud-init waited for eth1 to carry an IPv4 and gave up, so the node joined with fuzeinfra.io/off-vlan=true:NoSchedule and carries no workload. The paid privateNetworking add-on or the assign to network 60932 did not land. Fix with the ca-private-net workflow (action=upgrade then action=assign); the node's join unit re-runs on the next boot and repairs itself.
+
+  # -------------------------------------------------------------------------
+  # "No label" must not read as healthy — that is the state every node from an
+  # unaudited provisioning path is in. Control planes are exempt: they are
+  # configured by provisioning.tf, not by the node cloud-init, so they never
+  # carry the label.
+  # -------------------------------------------------------------------------
+  - interval: 1m
+    name: unlabelled agent node is reported; labelled node and control plane are not
+    input_series:
+      - series: 'kube_node_info{node="unaudited-node",internal_ip="10.0.0.9"}'
+        values: '1+0x1500'
+      - series: 'kube_node_info{node="labelled-node",internal_ip="10.0.0.10"}'
+        values: '1+0x1500'
+      - series: 'kube_node_labels{node="labelled-node",label_fuzeinfra_io_vlan="present"}'
+        values: '1+0x1500'
+      - series: 'kube_node_info{node="cp-1",internal_ip="10.0.0.6"}'
+        values: '1+0x1500'
+      - series: 'kube_node_role{node="cp-1",role="control-plane"}'
+        values: '1+0x1500'
+    alert_rule_test:
+      - eval_time: 25h
+        alertname: NodeMissingVLANLabel
+        exp_alerts:
+          - exp_labels:
+              severity: info
+              node: unaudited-node
+              internal_ip: "10.0.0.9"
+            exp_annotations:
+              summary: "Node unaudited-node carries no fuzeinfra.io/vlan label"
+              description: >-
+                This node was created by a provisioning path that does not report VLAN status, so nothing is auditing it. Identify the path and bring it onto the contract -- see the provisioning-path table in docs/design/off-vlan-node-failure-policy.md.

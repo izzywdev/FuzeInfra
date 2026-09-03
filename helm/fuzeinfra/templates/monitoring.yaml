@@ -59,15 +59,99 @@ spec:
       port: {{ .Values.prometheus.port }}
       targetPort: 9090
 ---
+{{- /*
+     Prometheus' TSDB volume is a STANDALONE PersistentVolumeClaim, deliberately NOT a
+     StatefulSet volumeClaimTemplate. This mirrors the Loki conversion (#773), for the
+     same two reasons plus one that was specific to this outage.
+
+     WHY NOT A StatefulSet:
+       1. Nothing here needs one. `replicas` is 1, the volume is ReadWriteOnce, the
+          Service is a plain ClusterIP (the `serviceName` headless governance was never
+          used), and single-binary Prometheus has no peers, no ordinals and no stable
+          network identity requirement. A StatefulSet bought this workload nothing.
+       2. A StatefulSet's .spec.volumeClaimTemplates is immutable, AND this chart's Argo
+          Application hides that field from the sync entirely (ignoreDifferences +
+          RespectIgnoreDifferences, argocd/applications/fuzeinfra-prod.yaml). That made
+          `prometheus.storage` INERT — exactly as it had made `loki.storage` inert. A
+          standalone PVC's spec.resources.requests.storage IS mutable (the `longhorn`
+          class sets allowVolumeExpansion: true), so `prometheus.storage` below is now
+          the real, enforced size: change it in Git, Argo applies it, Longhorn expands.
+
+     That STS ignoreDifferences rule is NOT Prometheus-specific — it is keyed on
+     `kind: StatefulSet` with no name, and postgres/mongodb/neo4j/kafka/elasticsearch/
+     redis/rabbitmq/chromadb/alertmanager all depend on it to protect real data
+     (2026-07-24 incident, in which Neo4j was LOST). It is left exactly as-is;
+     Prometheus simply stops being a StatefulSet and therefore stops being in its scope.
+
+     MIGRATION (2026-09-01) — WHY A FRESH VOLUME, NOT AN ADOPTION:
+     `fuzeinfra-prometheus-0` sat in ContainerCreating for NINE DAYS. The Longhorn
+     volume behind `data-fuzeinfra-prometheus-0` was itself healthy the whole time
+     (state=attached, robustness=healthy, 3 running replicas) — the failure was one
+     level down, a stale kernel mount on the attach node that pinned the block device:
+
+       MountVolume.MountDevice failed for volume "pvc-b9657c07-9224-4a82-bf9a-9dc28c8e543a":
+       rpc error: code = Internal desc = mount failed: exit status 32
+       mount: .../globalmount: /dev/longhorn/pvc-b9657c07-9224-4a82-bf9a-9dc28c8e543a
+       already mounted or mount point busy.      (x4458 over 6d7h)
+
+     A leaked mount is a property of THAT device on THAT node, so it cannot be fixed
+     from inside the chart and it does not clear on its own. For Loki, force-detaching
+     the volume, restarting the CSI plugin and deleting the pod all failed; declaring a
+     new claim — a different Longhorn volume, therefore a different device with no
+     leaked mount — is what actually worked, and that pod has run since with 0 restarts.
+
+     The cost is bounded and was worth paying: retention is 15d and the TSDB had already
+     been frozen for 9 of those days, so most of what the old volume holds has aged out
+     anyway, and the alternative is leaving the ENTIRE monitoring layer dark — with
+     Prometheus down there are no endpoints, so every rule in helm/fuzeinfra/rules/ is
+     inert, PVCFillingUp included.
+
+     Declaring a fresh PVC also means Git and the cluster can never disagree on a PVC's
+     IMMUTABLE fields (storageClassName, accessModes) — Argo creates it from exactly this
+     spec, whereas adopting a live claim whose spec differs would wedge the sync
+     permanently. The old claim is NOT deleted by this chart and must not be
+     auto-deleted: `data-fuzeinfra-prometheus-0` stays Bound (the `longhorn` class is
+     reclaimPolicy: Retain) so a human can mount it read-only to recover history, and
+     remove it plus its Longhorn volume once the new one is confirmed healthy.
+
+     Deletion protection: `helm.sh/resource-policy: keep` stops a Helm uninstall from
+     removing this claim, and Argo's `Prune=false` stops an Argo prune from removing it.
+     A chart change can disable Prometheus without destroying its volume. Shrinking
+     `storage` is rejected by the API server (expansion only) — that is intended.
+*/}}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: fuzeinfra-prometheus-data
+  labels:
+    {{- include "fuzeinfra.labels" . | nindent 4 }}
+    {{- include "fuzeinfra.selectorLabels" (dict "component" "prometheus" "root" $) | nindent 4 }}
+  annotations:
+    helm.sh/resource-policy: keep
+    argocd.argoproj.io/sync-options: Prune=false
+spec:
+  accessModes: ["ReadWriteOnce"]
+  {{- include "fuzeinfra.storageClass" . | nindent 2 }}
+  resources:
+    requests:
+      storage: {{ .Values.prometheus.storage }}
+---
 apiVersion: apps/v1
-kind: StatefulSet
+kind: Deployment
 metadata:
   name: fuzeinfra-prometheus
   labels:
     {{- include "fuzeinfra.labels" . | nindent 4 }}
 spec:
-  serviceName: fuzeinfra-prometheus
   replicas: 1
+  # Recreate, NOT RollingUpdate. LOAD-BEARING: the TSDB volume is ReadWriteOnce, so a
+  # rolling update deadlocks — the new pod cannot mount the claim while the old pod
+  # still holds it, the old pod is never terminated because the new one never becomes
+  # Ready, and the rollout hangs until it is manually unstuck. Recreate tears the old
+  # pod down first. The cost is a short scrape gap on every restart, which is the
+  # correct trade for a single-replica Prometheus that already had exactly one pod.
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       {{- include "fuzeinfra.selectorLabels" (dict "component" "prometheus" "root" $) | nindent 6 }}
@@ -112,6 +196,10 @@ spec:
               port: 9090
             initialDelaySeconds: 15
             periodSeconds: 10
+          {{- with .Values.prometheus.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
         {{- if .Values.prometheus.ruleSidecar.enabled }}
         # k8s-sidecar: watches ConfigMaps labeled `{{ .Values.prometheus.ruleSidecar.label }}={{ .Values.prometheus.ruleSidecar.labelValue }}`
         # in {{ .Values.prometheus.ruleSidecar.searchNamespace }}, writes their rule files into the shared rules-discovered
@@ -142,6 +230,14 @@ spec:
             - name: rules-discovered
               mountPath: /etc/prometheus/rules-discovered
         {{- end }}
+      {{- with .Values.prometheus.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.prometheus.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       volumes:
         - name: config
           configMap:
@@ -153,17 +249,9 @@ spec:
         - name: rules-discovered
           emptyDir: {}
         {{- end }}
-  volumeClaimTemplates:
-    - apiVersion: v1
-      kind: PersistentVolumeClaim
-      metadata:
-        name: data
-      spec:
-        accessModes: ["ReadWriteOnce"]
-        {{- include "fuzeinfra.storageClass" . | nindent 8 }}
-        resources:
-          requests:
-            storage: {{ .Values.prometheus.storage }}
+        - name: data
+          persistentVolumeClaim:
+            claimName: fuzeinfra-prometheus-data
 {{- end }}
 
 {{- /* ===================== Alertmanager ===================== */ -}}
@@ -204,6 +292,13 @@ spec:
         {{- include "fuzeinfra.labels" . | nindent 8 }}
         {{- include "fuzeinfra.selectorLabels" (dict "component" "alertmanager" "root" $) | nindent 8 }}
     spec:
+      {{- with .Values.alertmanager.nodeSelector }}
+      # Pin to durable (Longhorn-disk) nodes. Longhorn only registers a
+      # node.longhorn.io object for nodes running longhorn-manager; a pod
+      # scheduled elsewhere can never attach its volume.
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       containers:
         - name: alertmanager
           image: {{ .Values.alertmanager.image }}
@@ -517,15 +612,79 @@ spec:
       port: {{ .Values.loki.port }}
       targetPort: 3100
 ---
+{{- /*
+     Loki's data volume is a STANDALONE PersistentVolumeClaim, deliberately NOT a
+     StatefulSet volumeClaimTemplate.
+
+     WHY: a StatefulSet's .spec.volumeClaimTemplates is immutable — the API server
+     rejects any change to it ("updates to statefulset spec for fields other than
+     'replicas', 'ordinals', 'template', ... are forbidden"), and this chart's Argo
+     Application additionally hides that field from the sync entirely
+     (ignoreDifferences + RespectIgnoreDifferences, argocd/applications/fuzeinfra-prod.yaml).
+     The combination made `loki.storage` INERT: raising it 5Gi -> 20Gi in Git changed
+     nothing on the running cluster, and the live volume could only be grown by a
+     direct `kubectl patch pvc` — precisely the out-of-band mutation GitOps exists to
+     eliminate. A standalone PVC's spec.resources.requests.storage IS mutable (the
+     `longhorn` class sets allowVolumeExpansion: true), so `loki.storage` below is now
+     the real, enforced size: change it in Git, Argo applies it, Longhorn expands.
+
+     That STS ignoreDifferences rule is NOT Loki-specific — it is keyed on
+     `kind: StatefulSet` with no name, and postgres/mongodb/neo4j/kafka/elasticsearch/
+     redis/rabbitmq/prometheus/alertmanager/chromadb all depend on it to protect real
+     data (2026-07-24 incident). It is left exactly as-is; Loki simply stops being a
+     StatefulSet and therefore stops being in its scope.
+
+     MIGRATION (2026-08-31): this is a NEW, EMPTY volume, deliberately not an
+     adoption of the StatefulSet's old `data-fuzeinfra-loki-0` claim. Loki's content
+     is disposable logs, and that old volume still holds the unreplayable WAL that
+     produced the crash-loop ("building tsdb from old WAL files" -> "no space left on
+     device"), so adopting it would carry the failure forward. Declaring a fresh PVC
+     also means Git and the cluster can never disagree on a PVC's IMMUTABLE fields
+     (storageClassName, accessModes) — Argo creates it from exactly this spec,
+     whereas adopting a live claim whose spec differs would wedge the sync
+     permanently. Loki re-ingests from Promtail on start; only historical logs are
+     lost. The old claim is NOT deleted by this chart and must not be auto-deleted —
+     a human should remove `data-fuzeinfra-loki-0` (and its Longhorn volume) once
+     the new one is confirmed healthy.
+
+     Deletion protection: `helm.sh/resource-policy: keep` stops a Helm uninstall from
+     removing it, and Argo's `Prune=false` stops an Argo prune from removing it. A
+     chart change can disable Loki without destroying its volume. Shrinking `storage`
+     is rejected by the API server (expansion only) — that is intended.
+*/}}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: fuzeinfra-loki-data
+  labels:
+    {{- include "fuzeinfra.labels" . | nindent 4 }}
+    {{- include "fuzeinfra.selectorLabels" (dict "component" "loki" "root" $) | nindent 4 }}
+  annotations:
+    helm.sh/resource-policy: keep
+    argocd.argoproj.io/sync-options: Prune=false
+spec:
+  accessModes: ["ReadWriteOnce"]
+  {{- include "fuzeinfra.storageClass" . | nindent 2 }}
+  resources:
+    requests:
+      storage: {{ .Values.loki.storage }}
+---
 apiVersion: apps/v1
-kind: StatefulSet
+kind: Deployment
 metadata:
   name: fuzeinfra-loki
   labels:
     {{- include "fuzeinfra.labels" . | nindent 4 }}
 spec:
-  serviceName: fuzeinfra-loki
   replicas: 1
+  # Recreate, NOT RollingUpdate. LOAD-BEARING: the data volume is ReadWriteOnce, so
+  # a rolling update deadlocks — the new pod cannot mount the claim while the old
+  # pod still holds it, the old pod is never terminated because the new one never
+  # becomes Ready, and the rollout hangs until it is manually unstuck. Recreate
+  # tears the old pod down first. The cost is a short logging gap on every restart,
+  # which is the correct trade for a single-replica, single-binary Loki.
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       {{- include "fuzeinfra.selectorLabels" (dict "component" "loki" "root" $) | nindent 6 }}
@@ -575,21 +734,25 @@ spec:
               port: 3100
             initialDelaySeconds: 20
             periodSeconds: 10
+          {{- with .Values.loki.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      {{- with .Values.loki.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.loki.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       volumes:
         - name: config
           configMap:
             name: fuzeinfra-loki-config
-  volumeClaimTemplates:
-    - apiVersion: v1
-      kind: PersistentVolumeClaim
-      metadata:
-        name: data
-      spec:
-        accessModes: ["ReadWriteOnce"]
-        {{- include "fuzeinfra.storageClass" . | nindent 8 }}
-        resources:
-          requests:
-            storage: {{ .Values.loki.storage }}
+        - name: data
+          persistentVolumeClaim:
+            claimName: fuzeinfra-loki-data
 {{- end }}
 
 {{- /* ===================== Promtail (DaemonSet) ===================== */ -}}

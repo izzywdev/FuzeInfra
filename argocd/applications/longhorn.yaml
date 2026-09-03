@@ -67,11 +67,43 @@ spec:
           replicaReplenishmentWaitInterval: 30
           # Guard against replicas landing on autoscaled/reaped elastic nodes.
           allowVolumeCreationWithDegradedAvailability: false
-        # Keep local-path the cluster default: do NOT create a default-marked
-        # Longhorn StorageClass. The opt-in `longhorn` SC ships from the umbrella
-        # chart (templates/storageclass-longhorn.yaml), non-default.
+        # LONGHORN IS NOW THE CLUSTER DEFAULT. This was `false`, with local-path
+        # left as the default — and that default was silently destroying data.
+        #
+        # WHY IT CHANGED. `local-path` provisions node-LOCAL disk and pins the PV
+        # to that node by nodeAffinity. On a cluster whose elastic nodes are
+        # created and REAPED by an autoscaler, a volume on local-path dies with
+        # its node. Measured 2026-09-01, two PVs are bound to nodes that no longer
+        # exist:
+        #
+        #   fuzekeys/fuzekeys-data            -> fuzeinfra-elastic-918c8556  (gone)
+        #   fuzeinfra/data-fuzeinfra-postgres-0 -> fuzeinfra-elastic-57543f68 (gone)
+        #
+        # The fuzekeys one is why `fuzekeys-backend` can never schedule: its PV
+        # points at a deleted machine, so no amount of capacity or node labelling
+        # helps. This is the same class as the 2026-07-24 incident in which
+        # local-path volumes were wiped by node reinstalls and Neo4j was LOST.
+        #
+        # The trap was the DEFAULT, not any one repo's carelessness: a consuming
+        # chart that does not explicitly say `storageClassName: longhorn` gets
+        # ephemeral disk silently. `global.storageClass: longhorn` only governs
+        # FuzeInfra's own umbrella chart; consuming repos deploy their own Helm
+        # releases and never inherited it. Eight PVCs across six namespaces landed
+        # on local-path this way — including a Postgres, a MariaDB, RabbitMQ and
+        # Redis.
+        #
+        # Making the SAFE class the default inverts the failure mode: forgetting
+        # to choose now yields replicated storage on durable nodes instead of
+        # disposable disk. Opting INTO local-path stays possible and is now an
+        # explicit, reviewable act.
+        #
+        # PAIRED CHANGE, REQUIRED: k3s ships local-path marked default via its
+        # `local-storage` Addon. Two default classes is an invalid state, so that
+        # annotation must be flipped to "false" as well. It is owned by the k3s
+        # addon controller (objectset.rio.cattle.io/owner-name: local-storage),
+        # not by this chart, so it cannot be expressed here.
         persistence:
-          defaultClass: false
+          defaultClass: true
           defaultClassReplicaCount: 3
           reclaimPolicy: Retain
         # Trim footprint on the memory-constrained control-plane.

@@ -1,3 +1,41 @@
+# fuze:fork — NOT `fuze:managed`, but for a DIFFERENT reason than the other forks in this
+# directory, and the distinction matters because this file is the one most likely to be
+# "helpfully" stamped by the next sweep.
+#
+# THIS FILE CONTAINS NO FUZEINFRA-SPECIFIC BEHAVIOUR. It was diffed against the FuzeSDLC
+# canonical rendered through this repo's own render path, and its job set is a strict SUBSET
+# of the canonical's — 7 jobs missing (gate-a2a, gate-actionlint, gate-api-version,
+# gate-code-review, gate-federation-contract, gate-platform-auth, gate-vacuous-check) and
+# ZERO jobs that the canonical does not have. So this is staleness, not a fork of behaviour,
+# and the file SHOULD eventually be `fuze:managed`.
+#
+# It is left unmarked today for two concrete reasons, both of which are fixable upstream:
+#
+# 1. ADOPTING THE CANONICAL RIGHT NOW WOULD BE A SUPPLY-CHAIN DOWNGRADE. These pins are
+#    Dependabot-maintained in this repo (.github/dependabot.yml, weekly, github-actions
+#    ecosystem) and the canonical is behind on every one of them:
+#
+#       github/codeql-action/upload-sarif   v4.37.7 (x3)  ->  v3 (x3)
+#       actions/setup-python                v7.0.0  (x6)  ->  v5
+#       actions/setup-node                  v7.0.0  (x4)  ->  v4 / v4.4.0
+#       actions/checkout                    v7.0.1  (x14) ->  adds one v4.2.2 in gate-code-review
+#
+#    The canonical also carries one FLOATING `actions/setup-node@v7` with no SHA, which this
+#    repo's hardening standard (SHA-pin every third-party action) does not allow.
+#
+# 2. RECONCILIATION HERE IS A GATE-POLICY CHANGE, NOT A PROVENANCE STAMP. Adding those 7
+#    gate jobs changes what blocks a PR in this repo and has its own script/self-test
+#    prerequisites (cf. #771, which had to ship the gate scripts + self-tests the existing
+#    jobs already shelled out to). It deserves its own PR and its own review.
+#
+# Marking it prematurely is not neutral: `gate-workflow-drift` is a REQUIRED-check ratchet
+# that fails once a MARKED file's drift has survived `max_versions_behind` baseline releases.
+# Stamping now therefore arms a required check whose only local remedy would be accepting
+# the downgrades in (1).
+#
+# TO UNBLOCK: bump the canonical's action pins in FuzeSDLC (and SHA-pin that setup-node@v7),
+# then stamp this file in a follow-up PR that reviews the 7 added jobs on their merits.
+
 name: Harden Gate
 
 # Unified protection gate shared verbatim across all hardened repos.
@@ -122,7 +160,7 @@ jobs:
           pip install -q semgrep
           semgrep scan --config auto --sarif --output semgrep.sarif || true
           test -f semgrep.sarif || echo '{"version":"2.1.0","runs":[]}' > semgrep.sarif
-      - uses: github/codeql-action/upload-sarif@v4.37.7
+      - uses: github/codeql-action/upload-sarif@v4.37.9
         continue-on-error: true  # private repos lack code-scanning; report-only must stay green
         if: always()
         with:
@@ -196,7 +234,7 @@ jobs:
           output: trivy.sarif
           severity: CRITICAL,HIGH
           exit-code: '0'
-      - uses: github/codeql-action/upload-sarif@v4.37.7
+      - uses: github/codeql-action/upload-sarif@v4.37.9
         continue-on-error: true  # private repos lack code-scanning; report-only must stay green
         if: always()
         with:
@@ -218,7 +256,7 @@ jobs:
           [ -f .semgrep/fuze-authz.yml ] && CFG="$CFG --config .semgrep/fuze-authz.yml"
           semgrep scan $CFG --config p/owasp-top-ten --config p/secrets --sarif --output authz.sarif || true
           test -f authz.sarif || echo '{"version":"2.1.0","runs":[]}' > authz.sarif
-      - uses: github/codeql-action/upload-sarif@v4.37.7
+      - uses: github/codeql-action/upload-sarif@v4.37.9
         if: always()
         continue-on-error: true
         with:
@@ -290,6 +328,11 @@ jobs:
           # never ran — a new vacuous gate, introduced by the commit that removed four of
           # them. Discovery here is deliberately broad: this directory holds the self-tests
           # for every distributed script, and all of them must be known to fire.
+          # pyyaml+pynacl: this discovery is deliberately BROAD (test_*.py), so it runs the
+          # self-tests of every distributed script -- including test_gate_required_checks.py,
+          # whose gate has NO structural fallback and SystemExits without PyYAML. Matches
+          # the canonical harden-gate.yml, which installs both before this same line.
+          pip install -q pyyaml pynacl
           python -m unittest discover -s scripts/__tests__ -p 'test_*.py'
 
       - name: Identifier gate — contracts (enforcing)

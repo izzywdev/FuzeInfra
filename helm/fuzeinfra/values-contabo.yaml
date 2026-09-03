@@ -61,10 +61,34 @@ postgres:
   nodeSelector:
     node.longhorn.io/create-default-disk: "true"
 mongodb:
+  # Pin to durable Longhorn-disk nodes. longhorn-manager only runs on the 3
+  # durable nodes, so Longhorn registers node.longhorn.io objects only there;
+  # a stateful pod scheduled onto an ephemeral elastic node can NEVER attach
+  # its volume (FailedAttachVolume: node.longhorn.io "..." not found).
+  nodeSelector:
+    node.longhorn.io/create-default-disk: "true"
   storage: 10Gi
   resources:
     requests: {cpu: 100m, memory: 256Mi}
     limits: {cpu: "1", memory: 512Mi}
+# Shared MariaDB engine — ON in prod. Consumers needing a MySQL-protocol store
+# (WordPress and friends) must stop shipping their own MariaDB StatefulSet:
+# mendys-wp's own `mendys-wp-mariadb` STS had its PVC on `local-path` and lost
+# it to a node reinstall (2026-07-24 storage class). The shared engine's PVC is
+# Longhorn (global.storageClass, reclaimPolicy Retain) and is backed up by the
+# nightly DB backup CronJobs, which a consumer-owned engine never was.
+mariadb:
+  enabled: true
+  # Pin to durable Longhorn-disk nodes. longhorn-manager only runs on the 3
+  # durable nodes, so Longhorn registers node.longhorn.io objects only there;
+  # a stateful pod scheduled onto an ephemeral elastic node can NEVER attach
+  # its volume (FailedAttachVolume: node.longhorn.io "..." not found).
+  nodeSelector:
+    node.longhorn.io/create-default-disk: "true"
+  storage: 20Gi
+  resources:
+    requests: {cpu: 100m, memory: 256Mi}
+    limits: {cpu: "1", memory: 1Gi}
 neo4j:
   # Pin to durable Longhorn-disk nodes (same as postgres) so Neo4j never runs
   # on an ephemeral autoscaled node once products start seeding it.
@@ -88,6 +112,12 @@ serviceNeo4jInstances:
       requests: {cpu: 200m, memory: 1Gi}
       limits: {cpu: "1", memory: 2Gi}
 redis:
+  # Pin to durable Longhorn-disk nodes. longhorn-manager only runs on the 3
+  # durable nodes, so Longhorn registers node.longhorn.io objects only there;
+  # a stateful pod scheduled onto an ephemeral elastic node can NEVER attach
+  # its volume (FailedAttachVolume: node.longhorn.io "..." not found).
+  nodeSelector:
+    node.longhorn.io/create-default-disk: "true"
   storage: 2Gi
   resources:
     requests: {cpu: 50m, memory: 128Mi}
@@ -97,6 +127,12 @@ redis:
 # PVCs are RETAINED (no prune, no data loss) — set replicas back to 1 to restore.
 # mongo / neo4j / postgres / redis / kafka / chromadb / monitoring stay running.
 elasticsearch:
+  # Pin to durable Longhorn-disk nodes. longhorn-manager only runs on the 3
+  # durable nodes, so Longhorn registers node.longhorn.io objects only there;
+  # a stateful pod scheduled onto an ephemeral elastic node can NEVER attach
+  # its volume (FailedAttachVolume: node.longhorn.io "..." not found).
+  nodeSelector:
+    node.longhorn.io/create-default-disk: "true"
   replicas: 0
   storage: 20Gi
   javaOpts: "-Xms512m -Xmx512m"
@@ -104,6 +140,12 @@ elasticsearch:
     requests: {cpu: 250m, memory: 1Gi}
     limits: {cpu: "1", memory: 1536Mi}
 rabbitmq:
+  # Pin to durable Longhorn-disk nodes. longhorn-manager only runs on the 3
+  # durable nodes, so Longhorn registers node.longhorn.io objects only there;
+  # a stateful pod scheduled onto an ephemeral elastic node can NEVER attach
+  # its volume (FailedAttachVolume: node.longhorn.io "..." not found).
+  nodeSelector:
+    node.longhorn.io/create-default-disk: "true"
   replicas: 0 # TEMP headroom (#93) — restore to 1 when the node has capacity
   # Strong credential from deploy/sealed-secrets/fuzeinfra-app-credentials.yaml,
   # replacing the chart default "admin123" that prod was otherwise rendering.
@@ -115,8 +157,20 @@ rabbitmq:
     name: fuzeinfra-app-credentials
     key: RABBITMQ_PASSWORD
 kafka:
+  # Pin to durable Longhorn-disk nodes. longhorn-manager only runs on the 3
+  # durable nodes, so Longhorn registers node.longhorn.io objects only there;
+  # a stateful pod scheduled onto an ephemeral elastic node can NEVER attach
+  # its volume (FailedAttachVolume: node.longhorn.io "..." not found).
+  nodeSelector:
+    node.longhorn.io/create-default-disk: "true"
   storage: 10Gi
 prometheus:
+  # Pin to durable Longhorn-disk nodes. longhorn-manager only runs on the 3
+  # durable nodes, so Longhorn registers node.longhorn.io objects only there;
+  # a stateful pod scheduled onto an ephemeral elastic node can NEVER attach
+  # its volume (FailedAttachVolume: node.longhorn.io "..." not found).
+  nodeSelector:
+    node.longhorn.io/create-default-disk: "true"
   storage: 20Gi
   # Let downstream apps ship Prometheus alert/recording rules from their own
   # namespaces via ConfigMaps labeled `prometheus_rule: "1"`.
@@ -224,8 +278,83 @@ kafkaUi:
 #      commit it, let Argo sync.
 #   3. Flip loki.s3.enabled -> true here, commit, let Argo sync.
 loki:
+  # Pin to durable Longhorn-disk nodes. longhorn-manager only runs on the 3
+  # durable nodes, so Longhorn registers node.longhorn.io objects only there;
+  # a stateful pod scheduled onto an ephemeral elastic node can NEVER attach
+  # its volume (FailedAttachVolume: node.longhorn.io "..." not found).
+  nodeSelector:
+    node.longhorn.io/create-default-disk: "true"
+  # 20Gi, not the 5Gi base default — and as of the Deployment conversion this
+  # value is ENFORCED rather than aspirational.
+  #
+  # HOW IT WORKS NOW. Loki is a Deployment (strategy: Recreate) whose data volume
+  # is the standalone PVC `fuzeinfra-loki-data`, declared as its own template in
+  # helm/fuzeinfra/templates/monitoring.yaml. A standalone PVC's
+  # spec.resources.requests.storage is mutable and the `longhorn` class sets
+  # allowVolumeExpansion: true, so resizing Loki's disk is now an ordinary GitOps
+  # change: edit the number below, merge to main, Argo applies the PVC patch and
+  # Longhorn expands the volume. Growth only — the API server rejects a shrink.
+  #
+  # WHAT THIS REPLACED. Loki used to be a StatefulSet, so its storage came from
+  # volumeClaimTemplates — an immutable field, additionally hidden from the sync by
+  # the chart's Argo ignoreDifferences + RespectIgnoreDifferences. This number was
+  # therefore INERT: raising it 5Gi -> 20Gi changed nothing on the running cluster,
+  # and the live volume only reached 20Gi via a direct `kubectl patch pvc` on
+  # 2026-08-31 — exactly the out-of-band mutation GitOps exists to eliminate.
+  # That ignoreDifferences rule is deliberately UNTOUCHED: it is keyed on
+  # `kind: StatefulSet` with no name, and postgres/mongodb/neo4j/kafka/
+  # elasticsearch/redis/rabbitmq/prometheus/alertmanager/chromadb all still need it
+  # to protect real data after the 2026-07-24 incident. Loki is simply no longer a
+  # StatefulSet, so it is no longer in that rule's scope.
+  #
+  # WHY 5Gi WAS NOT SURVIVABLE, and why this is not merely a tuning nit. Loki
+  # retained 744h (31 days) of fleet logs and compacted them on a schedule
+  # (compactor.retention_enabled, configmaps-monitoring.yaml). 31 days of logs
+  # from 22 repos' workloads does not fit in 5Gi, so the volume filled — and a
+  # FULL Loki volume is self-sealing, because retention is enforced BY the
+  # compactor, the compactor runs inside Loki, and Loki cannot start:
+  #
+  #   mkdir /loki/tsdb-shipper-active/scratch/...: no space left on device
+  #
+  # It crash-looped 694 times over 2d11h and could never free its own space.
+  #
+  # The cost was not lost logs. Argo's sync of fuzeinfra-prod blocks on resource
+  # health, so a permanently-unhealthy Loki wedged one sync operation in `Running`
+  # for 37 HOURS (started 2026-08-30 08:47), and every prod change queued behind
+  # it silently — including the cluster-autoscaler maxSize raise that fleet-wide
+  # CI was waiting on. A monitoring component took the delivery pipeline down by
+  # filling a disk. Size this generously; it is not where to economise.
+  #
+  # Retention is now 336h (14 days, configmaps-monitoring.yaml) and s3.enabled is
+  # true below, so this volume no longer holds the retention window at all. Kept
+  # at 20Gi deliberately: it is the WAL + tsdb-shipper cache + compactor scratch,
+  # and Loki OSS has no size-based retention, so headroom is still the only thing
+  # standing between a write spike and a stuck pod. The new PVCFillingUp alert
+  # (rules/kubernetes.yml, 80%) is what catches that now.
+  storage: 20Gi
   s3:
-    enabled: false            # human-gated flip (needs the loki-s3 SealedSecret)
+    # ON since 2026-09-01. This — not a bigger disk — is the real remedy for
+    # unbounded growth: chunks + index live in Contabo Object Storage, so the PVC
+    # stops being the constraint and can no longer wedge Loki (and, through Loki's
+    # health, the whole Argo sync queue). The PVC above still exists and still
+    # matters: Loki keeps its WAL, the tsdb-shipper active/cache directories and
+    # the compactor working_directory on local disk, so it is sized for working
+    # set rather than for the full retention window.
+    #
+    # No longer "human-gated". The gate was never a safeguard — it was a flag
+    # waiting on a human to seal a secret, which is a defect in an autonomous
+    # SDLC. The credential was fetched from the Contabo API (NOT the panel; the
+    # API also requires x-request-id to be a valid UUID), verified against
+    # eu2.contabostorage.com/fuzeinfra-loki with a list + put/head/delete
+    # round-trip, and sealed OFFLINE against the committed public cert
+    # (deploy/sealed-secrets/sealing-cert.pem) into
+    # deploy/sealed-secrets/loki-s3-credentials.yaml -> SealedSecret
+    # fuzeinfra/loki-s3, which the fuzeinfra-sealed-secrets Argo app syncs.
+    # Ordering note: that SealedSecret ships in the SAME commit as this flip, and
+    # monitoring.yaml wires the keys via secretKeyRef, so if the Secret is not yet
+    # materialised the Loki pod stays Pending on the missing Secret rather than
+    # starting with an empty credential and looping on S3 auth errors.
+    enabled: true
     endpoint: "eu2.contabostorage.com"
     region: "default"
     bucket: "fuzeinfra-loki"
@@ -259,6 +388,10 @@ backups:
     schedule: "20 2 * * *"   # 02:20 UTC
   neo4j:
     schedule: "40 2 * * *"   # 02:40 UTC
+  # Follows mariadb.enabled: true above. Staggered clear of the other three.
+  mariadb:
+    enabled: true
+    schedule: "0 3 * * *"    # 03:00 UTC
   s3:
     endpoint: "https://eu2.contabostorage.com"
     region: "default"
@@ -491,17 +624,70 @@ clusterAutoscaler:
   # the pending elastic-only overprovisioning pod request the first worker.
   nodeGroup:
     minSize: 0
-    maxSize: 1
+    # Raised 1 -> 4 on 2026-08-31. At maxSize 1 the autoscaler had exactly one elastic
+    # node to give and was already at it, so it logged `Skipping node group elastic -
+    # max size reached` against 49 unschedulable pods (40 ARC runners plus fuzebi,
+    # fuzehub-backend and fuzekeys-frontend) and could do nothing. Paired with the
+    # runner affinity change in runners/arc/runner-scale-set-values.yaml — that change
+    # lets runner pods land on elastic nodes at all, and this one lets there be more
+    # than one. Either alone leaves CI stuck.
+    #
+    # Scale-DOWN remains billing-aware and is NOT governed by this number: Contabo only
+    # terminates a cancelled instance at the end of its paid month, so utilization
+    # scale-down stays disabled and the reaper CronJob releases idle elastic capacity
+    # 24h before renewal. So this is a ceiling on concurrent spend, not a commitment to
+    # it — the pool still returns to 0 when idle.
+    maxSize: 4
   # Billing-aware model: Contabo only terminates a canceled instance at the
   # end of its paid month, so utilization scale-down is disabled — the
   # reaper CronJob below owns releasing idle elastic capacity instead.
   scaleDownEnabled: false
+  # GUARD AGAINST UNREGISTERED-NODE CANCELLATION.
+  #
+  # On 2026-09-02 at 07:09 the autoscaler CANCELLED three paid Contabo instances
+  # (203543503/588198fe, 203547161/9b31f718, 203547162/adca9568), scheduled for
+  # 2026-09-14. Cluster-autoscaler deletes nodes it considers UNREGISTERED once
+  # max-node-provision-time elapses, and for this provider "delete" is
+  # POST /v1/compute/instances/{id}/cancel -- a paid VPS, not a pod.
+  #
+  # It became reachable the moment #831 taught the provider to ATTRIBUTE those
+  # instances to the elastic node group. Before that they were invisible
+  # ("No node group for node ... skipping") and could not be deleted. The fix was
+  # correct; nobody asked what it would enable.
+  #
+  # The exposure is not historical. The elastic join path has been broken in ways
+  # only just fixed (#833: eth1 was never configured, so --node-ip could not work),
+  # and none of it has met a real scale-up. A node that fails to register inside
+  # the window is cancelled and billed to the end of its period -- then the
+  # autoscaler creates another and repeats. That is an unbounded bill for zero
+  # capacity, which is exactly why #833 chose quarantine over fail-loud.
+  #
+  # 90m, not 15m: long enough to cover create + private-network assign + the reboot
+  # that assign can trigger + k3s join + Longhorn attach, with room for a slow
+  # Contabo provision. The cost of being too generous is an orphan instance sitting
+  # idle until the reaper releases it at end-of-period -- the SAME money as a
+  # wrongful cancellation, minus the destroyed capacity and minus the retry loop.
+  #
+  # REVISIT once a real scale-up is observed joining cleanly on the VLAN. This is a
+  # brake while the join path is unproven, not a permanent setting.
+  maxNodeProvisionTime: 90m
   provider:
     # TODO: replace with the published image once fuzeinfra-contabo-ca-provider
     # has a tagged release (see cluster-autoscaler/contabo-externalgrpc).
     image: ghcr.io/izzywdev/fuzeinfra-contabo-ca-provider:latest
     # Bump with the provider image build SHA so Argo rolls the :latest pod.
-    imageRollout: "740d7d11a7a2083d990bd6a8c722eff3725e0441"
+    #
+    # ORDERING HAZARD, read before relying on this. On merge to main two
+    # workflows race: ca-provider-image.yml builds and pushes :latest (minutes),
+    # while deploy-prod triggers the Argo sync (seconds). If Argo wins, the pod
+    # restarts and re-pulls the OLD :latest, this annotation is already at its
+    # new value, and nothing ever rolls it again -- the change looks deployed
+    # and is not. After merging a provider change, VERIFY the running pod's
+    # image digest matches the digest ca-provider-image.yml just pushed:
+    #   kubectl -n fuzeinfra get pod -l app=fuzeinfra-contabo-ca-provider     #     -o jsonpath='{.items[*].status.containerStatuses[*].imageID}'
+    # and if it does not match, bump this value again in a follow-up PR. That
+    # is why this is a free-form marker rather than strictly the build SHA.
+    imageRollout: "canceldate-dateonly-fix-2026-09-02"
     existingSecret: fuzeinfra-ca-provider
     # Current Contabo create-instance catalog: Cloud VPS 4 (4 vCPU / 8 GiB).
     # V92 is a retired SKU and fails ordering with "No offer was found".
@@ -519,7 +705,14 @@ clusterAutoscaler:
     elasticTag: fuzeinfra-prod-elastic-v2
     elasticNamePrefix: fuzeinfra-prod-elastic-v2
     minSize: 0
-    maxSize: 1
+    # Must match clusterAutoscaler.nodeGroup.maxSize exactly — the block above states
+    # the rule ("Keep the upstream CA and the external provider on the exact same
+    # bounds"). If these two disagree the CA and the provider hold different ideas of
+    # the pool ceiling, which is the class of desired-vs-target mismatch that already
+    # cost this pool a cutover once (see the elasticTag v1 contamination note above:
+    # NodeGroupTargetSize reported 4 while only 2 nodes correlated, and CA skipped every
+    # scale-up iteration trying to repair target size).
+    maxSize: 4
     # TODO: set to the k3s server URL the elastic nodes join
     # (e.g. https://<contabo-server-ip>:6443).
     k3sServerUrl: "https://161.97.118.134:6443"
@@ -528,7 +721,28 @@ clusterAutoscaler:
     # `base64 -w0 cluster-autoscaler/contabo-externalgrpc/deploy/elastic-userdata.template`.
     # See that file's header for the template vars (.NodeName/.K3SServerURL/.K3SNodeToken)
     # and why --kubelet-arg=provider-id=contabo://{{.NodeName}} is load-bearing for scale-down.
-    userDataTemplateB64: "I2Nsb3VkLWNvbmZpZwojIENhbm9uaWNhbCBjbG91ZC1pbml0IFVzZXJEYXRhIHRlbXBsYXRlIGZvciBDb250YWJvIGVsYXN0aWMgKGF1dG9zY2FsZXItbWFuYWdlZCkKIyBub2Rlcy4gVGhpcyBmaWxlIGlzIE5PVCByZWFkIGRpcmVjdGx5IGJ5IHRoZSBwcm92aWRlciDigJQgaXQgaXMgYSBzb3VyY2UKIyBhcnRpZmFjdCB0aGF0IGFuIG9wZXJhdG9yIGJhc2U2NC1lbmNvZGVzIGludG8gdGhlIEhlbG0gdmFsdWUKIyBjbHVzdGVyQXV0b3NjYWxlci5wcm92aWRlci51c2VyRGF0YVRlbXBsYXRlQjY0IChzZWUgaGVsbS9mdXplaW5mcmEvdmFsdWVzLWNvbnRhYm8ueWFtbCksCiMgd2hpY2ggdGhlIGNvbnRhYm8tZXh0ZXJuYWxncnBjIHNlcnZlciBkZWNvZGVzIGludG8gVVNFUl9EQVRBX1RFTVBMQVRFX0I2NCAvCiMgcHJvdmlkZXIuQ29uZmlnLlVzZXJEYXRhVG1wbCBhbmQgcmVuZGVycyBvbmNlIHBlciBuZXcgaW5zdGFuY2UgdmlhCiMgaW50ZXJuYWwvcHJvdmlkZXIvc2NhbGUuZ28ncyByZW5kZXJVc2VyRGF0YS4KIwojIFRlbXBsYXRlIHZhcmlhYmxlcyBhdmFpbGFibGUgKEdvIHRleHQvdGVtcGxhdGUsIGV4ZWMnZCBwZXIgbm9kZSBhdCBjcmVhdGUKIyB0aW1lIOKAlCBzZWUgcmVuZGVyVXNlckRhdGEgaW4gaW50ZXJuYWwvcHJvdmlkZXIvc2NhbGUuZ28pOgojICAge3suTm9kZU5hbWV9fSAgICAgLSB0aGUgZWxhc3RpYyBpbnN0YW5jZSBuYW1lLCBlLmcuIGZ1emVpbmZyYS1lbGFzdGljLTMKIyAgIHt7LkszU1NlcnZlclVSTH19IC0gdGhlIGszcyBzZXJ2ZXIgVVJMIHRvIGpvaW4gKGZyb20gSzNTX1NFUlZFUl9VUkwgZW52KQojICAge3suSzNTTm9kZVRva2VufX0gLSB0aGUgazNzIGFnZW50IGpvaW4gdG9rZW4gKGZyb20gSzNTX05PREVfVE9LRU4gZW52KQojCiMgSU1QT1JUQU5UOiAtLWt1YmVsZXQtYXJnICdwcm92aWRlci1pZD1jb250YWJvOi8ve3suTm9kZU5hbWV9fScgaXMgd2hhdCBtYWtlcwojIENsdXN0ZXIgQXV0b3NjYWxlcidzIHNjYWxlLWRvd24gY29ycmVsYXRpb24gd29yay4gQ0EgaWRlbnRpZmllcyB3aGljaCBrOHMKIyBOb2RlIHRvIGRlbGV0ZSB2aWEgTm9kZS5TcGVjLlByb3ZpZGVySUQsIHdoaWNoIE5vZGVHcm91cE5vZGVzIChzaXplLmdvKQojIHJlcG9ydHMgYXMgImNvbnRhYm86Ly88bmFtZT4iIOKAlCBhIG5hbWUtYmFzZWQgc2NoZW1lLCBOT1QgdGhlIG51bWVyaWMgQ29udGFibwojIGluc3RhbmNlIGlkLCBiZWNhdXNlIHRoZSBudW1lcmljIGlkIGlzIG5vdCBrbm93biB0byB0aGUgbm9kZSBhdCBib290L2pvaW4KIyB0aW1lLiBJZiB0aGlzIGZsYWcgaXMgZHJvcHBlZCBvciB0aGUgbmFtZSBkb2Vzbid0IG1hdGNoLCBzY2FsZS1kb3duIGJyZWFrczoKIyBDQSB3aWxsIG5ldmVyIGZpbmQgYSBtYXRjaGluZyBub2RlIHRvIGRlbGV0ZS4KIwojIFNTSCBBQ0NFU1M6IHRoZSBGdXplSW5mcmEgQ29udGFibyBhY2NvdW50IGhhcyB6ZXJvIHJlZ2lzdGVyZWQgU1NILWtleQojIHNlY3JldHMgKG9ubHkgYSB0eXBlPXBhc3N3b3JkIHNlY3JldCBleGlzdHMpLCBzbyBpbnN0YW5jZSBjcmVhdGlvbiBkb2VzIE5PVAojIHJlZmVyZW5jZSBDb250YWJvJ3Mgc3NoS2V5cyBtZWNoYW5pc20gKGludGVybmFsL2NvbnRhYm8vY2xpZW50LmdvIG9taXRzCiMgInNzaEtleXMiIGZyb20gdGhlIGNyZWF0ZSByZXF1ZXN0IHdoZW4gU1NIS2V5SUQgaXMgdW5zZXQg4oCUIHNlZQojIGNhLWN1dG92ZXIueW1sIEdBVEUgQiwgd2hpY2ggbm93IHdhcm5zIHJhdGhlciB0aGFuIGZhaWxzIHdoZW4gbm8gbWF0Y2hpbmcKIyBzc2ggc2VjcmV0IGlzIGZvdW5kKS4gSW5zdGVhZCwgYnJlYWstZ2xhc3MgU1NIIGFjY2VzcyBpcyBncmFudGVkIHRoZSBzYW1lCiMgd2F5IHRoZSBleGlzdGluZyBiYXNlbGluZSBub2RlcyBnZXQgaXQgKG1vZHVsZXMvY29udGFiby1rM3Mtbm9kZS9jbG91ZC1pbml0LnRmdHBsKToKIyBhdXRob3JpemluZyBhIHB1YmxpYyBrZXkgZGlyZWN0bHkgdmlhIGNsb3VkLWluaXQncyBgdXNlcnM6YCBibG9jayBiZWxvdy4gVGhlCiMgbGl0ZXJhbCB0b2tlbiBzc2gtZWQyNTUxOSBBQUFBQzNOemFDMWxaREkxTlRFNUFBQUFJSUI5ZWM2NjlOd3RMb1MxM29wM09jZ2RhUTkzalhUSUJ5M3h1Yi9mMkxmbCBpenp5LndlaW5iZXJnQGdtYWlsLmNvbSBpcyBzdWJzdGl0dXRlZCB3aXRoIHRoZSByZWFsCiMgTk9ERV9TU0hfUFVCTElDX0tFWSBzZWNyZXQgYXQgYmFzZTY0LWVuY29kZSB0aW1lIChjYS1jdXRvdmVyLnltbCkg4oCUIGl0IGlzCiMgTkVWRVIgY29tbWl0dGVkIGFzIGEgcmVhbCBrZXkgYW5kIG5ldmVyIGVjaG9lZCB0byBhIGxvZy4KCnVzZXJzOgogIC0gbmFtZTogcm9vdAogICAgc3NoX2F1dGhvcml6ZWRfa2V5czoKICAgICAgLSBzc2gtZWQyNTUxOSBBQUFBQzNOemFDMWxaREkxTlRFNUFBQUFJSUI5ZWM2NjlOd3RMb1MxM29wM09jZ2RhUTkzalhUSUJ5M3h1Yi9mMkxmbCBpenp5LndlaW5iZXJnQGdtYWlsLmNvbQoKcGFja2FnZV91cGRhdGU6IHRydWUKCndyaXRlX2ZpbGVzOgogICMgazNzIGpvaW4gc2VjcmV0cyBsYW5kIGluIGEgcm9vdC1vbmx5IGVudiBmaWxlIHJhdGhlciB0aGFuIHRoZSBwcm9jZXNzCiAgIyB0YWJsZSwgc28gdGhlIHRva2VuIG5ldmVyIHNob3dzIHVwIGluIGBwc2AvY2xvdWQtaW5pdCBsb2dzIGFzIGEgQ0xJIGFyZy4KICAjIElOU1RBTExfSzNTX0NIQU5ORUwgaXMgcGlubmVkIHRvICJ2MS4zNiIgdG8gbWlycm9yCiAgIyBtb2R1bGVzL2NvbnRhYm8tazNzLW5vZGUncyBrM3NfY2hhbm5lbCBkZWZhdWx0IChzZWUgaXRzIHZhcmlhYmxlcy50ZiwKICAjIHVwZGF0ZWQgYnkgRnV6ZUluZnJhIzMxOC8jMzY2KSDigJQgc2FtZSBtaW5vciBhcyB0aGUgZmxlZXQsIHdoaWNoIGlzIGxpdmUKICAjIG9uIHYxLjM2LjIrazNzMSBhY3Jvc3MgYWxsIDQgbm9kZXMgaW5jbHVkaW5nIHRoZSBjb250cm9sLXBsYW5lLiBBbiBhZ2VudAogICMgbW9yZSB0aGFuIG9uZSBtaW5vciBhaGVhZC9iZWhpbmQgdGhlIHNlcnZlciBpcyB1bnN1cHBvcnRlZCwgc28gdGhpcyBtdXN0CiAgIyB0cmFjayB3aGF0ZXZlciBjaGFubmVsIHRoZSBiYXNlbGluZSBtb2R1bGUgcGlucy4KICAtIHBhdGg6IC9ldGMvazNzLWFnZW50LmVudgogICAgcGVybWlzc2lvbnM6ICIwNjAwIgogICAgb3duZXI6IHJvb3Q6cm9vdAogICAgY29udGVudDogfAogICAgICBLM1NfVVJMPXt7LkszU1NlcnZlclVSTH19CiAgICAgIEszU19UT0tFTj17ey5LM1NOb2RlVG9rZW59fQogICAgICBJTlNUQUxMX0szU19DSEFOTkVMPXYxLjM2CgpydW5jbWQ6CiAgIyBIb3N0IGZpcmV3YWxsOiBhZ2VudCBuZWVkcyB0byByZWFjaCB0aGUgQVBJICg2NDQzKSBvdXRib3VuZCBhbmQgYWNjZXB0CiAgIyBrdWJlbGV0ICgxMDI1MCkgZnJvbSB0aGUgc2VydmVyLCBwbHVzIHdoaWNoZXZlciBmbGFubmVsIGJhY2tlbmQgdGhlCiAgIyBjbHVzdGVyIGlzIGFjdHVhbGx5IHJ1bm5pbmcuIFRoZSBsaXZlIHByb2QgY2x1c3RlciBydW5zIGZsYW5uZWwKICAjIHdpcmVndWFyZC1uYXRpdmUgb24gQUxMIG5vZGVzIChGdXplSW5mcmEjMzY2KSwgc28gYW4gZWxhc3RpYyBhZ2VudCBNVVNUCiAgIyBhbGxvdyA1MTgyMC91ZHAgb3IgaXQgY2FuIHJlZ2lzdGVyIHdpdGggdGhlIEFQSSBzZXJ2ZXIgYnV0IG5ldmVyIHBhc3MKICAjIFdpcmVHdWFyZCBwb2Qtb3ZlcmxheSB0cmFmZmljIOKAlCB0aGUgbGlrZWx5IHJlYXNvbiBhIHByaW9yIGVsYXN0aWMKICAjIGluc3RhbmNlIG5ldmVyIHRydWx5IGpvaW5lZC4gODQ3Mi91ZHAgKFZYTEFOKSBpcyBrZXB0IHRvbyBzaW5jZSBpdCdzCiAgIyBoYXJtbGVzcyBhbmQgbWlycm9ycyB0aGUgYmFzZWxpbmUgbW9kdWxlJ3MgZmlyZXdhbGwgcnVsZXMuCiAgLSBbIHNoLCAtYywgInVmdyBhbGxvdyAyMi90Y3AgfHwgdHJ1ZSIgXQogIC0gWyBzaCwgLWMsICJ1ZncgYWxsb3cgMTAyNTAvdGNwIHx8IHRydWUiIF0KICAtIFsgc2gsIC1jLCAidWZ3IGFsbG93IDg0NzIvdWRwIHx8IHRydWUiIF0KICAtIFsgc2gsIC1jLCAidWZ3IGFsbG93IDUxODIwL3VkcCB8fCB0cnVlIiBdCiAgLSBbIHNoLCAtYywgInVmdyAtLWZvcmNlIGVuYWJsZSB8fCB0cnVlIiBdCiAgIyBKb2luIGFzIGEgazNzIGFnZW50IHVzaW5nIHRoZSBqb2luIHNlY3JldHMgd3JpdHRlbiBhYm92ZS4gLS1ub2RlLW5hbWUgYW5kCiAgIyAtLWt1YmVsZXQtYXJnPXByb3ZpZGVyLWlkIGFyZSB3aGF0IGxldCBOb2RlR3JvdXBOb2Rlcy9Ob2RlR3JvdXBEZWxldGVOb2RlcwogICMgY29ycmVsYXRlIHRoaXMgazhzIE5vZGUgYmFjayB0byB0aGlzIGV4YWN0IENvbnRhYm8gVlBTIGJ5IG5hbWUgKHNlZSB0aGUKICAjIElNUE9SVEFOVCBub3RlIGFib3ZlKS4gVGhlIHBvb2wgbGFiZWwgKyBQcmVmZXJOb1NjaGVkdWxlIHRhaW50IG1pcnJvcgogICMgTm9kZUdyb3VwVGVtcGxhdGVOb2RlSW5mbydzIHNjYWxlLWZyb20temVybyBzaW11bGF0aW9uIChpbnRlcm5hbC9wcm92aWRlci90ZW1wbGF0ZS5nbykKICAjIGV4YWN0bHkg4oCUIGtlZXAgdGhlbSBpbiBzeW5jIGlmIGVpdGhlciBzaWRlIGNoYW5nZXMuCiAgLSBbIHNoLCAtYywgInNldCAtYTsgLiAvZXRjL2szcy1hZ2VudC5lbnY7IHNldCArYTsgY3VybCAtc2ZMIGh0dHBzOi8vZ2V0Lmszcy5pbyB8IHNoIC1zIC0gYWdlbnQgLS1ub2RlLW5hbWUgJ3t7Lk5vZGVOYW1lfX0nIC0ta3ViZWxldC1hcmcgJ3Byb3ZpZGVyLWlkPWNvbnRhYm86Ly97ey5Ob2RlTmFtZX19JyAtLW5vZGUtbGFiZWwgJ2Z1emVpbmZyYS5pby9wb29sPWVsYXN0aWMnIC0tbm9kZS10YWludCAnZnV6ZWluZnJhLmlvL2VsYXN0aWM9dHJ1ZTpQcmVmZXJOb1NjaGVkdWxlJyIgXQo="
+    userDataTemplateB64: "I2Nsb3VkLWNvbmZpZwojIENhbm9uaWNhbCBjbG91ZC1pbml0IFVzZXJEYXRhIGZvciBDb250YWJvIGVsYXN0aWMgKGF1dG9zY2FsZXItbWFuYWdlZCkgbm9kZXMuCiMKIyA9PT4gVEhJUyBGSUxFIElTIFRIRSBTT1VSQ0UgT0YgVFJVVEguIEVESVQgSVQsIE5FVkVSIFRIRSBCQVNFNjQgVkFMVUUgQUxPTkUuIDw9PQojIGNhLWN1dG92ZXIueW1sIChVU0VSREFUQV9URU1QTEFURV9QQVRIKSBzdWJzdGl0dXRlcyBzc2gtZWQyNTUxOSBBQUFBQzNOemFDMWxaREkxTlRFNUFBQUFJSUI5ZWM2NjlOd3RMb1MxM29wM09jZ2RhUTkzalhUSUJ5M3h1Yi9mMkxmbCBpenp5LndlaW5iZXJnQGdtYWlsLmNvbSB3aXRoIHRoZQojIE5PREVfU1NIX1BVQkxJQ19LRVkgc2VjcmV0LCBiYXNlNjQtZW5jb2RlcyB0aGUgcmVzdWx0LCBhbmQgd3JpdGVzIGl0IHRvCiMgY2x1c3RlckF1dG9zY2FsZXIucHJvdmlkZXIudXNlckRhdGFUZW1wbGF0ZUI2NCBpbiB2YWx1ZXMtY29udGFiby55YW1sOyB0aGUKIyBwcm92aWRlciBkZWNvZGVzIHRoYXQgaW50byBVc2VyRGF0YVRtcGwgYW5kIHJlbmRlcnMgaXQgcGVyIGluc3RhbmNlCiMgKHJlbmRlclVzZXJEYXRhLCBpbnRlcm5hbC9wcm92aWRlci9zY2FsZS5nbykuIGNhLXNhbHZhZ2UtZW5yb2xsLnltbCByZWluc3RhbGxzCiMgaW5zdGFuY2VzIHN0cmFpZ2h0IGZyb20gVEhJUyBwYXRoLiBQUiAjODMwIHBhdGNoZWQgb25seSB0aGUgYmFzZTY0IGJsb2IsIHNvIHRoZQojIG5leHQgY2EtY3V0b3ZlciBydW4gd291bGQgaGF2ZSByZXZlcnRlZCBpdCBhbmQgc2FsdmFnZS1lbnJvbGwga2VwdCBtaW50aW5nCiMgb2ZmLVZMQU4gbm9kZXM7IHRlc3RzL3Rlc3RfZWxhc3RpY191c2VyZGF0YV92bGFuLnB5IG5vdyBmYWlscyBvbiB0aGF0IGRyaWZ0LgojCiMgRVZFUlkgQllURSBIRVJFIElTIFNISVBQRUQgVE8gVEhFIE5PREUgQVMgQVBJIGB1c2VyRGF0YWAgLSBrZWVwIGl0IGxlYW4gYW5kIHB1dAojIHJhdGlvbmFsZSBpbiBkb2NzL2Rlc2lnbi9vZmYtdmxhbi1ub2RlLWZhaWx1cmUtcG9saWN5Lm1kLCBub3QgaW4gY29tbWVudHMgaGVyZS4KIwojIEdvIHRleHQvdGVtcGxhdGUgdmFycyAocmVuZGVyZWQgcGVyIG5vZGUpOiB7ey5Ob2RlTmFtZX19LCB7ey5LM1NTZXJ2ZXJVUkx9fSwKIyB7ey5LM1NOb2RlVG9rZW59fS4KIyAgICogLS1rdWJlbGV0LWFyZyBwcm92aWRlci1pZD1jb250YWJvOi8ve3suTm9kZU5hbWV9fSBpcyB3aGF0IGxldHMgQ0EgY29ycmVsYXRlCiMgICAgIHRoaXMgazhzIE5vZGUgdG8gdGhpcyBWUFMgZm9yIHNjYWxlLWRvd24gKE5vZGVHcm91cE5vZGVzLCBzaXplLmdvKS4gRHJvcCBpdAojICAgICBhbmQgc2NhbGUtZG93biBzaWxlbnRseSBzdG9wcyB3b3JraW5nLgojICAgKiBub2RlLXJvbGU9d29ya2xvYWQgaXMgdGhlIHByb2R1Y3Qgd29ya2xvYWRzJyBub2RlU2VsZWN0b3IgdGFyZ2V0OyBrM3MKIyAgICAgYXBwbGllcyAtLW5vZGUtbGFiZWwgYXQgUkVHSVNUUkFUSU9OIE9OTFksIHNvIGl0IG11c3QgYmUgYm9ybiB3aXRoIHRoZSBub2RlCiMgICAgIChwYXJpdHkgZ3VhcmRlZCBieSBpbnRlcm5hbC9wcm92aWRlci9sYWJlbF9wYXJpdHlfdGVzdC5nbykuCiMgICAqIEJyZWFrLWdsYXNzIFNTSCBjb21lcyBmcm9tIHRoZSB1c2VyczogYmxvY2sgKHRoZSBhY2NvdW50IGhhcyBubyByZWdpc3RlcmVkCiMgICAgIENvbnRhYm8gU1NILWtleSBzZWNyZXQgLSBzZWUgY2EtY3V0b3Zlci55bWwgR0FURSBCKS4KIwojIFBSSVZBVEUgVkxBTiAobmV0IDYwOTMyLCAxMC4wLjAuMC8yMikgLSB0aHJlZSB0aGluZ3MgbXVzdCBBTEwgaGFwcGVuOgojICAgMS4gdGhlIHBhaWQgYWRkLW9uIG9yZGVyZWQgYXQgY3JlYXRlIChhZGRPbnMucHJpdmF0ZU5ldHdvcmtpbmcpLAojICAgMi4gdGhlIGluc3RhbmNlIEFTU0lHTkVEIHRvIDYwOTMyIGFmdGVyIGNyZWF0ZSwgYW5kCiMgICAzLiB0aGlzIGZpbGUgYnJpbmdpbmcgZXRoMSB1cCArIGhhbmRpbmcgazNzIC0tbm9kZS1pcC8tLWZsYW5uZWwtaWZhY2UuCiMgKDMpIHVzZWQgdG8gYmUgaW5jb21wbGV0ZTogdGhlIHByZXZpb3VzIHJldmlzaW9uIFdBSVRFRCBmb3IgYW4gYWRkcmVzcyBvbiBldGgxCiMgYnV0IG5ldmVyIENPTkZJR1VSRUQgZXRoMSwgYW5kIGNsb3VkLWluaXQncyBmYWxsYmFjayBuZXRjZmcgb25seSBicmluZ3MgdXAgdGhlCiMgcHJpbWFyeSBOSUMgLSBzbyB0aGUgd2FpdCBjb3VsZCBuZXZlciBzdWNjZWVkIGFuZCBldmVyeSBub2RlIGZlbGwgdGhyb3VnaCB0bwojICJqb2luIGFueXdheSIuICgyKSBydW5zIEFGVEVSIGNyZWF0ZUluc3RhbmNlIHJldHVybnMsIHdoaWxlIHRoaXMgY2xvdWQtaW5pdCBpcwojIGFscmVhZHkgcnVubmluZywgYW5kIE1BWSBSRUJPT1QgdGhlIG5vZGU7IGBydW5jbWRgIGlzIG9uY2UtcGVyLWluc3RhbmNlLCBzbyB0aGUKIyBqb2luIGxpdmVzIGluIGEgc3lzdGVtZCBvbmVzaG90IHRoYXQgcmUtcnVucyBldmVyeSBib290IHVudGlsIGl0IHN1Y2NlZWRzIG9uIHRoZQojIFZMQU4sIGFuZCB0aGUgd2FpdCBsb29wIHJlLWFwcGxpZXMgbmV0cGxhbiBlYWNoIHBvbGwuIFRoZSByZWJvb3QgdGh1cyBiZWNvbWVzCiMgdGhlIFJFUEFJUiB0cmlnZ2VyIHJhdGhlciB0aGFuIHRoZSBmYWlsdXJlIG1vZGUuCgp1c2VyczoKICAtIG5hbWU6IHJvb3QKICAgIHNzaF9hdXRob3JpemVkX2tleXM6CiAgICAgIC0gc3NoLWVkMjU1MTkgQUFBQUMzTnphQzFsWkRJMU5URTVBQUFBSUlCOWVjNjY5Tnd0TG9TMTNvcDNPY2dkYVE5M2pYVElCeTN4dWIvZjJMZmwgaXp6eS53ZWluYmVyZ0BnbWFpbC5jb20KCnBhY2thZ2VfdXBkYXRlOiB0cnVlCgp3cml0ZV9maWxlczoKICAjIGszcyBqb2luIHNlY3JldHMgbGFuZCBpbiBhIHJvb3Qtb25seSBlbnYgZmlsZSByYXRoZXIgdGhhbiB0aGUgcHJvY2VzcwogICMgdGFibGUsIHNvIHRoZSB0b2tlbiBuZXZlciBzaG93cyB1cCBpbiBgcHNgL2Nsb3VkLWluaXQgbG9ncyBhcyBhIENMSSBhcmcuCiAgIyBJTlNUQUxMX0szU19DSEFOTkVMIGlzIHBpbm5lZCB0byAidjEuMzYiIHRvIG1pcnJvcgogICMgbW9kdWxlcy9jb250YWJvLWszcy1ub2RlJ3MgazNzX2NoYW5uZWwgZGVmYXVsdCAoc2VlIGl0cyB2YXJpYWJsZXMudGYsCiAgIyB1cGRhdGVkIGJ5IEZ1emVJbmZyYSMzMTgvIzM2Nikg4oCUIHNhbWUgbWlub3IgYXMgdGhlIGZsZWV0LiBBbiBhZ2VudCBtb3JlCiAgIyB0aGFuIG9uZSBtaW5vciBhaGVhZC9iZWhpbmQgdGhlIHNlcnZlciBpcyB1bnN1cHBvcnRlZCwgc28gdGhpcyBtdXN0IHRyYWNrCiAgIyB3aGF0ZXZlciBjaGFubmVsIHRoZSBiYXNlbGluZSBtb2R1bGUgcGlucy4KICAtIHBhdGg6IC9ldGMvazNzLWFnZW50LmVudgogICAgcGVybWlzc2lvbnM6ICIwNjAwIgogICAgb3duZXI6IHJvb3Q6cm9vdAogICAgY29udGVudDogfAogICAgICBLM1NfVVJMPXt7LkszU1NlcnZlclVSTH19CiAgICAgIEszU19UT0tFTj17ey5LM1NOb2RlVG9rZW59fQogICAgICBJTlNUQUxMX0szU19DSEFOTkVMPXYxLjM2CgogICMgUHJlZmVyIElQdjQgb3ZlciBJUHY2IGluIGdsaWJjIGFkZHJlc3Mgc2VsZWN0aW9uIChSRkMgNjcyNCAxMC4zKSBzbyBHSENSCiAgIyBwdWxscyBhcmUgbm90IFRDUC1yZXNldCBvbiBDb250YWJvIElQdjYgQ0ROIHBhdGhzIChGdXplSW5mcmEjNjE2KS4gVGhlCiAgIyBub2RlLWNvbmZpZ3VyYXRvciBEYWVtb25TZXQgZG9lcyB0aGlzIGNsdXN0ZXItd2lkZSwgYnV0IG9ubHkgb25jZSBpdAogICMgc2NoZWR1bGVzOyB3cml0aW5nIGl0IGhlcmUgY292ZXJzIGZpcnN0IGJvb3QgdG8gdGhlbiAtIGV4YWN0bHkgdGhlIHdpbmRvdyBpbgogICMgd2hpY2ggdGhlIG5vZGUgcHVsbHMgaXRzIGZpcnN0IGltYWdlcy4KICAjIE5PVEU6IHRoaXMgZG9lcyBOT1QgZml4IHRoZSBkdWFsIGAyYTAyOmMyMDc6Li4uOjoxYCBJbnRlcm5hbElQIHNlZW4gbGl2ZSBvbgogICMgZnV6ZWluZnJhLWNpLXJ1bm5lci0yIC8gZnV6ZWluZnJhLXByb2QtZWxhc3RpYy12Mi1jMDU2YTIyYS4gVGhhdCBpcyBrM3MKICAjIGF1dG8tZGV0ZWN0aW5nIGJvdGggYWRkcmVzcyBmYW1pbGllcyBpbiB0aGUgYWJzZW5jZSBvZiAtLW5vZGUtaXA7IG9ubHkgYW4KICAjIGV4cGxpY2l0IC0tbm9kZS1pcCAoYmVsb3cpIGZpeGVzIGl0LgogIC0gcGF0aDogL2V0Yy9nYWkuY29uZgogICAgcGVybWlzc2lvbnM6ICIwNjQ0IgogICAgb3duZXI6IHJvb3Q6cm9vdAogICAgY29udGVudDogfAogICAgICBwcmVjZWRlbmNlIDo6ZmZmZjowOjAvOTYgIDEwMAoKICAjIFByaXZhdGUgVlBDIE5JQy4gQ29udGFibyBhdHRhY2hlcyB0aGUgcHJpdmF0ZSBuZXR3b3JrIGFzIGV0aDEuIGBvcHRpb25hbDoKICAjIHRydWVgIG1lYW5zIGJvb3QgbmV2ZXIgYmxvY2tzIHdoZW4gdGhlIHBlci1pbnN0YW5jZSBWUEMgYWRkLW9uIGhhcyBub3QgYmVlbgogICMgb3JkZXJlZCBvciB0aGUgYXNzaWduIGhhcyBub3QgbGFuZGVkIHlldC4KICAtIHBhdGg6IC9ldGMvbmV0cGxhbi82MC1ldGgxLXByaXZhdGUueWFtbAogICAgcGVybWlzc2lvbnM6ICIwNjAwIgogICAgb3duZXI6IHJvb3Q6cm9vdAogICAgY29udGVudDogfAogICAgICBuZXR3b3JrOgogICAgICAgIHZlcnNpb246IDIKICAgICAgICBldGhlcm5ldHM6CiAgICAgICAgICBldGgxOgogICAgICAgICAgICBkaGNwNDogdHJ1ZQogICAgICAgICAgICBvcHRpb25hbDogdHJ1ZQoKICAtIHBhdGg6IC91c3IvbG9jYWwvc2Jpbi9mdXplaW5mcmEtdmxhbi1qb2luLnNoCiAgICBwZXJtaXNzaW9uczogIjA3NTAiCiAgICBvd25lcjogcm9vdDpyb290CiAgICBjb250ZW50OiB8CiAgICAgICMhL2Jpbi9zaAogICAgICAjIFdhaXQgZm9yIHRoZSBwcml2YXRlIFZMQU4gTklDLCB0aGVuIGpvaW4gazNzIGJvdW5kIHRvIGl0LgogICAgICAjCiAgICAgICMgUnVucyBmcm9tIGZ1emVpbmZyYS12bGFuLWpvaW4uc2VydmljZSBvbiBFVkVSWSBib290IHVudGlsIGl0IGhhcwogICAgICAjIHN1Y2NlZWRlZCBvbiB0aGUgVkxBTiAoc2VudGluZWwgL2V0Yy9mdXplaW5mcmEtdmxhbi1qb2luZWQpLiBUaGF0IGlzCiAgICAgICMgZGVsaWJlcmF0ZTogdGhlIENvbnRhYm8gcHJpdmF0ZS1uZXR3b3JrIEFTU0lHTiBoYXBwZW5zIGFmdGVyCiAgICAgICMgY3JlYXRlSW5zdGFuY2UgcmV0dXJucyBhbmQgbWF5IHJlYm9vdCB0aGUgbm9kZSwgc28gYSBvbmUtc2hvdCBjbG91ZC1pbml0CiAgICAgICMgcnVuY21kIGlzIG5vdCBhIHNhZmUgcGxhY2UgZm9yIHRoaXMgd29yay4KICAgICAgIwogICAgICAjIEZBSUxVUkUgUE9MSUNZOiBRVUFSQU5USU5FIC0gbmVpdGhlciBmYWlsLXNvZnQgKGpvaW4gb2ZmLVZMQU4gYW5kIHdhcm4KICAgICAgIyBpbnRvIGEgbG9nIG5vYm9keSByZWFkcykgbm9yIGZhaWwtbG91ZCAocmVmdXNlIHRvIGpvaW4sIHRoZSBkdXJhYmxlCiAgICAgICMgbW9kdWxlJ3MgcG9saWN5KS4gVGhlIG5vZGUgRE9FUyByZWdpc3Rlciwgc28gdGhlIGZhaWx1cmUgaXMgdmlzaWJsZSBpbgogICAgICAjIGBrdWJlY3RsIGdldCBub2Rlc2AgYW5kIENBIGRvZXMgbm90IHRocmFzaC1hbmQtYmlsbCwgYnV0IGl0IHJlZ2lzdGVycwogICAgICAjIFVOU0NIRURVTEFCTEUgc28gaXQgY2FuIG5ldmVyIHBvaXNvbiBhIHdvcmtsb2FkOgogICAgICAjICAgICAtLW5vZGUtbGFiZWwgZnV6ZWluZnJhLmlvL3ZsYW49YWJzZW50CiAgICAgICMgICAgIC0tbm9kZS10YWludCAgZnV6ZWluZnJhLmlvL29mZi12bGFuPXRydWU6Tm9TY2hlZHVsZQogICAgICAjIFRoZSBoZWFsdGh5IHBhdGggaXMgbGFiZWxsZWQgc3ltbWV0cmljYWxseSAoZnV6ZWluZnJhLmlvL3ZsYW49cHJlc2VudCkKICAgICAgIyBzbyAibm8gbGFiZWwgYXQgYWxsIiBpcyBpdHNlbGYgZGV0ZWN0YWJsZS4gQWxlcnRzOgogICAgICAjIGhlbG0vZnV6ZWluZnJhL3RlbXBsYXRlcy9wcm9tZXRoZXVzLXJ1bGVzLW5vZGVzLnlhbWwuIEZ1bGwgcmF0aW9uYWxlOgogICAgICAjIGRvY3MvZGVzaWduL29mZi12bGFuLW5vZGUtZmFpbHVyZS1wb2xpY3kubWQuCiAgICAgIHNldCAtdQoKICAgICAgSUZBQ0U9ZXRoMQogICAgICBQVUJJRkFDRT1ldGgwCiAgICAgIFdBSVRfU0VDUz02MDAKICAgICAgUE9MTF9TRUNTPTUKICAgICAgVkxBTl9TRU5USU5FTD0vZXRjL2Z1emVpbmZyYS12bGFuLWpvaW5lZAogICAgICBMT0dGPS92YXIvbG9nL2Z1emVpbmZyYS12bGFuLWpvaW4ubG9nCgogICAgICBsb2coKSB7IGVjaG8gIltmdXplaW5mcmEtdmxhbi1qb2luXSAkKGRhdGUgLXUgKyVZLSVtLSVkVCVIOiVNOiVTWikgJCoiID4+IiRMT0dGIiAyPiYxOyBlY2hvICJbZnV6ZWluZnJhLXZsYW4tam9pbl0gJCoiID4mMjsgfQoKICAgICAgaWYgWyAtZiAiJFZMQU5fU0VOVElORUwiIF07IHRoZW4KICAgICAgICBsb2cgImFscmVhZHkgam9pbmVkIG9uIHRoZSBwcml2YXRlIFZMQU47IG5vdGhpbmcgdG8gZG8iCiAgICAgICAgZXhpdCAwCiAgICAgIGZpCgogICAgICBpcDRfb2YoKSB7IGlwIC00IC1vIGFkZHIgc2hvdyAiJDEiIDI+L2Rldi9udWxsIHwgYXdrICd7cHJpbnQgJDR9JyB8IGN1dCAtZC8gLWYxIHwgaGVhZCAtbiAxOyB9CgogICAgICAjIFdhaXQgZm9yIGV0aDEgdG8gY2FycnkgYW4gSVB2NC4gUmUtYXBwbHkgbmV0cGxhbiBvbiBldmVyeSBwb2xsOiB0aGUgdk5JQwogICAgICAjIGNhbiBhcHBlYXIgb25seSBvbmNlIHRoZSBwb3N0LWNyZWF0ZSBwcml2YXRlLW5ldHdvcmsgQVNTSUdOIGxhbmRzLCB3aGljaAogICAgICAjIGlzIGFmdGVyIHRoZSBmaXJzdCBuZXRwbGFuIGFwcGx5IHJhbiAodGhlIGFzc2lnbi1iZWZvcmUtYm9vdCByYWNlKS4KICAgICAgREVBRExJTkU9JCgoICQoZGF0ZSArJXMpICsgV0FJVF9TRUNTICkpCiAgICAgIFBSSVY9IiIKICAgICAgd2hpbGUgOiA7IGRvCiAgICAgICAgUFJJVj0kKGlwNF9vZiAiJElGQUNFIikKICAgICAgICBbIC1uICIkUFJJViIgXSAmJiBicmVhawogICAgICAgIFsgIiQoZGF0ZSArJXMpIiAtZ2UgIiRERUFETElORSIgXSAmJiBicmVhawogICAgICAgIG5ldHBsYW4gYXBwbHkgPi9kZXYvbnVsbCAyPiYxIHx8IHRydWUKICAgICAgICBzbGVlcCAiJFBPTExfU0VDUyIKICAgICAgZG9uZQogICAgICBQVUI9JChpcDRfb2YgIiRQVUJJRkFDRSIpCgogICAgICBpZiBbIC1uICIkUFJJViIgXTsgdGhlbgogICAgICAgIGxvZyAicHJpdmF0ZSBOSUMgJElGQUNFIGhhcyAkUFJJViAocHVibGljICRQVUIpIC0gam9pbmluZyBPTiB0aGUgVkxBTiIKICAgICAgZWxzZQogICAgICAgIGxvZyAiRkFUQUw6ICRJRkFDRSBoYXMgbm8gSVB2NCBhZnRlciAke1dBSVRfU0VDU31zLiBUaGUgcHJpdmF0ZS1uZXR3b3JraW5nIGFkZC1vbiBvciB0aGUgbmV0d29yayBhc3NpZ24gZGlkIG5vdCBsYW5kLiBKb2luaW5nIFFVQVJBTlRJTkVEIChOb1NjaGVkdWxlKSBzbyB0aGlzIG5vZGUgaXMgdmlzaWJsZSBpbiBrdWJlY3RsIGdldCBub2RlcyBidXQgY2FycmllcyBubyB3b3JrbG9hZC4iCiAgICAgIGZpCgogICAgICAjIC0tLS0gcmVwYWlyIHBhdGggLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0KICAgICAgIyBrM3MgYWxyZWFkeSBpbnN0YWxsZWQgPT4gYSBwcmV2aW91cyBib290IGpvaW5lZCwgdmVyeSBsaWtlbHkgb2ZmLVZMQU4KICAgICAgIyBiZWZvcmUgdGhlIGFzc2lnbiByZWJvb3RlZCB1cy4gSWYgdGhlIFZMQU4gaXMgdXAgbm93LCByZXdyaXRlIHRoZSBhZ2VudAogICAgICAjIGNvbmZpZyBhbmQgcmVzdGFydCByYXRoZXIgdGhhbiByZS1ydW5uaW5nIHRoZSBpbnN0YWxsZXIuCiAgICAgIGlmIFsgLWYgL2V0Yy9zeXN0ZW1kL3N5c3RlbS9rM3MtYWdlbnQuc2VydmljZSBdOyB0aGVuCiAgICAgICAgaWYgWyAteiAiJFBSSVYiIF07IHRoZW4KICAgICAgICAgIGxvZyAiazNzLWFnZW50IGFscmVhZHkgcHJlc2VudCBhbmQgc3RpbGwgbm8gVkxBTjsgbGVhdmluZyBpdCBhbG9uZSAoc3RpbGwgcXVhcmFudGluZWQpIgogICAgICAgICAgZXhpdCAwCiAgICAgICAgZmkKICAgICAgICBsb2cgImszcy1hZ2VudCBhbHJlYWR5IHByZXNlbnQgYW5kIHRoZSBWTEFOIGlzIG5vdyB1cCAtIHJlcGFpcmluZyBub2RlLWlwL2ZsYW5uZWwtaWZhY2UgYW5kIHJlc3RhcnRpbmciCiAgICAgICAgbWtkaXIgLXAgL2V0Yy9yYW5jaGVyL2szcwogICAgICAgIHsKICAgICAgICAgIGVjaG8gIiMgV3JpdHRlbiBieSBmdXplaW5mcmEtdmxhbi1qb2luLnNoIGFmdGVyIGEgcG9zdC1hc3NpZ24gcmVib290LiIKICAgICAgICAgIGVjaG8gIm5vZGUtaXA6ICRQUklWIgogICAgICAgICAgZWNobyAiZmxhbm5lbC1pZmFjZTogJElGQUNFIgogICAgICAgICAgWyAtbiAiJFBVQiIgXSAmJiBlY2hvICJub2RlLWV4dGVybmFsLWlwOiAkUFVCIgogICAgICAgIH0gPiAvZXRjL3JhbmNoZXIvazNzL2NvbmZpZy55YW1sCiAgICAgICAgc3lzdGVtY3RsIHJlc3RhcnQgazNzLWFnZW50IHx8IGxvZyAiV0FSTklORzogazNzLWFnZW50IHJlc3RhcnQgZmFpbGVkIgogICAgICAgIHRvdWNoICIkVkxBTl9TRU5USU5FTCIKICAgICAgICBsb2cgInJlcGFpcmVkLiBOT1RFOiBrM3MgYXBwbGllcyBub2RlIGxhYmVscy90YWludHMgYXQgUkVHSVNUUkFUSU9OIE9OTFksIHNvIGFuIG9wZXJhdG9yIG11c3QgY2xlYXIgdGhlIHF1YXJhbnRpbmUgbWFya3M6IGt1YmVjdGwgbGFiZWwgbm9kZSB7ey5Ob2RlTmFtZX19IGZ1emVpbmZyYS5pby92bGFuPXByZXNlbnQgLS1vdmVyd3JpdGUgJiYga3ViZWN0bCB0YWludCBub2RlIHt7Lk5vZGVOYW1lfX0gZnV6ZWluZnJhLmlvL29mZi12bGFuLSIKICAgICAgICBleGl0IDAKICAgICAgZmkKCiAgICAgICMgLS0tLSBmaXJzdCBqb2luIC0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLQogICAgICBzZXQgLWEKICAgICAgLiAvZXRjL2szcy1hZ2VudC5lbnYKICAgICAgc2V0ICthCgogICAgICBORVRBUkdTPSIiCiAgICAgIFZMQU5BUkdTPSItLW5vZGUtbGFiZWwgZnV6ZWluZnJhLmlvL3ZsYW49YWJzZW50IC0tbm9kZS10YWludCBmdXplaW5mcmEuaW8vb2ZmLXZsYW49dHJ1ZTpOb1NjaGVkdWxlIgogICAgICBpZiBbIC1uICIkUFJJViIgXTsgdGhlbgogICAgICAgIE5FVEFSR1M9Ii0tbm9kZS1pcCAkUFJJViAtLWZsYW5uZWwtaWZhY2UgJElGQUNFIgogICAgICAgIFsgLW4gIiRQVUIiIF0gJiYgTkVUQVJHUz0iJE5FVEFSR1MgLS1ub2RlLWV4dGVybmFsLWlwICRQVUIiCiAgICAgICAgVkxBTkFSR1M9Ii0tbm9kZS1sYWJlbCBmdXplaW5mcmEuaW8vdmxhbj1wcmVzZW50IgogICAgICBmaQoKICAgICAgIyBEZWxpYmVyYXRlbHkgT05FIGxpbmUuIFRlc3RFbGFzdGljTm9kZUxhYmVsUGFyaXR5IGFuZAogICAgICAjIFRlc3RWYWx1ZXNDb250YWJvVXNlckRhdGFCNjRQYXJpdHkgbG9jYXRlIHRoZSBqb2luIGJ5IHNjYW5uaW5nIGZvciB0aGUKICAgICAgIyBzaW5nbGUgbGluZSB0aGF0IGluc3RhbGxzIHRoZSBrM3MgYWdlbnQsIHRoZW4gcGFyc2UgdGhlIC0tbm9kZS1sYWJlbAogICAgICAjIGZsYWdzIG9mZiBpdCB0byBjb21wYXJlIGFnYWluc3QgdGhlIENBIHNjYWxlLWZyb20temVybyBzaW11bGF0aW9uIGluCiAgICAgICMgaW50ZXJuYWwvcHJvdmlkZXIvdGVtcGxhdGUuZ28uIFdyYXBwaW5nIHRoaXMgYWNyb3NzIGJhY2tzbGFzaC1jb250aW51ZWQKICAgICAgIyBsaW5lcyBtYWtlcyB0aG9zZSBndWFyZHMgcGFyc2UgemVybyBsYWJlbHMgYW5kIHRoZSBwYXJpdHkgY29udHJhY3QKICAgICAgIyBzaWxlbnRseSBzdG9wcyBiZWluZyBjaGVja2VkLiAoVGhvc2Ugc2Nhbm5lcnMgbWF0Y2ggb24gdGhlIGluc3RhbGxlciBVUkwKICAgICAgIyBwbHVzIHRoZSBhZ2VudCBzdWJjb21tYW5kLCBzbyBubyBjb21tZW50IGhlcmUgbWF5IGNvbnRhaW4gYm90aC4pCiAgICAgIGN1cmwgLXNmTCBodHRwczovL2dldC5rM3MuaW8gfCBzaCAtcyAtIGFnZW50ICRORVRBUkdTICRWTEFOQVJHUyAtLW5vZGUtbmFtZSAne3suTm9kZU5hbWV9fScgLS1rdWJlbGV0LWFyZyAncHJvdmlkZXItaWQ9Y29udGFibzovL3t7Lk5vZGVOYW1lfX0nIC0tbm9kZS1sYWJlbCAnZnV6ZWluZnJhLmlvL3Bvb2w9ZWxhc3RpYycgLS1ub2RlLWxhYmVsICdub2RlLXJvbGU9d29ya2xvYWQnIC0tbm9kZS10YWludCAnZnV6ZWluZnJhLmlvL2VsYXN0aWM9dHJ1ZTpQcmVmZXJOb1NjaGVkdWxlJwogICAgICBSQz0kPwoKICAgICAgaWYgWyAiJFJDIiAtbmUgMCBdOyB0aGVuCiAgICAgICAgbG9nICJrM3MgYWdlbnQgaW5zdGFsbCBleGl0ZWQgJFJDIC0gdGhlIHVuaXQgd2lsbCByZXRyeSBvbiB0aGUgbmV4dCBib290IgogICAgICAgIGV4aXQgIiRSQyIKICAgICAgZmkKICAgICAgaWYgWyAtbiAiJFBSSVYiIF07IHRoZW4KICAgICAgICB0b3VjaCAiJFZMQU5fU0VOVElORUwiCiAgICAgICAgbG9nICJqb2luZWQgb24gdGhlIHByaXZhdGUgVkxBTiBhcyB7ey5Ob2RlTmFtZX19ICgkUFJJVikiCiAgICAgIGVsc2UKICAgICAgICBsb2cgImpvaW5lZCBRVUFSQU5USU5FRCBhcyB7ey5Ob2RlTmFtZX19OyBubyBzZW50aW5lbCB3cml0dGVuLCBzbyBhIGxhdGVyIGJvb3QgKGUuZy4gb25jZSB0aGUgYXNzaWduIGxhbmRzKSByZXBhaXJzIHRoaXMgbm9kZSIKICAgICAgZmkKICAgICAgZXhpdCAwCgogIC0gcGF0aDogL2V0Yy9zeXN0ZW1kL3N5c3RlbS9mdXplaW5mcmEtdmxhbi1qb2luLnNlcnZpY2UKICAgIHBlcm1pc3Npb25zOiAiMDY0NCIKICAgIG93bmVyOiByb290OnJvb3QKICAgIGNvbnRlbnQ6IHwKICAgICAgW1VuaXRdCiAgICAgIERlc2NyaXB0aW9uPUZ1emVJbmZyYTogd2FpdCBmb3IgdGhlIHByaXZhdGUgVkxBTiBOSUMgYW5kIGpvaW4gazNzCiAgICAgICMgUnVucyBvbiBldmVyeSBib290IHVudGlsIC9ldGMvZnV6ZWluZnJhLXZsYW4tam9pbmVkIGV4aXN0cy4gVGhpcyBpcyB3aGF0CiAgICAgICMgbWFrZXMgdGhlIGpvaW4gc3Vydml2ZSB0aGUgcmVib290IHRoZSBwb3N0LWNyZWF0ZSBDb250YWJvCiAgICAgICMgcHJpdmF0ZS1uZXR3b3JrIGFzc2lnbiBjYW4gdHJpZ2dlciAtIGNsb3VkLWluaXQgcnVuY21kIHdvdWxkIG5vdC4KICAgICAgQWZ0ZXI9bmV0d29yay1vbmxpbmUudGFyZ2V0CiAgICAgIFdhbnRzPW5ldHdvcmstb25saW5lLnRhcmdldAogICAgICBDb25kaXRpb25QYXRoRXhpc3RzPSEvZXRjL2Z1emVpbmZyYS12bGFuLWpvaW5lZAoKICAgICAgW1NlcnZpY2VdCiAgICAgIFR5cGU9b25lc2hvdAogICAgICBSZW1haW5BZnRlckV4aXQ9bm8KICAgICAgRXhlY1N0YXJ0PS91c3IvbG9jYWwvc2Jpbi9mdXplaW5mcmEtdmxhbi1qb2luLnNoCiAgICAgIFRpbWVvdXRTdGFydFNlYz0xMjAwCgogICAgICBbSW5zdGFsbF0KICAgICAgV2FudGVkQnk9bXVsdGktdXNlci50YXJnZXQKCnJ1bmNtZDoKICAjIC0tLSBMb25naG9ybiBub2RlIHByZXJlcXVpc2l0ZXMgKE9QVC1JTiwgY29tbWVudGVkIE9GRiBieSBkZWZhdWx0KSAtLS0KICAjIExvbmdob3JuIGF0dGFjaGVzIHZvbHVtZXMgb3ZlciBpU0NTSSBhbmQgc2VydmVzIFJXWCBvdmVyIE5GUywgc28gYW55IG5vZGUgdGhhdAogICMgbWF5IGhvc3QgYSBMb25naG9ybiByZXBsaWNhIG9yIG1vdW50IGEgTG9uZ2hvcm4tYmFja2VkIHZvbHVtZSBuZWVkcyB0aGUgaVNDU0kKICAjIGluaXRpYXRvciArIE5GUyBjbGllbnQgKyAvdmFyL2xpYi9sb25naG9ybi4gTGVmdCBDT01NRU5URUQgc28gYSBtZXJnZSBpcyBhCiAgIyBuby1vcC4gVW5jb21tZW50ICsgcmUtcnVuIGNhLWN1dG92ZXIgT05MWSB3aGVuIGVuYWJsaW5nIExvbmdob3JuIEFORCBlbGFzdGljCiAgIyBub2RlcyBhcmUgYWxsb3dlZCB0byBydW4gTG9uZ2hvcm4tYmFja2VkIHBvZHMgKHNlZQogICMgZG9jcy9kZXNpZ24vbG9uZ2hvcm4tc3RvcmFnZS5tZCDCpzMvwqc0LjEg4oCUIHJlcGxpY2FzIGFyZSBub3JtYWxseSBwaW5uZWQgdG8KICAjIERVUkFCTEUgYmFzZWxpbmUgbm9kZXMsIG9mZiBiaWxsaW5nLXJlYXBlZCBlbGFzdGljIG5vZGVzKS4KICAjIC0gWyBzaCwgLWMsICJERUJJQU5fRlJPTlRFTkQ9bm9uaW50ZXJhY3RpdmUgYXB0LWdldCB1cGRhdGUgLXkgfHwgdHJ1ZSIgXQogICMgLSBbIHNoLCAtYywgIkRFQklBTl9GUk9OVEVORD1ub25pbnRlcmFjdGl2ZSBhcHQtZ2V0IGluc3RhbGwgLXkgb3Blbi1pc2NzaSBuZnMtY29tbW9uIHx8IHRydWUiIF0KICAjIC0gWyBzaCwgLWMsICJzeXN0ZW1jdGwgZW5hYmxlIC0tbm93IGlzY3NpZCB8fCB0cnVlIiBdCiAgIyAtIFsgc2gsIC1jLCAibWtkaXIgLXAgL3Zhci9saWIvbG9uZ2hvcm4iIF0KICAjCiAgIyBIb3N0IGZpcmV3YWxsOiB0aGUgYWdlbnQgbXVzdCByZWFjaCB0aGUgQVBJICg2NDQzKSBvdXRib3VuZCBhbmQgYWNjZXB0CiAgIyBrdWJlbGV0ICgxMDI1MCksIHBsdXMgd2hpY2hldmVyIGZsYW5uZWwgYmFja2VuZCB0aGUgY2x1c3RlciBydW5zLiBUaGUgbGl2ZQogICMgcHJvZCBjbHVzdGVyIHJ1bnMgZmxhbm5lbCB3aXJlZ3VhcmQtbmF0aXZlIG9uIEFMTCBub2RlcyAoRnV6ZUluZnJhIzM2NiksIHNvCiAgIyBhbiBlbGFzdGljIGFnZW50IE1VU1QgYWxsb3cgNTE4MjAvdWRwIG9yIGl0IGNhbiByZWdpc3RlciB3aXRoIHRoZSBBUEkgc2VydmVyCiAgIyBidXQgbmV2ZXIgcGFzcyBXaXJlR3VhcmQgcG9kLW92ZXJsYXkgdHJhZmZpYy4gODQ3Mi91ZHAgKFZYTEFOKSBpcyBrZXB0IHRvbwogICMgc2luY2UgaXQgaXMgaGFybWxlc3MgYW5kIG1pcnJvcnMgdGhlIGJhc2VsaW5lIG1vZHVsZSdzIHJ1bGVzLgogIC0gWyBzaCwgLWMsICJ1ZncgYWxsb3cgMjIvdGNwIHx8IHRydWUiIF0KICAtIFsgc2gsIC1jLCAidWZ3IGFsbG93IDEwMjUwL3RjcCB8fCB0cnVlIiBdCiAgLSBbIHNoLCAtYywgInVmdyBhbGxvdyA4NDcyL3VkcCB8fCB0cnVlIiBdCiAgLSBbIHNoLCAtYywgInVmdyBhbGxvdyA1MTgyMC91ZHAgfHwgdHJ1ZSIgXQogICMgQWxsb3cgdGhlIHdob2xlIFZMQU46IFdpcmVHdWFyZCAoNTE4MjAvdWRwKSwga3ViZWxldCAoMTAyNTApIGFuZCB0aGUgQVBJCiAgIyAoNjQ0MykgYWxsIHRyYXZlcnNlIGl0IG9uY2UgdGhlIG5vZGUgaXMgcHJpdmF0ZS4gVGhlIG5ldHdvcmsgaXMgYSAvMjIKICAjICgxMC4wLjAuMC8yMiDigJQgdGVycmFmb3JtL2NvbnRhYm8vcHJpdmF0ZS1uZXR3b3JrLnRmKTsgdGhlIHByZXZpb3VzIC8yNCB3b3VsZAogICMgaGF2ZSBzaWxlbnRseSBibGFja2hvbGVkIGV2ZXJ5IHBlZXIgYWxsb2NhdGVkIDEwLjAuMS54LTEwLjAuMy54LgogIC0gWyBzaCwgLWMsICJ1ZncgYWxsb3cgZnJvbSAxMC4wLjAuMC8yMiB8fCB0cnVlIiBdCiAgLSBbIHNoLCAtYywgInVmdyAtLWZvcmNlIGVuYWJsZSB8fCB0cnVlIiBdCiAgIyBCcmluZyB0aGUgcHJpdmF0ZSBOSUMgdXAsIHRoZW4gaGFuZCB0aGUgam9pbiB0byB0aGUgc3lzdGVtZCB1bml0LiBUaGUgdW5pdCDigJQKICAjIG5vdCBydW5jbWQg4oCUIG93bnMgdGhlIGpvaW4gcHJlY2lzZWx5IHNvIGEgcG9zdC1hc3NpZ24gcmVib290IHJlLXJ1bnMgaXQuCiAgLSBbIHNoLCAtYywgIm5ldHBsYW4gYXBwbHkgfHwgdHJ1ZSIgXQogIC0gWyBzaCwgLWMsICJzeXN0ZW1jdGwgZGFlbW9uLXJlbG9hZCIgXQogIC0gWyBzaCwgLWMsICJzeXN0ZW1jdGwgZW5hYmxlIC0tbm93IGZ1emVpbmZyYS12bGFuLWpvaW4uc2VydmljZSIgXQo="
+    # VLAN CUTOVER, autoscaler half. The baseline nodes were migrated to Contabo
+    # private network 60932 (control plane vmi3383846 = 10.0.0.6, vmi3396106 =
+    # 10.0.0.2, mendys-worker-1 = 10.0.0.3), but the autoscaler was never flipped
+    # to match -- so every node it created landed OFF the VLAN with an unreachable
+    # kubelet (no exec/logs/port-forward). That is why all five elastic nodes were
+    # broken and the three baseline nodes were fine: a split exactly along VLAN
+    # membership, not a per-node fault. It also explains why LiteLLM could not be
+    # reached until its pod was moved, and why Loki's stale mount was so hard to
+    # inspect.
+    #
+    # The gate comment in values.yaml said to turn this on ONLY during the
+    # coordinated cutover, because a node on private-only flannel cannot join a
+    # still-public control plane. That precondition is now MET -- the control plane
+    # is already on 10.0.0.x. This is the last step of a finished migration.
+    #
+    # Ordering the add-on + attaching is NOT sufficient by itself: the paired
+    # cloud-init change above derives the private IP at boot and passes --node-ip
+    # and --flannel-iface. Without those k3s advertises the PUBLIC address and the
+    # kubelet stays unreachable even once the node is on the VLAN.
+    privateNetworking: true
+    privateNetworkId: 60932
     # Best-effort email warning fired immediately before each new elastic
     # instance is provisioned (see internal/notify + internal/provider/scale.go's
     # NodeGroupIncreaseSize) — purely an early-warning signal for an operator;
@@ -718,6 +932,40 @@ serviceMongoDatabases:
     passwordSecret:
       name: fuzepicker-db-credentials
       key: password
+# Per-service MariaDB provisioning — PROD. Helm REPLACES lists, so the full set
+# is restated here (the base values.yaml default is an empty list).
+#
+# GITOPS GATE, identical to serviceDatabases above and just as hard: the hook is
+# a SINGLE Job pod that mounts every enabled entry's password by `secretKeyRef`
+# (optional: false). ONE missing Secret fails the pod with
+# CreateContainerConfigError, blocks every other entry, and degrades the Argo
+# PostSync wave. Flip an entry to `true` ONLY in the same PR that lands its
+# sealed Secret in the `fuzeinfra` namespace.
+#
+#   - mendys-wp -> Secret `mendys-wp-db-credentials` key `password`  (ABSENT)
+#
+# mendys-wp is the reason this engine exists, but it still runs its own
+# `mendys-wp-mariadb` StatefulSet in the `mendys-wp` namespace with credentials
+# in its own `mendys-wp-db` Secret (keys MYSQL_DATABASE / MYSQL_USER /
+# MYSQL_PASSWORD / MYSQL_ROOT_PASSWORD). Migrating it is a two-step handshake
+# owned by the consumer repo, not by this PR:
+#   1. mendys-wp seals its existing MYSQL_PASSWORD value as
+#      `mendys-wp-db-credentials` (key `password`) FOR the `fuzeinfra`
+#      namespace and commits the ciphertext to deploy/sealed-secrets/.
+#   2. THEN this entry flips to `enabled: true`; the PostSync Job creates the
+#      user+database on the shared engine with that same password, mendys-wp
+#      repoints WORDPRESS_DB_HOST at
+#      fuzeinfra-mariadb.fuzeinfra.svc.cluster.local:3306, dumps/restores its
+#      data, and retires its own StatefulSet.
+# See docs/consuming-repos/MARIADB_PROVISIONING.md.
+serviceMariadbDatabases:
+  - name: mendys-wp
+    enabled: false
+    user: mendys_wp_svc
+    database: mendys_wp
+    passwordSecret:
+      name: mendys-wp-db-credentials
+      key: password
 # Chroma allocations are enabled only with a matching strict-scoped
 # SealedSecret in deploy/sealed-secrets. Chroma binds each bearer token to the
 # declared tenant/database; the NetworkPolicy also admits only the named pods.
@@ -771,3 +1019,86 @@ serviceChromaCollections:
 nodeConfigurator:
   preferIPv4:
     enabled: true
+  # ENABLED. multipathd claims Longhorn's /dev/sd* devices, and Longhorn has been
+  # reporting it on EVERY Longhorn node while nothing acted on it:
+  #
+  #   Multipathd=False  MultipathdIsRunning
+  #   "multipathd is running with a known issue that affects Longhorn"
+  #   fuzeinfra-ci-runner-1  False     mendys-worker-1  False
+  #   vmi3383846             False     vmi3396106       False
+  #
+  # It produces BOTH stuck-volume signatures seen in this cluster:
+  #   * "already mounted or mount point busy"        — Loki, x4458 over 6d7h
+  #   * mke2fs "apparently in use by the system"     — Prometheus, on a BRAND NEW volume
+  #
+  # This is why fuzeinfra-prometheus-0 sat ContainerCreating for 9 DAYS, which left
+  # Prometheus with no endpoints — so every rule under helm/fuzeinfra/rules/ was
+  # inert, including the PVCFillingUp alert added to catch the very disk-full
+  # condition that took Loki down. The monitoring layer was dark the whole time.
+  #
+  # CORRECTS THE CONCLUSION OF #773. Converting a StatefulSet to a Deployment +
+  # fresh PVC did NOT fix this class; it only sidesteps it when the new device wins
+  # the race against multipathd. Loki won. Prometheus, converted identically in
+  # #816, LOST — its replacement volume attached healthy and then failed to FORMAT.
+  # Since #814 made longhorn the default StorageClass, that race now applies to
+  # every new volume in the cluster, not just these two.
+  #
+  # RISK: this restarts multipathd on all four Longhorn nodes. It was gated off
+  # because it touches a host daemon and could not be tested in advance. Verify
+  # after Argo syncs:
+  #   multipath -t | grep -A2 blacklist
+  #   the Longhorn node condition Multipathd flipping False -> True
+  #   fuzeinfra-prometheus reaching Running/Ready
+  # REVERTED 2026-09-01 ~22:35Z. Enabling this correlates in time with the prod
+  # control plane becoming unreachable: TCP 6443 open but the TLS handshake timing
+  # out, from BOTH an external host and an in-cluster runner, starting after the
+  # 22:17:30Z deploy (the 21:52:27Z deploy was fine).
+  #
+  # Plausible mechanism, NOT verified on-node -- the cluster is unreachable, which
+  # is the symptom itself. The rendered blacklist is `devnode "^sd[a-z0-9]+"`, i.e.
+  # EVERY /dev/sd* device, and an on-node check earlier today found `dm-0 = mpatha`
+  # on these hosts. If a filesystem on vmi3383846 -- the control-plane node running
+  # etcd -- was mounted through that multipath map, dropping the map stalls its
+  # disk, which stalls etcd, which presents exactly as a TLS handshake timeout.
+  #
+  # Turning this off does NOT by itself repair a node: the DaemonSet has already
+  # written /etc/multipath.conf. Recovery is restoring the backup the script took
+  # at /etc/multipath.conf.pre-fuzeinfra and restarting multipathd (console/SSH).
+  #
+  # The underlying Prometheus/Longhorn mount bug is REAL and still unfixed. A retry
+  # should match Longhorn's devices specifically (vendor/product or wwid) rather
+  # than all of sd*, and roll out to ONE non-control-plane node first.
+  multipathBlacklist:
+    enabled: true
+    # STAGE ONE: fuzeinfra-ci-runner-1 only. It is a Longhorn node, it is NOT the
+    # control plane, and it carries no database PVC -- so if the multipathd restart
+    # misbehaves the blast radius is CI capacity, not etcd. Widen to the remaining
+    # Longhorn nodes (mendys-worker-1, vmi3396106, then vmi3383846 LAST) only after
+    # volumes are observed attaching and formatting cleanly here.
+    rolloutNodes:
+      - fuzeinfra-ci-runner-1
+
+# Stateful services not otherwise overridden here still need the durable pin.
+alertmanager:
+  # Pin to durable Longhorn-disk nodes. longhorn-manager only runs on the 3
+  # durable nodes, so Longhorn registers node.longhorn.io objects only there;
+  # a stateful pod scheduled onto an ephemeral elastic node can NEVER attach
+  # its volume (FailedAttachVolume: node.longhorn.io "..." not found).
+  nodeSelector:
+    node.longhorn.io/create-default-disk: "true"
+chromadb:
+  # Pin to durable Longhorn-disk nodes. longhorn-manager only runs on the 3
+  # durable nodes, so Longhorn registers node.longhorn.io objects only there;
+  # a stateful pod scheduled onto an ephemeral elastic node can NEVER attach
+  # its volume (FailedAttachVolume: node.longhorn.io "..." not found).
+  nodeSelector:
+    node.longhorn.io/create-default-disk: "true"
+
+# Pin kube-state-metrics to a DURABLE (VLAN) node. It had been landing on
+# autoscaler-managed elastic nodes, which are billing-reaped out from under it and
+# whose kubelet the API server cannot reach — `kubectl logs` there fails with
+# `proxy error ... dialing <ip>:10250, code 502`, so the component was both
+# evictable-at-random and impossible to debug. Same selector the databases use.
+kubeStateMetrics:
+  nodeSelector:
+    node.longhorn.io/create-default-disk: "true"

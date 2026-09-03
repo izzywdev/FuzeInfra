@@ -1,3 +1,26 @@
+# fuze:fork — deliberately NOT `fuze:managed`, so governance-sync never reconciles it.
+#
+# Shares a name with `workflow-templates/auto-merge.yml` but implements a different merge
+# mechanism, required by this repo's branch protection:
+#
+#   * The canonical uses `gh pr merge --auto` (GitHub's native auto-merge QUEUE). That queue
+#     does NOT honour ruleset bypass actors — it waits for a human review even when the
+#     enabler is a bypass actor — so under this repo's "Protect default branch" ruleset
+#     (required reviews + code-owner + signed commits) every PR simply stalls.
+#   * This copy instead does a direct **admin squash-merge** as the admin PAT: squash so
+#     GitHub signs the single commit (satisfies required_signatures), `--admin` so the
+#     review/signature rules are bypassed for the automation only. External / non-admin
+#     contributors stay fully gated.
+#
+# Two further behaviours the canonical has no equivalent of, both added after live
+# incidents: a `schedule` backstop that sweeps ALL open PRs (event-only delivery missed
+# merges when the last check to go green fired no fresh check_suite), and `--match-head-commit`
+# pinning of the merge to the exact OID whose checks were read (without it, PRs #415 and
+# #418 were merged at a commit no check had run against and the author's newer commits were
+# silently discarded).
+#
+# Retiring this fork means changing the merge model, not re-stamping a file.
+
 name: Auto-merge
 
 # Autonomous merge under the tightened "Protect default branch" ruleset

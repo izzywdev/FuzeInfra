@@ -1,0 +1,109 @@
+# =============================================================================
+# deployment-watchdog
+# =============================================================================
+# Catches the class of prod freeze that went unnoticed for 2d11h on
+# 2026-08-30..09-01, when every individual component reported "running":
+#
+#   1. Loki's 5Gi PVC filled. A full Loki volume is SELF-SEALING — retention is
+#      enforced by the compactor, the compactor runs inside Loki, and Loki cannot
+#      start on a full disk. It crash-looped 694 times and could never free its
+#      own space.
+#   2. Argo's sync of fuzeinfra-prod blocks on resource health, so that
+#      permanently-unhealthy StatefulSet wedged ONE sync operation in
+#      phase=Running for 37 hours ("waiting for healthy state of
+#      apps/StatefulSet/fuzeinfra-loki and 1 more resources").
+#   3. Argo will not start a new sync while an operation is in flight, so every
+#      prod change queued silently behind it — including a cluster-autoscaler
+#      maxSize raise that fleet-wide CI was blocked on.
+#   4. Nothing alerted. It was found by hand, days later.
+#
+# WHY ubuntu-latest AND NOT `runs-on: staging` (do not "fix" this):
+# every other cluster-touching workflow in this repo runs on the self-hosted
+# `staging` ARC runner, which lives INSIDE the cluster it would be watching. A
+# watchdog hosted by its own subject cannot start when the subject is the thing
+# that is broken — during this very incident the fleet's CI was blocked on an
+# autoscaler change that could not deploy. FuzeInfra is PUBLIC, so hosted
+# minutes are free and unmetered, which also matters because the private repos'
+# Actions budget is currently exhausted.
+#
+# READ-ONLY against the cluster, with exactly one sanctioned write: dispatching
+# the existing argo-terminate-op workflow for an operation ALREADY past the
+# threshold (safe and reversible — Argo re-syncs from git, which is the desired
+# state). Nothing is ever patched, edited or deleted; prod is GitOps under Argo
+# selfHeal. No Secret is ever read: this repo's job logs are public.
+#
+# NO continue-on-error / || true / exit 0 anywhere. If it cannot reach the
+# cluster it FAILS. A watchdog that goes green when blind is worse than none.
+#
+# Thresholds: governance/watchdog-thresholds.json
+# Detection:  scripts-tools/deployment_watchdog.py (unit-tested offline in
+#             tests/test_deployment_watchdog.py)
+# Secret:     KUBE_CONFIG (base64 kubeconfig) — the same secret cluster-query.yml
+#             and argo-outofsync-autofix.yml use.
+# =============================================================================
+name: deployment-watchdog
+
+on:
+  schedule:
+    # Every 15 minutes. The stuck-op threshold is 45m, so a wedged sync is filed
+    # within an hour of crossing it instead of after two days.
+    - cron: '*/15 * * * *'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Detect and print only — file no issue, dispatch nothing.'
+        type: boolean
+        required: false
+        default: true
+
+permissions:
+  contents: read
+  issues: write
+  # Required to dispatch argo-terminate-op for an op already past threshold.
+  actions: write
+
+concurrency:
+  group: deployment-watchdog
+  cancel-in-progress: false
+
+jobs:
+  watch:
+    # See the header: hosted ON PURPOSE, so the watchdog survives the cluster
+    # being the thing that is broken.
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: azure/setup-kubectl@829323503d1be3d00ca8346e5391ca0b07a9ab0d # v5.1.0
+
+      - name: Configure kubectl
+        env:
+          KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
+        run: |
+          set -euo pipefail
+          if [ -z "$KUBE_CONFIG" ]; then
+            echo "::error::KUBE_CONFIG unset — the watchdog cannot see the cluster. Failing instead of reporting all clear."
+            exit 1
+          fi
+          mkdir -p "$HOME/.kube"
+          printf '%s' "$KUBE_CONFIG" | base64 -d > "$HOME/.kube/config"
+          chmod 600 "$HOME/.kube/config"
+          echo "KUBECONFIG=$HOME/.kube/config" >> "$GITHUB_ENV"
+
+      - name: Run watchdog
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN || secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          # On `schedule` this is the empty string, so scheduled runs are always
+          # live. Only an explicit workflow_dispatch can ask for a dry run.
+          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          ARGS=(--repo "$REPO" --run-url "$RUN_URL")
+          if [ "$DRY_RUN" = "true" ]; then
+            ARGS+=(--dry-run)
+            echo "::notice::dry run — detections will be printed, no issue filed, nothing dispatched"
+          fi
+          python3 scripts-tools/deployment_watchdog.py "${ARGS[@]}"

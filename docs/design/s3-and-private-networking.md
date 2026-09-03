@@ -507,3 +507,45 @@ against prod out-of-band.
 - Does not move any database onto S3 (impossible; they stay on block storage).
 - Does not weaken the ELASTIC-EXCLUSION invariant (no instance enumeration added).
 - Does not commit any plaintext secret (all credentials via offline-sealed SealedSecrets).
+
+
+## Elastic (autoscaler-created) nodes join the VLAN - completed 2026-09-01
+
+The baseline nodes were cut over to private network **60932** (control plane
+`vmi3383846` = 10.0.0.6, `vmi3396106` = 10.0.0.2, `mendys-worker-1` = 10.0.0.3).
+The autoscaler's values were **not** flipped at the same time, so every node it
+created landed off-VLAN. The visible symptom was that all five elastic nodes had
+an unreachable kubelet - no `exec`, `logs`, or `port-forward` - while the three
+baseline nodes were fine. That split follows VLAN membership exactly; it was not
+a per-node fault, and node `588198fe` was not uniquely broken - it was simply the
+elastic node that happened to get tested.
+
+Knock-on effects that traced back to this one gap: LiteLLM was unreachable until
+its pod was moved, and Loki's stale mount could not be inspected in place.
+
+**Three things are required. Any one alone is insufficient:**
+
+| # | Setting | Where | Why it is required |
+|---|---|---|---|
+| 1 | `provider.privateNetworking: true` | `values-contabo.yaml` | Orders the paid Contabo add-on at `createInstance` (`addOns.privateNetworking`). Without it, attach returns **HTTP 402**. |
+| 2 | `provider.privateNetworkId: 60932` | `values-contabo.yaml` | Grants network membership. The add-on grants the *capability*; this grants the *attachment*. |
+| 3 | `--node-ip <private> --flannel-iface eth1` | cloud-init `userDataTemplateB64` | **The one that was missed.** Without `--node-ip`, k3s advertises the PUBLIC address, so the kubelet stays unreachable even after the node is on the VLAN. Without `--flannel-iface`, the overlay keeps using the public interface. |
+
+Contabo assigns the private IP **after** create+attach, so it cannot be templated
+in at render time. The cloud-init waits up to 300s for `eth1` to carry an address
+and reads it off the interface at boot.
+
+**Deliberate fallback:** if `eth1` never gets an address, the node joins *without*
+`--node-ip` and logs a warning, rather than failing to join. A node with an
+unreachable kubelet is strictly better than no node - the failure this avoids is
+a scale-up event that silently yields zero capacity.
+
+The flannel backend is **wireguard-native on all nodes** (FuzeInfra#366); the
+cloud-init already opens `51820/udp`, and now also allows the `10.0.0.0/24`
+subnet outright.
+
+**Anything that provisions a node must set all three.** Terraform's
+`modules/contabo-k3s-node` already writes `node-ip`/`flannel-iface` when
+`private_net_enabled` (see `provisioning.tf`); the autoscaler path is the one that
+had drifted. The systemic lesson: the cutover was tracked as a Terraform change,
+and the second provisioning path was never enumerated as part of "done".

@@ -506,9 +506,9 @@ jobs:
               .clusterAutoscaler.provider.elasticTag = "fuzeinfra-prod-elastic-v2" |
               .clusterAutoscaler.provider.elasticNamePrefix = "fuzeinfra-prod-elastic-v2" |
               .clusterAutoscaler.provider.minSize = 0 |
-              .clusterAutoscaler.provider.maxSize = 1 |
+              .clusterAutoscaler.provider.maxSize = 4 |
               .clusterAutoscaler.nodeGroup.minSize = 0 |
-              .clusterAutoscaler.nodeGroup.maxSize = 1
+              .clusterAutoscaler.nodeGroup.maxSize = 4
             ' "$VALUES_PATH"
           rm -f "$RENDERED_USERDATA"
           trap - EXIT
@@ -549,7 +549,7 @@ jobs:
 
       - name: dry_run — upload artifact
         if: ${{ inputs.dry_run }}
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@v7.0.1
         with:
           name: ca-cutover-dry-run-${{ github.run_id }}
           path: /tmp/ca-cutover-dry-run

@@ -1,0 +1,260 @@
+# fuze:managed template=fuze-cluster.yml baseline=v1 digest=sha256:eb98f6bdc6dfe89cd42ab887ef6b42448a669b77a3f7a0dea199291c9e92c786
+name: Fuze (cluster-capable)
+
+# THE PRIVILEGED HALF OF THE `@fuze` ENTRYPOINT. Identical trigger surface to
+# `workflow-templates/fuze.yml`, plus prod cluster credentials and the CLIs to use them.
+#
+# THIS FILE IS NOT PART OF THE STANDARD STACK AND MUST NEVER BECOME PART OF IT.
+# It is installed by scripts/bootstrap/caps/workflows.py ONLY into a repo whose
+# `.fuze/manifest.json` declares `clusterOps.enabled: true`. Today exactly one repo
+# qualifies — izzywdev/FuzeInfra, which owns the cluster — and the baseline forbids any
+# other repo from mutating it (CLAUDE.baseline.md §1: consuming repos delegate infra
+# changes to FuzeInfra via `@fuze` and never operate the cluster themselves). A product
+# repo that declared this flag would be declaring a policy violation, not enabling a
+# feature.
+#
+# TWO INDEPENDENT GATES, ON PURPOSE. The manifest flag decides whether the FILE exists in
+# a repo at all; `vars.FUZE_CLUSTER_ENTRYPOINT` decides whether it RUNS. Either one absent
+# means no cluster-capable agent. The default of both is off, so the failure direction is
+# always toward the unprivileged handler in `fuze.yml` — which is also why the two can
+# never both answer one mention: `fuze.yml`'s Gate 4 stands down exactly when this file's
+# gate stands up.
+#
+# WHY THE VARIABLE EXISTS RATHER THAN JUST THE FLAG. The manifest is reconciled from the
+# hub; a repo variable is set in the repo's own settings by a human. Requiring both means
+# no single automated propagation path — not a governance sync, not a bootstrap re-run —
+# can turn on prod cluster access by itself. Activate with:
+#     gh variable set FUZE_CLUSTER_ENTRYPOINT --repo <owner/repo> --body true
+#
+# `runs-on: staging` IS DELIBERATE AND IS NOT A PLACEHOLDER. This job must run on the
+# in-cluster ARC pool: the LiteLLM gateway it routes through is ClusterIP-only behind a
+# NetworkPolicy that allowlists the `arc-runners` namespace, so a GitHub-hosted runner
+# cannot reach it at all. The file is listed in `lib/render.RUNNER_EXEMPT` so the installer
+# does NOT overwrite this with the repo's general-purpose `ci.runner` — that pool is chosen
+# for ordinary CI, and silently relocating a KUBE_CONFIG-holding job onto it is not a
+# rendering detail. A `runs-on:` naming a pool that does not exist does not fail, it QUEUES
+# FOREVER (governance/ci-runners.md), which is a second reason this file must not reach a
+# repo without that pool.
+#
+# SECURITY. Trusted authors only (OWNER/MEMBER/COLLABORATOR) — the gating is load-bearing
+# here in a way it is not in `fuze.yml`: this runner holds prod cluster creds AND an agent
+# that can act on them. Destructive-op guard shims below enforce the irreversible-verb ban
+# at the OS level, independently of what the agent is told.
+on:
+  issue_comment:
+    types: [created]
+  pull_request_review_comment:
+    types: [created]
+  issues:
+    types: [opened, assigned, labeled]
+  pull_request_review:
+    types: [submitted]
+
+jobs:
+  fuze:
+    concurrency:
+      group: fuze-${{ github.event.issue.number || github.event.pull_request.number }}
+      cancel-in-progress: true
+    # Gate 0 (ACTIVATION): the repo variable. Absent -> this whole workflow is inert and
+    #   `fuze.yml` answers instead. See the header for why this is separate from the
+    #   manifest flag that decides whether the file is here at all.
+    # Gates 1-3 are identical to fuze.yml: mention, trusted author, loop-guard sentinel.
+    if: |
+      vars.FUZE_CLUSTER_ENTRYPOINT == 'true' &&
+      (
+        (github.event_name == 'issue_comment' && contains(github.event.comment.body, '@fuze') &&
+          !contains(github.event.comment.body, 'fuze-loop-guard') &&
+          contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association)) ||
+        (github.event_name == 'pull_request_review_comment' && contains(github.event.comment.body, '@fuze') &&
+          !contains(github.event.comment.body, 'fuze-loop-guard') &&
+          contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association)) ||
+        (github.event_name == 'pull_request_review' && contains(github.event.review.body, '@fuze') &&
+          !contains(github.event.review.body, 'fuze-loop-guard') &&
+          contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.review.author_association)) ||
+        (github.event_name == 'issues' && github.event.action == 'opened' &&
+          (contains(github.event.issue.body, '@fuze') || contains(github.event.issue.title, '@fuze')) &&
+          contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.issue.author_association)) ||
+        (github.event_name == 'issues' && github.event.action == 'labeled' &&
+          github.event.label.name == 'fuze' &&
+          contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.issue.author_association)) ||
+        (github.event_name == 'issues' && github.event.action == 'assigned' &&
+          github.event.assignee.login == 'fuze' &&
+          contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.issue.author_association))
+      )
+    runs-on: staging
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+      id-token: write
+      actions: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          fetch-depth: 1
+
+      - name: Set up kubectl
+        uses: azure/setup-kubectl@829323503d1be3d00ca8346e5391ca0b07a9ab0d  # v5.1.0
+      - name: Set up helm
+        uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310  # v5.0.1
+        with:
+          version: v3.14.4
+      - name: Set up terraform
+        uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e  # v4.0.1
+        with:
+          terraform_version: "1.6.6"
+          terraform_wrapper: false
+
+      - name: Configure kubectl (prod cluster)
+        id: kube
+        env:
+          KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
+        run: |
+          if [ -z "$KUBE_CONFIG" ]; then
+            echo "::warning::KUBE_CONFIG secret is empty — cluster ops unavailable this run."
+            exit 0
+          fi
+          mkdir -p "$HOME/.kube"
+          printf '%s' "$KUBE_CONFIG" | base64 -d > "$HOME/.kube/config"
+          chmod 600 "$HOME/.kube/config"
+          echo "KUBECONFIG=$HOME/.kube/config" >> "$GITHUB_ENV"
+          kubectl config current-context >/dev/null 2>&1 && echo "kubectl context ready"
+
+      # HARD guardrail: shadow the cluster CLIs with PATH wrappers that REJECT destructive
+      # verbs, enforced at the OS level regardless of what the agent is instructed to do.
+      # kubectl apply/get/label/rollout, helm template/upgrade --dry-run and terraform plan
+      # all pass through; the irreversible verbs do not. The self-test at the end is not
+      # decoration — a guard that silently failed to install is worse than none, because the
+      # run would report the guard as present.
+      - name: Install destructive-op guard shims
+        run: |
+          set -euo pipefail
+          GUARD="$HOME/guardbin"; mkdir -p "$GUARD"
+          RK="$(command -v kubectl)"; RH="$(command -v helm)"; RT="$(command -v terraform)"
+          cat > "$GUARD/kubectl" <<EOF
+          #!/usr/bin/env bash
+          for a in "\$@"; do case "\$a" in
+            delete|drain|cordon|uncordon|taint|patch|edit|replace) echo "guard: 'kubectl \$a' is blocked on this runner (prod GitOps; reconcile via chart+PR)" >&2; exit 97;; esac; done
+          exec "$RK" "\$@"
+          EOF
+          cat > "$GUARD/helm" <<EOF
+          #!/usr/bin/env bash
+          for a in "\$@"; do case "\$a" in uninstall|delete|rollback) echo "guard: 'helm \$a' is blocked on this runner" >&2; exit 97;; esac; done
+          exec "$RH" "\$@"
+          EOF
+          cat > "$GUARD/terraform" <<EOF
+          #!/usr/bin/env bash
+          for a in "\$@"; do case "\$a" in apply|destroy|import|"state") echo "guard: 'terraform \$a' is blocked on this runner (plan-only; apply via the terraform CD)" >&2; exit 97;; esac; done
+          exec "$RT" "\$@"
+          EOF
+          chmod +x "$GUARD"/kubectl "$GUARD"/helm "$GUARD"/terraform
+          "$GUARD/kubectl" delete ns x >/dev/null 2>&1 && { echo "guard self-test FAILED (delete not blocked)"; exit 1; } || echo "guard: kubectl delete correctly blocked"
+          echo "$GUARD" >> "$GITHUB_PATH"
+
+      - name: Run Fuze (cluster-capable)
+        id: fuze
+        continue-on-error: true
+        uses: ./.github/actions/fuze-code-action
+        with:
+          github-token: ${{ secrets.GH_TOKEN || secrets.GITHUB_TOKEN }}
+          litellm-key: ${{ secrets.LITELLM_FUZE_KEY }}
+          anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY }}
+          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          gemini-api-key: ${{ secrets.GEMINI_API_KEY }}
+          show-full-output: true
+          allowed-bots: "fuzeone-bot,github-actions,fuze-agent"
+          # Passed through fuze-code-action's `extra-env` rather than left on this step's
+          # `env:` — a composite action's inner steps do not reliably inherit the caller
+          # step's env, and silently dropping KUBECONFIG here would leave every cluster
+          # command failing for a reason nothing in the log names. See that input's own
+          # description.
+          extra-env: |
+            KUBECONFIG=${{ env.KUBECONFIG }}
+          additional-permissions: |
+            Bash
+            Write
+            Edit
+            MultiEdit
+            Task
+            TodoWrite
+          claude-args: >-
+            --permission-mode bypassPermissions
+            --max-turns 60
+            --append-system-prompt "EXPERT-FIRST: begin every task by invoking this repo's <repo>-expert subagent (via Task) to load its architecture/deploy/gotcha context before planning or coding; the expert is named in .fuze/manifest.json under `expert`. This runner has PROD CLUSTER ACCESS: KUBECONFIG targets the production cluster and kubectl/helm/terraform are installed. GitOps guardrails: prod is GitOps under ArgoCD selfHeal — never kubectl-patch/edit chart-managed resources (they are reverted within seconds); reconcile via chart+PR. Imperatively creating NON-chart-managed cluster Secrets to unblock a go-live IS allowed. Destructive verbs are blocked at the OS level by PATH guard shims; do not attempt to work around them. Prefer the devops-engineer agent for infra delegations, per governance/routing.md. End issue replies with DONE: or BLOCKED: so cross-repo monitors can key off it. CROSS-REPO HAND-OFF: if a delegated issue's REMAINING work belongs to another repo, do NOT leave it open here — open (or comment on) an issue in that repo mentioning its `@fuze` with full context and a STATE block, post a closing note here, and CLOSE this issue."
+
+      - name: Detect Fuze failure
+        id: detect
+        if: always()
+        env:
+          STEP_OUTCOME: ${{ steps.fuze.outcome }}
+          MODE: ${{ steps.fuze.outputs.mode }}
+          CONCLUSION: ${{ steps.fuze.outputs.conclusion }}
+        run: |
+          set -uo pipefail
+          failed=false; reason=""
+          if [ "${STEP_OUTCOME:-}" = "failure" ]; then
+            failed=true
+            reason="fuze-code-action failed (mode=${MODE:-?}, conclusion=${CONCLUSION:-?}). In mention mode there is only one rung, so this is the LiteLLM-or-Anthropic leg failing — check LITELLM_FUZE_KEY, gateway health, and that this runner is on the gateway's NetworkPolicy allowlist."
+          elif [ "${CONCLUSION:-}" = "failure" ]; then
+            failed=true
+            reason="the responder ran and reported conclusion=failure (mode=${MODE:-?}) — it errored before completing the task"
+          fi
+          echo "failed=$failed" >> "$GITHUB_OUTPUT"
+          {
+            echo "reason<<GHA_EOF"
+            echo "${reason}"
+            echo "GHA_EOF"
+          } >> "$GITHUB_OUTPUT"
+          if [ "$failed" = "true" ]; then
+            echo "::error::@fuze responder failed: $reason"
+          else
+            echo "@fuze responder completed without an error signal (mode=${MODE:-?})"
+          fi
+
+      - name: Alert on Fuze failure
+        if: always() && steps.detect.outputs.failed == 'true'
+        env:
+          TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          CHAT: ${{ secrets.TELEGRAM_CHAT_ID }}
+          GH_TOKEN: ${{ secrets.GH_TOKEN || secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          ISSUE: ${{ github.event.issue.number || github.event.pull_request.number }}
+          ACTOR: ${{ github.actor }}
+          REASON: ${{ steps.detect.outputs.reason }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -uo pipefail
+          if [ -n "${TOKEN:-}" ]; then
+            TEXT=$(printf '@fuze (cluster) responder FAILED\nRepo: %s\nIssue/PR: #%s\nBy: %s\nReason: %s\nRun: %s' \
+              "$REPO" "${ISSUE:-?}" "$ACTOR" "$REASON" "$RUN_URL")
+            curl -s -X POST "https://api.telegram.org/bot${TOKEN}/sendMessage" \
+              --data-urlencode "chat_id=${CHAT:-}" \
+              --data-urlencode "text=${TEXT}" \
+              --data "disable_web_page_preview=true" >/dev/null \
+              && echo "telegram alert sent" || echo "::warning::telegram send failed"
+          else
+            echo "::notice::TELEGRAM_BOT_TOKEN unset — skipping Telegram alert"
+          fi
+          # LOOP-BREAKER sentinel — see fuze.yml. DO NOT remove it.
+          if [ -n "${ISSUE:-}" ]; then
+            {
+              printf '<!-- fuze-loop-guard: automated failure notice — this comment must NOT re-trigger the Fuze workflow -->\n'
+              printf '### Fuze responder did not run to completion\n\n'
+              printf 'The responder errored before finishing your request, so **no changes were made and no branch was created**.\n\n'
+              printf -- '- **Reason:** %s\n' "$REASON"
+              printf -- '- **Run log:** %s\n\n' "$RUN_URL"
+              printf 'This notice is automated and will **not** retry on its own. Re-trigger by posting a new comment mentioning `@fuze` once the cause is fixed.\n'
+            } > "${RUNNER_TEMP}/fuze-fail.md"
+            gh issue comment "$ISSUE" --repo "$REPO" --body-file "${RUNNER_TEMP}/fuze-fail.md" \
+              && echo "posted failure notice to #$ISSUE" || echo "::warning::could not comment on #$ISSUE"
+          fi
+
+      - name: Fail job if Fuze failed
+        if: always() && steps.detect.outputs.failed == 'true'
+        env:
+          REASON: ${{ steps.detect.outputs.reason }}
+        run: |
+          echo "::error::Marking job failed — @fuze responder did not complete: ${REASON}"
+          exit 1

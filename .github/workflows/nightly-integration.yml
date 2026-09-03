@@ -1,3 +1,21 @@
+# fuze:fork — deliberately NOT `fuze:managed`, so governance-sync never reconciles it.
+#
+# Same in-cluster divergence as governance-nightly.yml in this repo:
+#
+#   * `runs-on: staging` — ARC runner inside this cluster.
+#   * LLM traffic routed through the in-cluster LiteLLM gateway
+#     (http://litellm.fuzeinfra.svc.cluster.local:4000, ANTHROPIC_AUTH_TOKEN =
+#     LITELLM_FUZE_KEY) rather than a provider key on the runner. That hostname does not
+#     resolve off-cluster.
+#   * `github_token: ${{ secrets.GH_TOKEN }}` passed explicitly to claude-code-action,
+#     because the OIDC -> App-token exchange it would otherwise perform fails on the
+#     staging runners.
+#   * The self-propagating adoption path files ONE idempotent **@fuze** build issue (this
+#     repo's mention convention — see fuze.yml); the canonical says @claude.
+#
+# Reconciling this would move the job to ubuntu-latest with no reachable gateway and no
+# valid credential, and it would still report green when it skipped.
+
 name: Nightly Integration
 
 # ADLC govern-loop, integration arm (sibling of governance-nightly.yml).
@@ -136,7 +154,7 @@ jobs:
         with:
           fetch-depth: 0
       - name: Auto-fix → DRAFT PR (never auto-merge)
-        uses: anthropics/claude-code-action@24dcd50c0568f0fc9e9211213a4fd2d9eb15c4e0  # v1.0.200
+        uses: anthropics/claude-code-action@a874e9ecd7bb36efdad65429c6b35815f5a08f10  # v1.0.210
         env:
           # Route through LiteLLM for cross-provider failover; no provider key held here.
           ANTHROPIC_BASE_URL: http://litellm.fuzeinfra.svc.cluster.local:4000
@@ -152,6 +170,22 @@ jobs:
           anthropic_api_key: ${{ secrets.LITELLM_FUZE_KEY }}
           # github_token bypasses the OIDC→App token exchange that fails on staging runners.
           github_token: ${{ secrets.GH_TOKEN }}
+          # allowed_bots: `fuzeone-bot`, the identity GitHub attributes this repo's
+          # SCHEDULED runs to. Left empty, claude-code-action's human-actor check aborts
+          # this step ~1s in, BEFORE any request reaches the LiteLLM gateway configured
+          # in `env:` directly above:
+          #   "Workflow initiated by non-human actor: fuzeone-bot (actor not found on
+          #    GitHub). Add bot to allowed_bots list or use '*' to allow all bots."
+          # Measured on run 33505900409 (2026-09-01), whose failing autofix job prints
+          # ANTHROPIC_BASE_URL: http://litellm.fuzeinfra.svc.cluster.local:4000 in the
+          # same env block it dies in — the gateway was wired; the run never used it.
+          # `fuzeone-bot` 404s on GET /users/..., which routes it to the `catch` branch of
+          # claude-code-action src/github/validation/actor.ts — that branch still consults
+          # isAllowedBot(), so a literal login suffices and `*` is not needed. NOT `*`:
+          # this repo runs dependabot, and `*` would let any bot-authored event start an
+          # agent run holding the gateway key and repo write. A cron cannot be triggered
+          # by dependabot, so naming the one scheduler identity keeps the gate meaningful.
+          allowed_bots: fuzeone-bot
           prompt: |
             The **nightly integration suite** for ${{ github.repository }} FAILED
             (run ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}).

@@ -6,3 +6,23 @@ terraform/contabo/*.js text eol=lf
 # as Bash on Ubuntu; keep them LF so a Windows checkout can't paste CRLF and leave a
 # stray \r in the shebang.
 agent-templates/environments/desktop/*.sh text eol=lf
+
+# ARC onboarding scripts are executed as Bash (in-cluster and from CI). Same hazard as
+# above and it is not theoretical here: on a Windows checkout `bash -n
+# runners/arc/register-repo.sh` already fails with `syntax error near unexpected token
+# $'{\r'`, so the script is unrunnable from this working tree today.
+runners/arc/*.sh text eol=lf
+
+# The bootstrap provenance ledger is rewritten by scripts/bootstrap (Python text mode),
+# so a Windows run stores it CRLF and gate-line-endings hard-fails the PR that touched it.
+# Measured: FuzeInfra#771, `i/crlf  .fuze/installed.json`.
+.fuze/*.json text eol=lf
+
+# Node cloud-init is shipped verbatim to Contabo as `userData` and executed by
+# cloud-init on Linux. A CRLF checkout puts a stray  in the join script's
+# shebang, and - worse - changes the bytes that ca-cutover.yml base64-encodes,
+# so the blob in values-contabo.yaml no longer matches the template and
+# tests/test_elastic_userdata_vlan.py fails for a reason that looks nothing like
+# a line-ending problem.
+cluster-autoscaler/contabo-externalgrpc/deploy/*.template text eol=lf
+modules/contabo-k3s-node/cloud-init.tftpl text eol=lf

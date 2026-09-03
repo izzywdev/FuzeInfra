@@ -209,7 +209,7 @@ jobs:
 
       - name: Save the reviewed plan
         if: success() && steps.detect.outputs.tf == 'true' && github.event.pull_request.head.repo.fork != true
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@v7.0.1
         with:
           # Keyed by PR head SHA so the merge job applies the EXACT reviewed plan.
           name: tfplan-${{ github.event.pull_request.head.sha }}
@@ -220,7 +220,7 @@ jobs:
 
       - name: Post plan as PR comment
         if: always() && steps.detect.outputs.tf == 'true' && github.event.pull_request.head.repo.fork != true
-        uses: actions/github-script@v9
+        uses: actions/github-script@v9.0.0
         with:
           script: |
             const fs = require('fs');

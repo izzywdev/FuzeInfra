@@ -118,6 +118,44 @@ variable "enable_longhorn_prereqs" {
   default     = false
 }
 
+# ---------------------------------------------------------------------------
+# Attach to an EXISTING private network (the prod mode)
+#
+# private_network_name (above) CREATES/manages a contabo_private_network and
+# reconciles its instance_ids to exactly this request set. Pointing that at the
+# live prod network 60932 would try to DETACH every member this module did not
+# author -- the control planes and every elastic node. See the ELASTIC-EXCLUSION
+# note in terraform/contabo/private-network.tf.
+#
+# private_network_id is the safe alternative: it enables the private-networking
+# half of cloud-init (eth1 netplan, --node-ip/--flannel-iface, the VLAN firewall
+# rule, the off-VLAN quarantine) WITHOUT declaring any network resource, so
+# Terraform never touches membership. Membership + the paid per-instance add-on
+# are ordered out-of-band, idempotently, by the `ca-private-net` workflow
+# (action=upgrade then action=assign, or action=enroll-elastics).
+#
+# The order does not matter: the assign may land minutes after boot, and it may
+# reboot the node. The join is a systemd oneshot that re-runs every boot until
+# it succeeds on the VLAN, so a late assign repairs the node by itself.
+# ---------------------------------------------------------------------------
+variable "private_network_id" {
+  description = "Contabo private-network id to place nodes on. Enables the private-networking half of cloud-init without Terraform managing network membership. 0 disables. Mutually exclusive with private_network_name."
+  type        = number
+  # DEFAULT ON (60932 = the live prod VLAN). This module exists only to join
+  # FuzeInfra prod k3s and prod is VLAN-only, so off-VLAN is never the correct
+  # answer -- it must not be what a caller gets by saying nothing. That silence
+  # is exactly how fuzeinfra-ci-runner-2 was born off-VLAN two days after the
+  # cutover: ci-workers.tf simply never mentioned private networking.
+  # Secure-by-default also covers callers that do not exist yet, which a
+  # per-caller fix cannot. Set 0 to opt out deliberately.
+  default = 60932
+
+  validation {
+    condition     = var.private_network_id == 0 || var.private_network_name == ""
+    error_message = "Set either private_network_id (attach to an existing network, membership managed out-of-band) or private_network_name (this module creates and reconciles the network) -- never both."
+  }
+}
+
 variable "private_iface" {
   description = "Private NIC device name the Contabo VPC attaches as (eth1 on a 2-NIC Ubuntu 24.04 image). When private_network_name is set, the node brings this interface up via netplan and k3s routes its overlay (--flannel-iface) + node-ip over it. NOTE: the per-instance Contabo VPC add-on is a MANUAL panel purchase (HTTP 402 otherwise) that Terraform cannot order."
   type        = string

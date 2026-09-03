@@ -29,6 +29,18 @@ Design notes:
   {{- if .enabled }}{{- $enabled = append $enabled . }}{{- end }}
 {{- end }}
 {{- if $enabled }}
+{{- /* Render-time identifier validation. psql's server-side format(%I/%L)
+       already blocks SQL injection, but the role/database names are first
+       interpolated into a BASH command line inside the block scalar below,
+       where a backtick or $( ) would be shell injection before it ever reached
+       psql. Rejecting at template time means `helm lint`/CI catches a
+       malformed allocation instead of the cluster executing it. Mirrors the
+       identical guard in service-mariadb-provisioning.yaml. */ -}}
+{{- range $enabled }}
+{{- if not (regexMatch "^[A-Za-z0-9-]+$" .name) }}{{ fail (printf "serviceDatabases[].name %q must match ^[A-Za-z0-9-]+$ (it becomes an env var name)" .name) }}{{ end }}
+{{- if not (regexMatch "^[A-Za-z0-9_]+$" (.role | toString)) }}{{ fail (printf "serviceDatabases[%s].role %q must match ^[A-Za-z0-9_]+$" .name (.role | toString)) }}{{ end }}
+{{- if not (regexMatch "^[A-Za-z0-9_]+$" (.database | toString)) }}{{ fail (printf "serviceDatabases[%s].database %q must match ^[A-Za-z0-9_]+$" .name (.database | toString)) }}{{ end }}
+{{- end }}
 apiVersion: batch/v1
 kind: Job
 metadata:

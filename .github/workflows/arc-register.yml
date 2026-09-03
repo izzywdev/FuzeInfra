@@ -1,3 +1,29 @@
+# fuze:fork — DELIBERATELY NOT `fuze:managed`. DO NOT STAMP THIS FILE.
+#
+# There IS a canonical `workflow-templates/arc-register.yml` in FuzeSDLC with this exact
+# name, so an automated re-stamp sweep will keep proposing this file as "unmarked but
+# canonical". It is not. The canonical is a 43-line STUB whose entire job body is:
+#
+#     echo "::notice title=arc-register::Delegate ARC scale-set registration to FuzeInfra
+#            via @claude on FuzeInfra with scale-set name: $SCALE_SET_NAME ..."
+#
+# THIS FILE IS THE THING THAT STUB DELEGATES TO. FuzeInfra is the handler side: the
+# allowlist-authorized ARC onboarding handler (repository_dispatch type=arc-register +
+# workflow_dispatch, authorization via config/arc-register-allowlist.json enforced by
+# scripts-tools/validate_arc_register.py, then the real helm/kubectl install|uninstall of
+# the consumer's AutoscalingRunnerSet). Consumer repos hold the stub; the hub holds this.
+#
+# WHY STAMPING IT IS THE DANGEROUS CASE, not merely a wrong one. Replacing a 292-line
+# working handler with a 43-line `echo` does not fail: the workflow still parses, still
+# runs, and still EXITS 0. CI stays green while every consumer's ARC onboarding silently
+# becomes a notice annotation, and the failure only surfaces the next time a repo's runners
+# are actually (re)installed — by which time nothing points back at the stamp.
+#
+# Note also that `scripts/bootstrap/lib/render.py`'s RUNNER_EXEMPT already names
+# arc-register.yml, for the adjacent reason: a workflow that REGISTERS the scale set must
+# never be rendered onto that scale set, or a torn-down set leaves the job that would
+# restore it queued forever.
+
 # ===========================================================================
 # arc-register — delegation handler for ARC runner scale-set registration
 # ===========================================================================

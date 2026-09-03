@@ -59,6 +59,20 @@ rules:
     resources:
       - poddisruptionbudgets
     verbs: ["list", "watch"]
+  # kube-state-metrics v2 collects admission webhook configurations by DEFAULT.
+  # Without these two the collectors are dead and the log fills, once per resync,
+  # forever, with:
+  #   Failed to watch *v1.ValidatingWebhookConfiguration: ... is forbidden:
+  #   User "system:serviceaccount:fuzeinfra:fuzeinfra-kube-state-metrics" cannot
+  #   list resource "validatingwebhookconfigurations" ... at the cluster scope
+  # It is not fatal -- the pod still goes Ready -- which is exactly why it went
+  # unnoticed: the only symptom is missing kube_validatingwebhookconfiguration_*
+  # / kube_mutatingwebhookconfiguration_* series plus permanent error spam.
+  - apiGroups: ["admissionregistration.k8s.io"]
+    resources:
+      - validatingwebhookconfigurations
+      - mutatingwebhookconfigurations
+    verbs: ["list", "watch"]
   - apiGroups: ["certificates.k8s.io"]
     resources:
       - certificatesigningrequests
@@ -164,4 +178,29 @@ spec:
             periodSeconds: 10
           resources:
             {{- toYaml .Values.kubeStateMetrics.resources | nindent 12 }}
+      {{- with .Values.kubeStateMetrics.nodeSelector }}
+      # PLACEMENT IS OPERATIONAL, NOT COSMETIC. kube-state-metrics is a monitoring
+      # control-plane component and must not sit on an autoscaler-managed elastic node:
+      #
+      #   1. Elastic nodes are BILLING-REAPED. The reaper releases idle ones, so the
+      #      single KSM replica gets evicted on someone else's schedule and every
+      #      kube_* series the dashboards and rules depend on gaps out with it.
+      #   2. Elastic nodes are OFF-VLAN, which makes KSM UNDEBUGGABLE. The API server
+      #      cannot reach their kubelet, so `kubectl logs` against a pod there returns
+      #      `proxy error ... while dialing <ip>:10250, code 502` and nothing else.
+      #      That is not hypothetical: it is why the current 500+ restart crash-loop
+      #      could not be root-caused from outside the cluster. Deleting the pod does
+      #      not help — the scheduler deterministically re-picked the same elastic
+      #      node four times in a row, because those nodes are the least loaded.
+      #
+      # The selector reuses the durable-node convention already used in
+      # values-contabo.yaml for postgres/mongodb/neo4j (node.longhorn.io/create-default-disk),
+      # which resolves to exactly the VLAN nodes.
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.kubeStateMetrics.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
 {{- end }}

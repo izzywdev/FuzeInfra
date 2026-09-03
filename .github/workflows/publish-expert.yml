@@ -1,3 +1,4 @@
+# fuze:managed template=publish-expert.yml baseline=main digest=sha256:e6d9dc241f710c9b5a4cb940c60f4873ea5e9de530c38cf87a90df0e206646b2
 name: Publish Expert Agent
 
 # Owner-published experts: this repo AUTHORS its own `<repo>-expert` agent (co-located with
@@ -57,9 +58,11 @@ jobs:
           fi
           # slug = the expert name minus the trailing "-expert" (fuzeplan-expert -> fuzeplan)
           SLUG="${EXPERT%-expert}"
-          echo "ok=true"        >> "$GITHUB_OUTPUT"
-          echo "expert=$EXPERT" >> "$GITHUB_OUTPUT"
-          echo "slug=$SLUG"     >> "$GITHUB_OUTPUT"
+          {
+            echo "ok=true"
+            echo "expert=$EXPERT"
+            echo "slug=$SLUG"
+          } >> "$GITHUB_OUTPUT"
           echo "Publishing '${EXPERT}' as agent-sync/${SLUG}"
 
       - name: Open/update the agent-sync PR on FuzeSDLC
@@ -161,5 +164,8 @@ jobs:
           gh api "repos/${REPO}/issues/${PR_NUMBER}/labels" \
             -X POST -f "labels[]=expert-drift-risk" 2>/dev/null || true
           # Post advisory comment
+          # shellcheck disable=SC2001  # per-LINE prefix; ${v//} cannot do this
           MATCHED_LIST=$(echo "$MATCHED" | sed 's/^/- /')
+          # shellcheck disable=SC2016  # printf FORMAT string: the %s are printf's
+          # placeholders, filled from the arguments after it.
           gh pr comment "${PR_NUMBER}" --repo "${REPO}" --body "$(printf '⚠️ **Expert drift risk:** this PR touches files monitored by \`%s\`.\n\nMatched paths:\n%s\n\nConsider updating \`.claude/agents/%s.md\` to reflect any architectural changes. See [governance/agent-ownership.md](governance/agent-ownership.md) for the expert update workflow.' "$EXPERT" "$MATCHED_LIST" "$EXPERT")" 2>/dev/null || true
