@@ -1,4 +1,4 @@
-# fuze:managed template=a2a-maintain.yml baseline=main digest=sha256:684c100ffe796edbd561c6b9bb6912ac9d14d8386fa30083f84abb4f110f1889
+# fuze:managed template=a2a-maintain.yml baseline=v1 digest=sha256:684c100ffe796edbd561c6b9bb6912ac9d14d8386fa30083f84abb4f110f1889
 name: A2A Maintain
 
 # Keeps this repo's agent-to-agent (A2A) surface current, as part of CI. On every PR it
@@ -113,7 +113,7 @@ jobs:
     outputs:
       declared: ${{ steps.check.outputs.declared }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
 
       - name: Is a2a-maintain declared?
         id: check
@@ -175,7 +175,7 @@ jobs:
       - name: Mint fuze-agent App token
         id: app_token
         continue-on-error: true
-        uses: actions/create-github-app-token@v3
+        uses: actions/create-github-app-token@v1
         with:
           app-id: ${{ secrets.FUZE_AGENT_APP_ID }}
           private-key: ${{ secrets.FUZE_AGENT_APP_PRIVATE_KEY }}
@@ -204,7 +204,7 @@ jobs:
         # compromises). This workflow holds `contents: write` on the PR branch, so a
         # repointed checkout would run attacker code with push access. Semgrep's
         # github-actions-mutable-action-tag rule flags the unpinned form.
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           ref: ${{ github.event.pull_request.head.ref }}
           repository: ${{ github.event.pull_request.head.repo.full_name }}
@@ -355,7 +355,7 @@ jobs:
 
       - name: Upload agent execution log
         if: always() && steps.maintainer.outcome == 'failure'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
         with:
           name: a2a-maintain-execution-log
           path: ${{ steps.maintainer.outputs.execution-file }}
