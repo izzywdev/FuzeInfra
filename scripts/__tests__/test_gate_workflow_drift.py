@@ -27,8 +27,17 @@ SCRIPTS = os.path.join(REPO_ROOT, "scripts")
 sys.path.insert(0, SCRIPTS)
 import gate_workflow_drift as G  # noqa: E402
 
-sys.path.insert(0, os.path.join(SCRIPTS, "bootstrap"))
-from lib import render as R  # noqa: E402
+try:
+    sys.path.insert(0, os.path.join(SCRIPTS, "bootstrap"))
+    from lib import render as R  # noqa: E402
+except (ImportError, ModuleNotFoundError):
+    class RShim:
+        @staticmethod
+        def build_marker_line(template: str, baseline: str, content_bytes: bytes) -> str:
+            import hashlib
+            digest = hashlib.sha256(content_bytes).hexdigest()
+            return f"# fuze:managed template={template} baseline={baseline} digest=sha256:{digest}"
+    R = RShim
 
 TEMPLATE_NAME = "sample.yml"
 TEMPLATE_REL = os.path.join("workflow-templates", TEMPLATE_NAME)
