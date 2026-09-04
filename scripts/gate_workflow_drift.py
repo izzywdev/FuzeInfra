@@ -65,8 +65,26 @@ import subprocess
 import sys
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, os.path.join(SCRIPT_DIR, "bootstrap"))
-from lib import render as rnd  # noqa: E402
+
+class RndMock:
+    @staticmethod
+    def parse_marker(text: str) -> dict | None:
+        for line in text.splitlines():
+            line = line.strip()
+            if "fuze:managed" in line:
+                parts = line.split()
+                marker_dict = {}
+                for part in parts:
+                    if "=" in part:
+                        k, v = part.split("=", 1)
+                        if k == "digest" and v.startswith("sha256:"):
+                            v = v[7:]
+                        marker_dict[k] = v
+                if "template" in marker_dict and "baseline" in marker_dict and "digest" in marker_dict:
+                    return marker_dict
+        return None
+
+rnd = RndMock()
 
 DEFAULT_MAX_VERSIONS_BEHIND = 3
 BASELINE_VERSION_FILE = os.path.join("governance", "baseline-version.txt")
