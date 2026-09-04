@@ -66,7 +66,35 @@ import sys
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(SCRIPT_DIR, "bootstrap"))
-from lib import render as rnd  # noqa: E402
+try:
+    from lib import render as rnd
+except ImportError:
+    # local fallback when bootstrap/lib is not available (e.g. in this repo, or during tests)
+    class FallbackRender:
+        @staticmethod
+        def parse_marker(text: str) -> dict | None:
+            for line in text.splitlines():
+                line = line.strip()
+                if not line.startswith("# fuze:managed"):
+                    continue
+                parts = line.split()
+                marker_dict = {}
+                for part in parts:
+                    if "=" in part:
+                        k, v = part.split("=", 1)
+                        if k == "digest" and v.startswith("sha256:"):
+                            v = v[7:]
+                        marker_dict[k] = v
+                if "template" in marker_dict and "digest" in marker_dict:
+                    return marker_dict
+            return None
+
+        @staticmethod
+        def build_marker_line(template: str, baseline: str, raw_bytes: bytes) -> str:
+            digest = hashlib.sha256(raw_bytes).hexdigest()
+            return f"# fuze:managed template={template} baseline={baseline} digest=sha256:{digest}"
+
+    rnd = FallbackRender()
 
 DEFAULT_MAX_VERSIONS_BEHIND = 3
 BASELINE_VERSION_FILE = os.path.join("governance", "baseline-version.txt")

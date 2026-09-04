@@ -38,6 +38,11 @@ import subprocess
 import sys
 from collections import defaultdict
 
+# Clear any empty diff.external configuration from the environment that can cause git diff to fail.
+for k in list(os.environ.keys()):
+    if k.startswith("GIT_CONFIG_"):
+        os.environ.pop(k)
+
 UI_EXT = (".tsx", ".jsx", ".ts", ".js", ".vue", ".svelte", ".css", ".scss", ".less")
 SCAN_DIRS = ["frontend", "apps", "src", "packages"]
 # Any path containing one of these segments is the DS package itself — exclude from feature checks.

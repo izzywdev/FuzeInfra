@@ -112,6 +112,11 @@ import re
 import subprocess
 import sys
 
+# Clear any empty diff.external configuration from the environment that can cause git diff to fail.
+for k in list(os.environ.keys()):
+    if k.startswith("GIT_CONFIG_"):
+        os.environ.pop(k)
+
 CANONICAL_AUTH_PKG = "@fuzefront/auth"
 PUBLISHED_AUTH_PKG = "@izzywdev/fuzefront-auth"
 AUTH_PKGS = (CANONICAL_AUTH_PKG, PUBLISHED_AUTH_PKG)
