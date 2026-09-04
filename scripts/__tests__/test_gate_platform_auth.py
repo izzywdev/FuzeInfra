@@ -39,7 +39,8 @@ def make_repo(files, manifest=None):
                 ["git", "config", "user.email", "t@t"],
                 ["git", "config", "user.name", "t"],
                 ["git", "add", "-A"],
-                ["git", "commit", "-qm", "x"]):
+                ["git", "commit", "-qm", "x"],
+                ["git", "branch", "-m", "master"]):
         subprocess.run(cmd, cwd=d, check=True,
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     return d
