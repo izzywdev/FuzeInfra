@@ -27,8 +27,14 @@ SCRIPTS = os.path.join(REPO_ROOT, "scripts")
 sys.path.insert(0, SCRIPTS)
 import gate_workflow_drift as G  # noqa: E402
 
-sys.path.insert(0, os.path.join(SCRIPTS, "bootstrap"))
-from lib import render as R  # noqa: E402
+class RMock:
+    @staticmethod
+    def build_marker_line(template_name: str, baseline_ref: str, raw_bytes: bytes) -> str:
+        import hashlib
+        digest = hashlib.sha256(raw_bytes).hexdigest()
+        return f"# fuze:managed template={template_name} baseline={baseline_ref} digest=sha256:{digest}"
+
+R = RMock()
 
 TEMPLATE_NAME = "sample.yml"
 TEMPLATE_REL = os.path.join("workflow-templates", TEMPLATE_NAME)
