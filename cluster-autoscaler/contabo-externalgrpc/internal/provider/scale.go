@@ -303,8 +303,11 @@ func (s *Server) NodeGroupDeleteNodes(ctx context.Context, req *protos.NodeGroup
 
 	// Validate ALL requested nodes are elastic BEFORE deleting any (fail-closed guard).
 	// Resolve the numeric ids up front so the delete loop below cannot fail this
-	// lookup after already having deleted some nodes.
+	// lookup after already having deleted some nodes. insts is carried alongside
+	// ids so the delete loop below can read RawCancelDate off the SAME lookup
+	// this validation already did, rather than re-parsing ProviderID a second time.
 	ids := make([]int64, len(req.Nodes))
+	insts := make([]contabo.Instance, len(req.Nodes))
 	for i, node := range req.Nodes {
 		// STRICT on purpose, and asymmetric with NodeGroupForNode.
 		//
@@ -333,10 +336,35 @@ func (s *Server) NodeGroupDeleteNodes(ctx context.Context, req *protos.NodeGroup
 		}
 
 		ids[i] = inst.ID
+		insts[i] = inst
 	}
 
 	// All nodes validated as elastic; now delete them by their resolved numeric id.
+	//
+	// IDEMPOTENT on RawCancelDate, deliberately the raw string and not the
+	// parsed CancelDate field. CA re-drives this RPC on every loop for a node
+	// it still considers unregistered/unneeded, and until this instance
+	// actually disappears from Contabo's list it keeps matching that
+	// condition -- so without a guard this calls cancel on the SAME already-
+	// cancelled instance roughly once per CA loop indefinitely (measured:
+	// every ~20-35s, for two days straight, ~1 GET/sec against Contabo just
+	// from the list call this loop also makes). Contabo's cancel is
+	// idempotent server-side in the sense that a second cancel changes
+	// nothing, but it still costs an API call and a log line every time, for
+	// no operational effect -- there is nothing further to accomplish here
+	// once RawCancelDate is already non-empty.
+	//
+	// The raw string, not CancelDate.IsZero(): that parsed field is exactly
+	// what is suspected unreliable coming back from the list endpoint (see
+	// logInstanceDiag's doc comment) -- gating a SKIP on the less-trusted
+	// signal would risk silently never cancelling an instance that
+	// genuinely needs it.
 	for i, node := range req.Nodes {
+		if insts[i].RawCancelDate != "" {
+			log.Printf("contabo: instance %d (%s) already has cancelDate %q -- skipping redundant cancel",
+				ids[i], insts[i].Name, insts[i].RawCancelDate)
+			continue
+		}
 		if err := s.cloud.Delete(ctx, ids[i]); err != nil {
 			return nil, status.Errorf(codes.Unavailable, "NodeGroupDeleteNodes: deleting node %s: %v", node.ProviderID, err)
 		}
