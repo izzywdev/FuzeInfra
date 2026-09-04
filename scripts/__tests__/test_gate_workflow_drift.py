@@ -25,10 +25,20 @@ REPO_ROOT = os.path.dirname(os.path.dirname(HERE))
 SCRIPTS = os.path.join(REPO_ROOT, "scripts")
 
 sys.path.insert(0, SCRIPTS)
-import gate_workflow_drift as G  # noqa: E402
+try:
+    import gate_workflow_drift as G  # noqa: E402
+    sys.path.insert(0, os.path.join(SCRIPTS, "bootstrap"))
+    from lib import render as R  # noqa: E402
+    HAS_BOOTSTRAP = True
+except ImportError:
+    G = None
+    R = None
+    HAS_BOOTSTRAP = False
 
-sys.path.insert(0, os.path.join(SCRIPTS, "bootstrap"))
-from lib import render as R  # noqa: E402
+
+def setUpModule():
+    if not HAS_BOOTSTRAP:
+        raise unittest.SkipTest("scripts/bootstrap is missing (consuming repo)")
 
 TEMPLATE_NAME = "sample.yml"
 TEMPLATE_REL = os.path.join("workflow-templates", TEMPLATE_NAME)
