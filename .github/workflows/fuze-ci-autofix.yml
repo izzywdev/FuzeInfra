@@ -1,4 +1,4 @@
-# fuze:managed template=fuze-ci-autofix.yml baseline=main digest=sha256:6b346a752716fca7bafa70d49a2bbc267a7f2d93cdefdd4038e606094a5d7b1d
+# fuze:managed template=fuze-ci-autofix.yml baseline=v1 digest=sha256:6b346a752716fca7bafa70d49a2bbc267a7f2d93cdefdd4038e606094a5d7b1d
 name: Fuze Auto-Fix CI
 
 # RENAMED from claude-ci-autofix.yml (the claude-* -> fuze-* fleet rename; see

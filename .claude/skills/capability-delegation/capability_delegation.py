@@ -1,25 +1,29 @@
-"""Capability delegation — the deterministic pieces a session and a callee share.
+"""Capability delegation — the deterministic pieces a caller and a callee share.
 
-This is the Phase-1b helper for ``CAPABILITY_DELEGATION.md``: the parts of cross-session
-delegation that are *pure logic* (envelope format, capability→environment lookup, the
-fail-closed authorization check, and the caller-side path selection) live here so every
-agent does them **identically** and they can be unit-tested offline. The transport itself
-(spawning a session, firing a trigger) is a set of ``claude-code-remote`` MCP tool calls an
-agent makes from its own tool namespace — those are documented step-by-step in
-``CAPABILITY_DELEGATION_RUNBOOK.md``; this module produces/validates the payloads that flow
-through them.
+The parts of cross-session delegation that are *pure logic* — the message envelope, the
+caller-side path selection, and the callee's fail-closed authorization check — live here so
+every agent does them **identically** and they can be unit-tested offline. The transport
+itself (spawning a session, firing a trigger to deliver a turn) is a set of
+`claude-code-remote` MCP tool calls an agent makes from its own tool namespace; those are
+documented step-by-step in this skill's `SKILL.md`. This module produces/validates the
+payloads that flow through them.
+
+This is the **generic, fleet-wide** helper (synced into every repo's `.claude/skills/` by
+governance-sync). The one repo-specific input — *which environment owns which capability* —
+is NOT hardcoded here: it is loaded from a repo-local registry file (`load_registry`), so
+the same code serves every repo and each repo declares its own capability→environment map.
 
 No third-party dependencies (stdlib only) so it imports in any sandbox and in CI.
 
-Envelope (every delegated turn starts with this line — ``CAPABILITY_DELEGATION.md`` §3):
+Envelope (every delegated turn starts with this line):
 
     [A2A from=<sender session_id> corr=<uuid> reply_to=<sender session_id> cap=<capability>] <body>
 
-CLI (for eyeballing / scripting; the logic is the importable functions):
+CLI:
 
-    python capability_delegation.py envelope  --from session_A --cap kubectl.read --body "get pods -n fuzeinfra"
-    python capability_delegation.py parse     "[A2A from=session_A corr=... reply_to=session_A cap=kubectl.read] get pods"
-    python capability_delegation.py registry  [--cap kubectl.read]
+    python capability_delegation.py envelope  --from session_A --cap kubectl.read --body "get pods"
+    python capability_delegation.py parse     "[A2A from=session_A corr=... cap=kubectl.read] get pods"
+    python capability_delegation.py registry  [--cap kubectl.read] [--registry <path>]
     python capability_delegation.py authorize --from session_A --cap kubectl.read \
         --provides-to session_A --allow-cap kubectl.read
 """
@@ -28,6 +32,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sys
 import uuid
@@ -36,54 +41,54 @@ from typing import Iterable, Optional
 
 
 # --------------------------------------------------------------------------------------
-# Capability → owning environment registry (mirrors CAPABILITY_DELEGATION.md §5).
+# Registry (repo-specific data, not hardcoded here).
 #
-# Keys are the `cap=` tokens that appear in the envelope; they name PRE-AGREED operations,
-# never arbitrary commands. `environment` is the `environment_id` (from
-# `.fuze/manifest.json` roles.environments) that OWNS the credential for that capability —
-# the caller spawns a session there (or finds a live one) and delegates; it never receives
-# the credential itself. `read_only` flags capabilities safe to auto-honor; the rest keep
-# their existing human/GitOps gate (§4.4). `environment: None` means "not wired to any env
-# today" — delegation for it must fail closed until Phase 3 provisions the credential.
+# A capability→environment registry maps each `cap=` token (a PRE-AGREED operation, never an
+# arbitrary command) to the `environment_id` that OWNS its credential. Callers look a
+# capability up and spawn a session in that environment; they never receive the credential.
+# Each repo declares its own registry as JSON at one of REGISTRY_PATHS, shaped:
+#
+#   { "kubectl.read": {"environment": "selfhosted-devops", "read_only": true, "notes": "…"},
+#     "github.secret.provision": {"environment": null, ...}   # null = not wired → don't delegate
+#   }
 # --------------------------------------------------------------------------------------
-CAPABILITY_REGISTRY: dict[str, dict] = {
-    "kubectl.read": {
-        "environment": "selfhosted-devops",
-        "read_only": True,
-        "notes": "prod cluster read (get/logs); prefer the read-only cluster-query.yml for pure reads",
-    },
-    "gitops.edit": {
-        "environment": "cloud-devops",
-        "read_only": False,
-        "notes": "Helm/Argo/values edit + PR only; FUZE_GITOPS_ONLY, no kubeconfig, never direct prod apply",
-    },
-    "backend.build": {"environment": "cloud-backend", "read_only": False, "notes": "backend slice"},
-    "frontend.build": {"environment": "cloud-frontend", "read_only": False, "notes": "frontend slice"},
-    "qa.run": {"environment": "cloud-qa", "read_only": False, "notes": "test/QA slice"},
-    "exec.decision": {
-        "environment": "cloud-exec",
-        "read_only": False,
-        "notes": "tenants Exec-{ceo,cto,cfo,ciso}; governed by the frozen exec A2A card contract",
-    },
-    "github.secret.provision": {
-        "environment": None,  # NOT wired to any managed-agent env today (§5).
-        "read_only": False,
-        "notes": "cloud-devops has `gh` but GITHUB_TOKEN is unset; needs a secret-write token added "
-        "to the owning env in Phase 3 before a delegate can actually do it",
-    },
-    "database.provision": {
-        "environment": None,  # NOT wired to any managed-agent env today.
-        "read_only": False,
-        "notes": "the second half of FuzeInfra's infra-platform A2A tenant "
-        "(.claude/skills/fuzeinfra-platform-expert) -- no handler exists yet that turns a "
-        "request into an actual data-tier reconciliation. Naming this entry is the "
-        "declared intent, same shape as github.secret.provision above; wiring it needs a "
-        "real owning environment and a call path into the data-tier reconciler before any "
-        "delegate may honor it as done rather than as UNSUPPORTED.",
-    },
-}
+REGISTRY_PATHS = (
+    "agent-templates/orchestration/capability-registry.json",
+    ".fuze/capability-registry.json",
+)
 
 
+def load_registry(repo_root: Optional[str] = None, path: Optional[str] = None) -> dict:
+    """Load the repo's capability→environment registry, or {} if none is declared.
+
+    Returns {} (not an error) when no registry file exists — a caller MUST treat an unknown
+    capability as "cannot delegate", so an absent registry fails closed by construction.
+    """
+    root = repo_root or os.getcwd()
+    candidates = [path] if path else [os.path.join(root, p) for p in REGISTRY_PATHS]
+    for cand in candidates:
+        if cand and os.path.isfile(cand):
+            with open(cand, encoding="utf-8") as f:
+                data = json.load(f)
+            # tolerate a top-level "$schema" / comment keys
+            return {k: v for k, v in data.items() if not k.startswith("$")}
+    return {}
+
+
+def capability_environment(cap: str, registry: dict) -> Optional[str]:
+    """The environment_id that owns `cap`, or None if unknown/not-wired.
+
+    None is returned both for an unknown capability and for a known-but-unwired one
+    (`environment: null`). A caller MUST treat None as "cannot delegate this yet", never as
+    "delegate anywhere".
+    """
+    entry = registry.get(cap)
+    return entry.get("environment") if isinstance(entry, dict) else None
+
+
+# --------------------------------------------------------------------------------------
+# Envelope
+# --------------------------------------------------------------------------------------
 # Header value tokens are non-whitespace AND non-`]` — so a body that itself contains a
 # `]` (e.g. "bump image [v2]") can't be swallowed into the last header value.
 _VAL = r"[^\]\s]+"
@@ -109,8 +114,7 @@ class Envelope:
     reply_to: Optional[str] = None
 
     def __post_init__(self) -> None:
-        # reply_to defaults to the sender: the callee fires its reply back at `from`.
-        if self.reply_to is None:
+        if self.reply_to is None:  # the callee fires its reply back at `from`
             self.reply_to = self.frm
 
     def render(self) -> str:
@@ -140,7 +144,7 @@ def parse_envelope(text: str) -> Optional[Envelope]:
     """Parse a delegated turn's opening envelope. Returns None if it isn't one.
 
     Order-independent for the header keys, and tolerant of a body that itself contains a
-    ``]`` — only the FIRST ``]`` closes the header.
+    ``]`` — only the header's own closing ``]`` ends the header.
     """
     if text is None:
         return None
@@ -156,43 +160,34 @@ def parse_envelope(text: str) -> Optional[Envelope]:
     )
 
 
-def capability_environment(cap: str) -> Optional[str]:
-    """The environment_id that owns `cap`, or None if unknown/not-wired.
-
-    None is returned both for an unknown capability and for a known-but-unwired one
-    (`github.secret.provision` today) — a caller MUST treat None as "cannot delegate this
-    yet", never as "delegate anywhere".
-    """
-    entry = CAPABILITY_REGISTRY.get(cap)
-    return entry["environment"] if entry else None
-
-
+# --------------------------------------------------------------------------------------
+# Authorization (callee side) — fail-closed
+# --------------------------------------------------------------------------------------
 @dataclass
 class Decision:
     allowed: bool
     reason: str
 
-    def __bool__(self) -> bool:  # so `if authorize(...):` reads naturally
+    def __bool__(self) -> bool:
         return self.allowed
 
 
 def authorize(
-    envelope: Envelope,
+    envelope: Optional[Envelope],
     provides_to: Iterable[str],
     allowed_caps: Iterable[str],
 ) -> Decision:
-    """The CALLEE's fail-closed check (CAPABILITY_DELEGATION.md §4). Default DENY.
+    """The CALLEE's fail-closed check. Default DENY.
 
-    A request is honored only if BOTH hold:
+    Honor a request only if BOTH hold:
       1. the sender (`envelope.frm`) is on `provides_to` — the callee-owned allowlist
-         (`.fuze/manifest.json` `providesTo`, currently `[]` = accept no callers), and
+         (`.fuze/manifest.json` `providesTo`, `[]` by default = accept no callers), and
       2. `envelope.cap` is one of `allowed_caps` — a pre-agreed, capability-scoped
          operation this callee honors (never an arbitrary command string).
 
-    An empty `provides_to` denies everything (matches the fail-closed manifest default).
-    This function AUTHORIZES only; it never executes and never returns a credential — the
-    caller of this function maps an allowed `cap` to its own vetted action and returns a
-    result/summary only.
+    An empty `provides_to` denies everything (the fail-closed manifest default). This
+    AUTHORIZES only; it never executes and never returns a credential — the caller of this
+    function maps an allowed `cap` to its own vetted action and returns a result only.
     """
     provides_to = set(provides_to or ())
     allowed_caps = set(allowed_caps or ())
@@ -212,19 +207,22 @@ def authorize(
     return Decision(True, f"sender allowed and capability {envelope.cap!r} is honored")
 
 
+# --------------------------------------------------------------------------------------
+# Path selection (caller side) — keyed on where the CALLER runs
+# --------------------------------------------------------------------------------------
 def select_path(caller_is_local: bool) -> dict:
-    """Which transport a caller uses, keyed on where the CALLER runs (§2b).
+    """Which transport a caller uses, keyed on where the CALLER runs.
 
-    Local/desktop → spawn a Claude Code session in the target environment by name
-    ("DevOps"): subscription/plan usage, no agent_id, the unblocked+cheaper path.
-    Non-local → handoff-mcp `spawn_agent(role)`: API-billed, needs credit + populated id
-    maps. Both carry the same envelope and the same fail-closed authz.
+    Local/desktop → spawn a Claude Code session in the target environment by name:
+    subscription/plan usage, no agent_id, the unblocked+cheaper path. Non-local →
+    handoff-mcp `spawn_agent(role)`: API-billed, needs credit + populated id maps. Both
+    carry the same envelope and the same fail-closed authz.
     """
     if caller_is_local:
         return {
             "path": "claude-code-session",
-            "how": 'spawn a Claude Code session in the target environment by name ("DevOps") '
-            "or create_session(environment_id=<owning env>)",
+            "how": "spawn a Claude Code session in the target environment by name "
+            "(desktop env picker) or create_session(environment_id=<owning env>)",
             "billing": "subscription/plan usage",
             "needs_agent_id": False,
         }
@@ -239,7 +237,7 @@ def select_path(caller_is_local: bool) -> dict:
 # --------------------------------------------------------------------------------------
 # CLI
 # --------------------------------------------------------------------------------------
-def _main(argv: Optional[list[str]] = None) -> int:
+def _main(argv: Optional[list] = None) -> int:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="cmd", required=True)
 
@@ -253,8 +251,9 @@ def _main(argv: Optional[list[str]] = None) -> int:
     pp = sub.add_parser("parse", help="parse an envelope line to JSON")
     pp.add_argument("text")
 
-    pr = sub.add_parser("registry", help="show the capability→environment registry")
+    pr = sub.add_parser("registry", help="show the repo's capability→environment registry")
     pr.add_argument("--cap", help="look up a single capability")
+    pr.add_argument("--registry", help="explicit registry path (else the default search paths)")
 
     pa = sub.add_parser("authorize", help="run the fail-closed callee check")
     pa.add_argument("--from", dest="frm", required=True)
@@ -277,14 +276,15 @@ def _main(argv: Optional[list[str]] = None) -> int:
         return 0
 
     if args.cmd == "registry":
+        reg = load_registry(path=args.registry)
         if args.cap:
-            entry = CAPABILITY_REGISTRY.get(args.cap)
+            entry = reg.get(args.cap)
             if entry is None:
-                print(f"unknown capability {args.cap!r}", file=sys.stderr)
+                print(f"unknown capability {args.cap!r} (registry has {len(reg)} entries)", file=sys.stderr)
                 return 1
             print(json.dumps({args.cap: entry}, indent=2))
             return 0
-        print(json.dumps(CAPABILITY_REGISTRY, indent=2))
+        print(json.dumps(reg, indent=2))
         return 0
 
     if args.cmd == "authorize":

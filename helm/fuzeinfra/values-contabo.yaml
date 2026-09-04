@@ -642,6 +642,35 @@ clusterAutoscaler:
   # end of its paid month, so utilization scale-down is disabled — the
   # reaper CronJob below owns releasing idle elastic capacity instead.
   scaleDownEnabled: false
+  # GUARD AGAINST UNREGISTERED-NODE CANCELLATION.
+  #
+  # On 2026-09-02 at 07:09 the autoscaler CANCELLED three paid Contabo instances
+  # (203543503/588198fe, 203547161/9b31f718, 203547162/adca9568), scheduled for
+  # 2026-09-14. Cluster-autoscaler deletes nodes it considers UNREGISTERED once
+  # max-node-provision-time elapses, and for this provider "delete" is
+  # POST /v1/compute/instances/{id}/cancel -- a paid VPS, not a pod.
+  #
+  # It became reachable the moment #831 taught the provider to ATTRIBUTE those
+  # instances to the elastic node group. Before that they were invisible
+  # ("No node group for node ... skipping") and could not be deleted. The fix was
+  # correct; nobody asked what it would enable.
+  #
+  # The exposure is not historical. The elastic join path has been broken in ways
+  # only just fixed (#833: eth1 was never configured, so --node-ip could not work),
+  # and none of it has met a real scale-up. A node that fails to register inside
+  # the window is cancelled and billed to the end of its period -- then the
+  # autoscaler creates another and repeats. That is an unbounded bill for zero
+  # capacity, which is exactly why #833 chose quarantine over fail-loud.
+  #
+  # 90m, not 15m: long enough to cover create + private-network assign + the reboot
+  # that assign can trigger + k3s join + Longhorn attach, with room for a slow
+  # Contabo provision. The cost of being too generous is an orphan instance sitting
+  # idle until the reaper releases it at end-of-period -- the SAME money as a
+  # wrongful cancellation, minus the destroyed capacity and minus the retry loop.
+  #
+  # REVISIT once a real scale-up is observed joining cleanly on the VLAN. This is a
+  # brake while the join path is unproven, not a permanent setting.
+  maxNodeProvisionTime: 90m
   provider:
     # TODO: replace with the published image once fuzeinfra-contabo-ca-provider
     # has a tagged release (see cluster-autoscaler/contabo-externalgrpc).
@@ -658,7 +687,7 @@ clusterAutoscaler:
     #   kubectl -n fuzeinfra get pod -l app=fuzeinfra-contabo-ca-provider     #     -o jsonpath='{.items[*].status.containerStatuses[*].imageID}'
     # and if it does not match, bump this value again in a follow-up PR. That
     # is why this is a free-form marker rather than strictly the build SHA.
-    imageRollout: "canceldate-dateonly-fix-2026-09-02"
+    imageRollout: "cancel-raw-diag-2026-09-03"
     existingSecret: fuzeinfra-ca-provider
     # Current Contabo create-instance catalog: Cloud VPS 4 (4 vCPU / 8 GiB).
     # V92 is a retired SKU and fails ordering with "No offer was found".
@@ -1041,13 +1070,40 @@ nodeConfigurator:
   # than all of sd*, and roll out to ONE non-control-plane node first.
   multipathBlacklist:
     enabled: true
-    # STAGE ONE: fuzeinfra-ci-runner-1 only. It is a Longhorn node, it is NOT the
-    # control plane, and it carries no database PVC -- so if the multipathd restart
-    # misbehaves the blast radius is CI capacity, not etcd. Widen to the remaining
-    # Longhorn nodes (mendys-worker-1, vmi3396106, then vmi3383846 LAST) only after
-    # volumes are observed attaching and formatting cleanly here.
+    # STAGE TWO: + vmi3396106.
+    #
+    # Stage one (fuzeinfra-ci-runner-1) applied cleanly and is still applied --
+    # its configurator logs "multipath.conf written / multipathd restarted" while
+    # every other node logs "not in multipath rollout set; skipping". No new
+    # FailedMount/FailedAttachVolume event appeared cluster-wide.
+    #
+    # But stage one CANNOT actually prove the fix. ci-runner-1 runs no
+    # longhorn-manager pod (node.longhorn.io Ready=False, reason ManagerPodMissing,
+    # since 2026-07-26), so it hosts no replica and never attaches a Longhorn
+    # volume. It proved the rollout gate works and the restart is survivable --
+    # nothing about iSCSI device claiming.
+    #
+    # ORDER CHANGED from the original plan (mendys-worker-1 next). mendys-worker-1
+    # is ALSO Ready=False, so it cannot demonstrate an attach either. Of the four
+    # Longhorn nodes only vmi3383846 and vmi3396106 are Ready=True and host
+    # replicas, and vmi3383846 is the apiserver endpoint (161.97.118.134) -- so it
+    # stays LAST. That makes vmi3396106 the only node that can verify the change.
+    #
+    # Accepted risk: vmi3396106 is a control-plane/etcd member (3 members, quorum
+    # 2, can lose 1). The blacklist excludes only vendor IET / product
+    # VIRTUAL-DISK -- Longhorn's own iSCSI devices. The host root disk is
+    # QEMU/QEMUHARDDISK and is untouched, and restarting multipathd does not
+    # restart etcd.
+    #
+    # NOTE on the Multipathd condition: it will NOT flip to True here. Longhorn
+    # reports status=False reason=MultipathdIsRunning purely from the process
+    # being up; it never inspects multipath.conf. Verify by observing a volume
+    # attach + format cleanly, not by that condition.
+    #
+    # Widen to mendys-worker-1, then vmi3383846 LAST, only after that.
     rolloutNodes:
       - fuzeinfra-ci-runner-1
+      - vmi3396106
 
 # Stateful services not otherwise overridden here still need the durable pin.
 alertmanager:

@@ -3,11 +3,49 @@ package provider
 import (
 	"context"
 	"fmt"
+	"log"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/izzywdev/fuzeinfra/contabo-externalgrpc/internal/contabo"
 	"github.com/izzywdev/fuzeinfra/contabo-externalgrpc/internal/protos"
 )
+
+// instanceDiag rate-limits the per-instance diagnostic below. CA polls this
+// RPC about once a second, so an unthrottled line per instance per call would
+// be thousands of lines an hour.
+var (
+	instanceDiagMu   sync.Mutex
+	instanceDiagLast time.Time
+)
+
+// logInstanceDiag prints, at most once a minute, what the Contabo list
+// endpoint actually returned for each elastic instance: name, status, and the
+// RAW cancelDate string alongside whether it parsed.
+//
+// This exists because a merged fix (#832, date-only cancelDate parsing) did
+// not change the observed behaviour: CA still reported the same instances as
+// longUnregistered and the provider still re-issued cancel against them every
+// ~35s, while the log contained ZERO "unparsable cancelDate" lines. Those two
+// facts together mean the parsed value was zero WITHOUT the field ever being
+// non-empty -- but that was an inference, and cancelling paid servers on an
+// inference is how three of them were cancelled in the first place. This makes
+// the actual value observable so the fix can be made on evidence.
+//
+// Names, statuses and dates only -- never a token or credential.
+func logInstanceDiag(instances []contabo.Instance) {
+	instanceDiagMu.Lock()
+	defer instanceDiagMu.Unlock()
+	if time.Since(instanceDiagLast) < time.Minute {
+		return
+	}
+	instanceDiagLast = time.Now()
+	for _, inst := range instances {
+		log.Printf("contabo-diag: instance %d name=%q status=%q rawCancelDate=%q parsedCancelDateZero=%t",
+			inst.ID, inst.Name, inst.Status, inst.RawCancelDate, inst.CancelDate.IsZero())
+	}
+}
 
 // liveElasticInstances filters out instances that Contabo has already been
 // told to remove, returning only those that can still legitimately hold a
@@ -103,6 +141,7 @@ func (s *Server) NodeGroupNodes(ctx context.Context, req *protos.NodeGroupNodesR
 	// liveElasticInstances). Never-joined instances we did NOT cancel are
 	// deliberately still reported, so CA can attribute and reclaim them
 	// rather than have them silently stranded.
+	logInstanceDiag(instances)
 	instances = liveElasticInstances(instances)
 
 	protoInstances := make([]*protos.Instance, 0, len(instances))

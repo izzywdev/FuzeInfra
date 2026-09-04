@@ -94,9 +94,11 @@
       "ceo",
       "cto",
       "cfo",
-      "ciso"
+      "ciso",
+      "infra-platform"
     ],
-    "external": false
+    "external": false,
+    "note": "Policy REVERSED 2026-09-04 -- FuzeInfra will host a genuine PRODUCT tenant (infra-platform: role.json + .claude/skills/fuzeinfra-platform-expert landed) in addition to the four Exec-* tenants; servingRoles already names it and tests/test_a2a_surface.py already enforces the new shape. Left enabled:false because gate-a2a I0 correctly flags that no chart values file yet carries an a2a: block for this tenant -- flipping enabled:true first would advertise a card routing to a pod that does not exist. Next PR: the Helm a2a block for infra-platform (devops-engineer), matching the pattern already used by other product repos, then flip this to true."
   },
   "hardening": {
     "ruleset": true,
@@ -118,5 +120,10 @@
     "dockerBaseImage": "node:24-alpine",
     "ciNodeVersion": "24.x",
     "enforce": false
+  },
+  "clusterOps": {
+    "enabled": true,
+    "runner": "staging",
+    "note": "FuzeInfra OWNS the cluster, so it is the one repo whose `@fuze` entrypoint may hold prod credentials. This flag installs workflow-templates/fuze-cluster.yml (kubectl/helm/terraform + the prod kubeconfig secret + the in-cluster arc-runners pool). It is HALF the gate: the workflow is inert until repo variable FUZE_CLUSTER_ENTRYPOINT=true is set by a human, so no automated propagation path can switch on prod cluster access by itself. CLAUDE.baseline.md 1 forbids any consuming repo from declaring this — a product repo carrying clusterOps is a governance finding, not a feature."
   }
 }

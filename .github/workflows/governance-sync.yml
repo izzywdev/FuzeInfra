@@ -1,4 +1,3 @@
-# fuze:managed template=governance-sync.yml baseline=main digest=sha256:cc456147d9f0089b8068b73b74d5e5fe76767ed4942c4681a8d8873edb3ef935
 name: Governance Sync
 
 # Per-repo, CI-time governance reconciliation (stamped by sdlc-bootstrap).
@@ -74,7 +73,7 @@ jobs:
           ssh-key: ${{ secrets.FUZESDLC_DEPLOY_KEY }}
           path: .fuzesdlc-canonical
 
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5
         if: steps.guard.outputs.ok == 'true'
         with:
           python-version: "3.12"
@@ -90,7 +89,7 @@ jobs:
         id: app_token
         if: steps.guard.outputs.ok == 'true'
         continue-on-error: true
-        uses: actions/create-github-app-token@v3
+        uses: actions/create-github-app-token@v1
         with:
           app-id: ${{ secrets.FUZE_AGENT_APP_ID }}
           private-key: ${{ secrets.FUZE_AGENT_APP_PRIVATE_KEY }}
@@ -112,7 +111,7 @@ jobs:
         id: app_token_workflows
         if: steps.guard.outputs.ok == 'true'
         continue-on-error: true
-        uses: actions/create-github-app-token@v3
+        uses: actions/create-github-app-token@v1
         with:
           app-id: ${{ secrets.FUZE_AGENT_APP_ID }}
           private-key: ${{ secrets.FUZE_AGENT_APP_PRIVATE_KEY }}
@@ -208,6 +207,46 @@ jobs:
               # extraheader, not a token-in-URL remote: git echoes a remote URL on several
               # error paths and never echoes a header, and some of these repos are public.
               AUTH_B64=$(printf 'x-access-token:%s' "$PUSH_TOKEN" | base64 -w0)
+              # UNSET FIRST. actions/checkout persists its own Authorization into this same
+              # config key, and this job checks out TWICE. Setting ours on top left the server
+              # receiving two Authorization headers and rejecting the push:
+              #     remote: Duplicate header: "Authorization"
+              # Observed on FuzeInfra run 33615645019: the branch never moved while the job
+              # reported "Reconciled and pushed 3 managed file(s) and 17 governed workflow
+              # file(s) ... using FUZE_AGENT_APP_WORKFLOWS".
+              # UNSET EVERY MATCHING KEY, NOT ONE LITERAL KEY. git sends extraheader from ALL
+              # http.<url>.extraheader sections whose url matches the push target. Unsetting only
+              # the generic "http.https://github.com/.extraheader" leaves any MORE SPECIFIC key
+              # actions/checkout persisted, and ours then matches as a SECOND header -- the
+              # actual cause of the rejection:
+              #     remote: Duplicate header: "Authorization"
+              #     fatal: ... The requested URL returned error: 400
+              # Observed on FuzeSDLC#290 run 33639451072, AFTER the single-key unset was added.
+              # Names only in the notice -- never a value; these repos are public.
+              echo "::notice::extraheader keys present before ours: $(git config --local --name-only --get-regexp '^http\\..*\\.extraheader$' 2>/dev/null | xargs || echo none)"
+              # UNSET EVERY MATCHING extraheader KEY, AND EVERY includeIf.gitdir CONDITIONAL
+              # INCLUDE. Both are real, independent mechanisms actions/checkout uses to inject
+              # credentials, and its OWN post-job cleanup removes both (visible in this exact
+              # job's log under "Removing HTTP extra header" / "Removing includeIf entries").
+              # The first fix here only did the first half. A run against that exact fix STILL
+              # hit the duplicate header:
+              #     remote: Duplicate header: "Authorization"
+              #     fatal: ... The requested URL returned error: 400
+              # (FuzeSDLC#290 run 33727092431, against commit 36a3ac2 -- the single-mechanism fix
+              # itself.) The header was never in THIS repo's local http.*.extraheader at all; it
+              # came from a separate credentials file referenced via includeIf.gitdir, which
+              # `git config --local --unset-all` cannot reach because it edits .git/config
+              # directly and never follows includeIf.
+              # Names only in the notice -- never a value; these repos are public.
+              echo "::notice::extraheader keys present before ours: $(git config --local --name-only --get-regexp '^http\..*\.extraheader$' 2>/dev/null | xargs || echo none)"
+              for k in $(git config --local --name-only --get-regexp '^http\..*\.extraheader$' 2>/dev/null || true); do
+                git config --local --unset-all "$k" || true
+              done
+              for k in $(git config --local --name-only --get-regexp '^includeIf\.gitdir:' 2>/dev/null || true); do
+                for v in $(git config --local --get-all "$k" 2>/dev/null || true); do
+                  git config --local --unset "$k" "$v" || true
+                done
+              done
               git config --local "http.https://github.com/.extraheader" "AUTHORIZATION: basic ${AUTH_B64}"
               unset AUTH_B64
             fi
@@ -220,7 +259,15 @@ jobs:
             # `|| true`: if it still cannot push after the retries, that is a real failure.
             pushed=false
             for attempt in 1 2 3; do
-              if git push origin "HEAD:${HEAD_REF}" 2>&1 | tee /tmp/gs-push.log; then
+              # `git push | tee` returns TEE's exit status, which is always 0. Every push
+              # therefore "succeeded" regardless of what the server said, `pushed` was set
+              # unconditionally, and the success notice printed over a REJECTED push. That is
+              # why reconciliations were computed, announced, and silently discarded.
+              # PIPESTATUS[0] is git's own status. Not `set -o pipefail`: that would change
+              # unrelated pipelines in this block.
+              git push origin "HEAD:${HEAD_REF}" 2>&1 | tee /tmp/gs-push.log
+              push_rc=${PIPESTATUS[0]}
+              if [ "$push_rc" -eq 0 ]; then
                 pushed=true
                 break
               fi
@@ -239,7 +286,14 @@ jobs:
                 exit 1
               fi
             done
-            git config --local --unset-all "http.https://github.com/.extraheader" || true
+            for k in $(git config --local --name-only --get-regexp '^http\..*\.extraheader$' 2>/dev/null || true); do
+              git config --local --unset-all "$k" || true
+            done
+            for k in $(git config --local --name-only --get-regexp '^includeIf\.gitdir:' 2>/dev/null || true); do
+              for v in $(git config --local --get-all "$k" 2>/dev/null || true); do
+                git config --local --unset "$k" "$v" || true
+              done
+            done
             if [ "$pushed" != "true" ]; then
               echo "::error::Failed to push the governance reconciliation to ${HEAD_REF} after 3 attempts."
               exit 1
