@@ -65,8 +65,28 @@ import subprocess
 import sys
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, os.path.join(SCRIPT_DIR, "bootstrap"))
-from lib import render as rnd  # noqa: E402
+try:
+    sys.path.insert(0, os.path.join(SCRIPT_DIR, "bootstrap"))
+    from lib import render as rnd  # noqa: E402
+except (ImportError, ModuleNotFoundError):
+    import re
+    class RndShim:
+        @staticmethod
+        def parse_marker(text: str) -> dict | None:
+            # Matches: # fuze:managed template=a2a-maintain.yml baseline=v1 digest=sha256:684c100f...
+            match = re.search(r'#\s*fuze:managed\s+template=(\S+)\s+baseline=(\S+)\s+digest=sha256:([a-fA-F0-9]+)', text)
+            if not match:
+                return None
+            return {
+                "template": match.group(1),
+                "baseline": match.group(2),
+                "digest": match.group(3)
+            }
+        @staticmethod
+        def build_marker_line(template: str, baseline: str, content_bytes: bytes) -> str:
+            digest = hashlib.sha256(content_bytes).hexdigest()
+            return f"# fuze:managed template={template} baseline={baseline} digest=sha256:{digest}"
+    rnd = RndShim
 
 DEFAULT_MAX_VERSIONS_BEHIND = 3
 BASELINE_VERSION_FILE = os.path.join("governance", "baseline-version.txt")
