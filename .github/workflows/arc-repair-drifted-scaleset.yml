@@ -1,0 +1,221 @@
+# ===========================================================================
+# arc-repair-drifted-scaleset — recreate an AutoscalingRunnerSet whose live
+# pod template has drifted in a field Argo cannot prune.
+# ===========================================================================
+# WHY THIS EXISTS (2026-08-31)
+# ---------------------------
+# Eight scale sets could not create a single runner pod for up to 30h while
+# Argo reported them Synced. Their live AutoscalingRunnerSet carried a stale
+# `dind` initContainer left behind by the old imperative
+# `containerMode: dind` helm release, alongside the `dind` CONTAINER that
+# runner-scale-set-values.yaml declares today. Container names must be unique
+# across initContainers+containers, so every pod was rejected with:
+#
+#     Failed to create the pod: ... spec.initContainers[1].name: Duplicate value: "dind"
+#
+# ARC never garbage-collects the resulting Failed EphemeralRunners, so five of
+# them pinned maxRunners and the listener looped forever.
+#
+# WHY ARGO CANNOT FIX THIS ITSELF — the important part:
+#   $ kubectl -n arc-runners get autoscalingrunnerset fuzepicker \
+#       -o jsonpath={.metadata.managedFields[*].manager}
+#   helm argocd-controller helm manager manager
+# The object has TWO writers. ServerSideApply only prunes fields the applying
+# manager OWNS, so argocd-controller dropping `dind` from its own applied
+# initContainers list does nothing — the "helm" manager still owns that entry.
+# Git is already correct; selfHeal will report Synced forever while the live
+# object stays broken. The only way out is to remove the object so Argo can
+# recreate it with a single owner.
+#
+# WHAT THIS DOES
+#   Deletes the named AutoscalingRunnerSet(s) and waits for Argo's automated
+#   sync to recreate them from Git. Deleting the ARS cascades (ownerReferences)
+#   to its EphemeralRunnerSet, its Failed EphemeralRunners and its listener, so
+#   it also clears the pinned maxRunners slots. The recreated object is owned by
+#   argocd-controller alone, so the drift cannot come back.
+#
+# WHY DELETING IS SAFE HERE, AND GUARDED SO IT STAYS SAFE
+#   A drifted set is 100% non-functional by definition — it cannot create a pod
+#   at all, so there is no running job to interrupt. To keep that true rather
+#   than assumed, this workflow REFUSES to touch a set that is not actually
+#   drifted (step "Detect drift"), which also makes re-running it a no-op. It
+#   only accepts names from a hardcoded allowlist, and requires a typed
+#   confirmation. It never deletes an Argo Application, only the k8s object Argo
+#   owns.
+#
+# THIS IS A REPAIR TOOL, NOT A DEPLOY PATH. Prod is GitOps: the durable fix for
+# the drift itself is in runners/arc/register-repo.sh (which no longer renders
+# its own divergent pod spec). Reach for this only when managedFields shows a
+# foreign owner on a field that must change.
+#
+# Required secret: KUBE_CONFIG — same base64 kubeconfig used by cluster-query /
+# arc-register / deploy-prod.
+#
+# Example:
+#   gh workflow run arc-repair-drifted-scaleset.yml --repo izzywdev/FuzeInfra \
+#     -f scale_sets="fuzepicker fuzesales" -f confirm=REPAIR
+
+name: arc-repair-drifted-scaleset
+
+on:
+  workflow_dispatch:
+    inputs:
+      scale_sets:
+        description: 'Space-separated scale-set names to repair (must be allowlisted below). Default = the 8 drifted on 2026-08-31.'
+        required: true
+        default: "fuzecontact fuzehub fuzemarket fuzepicker fuzesales fuzeservice fuzesocial mendysrobotics"
+        type: string
+      confirm:
+        description: 'Type REPAIR to confirm deleting + recreating these AutoscalingRunnerSets.'
+        required: true
+        default: ""
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: arc-repair-drifted-scaleset
+  cancel-in-progress: false
+
+jobs:
+  repair:
+    # ubuntu-latest, never a self-hosted runner: this workflow repairs the ARC
+    # scale sets, so it must not depend on one being healthy (same reasoning as
+    # arc-register.yml / arc-bootstrap.yml). During the incident that motivated
+    # it, 8 of them could not run a job at all.
+    runs-on: ubuntu-latest
+    steps:
+      - name: Confirm intent
+        env:
+          CONFIRM: ${{ inputs.confirm }}
+        run: |
+          if [ "$CONFIRM" != "REPAIR" ]; then
+            echo "::error title=arc-repair::Refusing: 'confirm' must be exactly REPAIR (got '${CONFIRM}')."
+            exit 1
+          fi
+
+      - uses: azure/setup-kubectl@829323503d1be3d00ca8346e5391ca0b07a9ab0d # v5.1.0
+
+      - name: Configure kubectl
+        env:
+          KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
+        run: |
+          if [ -z "$KUBE_CONFIG" ]; then echo "::error::KUBE_CONFIG unset"; exit 1; fi
+          mkdir -p "$HOME/.kube"
+          printf '%s' "$KUBE_CONFIG" | base64 -d > "$HOME/.kube/config"
+          chmod 600 "$HOME/.kube/config"
+          echo "KUBECONFIG=$HOME/.kube/config" >> "$GITHUB_ENV"
+
+      - name: Repair
+        # SCALE_SETS is workflow input — routed through env: rather than
+        # interpolated into the script, so a name containing shell
+        # metacharacters is a value, never syntax (gate-sast flags the direct
+        # ${{ }} form for exactly this).
+        env:
+          SCALE_SETS: ${{ inputs.scale_sets }}
+        run: |
+          set -uo pipefail
+          NS=arc-runners
+
+          # Fail-closed allowlist: every scale set FuzeInfra manages in
+          # argocd/applications/arc-runners.yaml. A name not on this list is a
+          # typo or a mistake, and this workflow deletes things — so refuse
+          # rather than guess. Add a name here in a reviewed PR when a new
+          # scale set is onboarded.
+          ALLOWED="fuze-runner fuzeagent fuzebi fuzecall fuzecontact fuzedeploy fuzeexecutive fuzefinance fuzefront fuzehub fuzekeys fuzemarket fuzemerchandize fuzepicker fuzeplan fuzesales fuzesdlc fuzeservice fuzesocial fuzex mendysrobotics mendysroboticswp staging"
+
+          repaired=""; skipped=""; failed=""
+
+          for NAME in $SCALE_SETS; do
+            echo "::group::$NAME"
+            ok=0
+            for a in $ALLOWED; do [ "$a" = "$NAME" ] && ok=1; done
+            if [ "$ok" != 1 ]; then
+              echo "::error title=arc-repair::'$NAME' is not an allowlisted scale set — refusing."
+              failed="$failed $NAME"; echo "::endgroup::"; continue
+            fi
+
+            INIT=$(kubectl -n "$NS" get autoscalingrunnerset "$NAME" \
+              -o jsonpath='{.spec.template.spec.initContainers[*].name}' 2>/dev/null)
+            if [ -z "$INIT" ]; then
+              echo "  '$NAME' not found in $NS — nothing to repair."
+              skipped="$skipped $NAME"; echo "::endgroup::"; continue
+            fi
+            echo "  live initContainers: $INIT"
+
+            # Only touch a set that is ACTUALLY drifted. This is what makes the
+            # delete safe (a drifted set cannot create pods, so no running job
+            # is lost) and makes re-running this workflow a no-op.
+            case " $INIT " in
+              *" dind "*) ;;
+              *) echo "  '$NAME' has no stale dind initContainer — already clean, skipping."
+                 skipped="$skipped $NAME"; echo "::endgroup::"; continue ;;
+            esac
+
+            echo "  managedFields owners: $(kubectl -n "$NS" get autoscalingrunnerset "$NAME" \
+              -o jsonpath='{.metadata.managedFields[*].manager}' 2>/dev/null)"
+            echo "  Failed EphemeralRunners held by this set:"
+            kubectl -n "$NS" get ephemeralrunner \
+              -l actions.github.com/scale-set-name="$NAME" \
+              -o jsonpath='{range .items[*]}    {.metadata.name} {.status.phase}{"\n"}{end}' 2>/dev/null || true
+
+            echo "  deleting AutoscalingRunnerSet/$NAME (cascades to its ERS, runners and listener)…"
+            if ! kubectl -n "$NS" delete autoscalingrunnerset "$NAME" --timeout=120s; then
+              echo "::error title=arc-repair::delete failed for $NAME"
+              failed="$failed $NAME"; echo "::endgroup::"; continue
+            fi
+
+            # Argo reconciles on a ~3min loop; selfHeal recreates the deleted
+            # resource. Poll rather than sleep so a fast sync is not punished.
+            echo "  waiting for Argo to recreate it…"
+            NEW=""
+            for i in $(seq 1 40); do
+              NEW=$(kubectl -n "$NS" get autoscalingrunnerset "$NAME" \
+                -o jsonpath='{.spec.template.spec.initContainers[*].name}' 2>/dev/null)
+              [ -n "$NEW" ] && { echo "  recreated after ~$((i*15))s"; break; }
+              sleep 15
+            done
+
+            if [ -z "$NEW" ]; then
+              echo "::error title=arc-repair::$NAME was NOT recreated within 10min. Check the Argo app: kubectl -n argocd get application arc-runners-$NAME"
+              failed="$failed $NAME"; echo "::endgroup::"; continue
+            fi
+
+            echo "  new initContainers: $NEW"
+            case " $NEW " in
+              *" dind "*)
+                echo "::error title=arc-repair::$NAME STILL has a dind initContainer after recreation — Git itself renders a duplicate, or another manager rewrote it. Do not re-run this workflow; fix runners/arc/runner-scale-set-values.yaml."
+                failed="$failed $NAME" ;;
+              *)
+                echo "  ✓ clean"
+                repaired="$repaired $NAME" ;;
+            esac
+            echo "::endgroup::"
+          done
+
+          {
+            echo "### arc-repair-drifted-scaleset"
+            echo ""
+            echo "| outcome | scale sets |"
+            echo "|---|---|"
+            echo "| repaired | ${repaired:-(none)} |"
+            echo "| skipped (already clean / absent) | ${skipped:-(none)} |"
+            echo "| failed | ${failed:-(none)} |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          [ -n "$failed" ] && exit 1
+          echo "Done. Repaired:${repaired:-(none)}"
+
+      - name: Post-repair state
+        if: always()
+        run: |
+          echo "=== AutoscalingRunnerSet pod templates ==="
+          kubectl -n arc-runners get autoscalingrunnersets \
+            -o custom-columns=NAME:.metadata.name,INIT:.spec.template.spec.initContainers[*].name,CTRS:.spec.template.spec.containers[*].name \
+            2>&1 || true
+          echo "=== EphemeralRunners still Failed (should be none for repaired sets) ==="
+          kubectl -n arc-runners get ephemeralrunner -A \
+            -o jsonpath='{range .items[?(@.status.phase=="Failed")]}{.metadata.name}{"\n"}{end}' 2>&1 || echo "(none)"
+          echo "=== Listener pods ==="
+          kubectl -n arc-systems get pods -l app.kubernetes.io/component=runner-scale-set-listener 2>&1 || true
