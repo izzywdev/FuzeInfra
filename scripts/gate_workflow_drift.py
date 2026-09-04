@@ -66,7 +66,26 @@ import sys
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(SCRIPT_DIR, "bootstrap"))
-from lib import render as rnd  # noqa: E402
+try:
+    from lib import render as rnd  # noqa: E402
+except ImportError:
+    class FallbackRender:
+        @staticmethod
+        def parse_marker(text: str) -> dict | None:
+            for line in text.splitlines()[:5]:
+                if "fuze:managed" in line:
+                    parts = line.split()
+                    marker = {}
+                    for part in parts:
+                        if "=" in part:
+                            k, v = part.split("=", 1)
+                            if k == "digest" and v.startswith("sha256:"):
+                                v = v[7:]
+                            marker[k] = v
+                    if "template" in marker:
+                        return marker
+            return None
+    rnd = FallbackRender
 
 DEFAULT_MAX_VERSIONS_BEHIND = 3
 BASELINE_VERSION_FILE = os.path.join("governance", "baseline-version.txt")

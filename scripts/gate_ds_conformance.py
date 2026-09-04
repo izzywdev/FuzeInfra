@@ -121,7 +121,7 @@ def changed_lines(root: str, base_ref: str) -> dict[str, set[int]] | None:
     `git diff --unified=0 <base_ref>...HEAD`. None if the diff can't be computed."""
     try:
         res = subprocess.run(
-            ["git", "-C", root, "diff", "--unified=0", f"{base_ref}...HEAD"],
+            ["git", "-C", root, "diff", "--no-ext-diff", "--unified=0", f"{base_ref}...HEAD"],
             capture_output=True, text=True, timeout=90,
         )
     except Exception as e:
