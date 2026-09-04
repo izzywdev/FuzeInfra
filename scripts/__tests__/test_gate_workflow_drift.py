@@ -28,7 +28,10 @@ sys.path.insert(0, SCRIPTS)
 import gate_workflow_drift as G  # noqa: E402
 
 sys.path.insert(0, os.path.join(SCRIPTS, "bootstrap"))
-from lib import render as R  # noqa: E402
+try:
+    from lib import render as R  # noqa: E402
+except ImportError:
+    R = None
 
 TEMPLATE_NAME = "sample.yml"
 TEMPLATE_REL = os.path.join("workflow-templates", TEMPLATE_NAME)
@@ -106,8 +109,7 @@ def make_repo_with_marker(tmp, baseline_ref, digest):
     os.makedirs(os.path.join(repo, ".github", "workflows"))
     _write(os.path.join(repo, ".fuze", "manifest.json"),
            '{"repo": "izzywdev/sample", "baselineRef": "%s"}\n' % baseline_ref)
-    marker = R.build_marker_line(TEMPLATE_NAME, baseline_ref, b"raw-bytes-irrelevant-here")
-    # The marker's own digest field is what this gate reads — rebuild the line with the
+    # The marker's own digest field is what this gate reads — build the line with the
     # EXACT digest we want stamped, rather than relying on build_marker_line's own hashing
     # of arbitrary bytes (we want to control the digest directly per test case).
     marker = f"# fuze:managed template={TEMPLATE_NAME} baseline={baseline_ref} digest=sha256:{digest}"
