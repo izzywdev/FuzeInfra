@@ -960,10 +960,27 @@ def changed_lines(repo, base_ref):
     A ratchet that silently empties itself when git is unhappy is a check that
     reports success because it looked at zero lines.
     """
+    env = os.environ.copy()
+    keys, values = [], []
+    count = int(env.get("GIT_CONFIG_COUNT", "0"))
+    for i in range(count):
+        k = env.get(f"GIT_CONFIG_KEY_{i}")
+        v = env.get(f"GIT_CONFIG_VALUE_{i}")
+        if k and k != "diff.external":
+            keys.append(k)
+            values.append(v)
+    for k in list(env.keys()):
+        if k.startswith("GIT_CONFIG_KEY_") or k.startswith("GIT_CONFIG_VALUE_"):
+            env.pop(k)
+    env["GIT_CONFIG_COUNT"] = str(len(keys))
+    for i, (k, v) in enumerate(zip(keys, values)):
+        env[f"GIT_CONFIG_KEY_{i}"] = k
+        env[f"GIT_CONFIG_VALUE_{i}"] = v
+
     try:
         res = subprocess.run(
             ["git", "-C", repo, "diff", "--unified=0", f"{base_ref}...HEAD"],
-            capture_output=True, text=True, timeout=90)
+            capture_output=True, text=True, timeout=90, env=env)
     except (OSError, subprocess.SubprocessError):
         return None
     if res.returncode != 0:

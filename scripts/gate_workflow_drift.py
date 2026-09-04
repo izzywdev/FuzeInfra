@@ -64,9 +64,19 @@ import os
 import subprocess
 import sys
 
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, os.path.join(SCRIPT_DIR, "bootstrap"))
-from lib import render as rnd  # noqa: E402
+import re
+
+class rnd:
+    @staticmethod
+    def parse_marker(text: str) -> dict | None:
+        match = re.search(r'#\s*fuze:managed\s+template=(\S+)\s+baseline=(\S+)\s+digest=sha256:([0-9a-fA-F]+)', text)
+        if not match:
+            return None
+        return {
+            "template": match.group(1),
+            "baseline": match.group(2),
+            "digest": match.group(3),
+        }
 
 DEFAULT_MAX_VERSIONS_BEHIND = 3
 BASELINE_VERSION_FILE = os.path.join("governance", "baseline-version.txt")
