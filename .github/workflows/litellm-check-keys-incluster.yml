@@ -29,8 +29,19 @@ jobs:
               echo;
               echo "=== model/info ===";
               curl -sS -m 15 -H "Authorization: Bearer $MKEY" "http://litellm.fuzeinfra.svc.cluster.local:4000/model/info";
+              echo DONE_MARKER;
+              sleep 60;
             '
-          kubectl -n fuzeinfra wait --for=condition=Ready pod/litellm-diag --timeout=60s || true
-          sleep 3
-          kubectl -n fuzeinfra logs litellm-diag || true
+          kubectl -n fuzeinfra wait --for=condition=Ready pod/litellm-diag --timeout=90s || true
+          ok=0
+          for i in 1 2 3 4 5 6 7 8; do
+            if kubectl -n fuzeinfra logs litellm-diag 2>/tmp/err.log > /tmp/out.log; then
+              cat /tmp/out.log
+              if grep -q DONE_MARKER /tmp/out.log; then ok=1; break; fi
+            else
+              cat /tmp/err.log
+            fi
+            sleep 8
+          done
           kubectl -n fuzeinfra delete pod litellm-diag --ignore-not-found --wait=false
+          [ "$ok" = "1" ] || echo "::warning::could not confirm full log capture"
