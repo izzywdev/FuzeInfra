@@ -771,14 +771,15 @@ clusterAutoscaler:
     # of committing the literal id here).
     notifyTelegramChatId: "5196390841"
   # Billing-aware reaper -- releases an idle elastic instance only within 24h
-  # of its projected monthly renewal (see cmd/reaper). billingPeriod matches
-  # the chart default (720h/~30d); set explicitly here so prod release window
-  # is self-documenting rather than relying on an inherited default.
+  # of its projected monthly renewal (see cmd/reaper). renewalDay matches the
+  # chart default (calendar-aligned to the 15th for the whole fleet,
+  # confirmed 2026-09); set explicitly here so prod release window is
+  # self-documenting rather than relying on an inherited default.
   reaper:
     enabled: true
     schedule: "0 * * * *"
     releaseWindow: 24h
-    billingPeriod: 720h
+    renewalDay: 15
 overprovisioning:
   # Enabled together with clusterAutoscaler during the gated Task 18 cutover.
   enabled: true

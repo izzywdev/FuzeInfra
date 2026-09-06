@@ -3,6 +3,7 @@ package reaper
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -14,14 +15,14 @@ import (
 
 const (
 	testReleaseWindow = 24 * time.Hour
-	testBillingPeriod = 720 * time.Hour // 30d
+	testRenewalDay    = 15 // Contabo bills the whole elastic fleet on the 15th of every month.
 )
 
 // --- Pure decision-function tests (no clock, no I/O) -----------------------
 
 func TestDecide_UnknownCreatedDateAlwaysKeeps(t *testing.T) {
 	now := time.Date(2026, 7, 22, 12, 0, 0, 0, time.UTC)
-	d, reason := Decide(time.Time{}, time.Time{}, now, testReleaseWindow, testBillingPeriod, true /* idle */)
+	d, reason := Decide(time.Time{}, time.Time{}, now, testReleaseWindow, testRenewalDay, true /* idle */)
 	if d != DecisionKeep {
 		t.Fatalf("Decide() = %v, want DecisionKeep for a zero/unknown CreatedDate", d)
 	}
@@ -30,12 +31,12 @@ func TestDecide_UnknownCreatedDateAlwaysKeeps(t *testing.T) {
 	}
 }
 
-func TestDecide_WellWithinBillingPeriodKeepsRegardlessOfIdle(t *testing.T) {
-	// Created 1 day ago; 30d billing period means renewal is ~29 days out —
-	// nowhere near the 24h release window. Must keep even if idle.
-	created := time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)
-	now := created.Add(24 * time.Hour)
-	d, _ := Decide(created, time.Time{}, now, testReleaseWindow, testBillingPeriod, true)
+func TestDecide_WellBeforeRenewalKeepsRegardlessOfIdle(t *testing.T) {
+	// now is 13 days before the next calendar renewal (the 15th) — nowhere
+	// near the 24h release window. Must keep even if idle.
+	created := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
+	now := time.Date(2026, 6, 2, 0, 0, 0, 0, time.UTC)
+	d, _ := Decide(created, time.Time{}, now, testReleaseWindow, testRenewalDay, true)
 	if d != DecisionKeep {
 		t.Fatalf("Decide() = %v, want DecisionKeep well before the release window opens", d)
 	}
@@ -43,9 +44,9 @@ func TestDecide_WellWithinBillingPeriodKeepsRegardlessOfIdle(t *testing.T) {
 
 func TestDecide_InWindowButBusyKeeps(t *testing.T) {
 	created := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
-	renewal := created.Add(testBillingPeriod)
+	renewal := time.Date(2026, 6, 15, 0, 0, 0, 0, time.UTC)
 	now := renewal.Add(-1 * time.Hour) // 1h before renewal, inside the 24h window
-	d, reason := Decide(created, time.Time{}, now, testReleaseWindow, testBillingPeriod, false /* idle */)
+	d, reason := Decide(created, time.Time{}, now, testReleaseWindow, testRenewalDay, false /* idle */)
 	if d != DecisionKeep {
 		t.Fatalf("Decide() = %v, want DecisionKeep for a busy node inside the release window", d)
 	}
@@ -56,9 +57,9 @@ func TestDecide_InWindowButBusyKeeps(t *testing.T) {
 
 func TestDecide_InWindowAndIdleReleases(t *testing.T) {
 	created := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
-	renewal := created.Add(testBillingPeriod)
+	renewal := time.Date(2026, 6, 15, 0, 0, 0, 0, time.UTC)
 	now := renewal.Add(-1 * time.Hour)
-	d, _ := Decide(created, time.Time{}, now, testReleaseWindow, testBillingPeriod, true)
+	d, _ := Decide(created, time.Time{}, now, testReleaseWindow, testRenewalDay, true)
 	if d != DecisionRelease {
 		t.Fatalf("Decide() = %v, want DecisionRelease for an idle node inside the release window", d)
 	}
@@ -68,9 +69,9 @@ func TestDecide_ExactlyAtWindowBoundaryReleases(t *testing.T) {
 	// now == renewal - releaseWindow is the inclusive boundary (the window
 	// "opens" at exactly this instant).
 	created := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
-	renewal := created.Add(testBillingPeriod)
+	renewal := time.Date(2026, 6, 15, 0, 0, 0, 0, time.UTC)
 	now := renewal.Add(-testReleaseWindow)
-	d, _ := Decide(created, time.Time{}, now, testReleaseWindow, testBillingPeriod, true)
+	d, _ := Decide(created, time.Time{}, now, testReleaseWindow, testRenewalDay, true)
 	if d != DecisionRelease {
 		t.Fatalf("Decide() = %v, want DecisionRelease exactly at the window boundary", d)
 	}
@@ -78,24 +79,76 @@ func TestDecide_ExactlyAtWindowBoundaryReleases(t *testing.T) {
 
 func TestDecide_JustBeforeWindowBoundaryKeeps(t *testing.T) {
 	created := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
-	renewal := created.Add(testBillingPeriod)
+	renewal := time.Date(2026, 6, 15, 0, 0, 0, 0, time.UTC)
 	now := renewal.Add(-testReleaseWindow).Add(-time.Second)
-	d, _ := Decide(created, time.Time{}, now, testReleaseWindow, testBillingPeriod, true)
+	d, _ := Decide(created, time.Time{}, now, testReleaseWindow, testRenewalDay, true)
 	if d != DecisionKeep {
 		t.Fatalf("Decide() = %v, want DecisionKeep one second before the window opens", d)
 	}
 }
 
-func TestDecide_PastRenewalStillIdleReleases(t *testing.T) {
-	// Defensive case: if the reaper somehow runs late (missed CronJob tick)
-	// and now is already past the projected renewal, an idle instance is
-	// still released rather than left to actually renew.
+func TestDecide_JustPastRenewalDayRollsToNextMonthAndKeeps(t *testing.T) {
+	// Once now is at/past this month's renewal instant, that cycle's charge
+	// has already landed (or is about to) — cancelling now would just get
+	// scheduled against the NEW billing period (~30 days out), paying for an
+	// unnecessary extra month for no benefit. So the projection must roll
+	// forward to next month's renewal and Keep, not force a release.
 	created := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
-	renewal := created.Add(testBillingPeriod)
-	now := renewal.Add(2 * time.Hour)
-	d, _ := Decide(created, time.Time{}, now, testReleaseWindow, testBillingPeriod, true)
+	now := time.Date(2026, 6, 15, 2, 0, 0, 0, time.UTC) // 2h past this month's renewal instant
+	d, reason := Decide(created, time.Time{}, now, testReleaseWindow, testRenewalDay, true /* idle */)
+	if d != DecisionKeep {
+		t.Fatalf("Decide() = %v, want DecisionKeep just past the renewal instant (rolled to next month)", d)
+	}
+	if !strings.Contains(reason, "2026-07-15T00:00:00Z") {
+		t.Fatalf("reason = %q, want it to project renewal onto 2026-07-15 (next month), not the just-passed 2026-06-15", reason)
+	}
+}
+
+func TestDecide_CreatedJustAfterRenewalDayProjectsNextMonth(t *testing.T) {
+	// An instance created just after the 15th has NOT just renewed under the
+	// old createdDate+30d model's assumption — under the real calendar-
+	// aligned model its first renewal is next month's 15th, ~29 days out,
+	// not ~15 days as a naive "nearest 15th" calculation might produce.
+	created := time.Date(2026, 6, 16, 0, 0, 0, 0, time.UTC)
+	now := created // reaper's very first pass right after creation
+	d, reason := Decide(created, time.Time{}, now, testReleaseWindow, testRenewalDay, true /* idle */)
+	if d != DecisionKeep {
+		t.Fatalf("Decide() = %v, want DecisionKeep — renewal is ~29 days out, not within the 24h window", d)
+	}
+	if !strings.Contains(reason, "2026-07-15T00:00:00Z") {
+		t.Fatalf("reason = %q, want the projected renewal to be 2026-07-15 (~30 days out, next month), not ~15 days out", reason)
+	}
+}
+
+func TestDecide_CreatedJustBeforeRenewalDayIsImminentAndReleases(t *testing.T) {
+	// An instance created just before the 15th is about to hit its very
+	// first calendar renewal within a day — the old createdDate+30d model
+	// would have projected a renewal a full month out and never released
+	// this idle instance in time, paying for an unnecessary extra month.
+	created := time.Date(2026, 6, 14, 0, 0, 0, 0, time.UTC)
+	now := time.Date(2026, 6, 14, 12, 0, 0, 0, time.UTC) // 12h before renewal, inside the 24h window
+	d, reason := Decide(created, time.Time{}, now, testReleaseWindow, testRenewalDay, true /* idle */)
 	if d != DecisionRelease {
-		t.Fatalf("Decide() = %v, want DecisionRelease when now is already past renewal", d)
+		t.Fatalf("Decide() = %v, want DecisionRelease — renewal is imminent (tomorrow), inside the release window", d)
+	}
+	if !strings.Contains(reason, "2026-06-15T00:00:00Z") {
+		t.Fatalf("reason = %q, want the projected renewal to be the imminent 2026-06-15, not ~30 days out", reason)
+	}
+}
+
+func TestDecide_ExactlyOnRenewalDayRollsToNextMonth(t *testing.T) {
+	// now landing exactly on the renewal instant (00:00:00 on the 15th)
+	// means this cycle's renewal has just happened — the projection must
+	// roll to next month's 15th rather than treating "now" itself as still
+	// within the current cycle's window.
+	created := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	now := time.Date(2026, 6, 15, 0, 0, 0, 0, time.UTC)
+	d, reason := Decide(created, time.Time{}, now, testReleaseWindow, testRenewalDay, true /* idle */)
+	if d != DecisionKeep {
+		t.Fatalf("Decide() = %v, want DecisionKeep exactly on the renewal boundary (rolled to next month)", d)
+	}
+	if !strings.Contains(reason, "2026-07-15T00:00:00Z") {
+		t.Fatalf("reason = %q, want it to project renewal onto 2026-07-15, not treat 2026-06-15 itself as in-window", reason)
 	}
 }
 
@@ -109,11 +162,11 @@ func TestDecide_PastRenewalStillIdleReleases(t *testing.T) {
 // instance is exactly what must never happen.
 func TestDecide_CancelDateSetAlwaysKeeps_EvenInWindowAndIdle(t *testing.T) {
 	created := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
-	renewal := created.Add(testBillingPeriod)
+	renewal := time.Date(2026, 6, 15, 0, 0, 0, 0, time.UTC)
 	now := renewal.Add(-1 * time.Hour) // in-window
 	cancelDate := time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)
 
-	d, reason := Decide(created, cancelDate, now, testReleaseWindow, testBillingPeriod, true /* idle */)
+	d, reason := Decide(created, cancelDate, now, testReleaseWindow, testRenewalDay, true /* idle */)
 	if d != DecisionKeep {
 		t.Fatalf("Decide() = %v, want DecisionKeep for an already-cancelled instance", d)
 	}
@@ -131,7 +184,7 @@ func TestDecide_CancelDateInPastStillKeeps(t *testing.T) {
 	cancelDate := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
 	now := time.Date(2026, 7, 22, 0, 0, 0, 0, time.UTC) // well after cancelDate
 
-	d, _ := Decide(created, cancelDate, now, testReleaseWindow, testBillingPeriod, true)
+	d, _ := Decide(created, cancelDate, now, testReleaseWindow, testRenewalDay, true)
 	if d != DecisionKeep {
 		t.Fatalf("Decide() = %v, want DecisionKeep for an instance whose cancelDate has already passed", d)
 	}
@@ -253,7 +306,7 @@ func (f *fakeContabo) Delete(_ context.Context, id int64) error {
 
 func TestRun_IdleNodeInWindowIsReleased(t *testing.T) {
 	created := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
-	renewal := created.Add(testBillingPeriod)
+	renewal := time.Date(2026, 6, 15, 0, 0, 0, 0, time.UTC)
 	now := renewal.Add(-1 * time.Hour)
 
 	inst := contabo.Instance{ID: 42, Name: "fuzeinfra-elastic-0", Status: "running", CreatedDate: created}
@@ -266,7 +319,7 @@ func TestRun_IdleNodeInWindowIsReleased(t *testing.T) {
 	r := &Reaper{
 		Contabo: fc,
 		K8s:     k8s,
-		Cfg:     Config{ReleaseWindow: testReleaseWindow, BillingPeriod: testBillingPeriod, ElasticTag: "fuzeinfra-elastic", EvictionTimeout: 5 * time.Second},
+		Cfg:     Config{ReleaseWindow: testReleaseWindow, RenewalDay: testRenewalDay, ElasticTag: "fuzeinfra-elastic", EvictionTimeout: 5 * time.Second},
 		Now:     func() time.Time { return now },
 	}
 
@@ -292,7 +345,7 @@ func TestRun_IdleNodeInWindowIsReleased(t *testing.T) {
 
 func TestRun_BusyNodeInWindowIsKeptAndNotDeleted(t *testing.T) {
 	created := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
-	renewal := created.Add(testBillingPeriod)
+	renewal := time.Date(2026, 6, 15, 0, 0, 0, 0, time.UTC)
 	now := renewal.Add(-1 * time.Hour)
 
 	inst := contabo.Instance{ID: 43, Name: "fuzeinfra-elastic-1", Status: "running", CreatedDate: created}
@@ -305,7 +358,7 @@ func TestRun_BusyNodeInWindowIsKeptAndNotDeleted(t *testing.T) {
 	r := &Reaper{
 		Contabo: fc,
 		K8s:     k8s,
-		Cfg:     Config{ReleaseWindow: testReleaseWindow, BillingPeriod: testBillingPeriod, ElasticTag: "fuzeinfra-elastic", EvictionTimeout: 5 * time.Second},
+		Cfg:     Config{ReleaseWindow: testReleaseWindow, RenewalDay: testRenewalDay, ElasticTag: "fuzeinfra-elastic", EvictionTimeout: 5 * time.Second},
 		Now:     func() time.Time { return now },
 	}
 
@@ -344,7 +397,7 @@ func TestRun_OutsideWindowIsKeptWithoutTouchingNodes(t *testing.T) {
 	r := &Reaper{
 		Contabo: fc,
 		K8s:     k8s,
-		Cfg:     Config{ReleaseWindow: testReleaseWindow, BillingPeriod: testBillingPeriod, ElasticTag: "fuzeinfra-elastic"},
+		Cfg:     Config{ReleaseWindow: testReleaseWindow, RenewalDay: testRenewalDay, ElasticTag: "fuzeinfra-elastic"},
 		Now:     func() time.Time { return now },
 	}
 
@@ -362,7 +415,7 @@ func TestRun_OutsideWindowIsKeptWithoutTouchingNodes(t *testing.T) {
 
 func TestRun_NoMatchingNodeIsKeptNotCanceled(t *testing.T) {
 	created := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
-	renewal := created.Add(testBillingPeriod)
+	renewal := time.Date(2026, 6, 15, 0, 0, 0, 0, time.UTC)
 	now := renewal.Add(-1 * time.Hour)
 
 	// Instance is within the release window, but never joined the cluster —
@@ -374,7 +427,7 @@ func TestRun_NoMatchingNodeIsKeptNotCanceled(t *testing.T) {
 	r := &Reaper{
 		Contabo: fc,
 		K8s:     k8s,
-		Cfg:     Config{ReleaseWindow: testReleaseWindow, BillingPeriod: testBillingPeriod, ElasticTag: "fuzeinfra-elastic"},
+		Cfg:     Config{ReleaseWindow: testReleaseWindow, RenewalDay: testRenewalDay, ElasticTag: "fuzeinfra-elastic"},
 		Now:     func() time.Time { return now },
 	}
 
@@ -392,7 +445,7 @@ func TestRun_NoMatchingNodeIsKeptNotCanceled(t *testing.T) {
 
 func TestRun_NotReadyNodeIsKeptNotCanceled(t *testing.T) {
 	created := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
-	renewal := created.Add(testBillingPeriod)
+	renewal := time.Date(2026, 6, 15, 0, 0, 0, 0, time.UTC)
 	now := renewal.Add(-1 * time.Hour)
 
 	inst := contabo.Instance{ID: 46, Name: "fuzeinfra-elastic-4", CreatedDate: created}
@@ -409,7 +462,7 @@ func TestRun_NotReadyNodeIsKeptNotCanceled(t *testing.T) {
 	r := &Reaper{
 		Contabo: fc,
 		K8s:     k8s,
-		Cfg:     Config{ReleaseWindow: testReleaseWindow, BillingPeriod: testBillingPeriod, ElasticTag: "fuzeinfra-elastic"},
+		Cfg:     Config{ReleaseWindow: testReleaseWindow, RenewalDay: testRenewalDay, ElasticTag: "fuzeinfra-elastic"},
 		Now:     func() time.Time { return now },
 	}
 
@@ -440,7 +493,7 @@ func TestRun_UnknownCreatedDateIsKeptNotCanceled(t *testing.T) {
 	r := &Reaper{
 		Contabo: fc,
 		K8s:     k8s,
-		Cfg:     Config{ReleaseWindow: testReleaseWindow, BillingPeriod: testBillingPeriod, ElasticTag: "fuzeinfra-elastic"},
+		Cfg:     Config{ReleaseWindow: testReleaseWindow, RenewalDay: testRenewalDay, ElasticTag: "fuzeinfra-elastic"},
 		Now:     func() time.Time { return now },
 	}
 
@@ -674,7 +727,7 @@ func TestSweepOrphans_RunIntegration(t *testing.T) {
 	r := &Reaper{
 		Contabo: fc,
 		K8s:     k8s,
-		Cfg:     Config{ReleaseWindow: testReleaseWindow, BillingPeriod: testBillingPeriod, ElasticTag: "fuzeinfra-elastic", EvictionTimeout: 5 * time.Second},
+		Cfg:     Config{ReleaseWindow: testReleaseWindow, RenewalDay: testRenewalDay, ElasticTag: "fuzeinfra-elastic", EvictionTimeout: 5 * time.Second},
 		Now:     time.Now,
 	}
 
@@ -709,7 +762,7 @@ func TestRun_ListByTagErrorPropagates(t *testing.T) {
 // every condition that would otherwise trigger a release.
 func TestRun_CancelledInstanceIsKeptAndNeverReCancelled(t *testing.T) {
 	created := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
-	renewal := created.Add(testBillingPeriod)
+	renewal := time.Date(2026, 6, 15, 0, 0, 0, 0, time.UTC)
 	now := renewal.Add(-1 * time.Hour) // in-window
 	cancelDate := time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)
 
@@ -723,7 +776,7 @@ func TestRun_CancelledInstanceIsKeptAndNeverReCancelled(t *testing.T) {
 	r := &Reaper{
 		Contabo: fc,
 		K8s:     k8s,
-		Cfg:     Config{ReleaseWindow: testReleaseWindow, BillingPeriod: testBillingPeriod, ElasticTag: "fuzeinfra-elastic", EvictionTimeout: 5 * time.Second},
+		Cfg:     Config{ReleaseWindow: testReleaseWindow, RenewalDay: testRenewalDay, ElasticTag: "fuzeinfra-elastic", EvictionTimeout: 5 * time.Second},
 		Now:     func() time.Time { return now },
 	}
 
