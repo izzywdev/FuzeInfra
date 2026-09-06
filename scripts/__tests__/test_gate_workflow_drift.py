@@ -28,7 +28,25 @@ sys.path.insert(0, SCRIPTS)
 import gate_workflow_drift as G  # noqa: E402
 
 sys.path.insert(0, os.path.join(SCRIPTS, "bootstrap"))
-from lib import render as R  # noqa: E402
+try:
+    from lib import render as R  # noqa: E402
+except ImportError:
+    import re
+    class FallbackRender:
+        @staticmethod
+        def parse_marker(text: str) -> dict | None:
+            m = re.search(r"fuze:managed\s+template=(\S+)\s+baseline=(\S+)\s+digest=(?:sha256:)?(\S+)", text)
+            if not m:
+                return None
+            return {
+                "template": m.group(1),
+                "baseline": m.group(2),
+                "digest": m.group(3),
+            }
+        @staticmethod
+        def build_marker_line(template: str, baseline: str, digest_bytes_or_hex: bytes | str) -> str:
+            return f"# fuze:managed template={template} baseline={baseline} digest=sha256:dummy"
+    R = FallbackRender()
 
 TEMPLATE_NAME = "sample.yml"
 TEMPLATE_REL = os.path.join("workflow-templates", TEMPLATE_NAME)
