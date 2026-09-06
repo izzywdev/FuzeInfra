@@ -902,6 +902,28 @@ nodeConfigurator:
     # before it goes near the node running etcd. The DaemonSet stays fleet-wide
     # regardless, so preferIPv4 is unaffected by staging this.
     rolloutNodes: []
+  # Give etcd priority on the disk over pod I/O, via the cgroup-v2 iocost controller.
+  #
+  # Fixes the 2026-09-06 outage mode: Prometheus TSDB compaction, Loki chunk flushes
+  # and Longhorn replica traffic all share /dev/sda1 with the etcd datastore. etcd
+  # then misses its 100ms budget ("apply request took too long ... read-only range"),
+  # the apiserver's own readiness fails, and it refuses connections cluster-wide --
+  # which is what actually took prod down, not any apiserver fault.
+  #
+  # NOTE: a plain systemd `IOWeight=` does NOT work on these nodes. It writes cgroup
+  # io.weight, which is INERT under scheduler `none` with no BFQ module -- a fix that
+  # looks applied and is not. iocost (CONFIG_BLK_CGROUP_IOCOST=y, already in this
+  # kernel) makes io.weight real with no module install and no reboot. iocost is also
+  # preferred over BFQ here because the disks are non-rotational.
+  #
+  # Safe no-op on a node whose kernel lacks iocost, or that has no such device.
+  ioPriority:
+    enabled: false
+    # Block device backing the etcd datastore (/var/lib/rancher/k3s/server/db).
+    device: sda
+    # k3s.service contains etcd; kubepods.slice contains every pod. 1000:100 = 10:1.
+    k3sWeight: 1000
+    podsWeight: 100
   image: docker.io/busybox:1.36.1
 
 kubeStateMetrics:

@@ -169,8 +169,15 @@ prometheus:
   # durable nodes, so Longhorn registers node.longhorn.io objects only there;
   # a stateful pod scheduled onto an ephemeral elastic node can NEVER attach
   # its volume (FailedAttachVolume: node.longhorn.io "..." not found).
+  # ALSO pinned to the monitoring node (fuzeinfra.io/role=monitoring, applied by
+  # scripts/label-durable-nodes.sh). That node is designated the LOWEST-priority
+  # holder of the API floating VIP, so heavy TSDB/chunk I/O never shares a disk
+  # with the etcd that is actively serving the API. On 2026-09-06 Loki sat on the
+  # API node, starved etcd ("apply request took too long ... read-only range"),
+  # and the apiserver refused connections cluster-wide.
   nodeSelector:
     node.longhorn.io/create-default-disk: "true"
+    fuzeinfra.io/role: monitoring
   storage: 20Gi
   # Let downstream apps ship Prometheus alert/recording rules from their own
   # namespaces via ConfigMaps labeled `prometheus_rule: "1"`.
@@ -282,8 +289,15 @@ loki:
   # durable nodes, so Longhorn registers node.longhorn.io objects only there;
   # a stateful pod scheduled onto an ephemeral elastic node can NEVER attach
   # its volume (FailedAttachVolume: node.longhorn.io "..." not found).
+  # ALSO pinned to the monitoring node (fuzeinfra.io/role=monitoring, applied by
+  # scripts/label-durable-nodes.sh). That node is designated the LOWEST-priority
+  # holder of the API floating VIP, so heavy TSDB/chunk I/O never shares a disk
+  # with the etcd that is actively serving the API. On 2026-09-06 Loki sat on the
+  # API node, starved etcd ("apply request took too long ... read-only range"),
+  # and the apiserver refused connections cluster-wide.
   nodeSelector:
     node.longhorn.io/create-default-disk: "true"
+    fuzeinfra.io/role: monitoring
   # 20Gi, not the 5Gi base default — and as of the Deployment conversion this
   # value is ENFORCED rather than aspirational.
   #
@@ -1108,6 +1122,18 @@ nodeConfigurator:
     rolloutNodes:
       - fuzeinfra-ci-runner-1
       - vmi3396106
+  # ENABLED. Gives etcd a 10:1 disk share over all pod I/O, via the cgroup-v2
+  # iocost controller. Direct fix for the 2026-09-06 outage: pod I/O (Prometheus
+  # TSDB compaction, Loki chunk flushes, Longhorn replica traffic) starved etcd on
+  # /dev/sda1 until it missed its 100ms budget, at which point the apiserver failed
+  # its OWN readiness and refused connections cluster-wide.
+  #
+  # Verified live on all three durable nodes 2026-09-06: iocost auto-derived the
+  # device cost model (~488 MB/s read, ~8.5k random read IOPS) and io.weight became
+  # effective. A plain systemd IOWeight= would NOT have worked here -- these nodes
+  # run scheduler `none` with no BFQ module, which leaves io.weight inert.
+  ioPriority:
+    enabled: true
 
 # Stateful services not otherwise overridden here still need the durable pin.
 alertmanager:

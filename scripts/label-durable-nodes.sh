@@ -27,6 +27,25 @@ set -euo pipefail
 LABEL="node.longhorn.io/create-default-disk=true"
 # The three durable (replica-hosting) nodes. Override via DURABLE_NODES.
 DURABLE_NODES="${DURABLE_NODES:-vmi3383846 vmi3396106 mendys-worker-1}"
+
+# The durable node that carries the heavy-I/O monitoring stack (Prometheus TSDB +
+# Loki), and which is therefore designated the LOWEST-priority holder of the API
+# floating VIP -- it should be the last node to serve API traffic, never the first.
+#
+# WHY: on 2026-09-06 Loki sat on vmi3383846, the same node serving the API. Its
+# chunk flushes plus Prometheus TSDB compaction starved etcd off the disk ("apply
+# request took too long ... read-only range"), the apiserver's own readiness then
+# failed, and it refused connections cluster-wide. Separating "the node that serves
+# the API" from "the node that does bulk disk I/O" is the structural fix;
+# nodeConfigurator.ioPriority (iocost) is the belt to this braces.
+#
+# Monitoring cannot simply leave the durable pool -- Longhorn disks exist ONLY on
+# durable nodes, so an elastic node can never attach these volumes.
+#
+# This MUST stay consistent with the keepalived VRRP priorities once the API
+# floating VIP lands: this node gets the lowest priority.
+MONITORING_LABEL="fuzeinfra.io/role=monitoring"
+MONITORING_NODE="${MONITORING_NODE:-vmi3396106}"
 VERIFY_ONLY="${1:-}"
 
 kubectl version --request-timeout=10s >/dev/null 2>&1 || {
@@ -42,6 +61,16 @@ if [ "$VERIFY_ONLY" != "--verify-only" ]; then
       echo "  SKIP $n (not in cluster)"
     fi
   done
+
+  echo "== labelling the monitoring / lowest-VIP-priority node =="
+  if kubectl get node "$MONITORING_NODE" >/dev/null 2>&1; then
+    kubectl label node "$MONITORING_NODE" "$MONITORING_LABEL" --overwrite >/dev/null
+    echo "  ok   $MONITORING_NODE ($MONITORING_LABEL)"
+  else
+    # Loud, because Prometheus and Loki nodeSelect on this label: without it they
+    # are unschedulable rather than merely misplaced.
+    echo "  WARN $MONITORING_NODE not in cluster - Prometheus/Loki will stay Pending" >&2
+  fi
 fi
 
 echo "== verification =="
