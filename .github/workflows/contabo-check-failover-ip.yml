@@ -1,0 +1,26 @@
+name: contabo-check-failover-ip
+on:
+  workflow_dispatch: {}
+permissions:
+  contents: read
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check for failover/secondary IP support
+        env:
+          CID: ${{ secrets.CONTABO_CLIENT_ID }}
+          CSEC: ${{ secrets.CONTABO_CLIENT_SECRET }}
+          CUSER: ${{ secrets.CONTABO_API_USER }}
+          CPASS: ${{ secrets.CONTABO_API_PASSWORD }}
+        run: |
+          set -euo pipefail
+          TOK=$(curl -sS -X POST -H "Content-Type: application/x-www-form-urlencoded" \
+            "https://auth.contabo.com/auth/realms/contabo/protocol/openid-connect/token" \
+            --data-urlencode "client_id=${CID}" --data-urlencode "client_secret=${CSEC}" \
+            --data-urlencode "username=${CUSER}" --data-urlencode "password=${CPASS}" \
+            --data-urlencode "grant_type=password" | jq -r .access_token)
+          echo "=== /v1/compute/secondary-ips (if it exists) ==="
+          curl -sS -o /dev/null -w "HTTP %{http_code}\n" -H "Authorization: Bearer $TOK" -H "x-request-id: $(cat /proc/sys/kernel/random/uuid)" "https://api.contabo.com/v1/compute/secondary-ips"
+          echo "=== instance IP config for vmi3383846 (203383846) ==="
+          curl -sS -H "Authorization: Bearer $TOK" -H "x-request-id: $(cat /proc/sys/kernel/random/uuid)" "https://api.contabo.com/v1/compute/instances/203383846" | jq '.data[0].ipConfig'
