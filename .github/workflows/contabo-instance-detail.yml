@@ -31,5 +31,5 @@ jobs:
             echo "=== instance $id ==="
             curl -sS -H "Authorization: Bearer $TOK" \
               -H "x-request-id: $(cat /proc/sys/kernel/random/uuid)" \
-              "https://api.contabo.com/v1/compute/instances/${id}" | jq '.data[0] | {instanceId, displayName, name, status, cancelDate, createdDate, productId, addOns}'
+              "https://api.contabo.com/v1/compute/instances/${id}" | jq '.data[0] | {instanceId, displayName, name, status, cancelDate, createdDate, productId, addOns, ipConfig}'
           done
