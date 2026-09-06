@@ -3,11 +3,49 @@ package provider
 import (
 	"context"
 	"fmt"
+	"log"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/izzywdev/fuzeinfra/contabo-externalgrpc/internal/contabo"
 	"github.com/izzywdev/fuzeinfra/contabo-externalgrpc/internal/protos"
 )
+
+// instanceDiag rate-limits the per-instance diagnostic below. CA polls this
+// RPC about once a second, so an unthrottled line per instance per call would
+// be thousands of lines an hour.
+var (
+	instanceDiagMu   sync.Mutex
+	instanceDiagLast time.Time
+)
+
+// logInstanceDiag prints, at most once a minute, what the Contabo list
+// endpoint actually returned for each elastic instance: name, status, and the
+// RAW cancelDate string alongside whether it parsed.
+//
+// This exists because a merged fix (#832, date-only cancelDate parsing) did
+// not change the observed behaviour: CA still reported the same instances as
+// longUnregistered and the provider still re-issued cancel against them every
+// ~35s, while the log contained ZERO "unparsable cancelDate" lines. Those two
+// facts together mean the parsed value was zero WITHOUT the field ever being
+// non-empty -- but that was an inference, and cancelling paid servers on an
+// inference is how three of them were cancelled in the first place. This makes
+// the actual value observable so the fix can be made on evidence.
+//
+// Names, statuses and dates only -- never a token or credential.
+func logInstanceDiag(instances []contabo.Instance) {
+	instanceDiagMu.Lock()
+	defer instanceDiagMu.Unlock()
+	if time.Since(instanceDiagLast) < time.Minute {
+		return
+	}
+	instanceDiagLast = time.Now()
+	for _, inst := range instances {
+		log.Printf("contabo-diag: instance %d name=%q status=%q rawCancelDate=%q parsedCancelDateZero=%t",
+			inst.ID, inst.Name, inst.Status, inst.RawCancelDate, inst.CancelDate.IsZero())
+	}
+}
 
 // liveElasticInstances filters out instances that Contabo has already been
 // told to remove, returning only those that can still legitimately hold a
@@ -67,6 +105,32 @@ func liveElasticInstances(instances []contabo.Instance) []contabo.Instance {
 	return live
 }
 
+// NodeGroupNodes/NodeGroupTargetSize deliberately apply NO filter at all --
+// see the two doc comments below for why. This file makes a cap/report
+// split, not a cap/report DUPLICATE: liveElasticInstances (above) exists so
+// scale-up always has room to create a fresh replacement, and is used ONLY
+// for that cap, in NodeGroupIncreaseSize. It must NOT also be applied here.
+//
+// A cancelled instance is not a liability the moment it is cancelled:
+// Contabo's cancellation is end-of-billing-period only (see Delete's doc
+// comment), so a cancelled instance keeps running, fully paid for, until
+// that date. Treating it as gone the instant it is cancelled -- which is
+// what happened when liveElasticInstances was ALSO used here -- meant a
+// caller with three cancelled, still-running, still-billed instances had
+// zero schedulable capacity from any of them: paying for compute that k3s
+// was never told still existed, and unable to create a replacement either
+// (that's what the cap-side fix addresses) -- stuck either way.
+//
+// A second, narrower filter keyed on Contabo's Status ("deleting"/"deleted")
+// was considered and rejected: it would contradict the existing, tested
+// contract that Status drives ONLY state mapping here, never exclusion --
+// see mapContaboStatusToProtoState and TestNodeGroupNodes_StateMapping, which
+// deliberately reports "deleting"/"stopping"/"deleted" instances (mapped to
+// instanceDeleting) so CA can run its own state machine over them, on the
+// grounds that a transient status string may still revert. CancelDate is the
+// only unambiguous, explicit "we asked for this to go away" signal; Status
+// never gates exclusion here, full stop.
+//
 // NodeGroupTargetSize returns the current target size of the node group,
 // which is the number of Contabo instances in the managed name namespace.
 // Name-prefix membership is authoritative because tag assignment is
@@ -81,11 +145,11 @@ func (s *Server) NodeGroupTargetSize(ctx context.Context, req *protos.NodeGroupT
 	reserved := s.inFlight
 	s.mu.Unlock()
 
-	// Cancelled instances must not hold a slot — see liveElasticInstances.
-	live := liveElasticInstances(instances)
-
+	// Must match what NodeGroupNodes reports, or CA's own bookkeeping sees a
+	// target size that disagrees with the node list it was just handed --
+	// see the doc comment above for why no filter is applied here.
 	return &protos.NodeGroupTargetSizeResponse{
-		TargetSize: int32(len(live) + reserved),
+		TargetSize: int32(len(instances) + reserved),
 	}, nil
 }
 
@@ -97,13 +161,14 @@ func (s *Server) NodeGroupNodes(ctx context.Context, req *protos.NodeGroupNodesR
 		return nil, fmt.Errorf("NodeGroupNodes: listing elastic instances by name prefix: %w", err)
 	}
 
-	// Report only instances that still hold a slot. A cancelled instance is
-	// already on Contabo's termination path; continuing to report it would
-	// pin the group at MaxSize for the rest of the billing period (see
-	// liveElasticInstances). Never-joined instances we did NOT cancel are
-	// deliberately still reported, so CA can attribute and reclaim them
-	// rather than have them silently stranded.
-	instances = liveElasticInstances(instances)
+	// Report every instance ListByNamePrefix returns, cancelled or not -- see
+	// the doc comment above NodeGroupTargetSize for why no filter is applied
+	// here. A cancelled instance stays fully paid-for and fully usable until
+	// Contabo actually tears it down; not reporting it here was compute
+	// already being paid for and never handed to k3s. Never-joined instances
+	// we did NOT cancel are still reported regardless, so CA can attribute
+	// and reclaim them rather than have them silently stranded.
+	logInstanceDiag(instances)
 
 	protoInstances := make([]*protos.Instance, 0, len(instances))
 	for _, inst := range instances {

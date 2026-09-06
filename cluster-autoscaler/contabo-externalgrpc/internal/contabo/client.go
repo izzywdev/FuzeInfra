@@ -51,6 +51,15 @@ type Instance struct {
 	// non-zero CancelDate as the authoritative termination anchor and MUST
 	// NOT re-cancel an instance that already carries one.
 	CancelDate time.Time
+	// RawCancelDate is Contabo's cancelDate EXACTLY as returned, before any
+	// parsing. Diagnostic only -- never a decision input. It exists because a
+	// zero CancelDate is ambiguous: it can mean "not cancelled", "field absent
+	// from this endpoint", or "present but unparsable". Only the first is
+	// benign, and the provider behaved very differently in the other two
+	// (cancelled instances kept being reported to CA, which re-issued cancel
+	// in a loop against Contabo). The parsed field alone could not tell them
+	// apart, so the raw value is retained and logged.
+	RawCancelDate string
 }
 
 // CreateReq is the request to create a new instance.
@@ -406,9 +415,10 @@ func (c *HTTPClient) ListByTag(ctx context.Context, tag string) ([]Instance, err
 			Name:        inst.DisplayName,
 			Status:      inst.Status,
 			PrivateIP:   privateIP,
-			Tags:        []string{tag},
-			CreatedDate: createdDate,
-			CancelDate:  cancelDate,
+			Tags:          []string{tag},
+			CreatedDate:   createdDate,
+			CancelDate:    cancelDate,
+			RawCancelDate: inst.CancelDate,
 		})
 	}
 
@@ -517,12 +527,13 @@ func (c *HTTPClient) fetchComputeInstancesPage(ctx context.Context, tok string, 
 		}
 
 		items = append(items, Instance{
-			ID:          inst.InstanceID,
-			Name:        inst.DisplayName,
-			Status:      inst.Status,
-			PrivateIP:   privateIP,
-			CreatedDate: createdDate,
-			CancelDate:  cancelDate,
+			ID:            inst.InstanceID,
+			Name:          inst.DisplayName,
+			Status:        inst.Status,
+			PrivateIP:     privateIP,
+			CreatedDate:   createdDate,
+			CancelDate:    cancelDate,
+			RawCancelDate: inst.CancelDate,
 		})
 	}
 	return items, nil

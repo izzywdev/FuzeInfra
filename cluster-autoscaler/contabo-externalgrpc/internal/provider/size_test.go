@@ -203,10 +203,16 @@ func cancelledInst(id int64, name string) contabo.Instance {
 	}
 }
 
-// TestNodeGroupTargetSize_ExcludesCancelled is the convergence guard: a pool
-// whose instances are all cancelled must report target size 0, not MaxSize,
-// or CA can never replace the capacity it just released.
-func TestNodeGroupTargetSize_ExcludesCancelled(t *testing.T) {
+// TestNodeGroupTargetSize_CountsCancelledButRunning is the convergence guard
+// for the OTHER direction of the same bug: Contabo cancellation is
+// end-of-billing-period only, so a cancelled instance keeps running, fully
+// paid for, until that date. A caller must see that capacity as usable target
+// size -- not zero it out -- or k3s is never told it can still schedule onto
+// compute that's already being paid for. (The cap itself, in
+// NodeGroupIncreaseSize, still excludes cancelled instances via
+// liveElasticInstances so scale-up isn't blocked -- that's a separate call
+// site, unchanged.)
+func TestNodeGroupTargetSize_CountsCancelledButRunning(t *testing.T) {
 	fc := &fakeCloud{instances: []contabo.Instance{
 		cancelledInst(1, "fuzeinfra-prod-elastic-v2-aaaaaaaa"),
 		cancelledInst(2, "fuzeinfra-prod-elastic-v2-bbbbbbbb"),
@@ -221,15 +227,17 @@ func TestNodeGroupTargetSize_ExcludesCancelled(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NodeGroupTargetSize error: %v", err)
 	}
-	if resp.TargetSize != 1 {
-		t.Fatalf("cancelled instances must not hold a pool slot: want targetSize=1, got %d "+
-			"(counting them pins the group at MaxSize and CA logs \"max size reached\")", resp.TargetSize)
+	if resp.TargetSize != 3 {
+		t.Fatalf("cancelled-but-still-running instances are still paid-for, schedulable capacity: "+
+			"want targetSize=3, got %d", resp.TargetSize)
 	}
 }
 
-// TestNodeGroupNodes_ExcludesCancelled: a cancelled instance is already on
-// Contabo's termination path, so CA must not keep it as group membership.
-func TestNodeGroupNodes_ExcludesCancelled(t *testing.T) {
+// TestNodeGroupNodes_ReportsCancelledButRunning: a cancelled instance is
+// already on Contabo's termination path, but not gone yet -- see
+// TestNodeGroupTargetSize_CountsCancelledButRunning. CA must keep seeing it
+// as group membership until Contabo actually tears it down.
+func TestNodeGroupNodes_ReportsCancelledButRunning(t *testing.T) {
 	fc := &fakeCloud{instances: []contabo.Instance{
 		cancelledInst(1, "fuzeinfra-prod-elastic-v2-aaaaaaaa"),
 		{ID: 2, Name: "fuzeinfra-prod-elastic-v2-bbbbbbbb", Status: "running"},
@@ -243,8 +251,8 @@ func TestNodeGroupNodes_ExcludesCancelled(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NodeGroupNodes error: %v", err)
 	}
-	if len(resp.Instances) != 1 || resp.Instances[0].Id != "contabo://fuzeinfra-prod-elastic-v2-bbbbbbbb" {
-		t.Fatalf("want only the live instance reported, got %v", resp.Instances)
+	if len(resp.Instances) != 2 {
+		t.Fatalf("want both the cancelled-but-running and the live instance reported, got %v", resp.Instances)
 	}
 }
 

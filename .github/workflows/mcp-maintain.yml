@@ -1,4 +1,4 @@
-# fuze:managed template=mcp-maintain.yml baseline=main digest=sha256:2ae3e7179694000b85f3b11eba4b1125e0e963a506f57af39f28e9a1239cad5d
+# fuze:managed template=mcp-maintain.yml baseline=v1 digest=sha256:2ae3e7179694000b85f3b11eba4b1125e0e963a506f57af39f28e9a1239cad5d
 name: MCP Maintain
 
 # Keeps this repo's Model Context Protocol (MCP) surface current, as part of CI. The
@@ -79,7 +79,7 @@ jobs:
     outputs:
       declared: ${{ steps.check.outputs.declared }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
 
       - name: Is mcp-maintain declared?
         id: check
@@ -141,7 +141,7 @@ jobs:
       - name: Mint fuze-agent App token
         id: app_token
         continue-on-error: true
-        uses: actions/create-github-app-token@v3
+        uses: actions/create-github-app-token@v1
         with:
           app-id: ${{ secrets.FUZE_AGENT_APP_ID }}
           private-key: ${{ secrets.FUZE_AGENT_APP_PRIVATE_KEY }}
@@ -174,7 +174,7 @@ jobs:
         # repointed by the action owner (cf. the trivy-action / kics-github-action
         # compromises). This workflow has `contents: write` on the PR branch, so a
         # repointed checkout would run attacker code with push access.
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
         with:
           ref: ${{ github.event.pull_request.head.ref }}
           repository: ${{ github.event.pull_request.head.repo.full_name }}
@@ -189,16 +189,16 @@ jobs:
       # itself require an agent run, so the agent path must not depend on the cluster
       # being up. preflight already proved a usable credential exists, so this
       # resolution cannot legitimately fail here.
-      # NO pre-resolution step here, deliberately. There used to be one whose only
-      # consumer was `anthropic-api-key:` on the maintainer step below, and that
-      # was the bug: it handed the RESOLVED credential (in the common case a
-      # runner-local LiteLLM virtual key) to fuze-code-action, which resolves the
-      # endpoint AGAIN internally. The nested resolution took that virtual key as
-      # its `fallback-anthropic-key` and configured the anthropic leg with it, so
-      # upstream Anthropic answered `Invalid API key` and every rung fell through.
-      # Token from one endpoint + base URL from another is never valid. Pass the
-      # RAW secrets and let fuze-code-action's own ./llm-endpoint be the single
-      # authority, exactly as fuze-code-review.yml does.
+      - name: Resolve LLM endpoint (LiteLLM in-cluster, vendor fallback)
+        id: llm
+        uses: ./.github/actions/llm-endpoint
+        with:
+          litellm-key: ${{ secrets.LITELLM_FUZE_KEY }}
+          fallback-chain: ${{ vars.FUZE_LLM_FALLBACK_CHAIN || 'anthropic,openai,gemini' }}
+          fallback-anthropic-key: ${{ secrets.ANTHROPIC_API_KEY }}
+          fallback-openai-key: ${{ secrets.OPENAI_API_KEY }}
+          fallback-gemini-key: ${{ secrets.GEMINI_API_KEY }}
+
       - name: Skip on last-commit marker
         id: marker
         run: |
@@ -216,7 +216,7 @@ jobs:
           # Same shape as gate-code-review in harden-gate.yml: the CLI reads
           # ANTHROPIC_AUTH_TOKEN, some SDK paths still read ANTHROPIC_API_KEY, so
           # both carry the resolved credential — whichever endpoint won the probe.
-          anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY }}
+          anthropic-api-key: ${{ steps.llm.outputs.auth-token }}
           # allowed_bots: scoped to `claude`, deliberately NOT `*`.
           #
           # The gate exists because claude-code-action hard-fails a Bot actor:

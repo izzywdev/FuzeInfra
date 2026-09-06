@@ -157,7 +157,7 @@ variable "private_network_id" {
 }
 
 variable "private_iface" {
-  description = "Private NIC device name the Contabo VPC attaches as (eth1 on a 2-NIC Ubuntu 24.04 image). When private_network_name is set, the node brings this interface up via netplan and k3s routes its overlay (--flannel-iface) + node-ip over it. NOTE: the per-instance Contabo VPC add-on is a MANUAL panel purchase (HTTP 402 otherwise) that Terraform cannot order."
+  description = "Private NIC device name the Contabo VPC attaches as (eth1 on a 2-NIC Ubuntu 24.04 image). When private_network_name is set, the node brings this interface up via netplan and k3s routes its overlay (--flannel-iface) + node-ip over it. NOTE: the per-instance Contabo VPC add-on is a paid per-instance charge and MUST be ordered before attach, or attach returns HTTP 402. It is API- and Terraform-orderable -- NOT a panel-only purchase, as this note previously claimed. It is ordered by this module's own add_ons block at create, and for existing instances via POST /v1/compute/instances/{id}/upgrade with privateNetworking enabled (ca-private-net action=upgrade). Ordering it is standing policy for every node -- see docs/design/off-vlan-node-failure-policy.md section 2a."
   type        = string
   default     = "eth1"
 }
