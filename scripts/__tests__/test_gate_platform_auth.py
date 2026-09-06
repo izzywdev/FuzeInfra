@@ -35,7 +35,7 @@ def make_repo(files, manifest=None):
         os.makedirs(os.path.join(d, ".fuze"), exist_ok=True)
         with open(os.path.join(d, ".fuze", "manifest.json"), "w") as fh:
             json.dump(manifest, fh)
-    for cmd in (["git", "init", "-q", "."],
+    for cmd in (["git", "init", "-q", "-b", "master", "."],
                 ["git", "config", "user.email", "t@t"],
                 ["git", "config", "user.name", "t"],
                 ["git", "add", "-A"],
