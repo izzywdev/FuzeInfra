@@ -1,0 +1,35 @@
+name: contabo-instance-detail
+on:
+  workflow_dispatch:
+    inputs:
+      instance_ids:
+        description: 'Comma-separated Contabo instanceIds'
+        required: true
+        type: string
+permissions:
+  contents: read
+jobs:
+  detail:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Get instance details
+        env:
+          CID: ${{ secrets.CONTABO_CLIENT_ID }}
+          CSEC: ${{ secrets.CONTABO_CLIENT_SECRET }}
+          CUSER: ${{ secrets.CONTABO_API_USER }}
+          CPASS: ${{ secrets.CONTABO_API_PASSWORD }}
+        run: |
+          set -euo pipefail
+          TOK=$(curl -sS -X POST -H "Content-Type: application/x-www-form-urlencoded" \
+            "https://auth.contabo.com/auth/realms/contabo/protocol/openid-connect/token" \
+            --data-urlencode "client_id=${CID}" --data-urlencode "client_secret=${CSEC}" \
+            --data-urlencode "username=${CUSER}" --data-urlencode "password=${CPASS}" \
+            --data-urlencode "grant_type=password" | jq -r .access_token)
+          [ -n "$TOK" ] && [ "$TOK" != "null" ] || { echo "::error::auth failed"; exit 1; }
+          IFS=',' read -ra IDS <<< "${{ inputs.instance_ids }}"
+          for id in "${IDS[@]}"; do
+            echo "=== instance $id ==="
+            curl -sS -H "Authorization: Bearer $TOK" \
+              -H "x-request-id: $(cat /proc/sys/kernel/random/uuid)" \
+              "https://api.contabo.com/v1/compute/instances/${id}" | jq '.data[0] | {instanceId, displayName, name, status, cancelDate, createdDate, productId, addOns}'
+          done
