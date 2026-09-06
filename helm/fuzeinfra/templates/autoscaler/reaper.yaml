@@ -93,6 +93,7 @@ spec:
         spec:
           serviceAccountName: fuzeinfra-ca-reaper
           restartPolicy: Never
+          {{- include "fuzeinfra.durableToleration" $ | nindent 10 }}
           containers:
             - name: reaper
               image: {{ .Values.clusterAutoscaler.provider.image }}

@@ -293,6 +293,7 @@ spec:
                   mountPath: /backup
               resources:
                 {{- toYaml $b.resources | nindent 16 }}
+          {{- include "fuzeinfra.durableToleration" $ | nindent 10 }}
           containers:
             {{- include "fuzeinfra.backup.uploadContainer" (dict "b" $b "root" $) | nindent 12 }}
 {{- end }}

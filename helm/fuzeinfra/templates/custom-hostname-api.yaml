@@ -222,6 +222,7 @@ spec:
         runAsNonRoot: true
         runAsUser: 10001
         fsGroup: 10001
+      {{- include "fuzeinfra.durableToleration" $ | nindent 6 }}
       containers:
         - name: custom-hostname-api
           image: "{{ $chapi.image }}:{{ $chapi.tag }}"

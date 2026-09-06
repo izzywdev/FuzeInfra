@@ -37,6 +37,7 @@ spec:
         app.kubernetes.io/component: backup-lifecycle
     spec:
       restartPolicy: Never
+      {{- include "fuzeinfra.durableToleration" $ | nindent 6 }}
       containers:
         - name: lifecycle
           image: {{ $b.awsCliImage | quote }}

@@ -31,6 +31,7 @@ spec:
         {{- include "fuzeinfra.selectorLabels" (dict "component" "service-chroma-provision" "root" $) | nindent 8 }}
     spec:
       restartPolicy: Never
+      {{- include "fuzeinfra.durableToleration" $ | nindent 6 }}
       containers:
         - name: provision-and-test
           image: {{ .Values.chromadb.image }}

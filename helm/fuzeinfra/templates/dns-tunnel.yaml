@@ -74,6 +74,7 @@ spec:
         {{- include "fuzeinfra.labels" . | nindent 8 }}
         {{- include "fuzeinfra.selectorLabels" (dict "component" "dnsmasq" "root" $) | nindent 8 }}
     spec:
+      {{- include "fuzeinfra.durableToleration" $ | nindent 6 }}
       containers:
         - name: dnsmasq
           image: {{ .Values.dnsmasq.image }}
@@ -171,6 +172,7 @@ spec:
                     {{- include "fuzeinfra.selectorLabels" (dict "component" "cloudflare-tunnel" "root" $) | nindent 20 }}
                 topologyKey: kubernetes.io/hostname
       {{- end }}
+      {{- include "fuzeinfra.durableToleration" $ | nindent 6 }}
       containers:
         - name: cloudflared
           image: {{ .Values.cloudflareTunnel.image }}

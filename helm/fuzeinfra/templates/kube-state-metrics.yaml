@@ -202,5 +202,8 @@ spec:
       {{- with .Values.kubeStateMetrics.tolerations }}
       tolerations:
         {{- toYaml . | nindent 8 }}
+        {{- include "fuzeinfra.durableTolerationItem" $ | nindent 8 }}
+      {{- else }}
+      {{- include "fuzeinfra.durableToleration" $ | nindent 6 }}
       {{- end }}
 {{- end }}

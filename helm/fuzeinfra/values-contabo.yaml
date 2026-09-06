@@ -12,6 +12,12 @@
 # Replace with a real domain once you have DNS pointing at the server.
 # =============================================================================
 global:
+  # ENABLED. Every pod in this chart tolerates the durable-node taint, so the
+  # taint can be applied to the durable nodes without evicting core infra.
+  # Still inert until a human runs, one node at a time:
+  #   kubectl taint node <node> fuzeinfra.io/durable=true:NoSchedule
+  durableNodeTaint:
+    enabled: true
   # Pin the namespace segment of every published service address. Prod consumers
   # (fuzefront, mendys-prod, fuzequality, ...) live in other namespaces and can
   # only reach the shared services by FQDN, so this value is part of the

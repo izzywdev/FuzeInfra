@@ -6,6 +6,25 @@
 # =============================================================================
 
 global:
+  # Durable-node taint enforcement (phase 1 of 2 -- see the
+  # "fuzeinfra.durableToleration" helper in templates/_helpers.tpl).
+  #
+  # The durable nodes should carry ONLY this chart and the FuzeFront platform.
+  # The only thing guarding them was node-role.kubernetes.io/control-plane with
+  # effect PreferNoSchedule, which is ADVISORY -- so 12 mendys-prod, 2 mendys-wp,
+  # 2 fuzemarket and one each of fuzesales/fuzequality/fuzeexecutive/fuzedeploy/
+  # fuzeagent pods had accumulated there. A NoSchedule taint is the only thing
+  # that makes the policy structural instead of a convention nobody enforces.
+  #
+  # enabled=true only makes every pod in THIS chart TOLERATE the taint. It does
+  # NOT create the taint, so it is a no-op until a human applies it:
+  #   kubectl taint node <node> fuzeinfra.io/durable=true:NoSchedule
+  # Apply that one node at a time; anything missing the toleration goes Pending,
+  # which is exactly the signal you want, observed deliberately.
+  durableNodeTaint:
+    enabled: false
+    key: fuzeinfra.io/durable
+    value: "true"
   # Namespace is taken from the Helm release namespace (`helm -n fuzeinfra`).
   #
   # serviceNamespace overrides ONLY the namespace segment of the in-cluster
