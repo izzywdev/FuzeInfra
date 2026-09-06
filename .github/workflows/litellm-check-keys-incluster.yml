@@ -1,0 +1,36 @@
+name: litellm-check-keys-incluster
+on:
+  workflow_dispatch: {}
+permissions:
+  contents: read
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: azure/setup-kubectl@829323503d1be3d00ca8346e5391ca0b07a9ab0d # v5.1.0
+      - name: Setup kubeconfig
+        run: |
+          mkdir -p ~/.kube
+          echo "${{ secrets.KUBE_CONFIG }}" | base64 -d > ~/.kube/config
+          chmod 600 ~/.kube/config
+      - name: In-cluster key/model check (ephemeral pod, self-cleaning)
+        env:
+          MKEY: ${{ secrets.LITELLM_MASTER_KEY }}
+        run: |
+          set -euo pipefail
+          kubectl -n fuzeinfra delete pod litellm-diag --ignore-not-found --wait=true
+          kubectl -n fuzeinfra run litellm-diag --restart=Never --image=curlimages/curl:8.10.1 \
+            --env="MKEY=$MKEY" --command -- sh -c '
+              echo "=== readiness ===";
+              curl -sS -m 10 http://litellm.fuzeinfra.svc.cluster.local:4000/health/readiness;
+              echo;
+              echo "=== key list ===";
+              curl -sS -m 15 -H "Authorization: Bearer $MKEY" "http://litellm.fuzeinfra.svc.cluster.local:4000/key/list?return_full_object=true&size=100";
+              echo;
+              echo "=== model/info ===";
+              curl -sS -m 15 -H "Authorization: Bearer $MKEY" "http://litellm.fuzeinfra.svc.cluster.local:4000/model/info";
+            '
+          kubectl -n fuzeinfra wait --for=condition=Ready pod/litellm-diag --timeout=60s || true
+          sleep 3
+          kubectl -n fuzeinfra logs litellm-diag || true
+          kubectl -n fuzeinfra delete pod litellm-diag --ignore-not-found --wait=false
