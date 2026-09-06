@@ -57,19 +57,55 @@ jobs:
             --data-urlencode "grant_type=password" | jq -r .access_token)
           [ -n "$TOK" ] && [ "$TOK" != "null" ] || { echo "::error::Contabo auth failed"; exit 1; }
 
-          # Paginate all instances; collect displayNames of elastic ones.
-          page=1; : > /tmp/contabo-elastic-names.txt
+          # Collect EVERY identifier of EVERY live instance -- displayName, the
+          # Contabo-assigned name (vmi*), and both IPs.
+          #
+          # DO NOT reintroduce a name-prefix filter here. The previous revision
+          # used `startswith("fuzeinfra-elastic")`, which never matched the real
+          # convention `fuzeinfra-prod-elastic-v2-*`. The live-instance list was
+          # therefore ALWAYS EMPTY, so every NotReady elastic node looked like an
+          # orphan and was deleted while its VPS was alive and healthy. That is
+          # what produced the 2026-09-06 incident: four running nodes whose Node
+          # objects were deleted out from under them, k3s-agent spinning forever
+          # on "node not found", the autoscaler reporting "4 unregistered nodes"
+          # and refusing every scale-up, 40+ Pending pods, and finally an OOM'd
+          # API server.
+          #
+          # Matching on displayName alone is unsafe for a second, independent
+          # reason: the autoscaler sometimes fails to set displayName at all
+          # (vmi3547160 ran for days with a BLANK one). An identifier that can
+          # legitimately be empty must never be the sole basis for a delete
+          # decision -- so a node is kept when ANY identifier matches.
+          page=1; : > /tmp/contabo-live-ids.txt
           while :; do
             RESP=$(curl -sS -H "Authorization: Bearer $TOK" \
               -H "x-request-id: $(cat /proc/sys/kernel/random/uuid)" \
               "https://api.contabo.com/v1/compute/instances?size=100&page=${page}")
             n=$(echo "$RESP" | jq '.data | length')
             [ "$n" -gt 0 ] || break
-            echo "$RESP" | jq -r '.data[] | select(.displayName | startswith("fuzeinfra-elastic")) | .displayName' >> /tmp/contabo-elastic-names.txt || true
+            echo "$RESP" | jq -r '
+              .data[]
+              | [ .displayName, .name, .ipConfig.v4.ip, .ipConfig.v6.ip ]
+              | .[] | select(. != null and . != "")
+            ' >> /tmp/contabo-live-ids.txt || true
             page=$((page+1)); [ "$page" -gt 30 ] && { echo "::warning::page cap hit"; break; }
           done
-          echo "Contabo elastic instances still live:"
-          cat /tmp/contabo-elastic-names.txt || echo "(none)"
+          sort -u -o /tmp/contabo-live-ids.txt /tmp/contabo-live-ids.txt
+
+          LIVE=$(grep -c . /tmp/contabo-live-ids.txt || true)
+          echo "Live Contabo identifiers collected: $LIVE"
+          # Fail closed. An empty list is indistinguishable from "the API broke"
+          # and would make EVERY node look orphaned -- the exact failure above.
+          if [ "$LIVE" -eq 0 ]; then
+            echo "::error::No live Contabo identifiers parsed. Refusing to proceed: every node would be classified an orphan. Check the API response shape."
+            exit 1
+          fi
+          # If the elastic naming convention moves again, say so loudly rather
+          # than silently mis-classifying live nodes.
+          if ! grep -qE '^fuzeinfra-(prod-)?elastic' /tmp/contabo-live-ids.txt; then
+            echo "::warning::No identifier matching 'fuzeinfra-*elastic*'. If the elastic pool is genuinely empty this is fine; otherwise the naming convention changed and this workflow needs updating."
+          fi
+          cat /tmp/contabo-live-ids.txt
 
       - name: Find orphaned k8s Node objects
         id: find
@@ -77,24 +113,41 @@ jobs:
           set -euo pipefail
           : > /tmp/orphans.txt
 
-          # All elastic k8s nodes (by pool label).
+          # All elastic k8s nodes (by pool label), with their addresses. A node
+          # is matched against Contabo by name OR by any of its IPs, because the
+          # name alone is not a reliable key (see the previous step's comment).
           NODES=$(kubectl get nodes -l 'fuzeinfra.io/pool=elastic' \
-            -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{range .status.conditions[?(@.type=="Ready")]}{.status}{end}{"\n"}{end}' 2>/dev/null || true)
+            -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{range .status.conditions[?(@.type=="Ready")]}{.status}{end}{"\t"}{range .status.addresses[*]}{.address}{","}{end}{"\n"}{end}' 2>/dev/null || true)
 
           echo "=== Elastic k8s nodes ==="
           echo "${NODES:-  (none)}"
 
-          while IFS=$'\t' read -r NAME READY; do
+          while IFS=$'\t' read -r NAME READY ADDRS; do
             [ -n "$NAME" ] || continue
             if [ "$READY" = "True" ]; then
               echo "KEEP  $NAME (Ready — never an orphan candidate)"
               continue
             fi
-            if grep -qxF "$NAME" /tmp/contabo-elastic-names.txt 2>/dev/null; then
-              echo "KEEP  $NAME (NotReady but Contabo instance still exists — may be rebooting)"
+            if grep -qxF "$NAME" /tmp/contabo-live-ids.txt 2>/dev/null; then
+              echo "KEEP  $NAME (NotReady but its name matches a live Contabo instance — may be rebooting)"
               continue
             fi
-            echo "ORPHAN $NAME (NotReady + no Contabo instance)"
+            # Name did not match. Before calling it an orphan, try every address
+            # the node reports. This is what saves a node whose displayName was
+            # never set by the autoscaler.
+            MATCHED=""
+            IFS=',' read -ra A <<< "$ADDRS"
+            for a in "${A[@]}"; do
+              [ -n "$a" ] || continue
+              if grep -qxF "$a" /tmp/contabo-live-ids.txt 2>/dev/null; then
+                MATCHED="$a"; break
+              fi
+            done
+            if [ -n "$MATCHED" ]; then
+              echo "KEEP  $NAME (NotReady, name unmatched, but address $MATCHED belongs to a live Contabo instance)"
+              continue
+            fi
+            echo "ORPHAN $NAME (NotReady + no live Contabo instance matched by name or any address)"
             echo "$NAME" >> /tmp/orphans.txt
           done <<< "$NODES"
 

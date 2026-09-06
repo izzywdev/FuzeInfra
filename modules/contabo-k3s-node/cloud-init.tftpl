@@ -248,6 +248,87 @@ write_files:
       [Install]
       WantedBy=multi-user.target
 
+  - path: /usr/local/sbin/fuzeinfra-agent-selfheal.sh
+    permissions: "0750"
+    owner: root:root
+    content: |
+      #!/bin/sh
+      # Restart k3s-agent when its Node object has been deleted out from under it.
+      #
+      # WHY THIS EXISTS. k3s-agent does NOT re-register when its Node object
+      # disappears. It logs `node "<name>" not found` on every status update,
+      # forever, while the VPS keeps running (and billing) and stays invisible to
+      # the scheduler. On 2026-09-06 four elastic nodes sat exactly like this for
+      # days: cluster-autoscaler counted them as "unregistered nodes", marked the
+      # elastic group `unhealthy`, refused EVERY scale-up, and the resulting 40+
+      # Pending pods eventually exhausted memory on the sole externally-reachable
+      # control plane and took the API server down. A single `systemctl restart`
+      # re-registers the node and is the whole fix -- so it must not need a human.
+      #
+      # DELIBERATELY NODE-LOCAL, not a DaemonSet. When the Node object is gone the
+      # scheduler cannot place a pod here, so any in-cluster watchdog is
+      # structurally blind to this exact failure. The guard has to live on the box.
+      set -u
+
+      LOGF=/var/log/fuzeinfra-agent-selfheal.log
+      STAMP=/var/lib/fuzeinfra-agent-selfheal.last
+      COOLDOWN=900
+      WINDOW=5min
+
+      log() { echo "[agent-selfheal] $(date -u +%Y-%m-%dT%H:%M:%SZ) $*" >>"$LOGF" 2>&1; }
+
+      # Only a RUNNING agent can be in this state. A stopped or failed unit is a
+      # different problem, and systemd's own Restart= already owns it.
+      [ "$(systemctl is-active k3s-agent 2>/dev/null)" = "active" ] || exit 0
+
+      if ! journalctl -u k3s-agent --since "-$WINDOW" --no-pager 2>/dev/null \
+           | grep -qE 'Error updating node status.*not found|Failed to get node when trying to set owner ref'; then
+        exit 0
+      fi
+
+      NOW=$(date +%s)
+      LAST=0
+      [ -f "$STAMP" ] && LAST=$(cat "$STAMP" 2>/dev/null || echo 0)
+      case "$LAST" in ''|*[!0-9]*) LAST=0 ;; esac
+
+      # Back off rather than restart-loop: if the API server is simply
+      # unreachable, restarting every 5 minutes makes the outage worse.
+      if [ $(( NOW - LAST )) -lt "$COOLDOWN" ]; then
+        log "node-not-found still present, but last restart was $(( NOW - LAST ))s ago (<$${COOLDOWN}s); backing off"
+        exit 0
+      fi
+
+      log "k3s-agent is active but its Node object is missing - restarting to force re-registration"
+      echo "$NOW" > "$STAMP"
+      if systemctl restart k3s-agent; then log "restart issued"; else log "WARNING: restart failed"; fi
+      exit 0
+
+  - path: /etc/systemd/system/fuzeinfra-agent-selfheal.service
+    permissions: "0644"
+    owner: root:root
+    content: |
+      [Unit]
+      Description=FuzeInfra: re-register k3s-agent if its Node object was deleted
+
+      [Service]
+      Type=oneshot
+      ExecStart=/usr/local/sbin/fuzeinfra-agent-selfheal.sh
+
+  - path: /etc/systemd/system/fuzeinfra-agent-selfheal.timer
+    permissions: "0644"
+    owner: root:root
+    content: |
+      [Unit]
+      Description=FuzeInfra: periodic k3s-agent re-registration check
+
+      [Timer]
+      OnBootSec=10min
+      OnUnitActiveSec=5min
+      AccuracySec=30s
+
+      [Install]
+      WantedBy=timers.target
+
 runcmd:
 %{ if enable_longhorn_prereqs ~}
   # Longhorn node prerequisites (gated by enable_longhorn_prereqs, default off).
@@ -285,3 +366,5 @@ runcmd:
   - [ sh, -c, "systemctl enable --now fuzeinfra-node-join.service" ]
   # etcd/k3s disk priority (see the script header). Runs on every boot.
   - [ sh, -c, "systemctl enable --now fuzeinfra-io-priority.service" ]
+  # Self-heal guard for a deleted Node object (see the script's header).
+  - [ sh, -c, "systemctl enable --now fuzeinfra-agent-selfheal.timer" ]
