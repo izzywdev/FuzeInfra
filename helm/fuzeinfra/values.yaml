@@ -1186,7 +1186,10 @@ clusterAutoscaler:
     enabled: false
     schedule: "0 * * * *"
     releaseWindow: 24h
-    billingPeriod: 720h
+    # Contabo bills the whole elastic fleet calendar-aligned to this day of
+    # month (confirmed 2026-09), not per-instance CreatedDate + a fixed
+    # period — see internal/reaper.Config.RenewalDay's doc comment.
+    renewalDay: 15
     successfulJobsHistoryLimit: 3
     failedJobsHistoryLimit: 3
     # Bounds a single CronJob run; the binary's own internal context timeout
