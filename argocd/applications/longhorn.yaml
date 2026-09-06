@@ -54,8 +54,40 @@ spec:
           # 3 replicas across DISTINCT nodes. Soft anti-affinity OFF = hard spread.
           defaultReplicaCount: 3
           replicaSoftAntiAffinity: false
-          # Small V92 disks: no thin over-provisioning; keep kubelet headroom.
-          storageOverProvisioningPercentage: 100
+          # Thin over-provisioning. Longhorn refuses a disk once the SUM OF
+          # REQUESTED replica sizes on it exceeds
+          #     (storageMaximum - storageReserved) * thisPercentage / 100
+          # and Longhorn reserves 30% of each disk by default. On the prod durable
+          # nodes that is (154.9G - 46.5G) = 108.4G of usable budget, so at 100%
+          # two of the three disks were already past the cap at 175G scheduled and
+          # reported Schedulable=False / DiskPressure.
+          #
+          # Consequence, 2026-09-06: NO volume in the cluster could place a replica
+          # anywhere. Every volume sat degraded and unable to rebuild, and
+          # fuzeinfra-postgres-0 could not attach at all -- which took DNS for
+          # fuzeinfra-postgres.fuzeinfra.svc.cluster.local with it, so Authentik
+          # crash-looped for five days ("PostgreSQL connection failed ... Name or
+          # service not known") and every admin/product login was down with it.
+          #
+          # 200% is safe here because Longhorn volumes are SPARSE: the durable
+          # nodes carry ~175G of *requested* replicas against ~111G actually
+          # written. The real guard against filling a disk is
+          # storageMinimalAvailablePercentage below, which is unchanged and still
+          # halts scheduling on genuine disk pressure.
+          #
+          # This is a ceiling, not a target. The structural fix is a third healthy
+          # durable node (mendys-worker-1 has been NotReady since 2026-09-02, so
+          # only two disks are usable and replicaSoftAntiAffinity=false means a
+          # 3-replica volume is unsatisfiable). Revisit once it is back.
+          #
+          # !! defaultSettings ONLY APPLIES ON FIRST INSTALL. Longhorn keeps live
+          # values in settings.longhorn.io CRDs and the chart does NOT overwrite
+          # them on upgrade, so changing this line alone changes NOTHING on a
+          # running cluster. It must be paired with:
+          #   kubectl -n longhorn-system patch settings.longhorn.io \
+          #     storage-over-provisioning-percentage --type=merge -p '{"value":"200"}'
+          # (already applied live on 2026-09-06; this line keeps a rebuild honest).
+          storageOverProvisioningPercentage: 200
           storageMinimalAvailablePercentage: 15
           # Do not let a node self-select all disks blindly; operator tags durable
           # nodes for replica placement (design §4.1 / O-6).
