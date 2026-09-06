@@ -79,6 +79,7 @@ spec:
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+      {{- include "fuzeinfra.durableToleration" $ | nindent 6 }}
       containers:
         - name: handoff-mcp
           image: "{{ .Values.handoffMcp.image }}:{{ .Values.handoffMcp.tag }}"

@@ -62,6 +62,7 @@ spec:
         {{- include "fuzeinfra.selectorLabels" (dict "component" "service-db-provision" "root" $) | nindent 8 }}
     spec:
       restartPolicy: Never
+      {{- include "fuzeinfra.durableToleration" $ | nindent 6 }}
       containers:
         - name: provision
           image: {{ .Values.serviceDbProvisioning.image | default "postgres:15" }}

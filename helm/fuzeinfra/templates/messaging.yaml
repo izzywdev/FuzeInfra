@@ -73,6 +73,7 @@ spec:
           volumeMounts:
             - name: data
               mountPath: /var/lib/kafka/data
+      {{- include "fuzeinfra.durableToleration" $ | nindent 6 }}
       containers:
         - name: kafka
           image: {{ .Values.kafka.image }}
@@ -305,6 +306,7 @@ spec:
         {{- include "fuzeinfra.labels" . | nindent 8 }}
         {{- include "fuzeinfra.selectorLabels" (dict "component" "kafka-ui" "root" $) | nindent 8 }}
     spec:
+      {{- include "fuzeinfra.durableToleration" $ | nindent 6 }}
       containers:
         - name: kafka-ui
           image: {{ .Values.kafkaUi.image }}
@@ -491,6 +493,7 @@ spec:
       nodeSelector:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+      {{- include "fuzeinfra.durableToleration" $ | nindent 6 }}
       containers:
         - name: rabbitmq
           image: {{ .Values.rabbitmq.image }}
@@ -586,6 +589,7 @@ spec:
         {{- include "fuzeinfra.labels" . | nindent 8 }}
         {{- include "fuzeinfra.selectorLabels" (dict "component" "mongo-express" "root" $) | nindent 8 }}
     spec:
+      {{- include "fuzeinfra.durableToleration" $ | nindent 6 }}
       containers:
         - name: mongo-express
           image: {{ .Values.mongoExpress.image }}

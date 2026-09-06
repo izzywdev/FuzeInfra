@@ -43,6 +43,7 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       {{- include "fuzeinfra.dbSpread" $ | nindent 6 }}
+      {{- include "fuzeinfra.durableToleration" $ | nindent 6 }}
       containers:
         - name: postgres
           image: {{ .Values.postgres.image }}
@@ -135,6 +136,7 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       {{- include "fuzeinfra.dbSpread" $ | nindent 6 }}
+      {{- include "fuzeinfra.durableToleration" $ | nindent 6 }}
       containers:
         - name: mongodb
           image: {{ .Values.mongodb.image }}
@@ -250,6 +252,7 @@ spec:
             - name: data
               mountPath: /data
       {{- end }}
+      {{- include "fuzeinfra.durableToleration" $ | nindent 6 }}
       containers:
         - name: redis
           image: {{ .Values.redis.image }}
@@ -337,6 +340,7 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       {{- include "fuzeinfra.dbSpread" $ | nindent 6 }}
+      {{- include "fuzeinfra.durableToleration" $ | nindent 6 }}
       containers:
         - name: neo4j
           image: {{ .Values.neo4j.image }}
@@ -448,6 +452,7 @@ spec:
             privileged: true
             runAsUser: 0
           command: ["sh", "-c", "sysctl -w vm.max_map_count=262144 || true"]
+      {{- include "fuzeinfra.durableToleration" $ | nindent 6 }}
       containers:
         - name: elasticsearch
           image: {{ .Values.elasticsearch.image }}
@@ -607,6 +612,7 @@ spec:
           volumeMounts:
             - name: auth
               mountPath: /auth
+      {{- include "fuzeinfra.durableToleration" $ | nindent 6 }}
       containers:
         - name: chromadb
           image: {{ .Values.chromadb.image }}
@@ -717,6 +723,7 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       {{- include "fuzeinfra.dbSpread" $ | nindent 6 }}
+      {{- include "fuzeinfra.durableToleration" $ | nindent 6 }}
       containers:
         - name: mariadb
           image: {{ .Values.mariadb.image }}

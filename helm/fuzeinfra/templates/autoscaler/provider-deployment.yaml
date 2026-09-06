@@ -32,6 +32,7 @@ spec:
         {{- include "fuzeinfra.labels" . | nindent 8 }}
         {{- include "fuzeinfra.selectorLabels" (dict "component" "contabo-ca-provider" "root" $) | nindent 8 }}
     spec:
+      {{- include "fuzeinfra.durableToleration" $ | nindent 6 }}
       containers:
         - name: provider
           image: {{ .Values.clusterAutoscaler.provider.image }}

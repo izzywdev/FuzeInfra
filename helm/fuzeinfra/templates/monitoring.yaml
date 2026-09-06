@@ -237,6 +237,9 @@ spec:
       {{- with .Values.prometheus.tolerations }}
       tolerations:
         {{- toYaml . | nindent 8 }}
+        {{- include "fuzeinfra.durableTolerationItem" $ | nindent 8 }}
+      {{- else }}
+      {{- include "fuzeinfra.durableToleration" $ | nindent 6 }}
       {{- end }}
       volumes:
         - name: config
@@ -299,6 +302,7 @@ spec:
       nodeSelector:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+      {{- include "fuzeinfra.durableToleration" $ | nindent 6 }}
       containers:
         - name: alertmanager
           image: {{ .Values.alertmanager.image }}
@@ -403,6 +407,9 @@ spec:
       {{- with .Values.grafana.tolerations }}
       tolerations:
         {{- toYaml . | nindent 8 }}
+        {{- include "fuzeinfra.durableTolerationItem" $ | nindent 8 }}
+      {{- else }}
+      {{- include "fuzeinfra.durableToleration" $ | nindent 6 }}
       {{- end }}
       containers:
         - name: grafana
@@ -745,6 +752,9 @@ spec:
       {{- with .Values.loki.tolerations }}
       tolerations:
         {{- toYaml . | nindent 8 }}
+        {{- include "fuzeinfra.durableTolerationItem" $ | nindent 8 }}
+      {{- else }}
+      {{- include "fuzeinfra.durableToleration" $ | nindent 6 }}
       {{- end }}
       volumes:
         - name: config
@@ -775,6 +785,7 @@ spec:
         {{- include "fuzeinfra.selectorLabels" (dict "component" "promtail" "root" $) | nindent 8 }}
     spec:
       serviceAccountName: fuzeinfra-monitoring
+      {{- include "fuzeinfra.durableToleration" $ | nindent 6 }}
       containers:
         - name: promtail
           image: {{ .Values.promtail.image }}
@@ -848,6 +859,7 @@ spec:
     spec:
       hostNetwork: true
       hostPID: true
+      {{- include "fuzeinfra.durableToleration" $ | nindent 6 }}
       containers:
         - name: node-exporter
           image: {{ .Values.nodeExporter.image }}

@@ -81,6 +81,7 @@ spec:
         {{- include "fuzeinfra.selectorLabels" (dict "component" "service-mariadb-provision" "root" $) | nindent 8 }}
     spec:
       restartPolicy: Never
+      {{- include "fuzeinfra.durableToleration" $ | nindent 6 }}
       containers:
         - name: provision
           image: {{ .Values.serviceMariadbProvisioning.image | default .Values.mariadb.image }}
