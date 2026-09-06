@@ -167,6 +167,68 @@ write_files:
 %{ endif ~}
       exit 0
 
+  - path: /usr/local/sbin/fuzeinfra-io-priority.sh
+    permissions: "0750"
+    owner: root:root
+    content: |
+      #!/bin/sh
+      # Give etcd/k3s priority on the disk over pod I/O, via cgroup-v2 iocost.
+      #
+      # WHY. On 2026-09-06 pod I/O (Prometheus TSDB compaction, Loki chunk flushes,
+      # Longhorn replica traffic) starved etcd on the shared root disk. etcd missed
+      # its 100ms budget ("apply request took too long ... read-only range"), the
+      # apiserver's own readiness then failed, and it refused connections
+      # cluster-wide. It was never an apiserver fault; it was disk contention.
+      #
+      # WHY iocost AND NOT systemd IOWeight=. IOWeight= writes cgroup io.weight,
+      # which is INERT unless a controller honours it. These images run scheduler
+      # `none` (the default for flash) with no BFQ module, so io.weight silently
+      # does nothing -- a fix that looks applied and is not. The kernel does ship
+      # CONFIG_BLK_CGROUP_IOCOST=y, so enabling iocost per-device makes io.weight
+      # real, with no module install and no reboot. iocost also beats BFQ here
+      # because the disks are non-rotational.
+      #
+      # The node-configurator DaemonSet applies the same settings cluster-wide, but
+      # it can only run once the node is Ready and scheduled. This covers first boot
+      # and every reboot -- these are runtime cgroup settings, not persisted config,
+      # so they are lost on every restart unless something reapplies them.
+      set -u
+      CG=/sys/fs/cgroup
+      DEV_NAME=sda
+
+      [ -f "$CG/io.cost.qos" ] || { echo "[io-priority] iocost unavailable; skipping"; exit 0; }
+      [ -f "/sys/block/$DEV_NAME/dev" ] || { echo "[io-priority] no $DEV_NAME; skipping"; exit 0; }
+      DEV=$(cat "/sys/block/$DEV_NAME/dev")
+
+      if grep -q "^$DEV enable=1" "$CG/io.cost.qos"; then
+        echo "[io-priority] iocost already enabled for $DEV"
+      else
+        echo "$DEV enable=1 ctrl=auto" > "$CG/io.cost.qos" && echo "[io-priority] iocost enabled for $DEV"
+      fi
+
+      # k3s.service (server) / k3s-agent.service (agent) hold etcd+kubelet;
+      # kubepods.slice holds every pod. 1000:100 = a 10:1 share.
+      [ -f "$CG/system.slice/k3s.service/io.weight" ] && echo 1000 > "$CG/system.slice/k3s.service/io.weight"
+      [ -f "$CG/system.slice/k3s-agent.service/io.weight" ] && echo 1000 > "$CG/system.slice/k3s-agent.service/io.weight"
+      [ -f "$CG/kubepods.slice/io.weight" ] && echo 100 > "$CG/kubepods.slice/io.weight"
+      exit 0
+
+  - path: /etc/systemd/system/fuzeinfra-io-priority.service
+    permissions: "0644"
+    owner: root:root
+    content: |
+      [Unit]
+      Description=FuzeInfra: prioritise etcd/k3s disk I/O over pods (cgroup-v2 iocost)
+      After=k3s.service k3s-agent.service
+
+      [Service]
+      Type=oneshot
+      RemainAfterExit=yes
+      ExecStart=/usr/local/sbin/fuzeinfra-io-priority.sh
+
+      [Install]
+      WantedBy=multi-user.target
+
   - path: /etc/systemd/system/fuzeinfra-node-join.service
     permissions: "0644"
     owner: root:root
@@ -221,3 +283,5 @@ runcmd:
   # precisely so a post-assign reboot re-runs it rather than losing it.
   - [ sh, -c, "systemctl daemon-reload" ]
   - [ sh, -c, "systemctl enable --now fuzeinfra-node-join.service" ]
+  # etcd/k3s disk priority (see the script header). Runs on every boot.
+  - [ sh, -c, "systemctl enable --now fuzeinfra-io-priority.service" ]

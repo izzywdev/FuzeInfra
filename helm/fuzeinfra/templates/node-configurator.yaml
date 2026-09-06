@@ -3,7 +3,7 @@
        both A and AAAA records exist for a host.  This fixes GHCR image pulls
        being TCP-reset mid-copy on Contabo's IPv6 CDN path (FuzeInfra#616).
        Disabled by default; enable via nodeConfigurator.preferIPv4.enabled. */ -}}
-{{- if or .Values.nodeConfigurator.preferIPv4.enabled .Values.nodeConfigurator.multipathBlacklist.enabled }}
+{{- if or .Values.nodeConfigurator.preferIPv4.enabled .Values.nodeConfigurator.multipathBlacklist.enabled .Values.nodeConfigurator.ioPriority.enabled }}
 {{- if .Values.nodeConfigurator.preferIPv4.enabled }}
 ---
 apiVersion: v1
@@ -115,6 +115,88 @@ spec:
       tolerations:
         - operator: Exists
       initContainers:
+        {{- if .Values.nodeConfigurator.ioPriority.enabled }}
+        {{- /*
+             WHY: etcd was being starved off the disk by pod I/O, and that -- not any
+             apiserver bug -- is what took the cluster down on 2026-09-06. The symptom
+             in the k3s journal is etcd, not kube:
+
+               apply request took too long  took=100-312ms  expected-duration=100ms
+               prefix="read-only range"
+
+             When etcd cannot serve reads inside its budget the apiserver's own
+             readiness fails and it stops accepting connections, which presents as
+             "connection refused" from every client. Prometheus TSDB compaction, Loki
+             chunk flushes and Longhorn replica traffic all share /dev/sda1 with the
+             etcd datastore, and with no I/O controller they compete first-come,
+             first-served against etcd's latency-critical fsync path.
+
+             WHY iocost AND NOT plain IOWeight= ON THE UNIT. systemd's IOWeight= writes
+             cgroup io.weight, which is INERT unless a controller honours it. These
+             nodes run scheduler `none` (the Ubuntu default for flash) and have no BFQ
+             module, so io.weight silently does nothing -- a fix that looks applied and
+             is not. The kernel does ship CONFIG_BLK_CGROUP_IOCOST=y, so enabling
+             iocost per-device makes io.weight real with no module install and no
+             reboot. iocost is also the right choice over BFQ here because the disks
+             are non-rotational (BFQ costs throughput on SSDs).
+
+             k3s.service holds etcd; pod containers live under kubepods.slice, a
+             sibling cgroup -- so weighting the two against each other is exactly the
+             split we want. ctrl=auto lets the kernel derive the device cost model
+             (measured on prod: ~488 MB/s read, ~8.5k random read IOPS).
+
+             Idempotent: re-enabling an already-enabled device is skipped, and the
+             weights are simply rewritten. Safe on a node where iocost is unavailable
+             -- it logs and exits 0 rather than failing the DaemonSet.
+        */}}
+        - name: set-etcd-io-priority
+          image: {{ .Values.nodeConfigurator.image }}
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            privileged: true
+          command:
+            - sh
+            - -c
+            - |
+              set -eu
+              DEV_NAME='{{ .Values.nodeConfigurator.ioPriority.device }}'
+              CG=/host-cgroup
+
+              if [ ! -f "$CG/io.cost.qos" ]; then
+                echo "iocost unavailable on this kernel (no io.cost.qos) - nothing to do"
+                exit 0
+              fi
+              if [ ! -f "/host-sys/block/$DEV_NAME/dev" ]; then
+                echo "block device $DEV_NAME not present on this node - skipping"
+                exit 0
+              fi
+              DEV=$(cat "/host-sys/block/$DEV_NAME/dev")
+
+              # Enable the controller for this device unless it already is.
+              if grep -q "^$DEV enable=1" "$CG/io.cost.qos"; then
+                echo "iocost already enabled for $DEV_NAME ($DEV)"
+              else
+                echo "$DEV enable=1 ctrl=auto" > "$CG/io.cost.qos"
+                echo "iocost enabled for $DEV_NAME ($DEV)"
+              fi
+
+              # etcd (inside k3s.service) outranks every pod.
+              if [ -f "$CG/system.slice/k3s.service/io.weight" ]; then
+                echo '{{ .Values.nodeConfigurator.ioPriority.k3sWeight }}' > "$CG/system.slice/k3s.service/io.weight"
+              else
+                echo "k3s.service cgroup absent (agent-only node?) - skipping k3s weight"
+              fi
+              if [ -f "$CG/kubepods.slice/io.weight" ]; then
+                echo '{{ .Values.nodeConfigurator.ioPriority.podsWeight }}' > "$CG/kubepods.slice/io.weight"
+              fi
+              echo "k3s=$(cat "$CG/system.slice/k3s.service/io.weight" 2>/dev/null || echo n/a) pods=$(cat "$CG/kubepods.slice/io.weight" 2>/dev/null || echo n/a)"
+          volumeMounts:
+            - name: host-sys
+              mountPath: /host-sys
+              readOnly: true
+            - name: host-cgroup
+              mountPath: /host-cgroup
+        {{- end }}
         {{- if .Values.nodeConfigurator.preferIPv4.enabled }}
         - name: write-gai-conf
           image: {{ .Values.nodeConfigurator.image }}
@@ -220,5 +302,14 @@ spec:
         - name: multipath-conf
           configMap:
             name: fuzeinfra-multipath-conf
+        {{- end }}
+        {{- if .Values.nodeConfigurator.ioPriority.enabled }}
+        - name: host-sys
+          hostPath:
+            path: /sys
+        {{- /* cgroup2 is its own mount, so /sys alone does not expose it. */}}
+        - name: host-cgroup
+          hostPath:
+            path: /sys/fs/cgroup
         {{- end }}
 {{- end }}
