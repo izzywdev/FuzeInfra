@@ -943,25 +943,28 @@ serviceMongoDatabases:
 # PostSync wave. Flip an entry to `true` ONLY in the same PR that lands its
 # sealed Secret in the `fuzeinfra` namespace.
 #
-#   - mendys-wp -> Secret `mendys-wp-db-credentials` key `password`  (ABSENT)
+#   - mendys-wp -> Secret `mendys-wp-db-credentials` key `password`
+#     (sealed in THIS PR -> deploy/sealed-secrets/mendys-wp-db-credentials.yaml)
 #
-# mendys-wp is the reason this engine exists, but it still runs its own
-# `mendys-wp-mariadb` StatefulSet in the `mendys-wp` namespace with credentials
-# in its own `mendys-wp-db` Secret (keys MYSQL_DATABASE / MYSQL_USER /
-# MYSQL_PASSWORD / MYSQL_ROOT_PASSWORD). Migrating it is a two-step handshake
-# owned by the consumer repo, not by this PR:
-#   1. mendys-wp seals its existing MYSQL_PASSWORD value as
-#      `mendys-wp-db-credentials` (key `password`) FOR the `fuzeinfra`
-#      namespace and commits the ciphertext to deploy/sealed-secrets/.
-#   2. THEN this entry flips to `enabled: true`; the PostSync Job creates the
-#      user+database on the shared engine with that same password, mendys-wp
-#      repoints WORDPRESS_DB_HOST at
-#      fuzeinfra-mariadb.fuzeinfra.svc.cluster.local:3306, dumps/restores its
-#      data, and retires its own StatefulSet.
+# mendys-wp is the reason this engine exists. It previously ran its own
+# `mendys-wp-mariadb` StatefulSet in the `mendys-wp` namespace (PVC on the
+# disposable `local-path` StorageClass — destroyed by a node reinstall on
+# 2026-07-26; MendysRoboticsWP #31). This is step 1+2 of the two-step handshake,
+# landed together as the doc requires:
+#   1. DONE (this PR): the mendys-wp DB password is sealed as
+#      `mendys-wp-db-credentials` (key `password`) FOR the `fuzeinfra` namespace
+#      and committed to deploy/sealed-secrets/mendys-wp-db-credentials.yaml, so
+#      the PostSync Job finds it by secretKeyRef on the first sync.
+#   2. DONE (this PR): the entry below flips to `enabled: true`; the idempotent
+#      PostSync Job creates the `mendys_wp` database and `mendys_wp_svc` user on
+#      the shared engine with that password.
+# Consumer-side cutover (separate MendysRobotics PR): repoint WORDPRESS_DB_HOST
+# at fuzeinfra-mariadb.fuzeinfra.svc.cluster.local:3306 with the same sealed
+# password, dump/restore the data, and retire the self-hosted StatefulSet.
 # See docs/consuming-repos/MARIADB_PROVISIONING.md.
 serviceMariadbDatabases:
   - name: mendys-wp
-    enabled: false
+    enabled: true
     user: mendys_wp_svc
     database: mendys_wp
     passwordSecret:

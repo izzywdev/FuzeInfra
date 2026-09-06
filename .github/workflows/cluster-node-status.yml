@@ -1,0 +1,28 @@
+name: cluster-node-status
+
+# One-off read-only escape hatch for when the self-hosted `staging` ARC pool
+# (which cluster-query.yml normally runs on) is itself down -- runs on
+# ubuntu-latest so it can reach the API server even during an ARC-pool outage.
+# Safe: get-only, no mutations.
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  status:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: azure/setup-kubectl@829323503d1be3d00ca8346e5391ca0b07a9ab0d # v5.1.0
+      - name: Setup kubeconfig
+        run: |
+          mkdir -p ~/.kube
+          echo "${{ secrets.KUBE_CONFIG }}" | base64 -d > ~/.kube/config
+          chmod 600 ~/.kube/config
+      - name: Node status
+        run: |
+          set -euo pipefail
+          kubectl get nodes -o wide --show-labels
+          echo "=== ARC runner pods ==="
+          kubectl -n arc-runners get pods -o wide 2>/dev/null || echo "(none/ns missing)"
