@@ -25,10 +25,19 @@ REPO_ROOT = os.path.dirname(os.path.dirname(HERE))
 SCRIPTS = os.path.join(REPO_ROOT, "scripts")
 
 sys.path.insert(0, SCRIPTS)
-import gate_workflow_drift as G  # noqa: E402
 
-sys.path.insert(0, os.path.join(SCRIPTS, "bootstrap"))
-from lib import render as R  # noqa: E402
+bootstrap_dir = os.path.join(SCRIPTS, "bootstrap")
+has_bootstrap = os.path.isdir(bootstrap_dir)
+
+if has_bootstrap:
+    import gate_workflow_drift as G  # noqa: E402
+    sys.path.insert(0, bootstrap_dir)
+    from lib import render as R  # noqa: E402
+else:
+    G = None
+    R = None
+
+skip_if_no_bootstrap = unittest.skipIf(not has_bootstrap, "scripts/bootstrap is missing (this is FuzeInfra, not FuzeSDLC)")
 
 TEMPLATE_NAME = "sample.yml"
 TEMPLATE_REL = os.path.join("workflow-templates", TEMPLATE_NAME)
@@ -116,6 +125,7 @@ def make_repo_with_marker(tmp, baseline_ref, digest):
     return repo
 
 
+@skip_if_no_bootstrap
 class TestFindStampedCommit(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
@@ -140,6 +150,7 @@ class TestFindStampedCommit(unittest.TestCase):
         self.assertIsNone(found)
 
 
+@skip_if_no_bootstrap
 class TestVersionsBehind(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
@@ -170,6 +181,7 @@ class TestVersionsBehind(unittest.TestCase):
         self.assertIsNone(n)
 
 
+@skip_if_no_bootstrap
 class TestClassifyFile(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
@@ -215,6 +227,7 @@ class TestClassifyFile(unittest.TestCase):
         self.assertEqual(result["status"], "orphaned")
 
 
+@skip_if_no_bootstrap
 class TestEvaluateDegradesCleanly(unittest.TestCase):
     """The requirement that made this gate safe to land at all: it must not go red on a
     repo the re-stamp fan-out has not reached yet."""
@@ -286,6 +299,7 @@ class TestEvaluateDegradesCleanly(unittest.TestCase):
         self.assertEqual(report["results"][0]["status"], "ok")
 
 
+@skip_if_no_bootstrap
 class TestLoadPolicy(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
@@ -316,6 +330,7 @@ class TestLoadPolicy(unittest.TestCase):
         self.assertEqual(policy["max_versions_behind"], G.DEFAULT_MAX_VERSIONS_BEHIND)
 
 
+@skip_if_no_bootstrap
 class TestRealPolicyFileIsValid(unittest.TestCase):
     """The actual shipped policy file must parse and produce a sane threshold — a broken
     JSON file here would silently fall back to the hardcoded default everywhere."""
