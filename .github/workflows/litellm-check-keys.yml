@@ -1,0 +1,24 @@
+name: litellm-check-keys
+on:
+  workflow_dispatch: {}
+permissions:
+  contents: read
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check key model restrictions
+        env:
+          KEY: ${{ secrets.LITELLM_MASTER_KEY }}
+        run: |
+          set -euo pipefail
+          BASE="https://litellm.prod.fuzefront.com"
+          echo "=== readiness ==="
+          curl -sS -m 10 "$BASE/health/readiness" || echo "(unreachable)"
+          echo
+          echo "=== key list (models restriction only, no secrets) ==="
+          curl -sS -m 15 -H "Authorization: Bearer $KEY" "$BASE/key/list?return_full_object=true&size=100" \
+            | jq '[.keys[]? // .data[]? | {alias: (.key_alias // .key_name // "n/a"), models, token_prefix: (.token // .key // "")[0:8]}]'
+          echo "=== model_list (what the gateway actually has loaded) ==="
+          curl -sS -m 15 -H "Authorization: Bearer $KEY" "$BASE/model/info" \
+            | jq '[.data[]?.model_name] | unique' 2>&1 || echo "(model/info failed)"
