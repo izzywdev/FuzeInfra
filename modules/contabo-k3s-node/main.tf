@@ -72,6 +72,28 @@ resource "contabo_instance" "node" {
     }
   }
 
+  # Add-on id 1501 -- present live on BOTH fuzeinfra-ci-runner-1 and -2
+  # (verified via GET /v1/compute/instances/{id}), but never declared here,
+  # so an unrelated PR's plan surfaced it as drift Terraform would REMOVE on
+  # apply (2026-09-06). Owner's assessment: the same VLAN/private-networking
+  # purchase as 1477. That does not fully square with 1477 alone being the id
+  # a single `{"privateNetworking":{}}` upgrade call returned -- if this were
+  # a straightforward SKU-specific alias for the same feature, only one of
+  # the two ci-runner nodes (different product SKUs, see ci-workers.tf) would
+  # be expected to show it, not both. Declared here anyway, paired with 1477
+  # under the identical condition, on the least-risk reading available: this
+  # only ever PRESERVES what is already live and paid for, never removes it,
+  # and if private networking is ever disabled for a node both ids release
+  # together as one purchase, matching the owner's belief. Revisit if Contabo
+  # support or the panel ever gives this id an actual name.
+  dynamic "add_ons" {
+    for_each = local.private_network_enabled ? [1] : []
+    content {
+      id       = "1501"
+      quantity = 1
+    }
+  }
+
   lifecycle {
     # cloud-init only runs on first boot, so re-rendering user_data (e.g. a
     # whitespace change) must not trigger a destroy/recreate of a live node.
