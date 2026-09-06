@@ -114,12 +114,30 @@ the token needs all of:
 | Account → Cloudflare Tunnel → Edit | the account |
 | Account → Access: Apps and Policies → Edit | the account |
 | Account → **Access: Organizations, Identity Providers, and Groups → Edit** | the account |
+| Account → **Access: Service Tokens → Edit** | the account |
 | Account → Workers Scripts → Edit | the account |
 
 **Access: Organizations, Identity Providers, and Groups → Edit** is required by
 `cloudflare_zero_trust_access_identity_provider.authentik`, which registers
 Authentik as a login method for the admin wall. It fails the same silent way as
 the SSL scope below: clean plan, `Authentication error (10000)` at apply.
+
+**Access: Service Tokens → Edit** is a SEPARATE permission group from **Access:
+Apps and Policies** above — a token can create/manage Access applications and
+policies fine and still fail to mint a `cloudflare_zero_trust_access_service_token`.
+Confirmed live (2026-09-06, PR #865): the plan for
+`cloudflare_zero_trust_access_application.litellm_service` and its Google/OTP
+policies applied cleanly, but `cloudflare_zero_trust_access_service_token.litellm_ci`
+failed with:
+
+```
+Error: error creating access service token:  (1010)
+  with cloudflare_zero_trust_access_service_token.litellm_ci[0]
+```
+
+Cloudflare's error body was empty for this one (`1010`, no detail), unlike the
+generic `10000` pattern below — treat any `cloudflare_zero_trust_access_service_token`
+apply failure as a permissions check first regardless of the exact code.
 
 A token missing **SSL and Certificates → Edit** plans cleanly and then fails at
 apply time with:
