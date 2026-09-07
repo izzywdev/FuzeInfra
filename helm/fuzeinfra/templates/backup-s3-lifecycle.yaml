@@ -13,7 +13,15 @@ Deletion is done by the storage provider, not by us: no pod has to run on time,
 and a missed CronJob can never cause unbounded growth.
 */ -}}
 {{- $b := .Values.backups }}
-{{- if and $b.enabled (eq $b.sink "s3") (gt (int $b.s3.lifecycleExpireDays) 0) }}
+{{- $v := $b.volumes }}
+{{- /* Volume copies (Prometheus TSDB / Loki) live under their own top-level key
+       prefix and age out faster — they are tens of GB per run, not a few MB.
+       put-bucket-lifecycle-configuration REPLACES the whole configuration, so
+       both rules have to be asserted by this one call; emitting them from a
+       second Job would silently delete whichever ran first. */ -}}
+{{- $dbRule := gt (int $b.s3.lifecycleExpireDays) 0 }}
+{{- $volRule := and $v.prometheus.enabled (gt (int $v.lifecycleExpireDays) 0) }}
+{{- if and $b.enabled (eq $b.sink "s3") (or $dbRule $volRule) }}
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -48,6 +56,10 @@ spec:
               value: {{ $b.s3.lifecycleExpireDays | quote }}
             - name: PREFIX
               value: {{ $b.s3.prefix | quote }}
+            - name: VOL_EXPIRE_DAYS
+              value: {{ $v.lifecycleExpireDays | quote }}
+            - name: VOL_PREFIX
+              value: {{ $v.prefix | quote }}
           command:
             - /bin/sh
             - -c
@@ -58,19 +70,35 @@ spec:
               cat > /tmp/lifecycle.json <<JSON
               {
                 "Rules": [
+                  {{- if $dbRule }}
                   {
                     "ID": "expire-db-backups",
                     "Status": "Enabled",
                     "Filter": { "Prefix": "${PREFIX}/" },
                     "Expiration": { "Days": ${EXPIRE_DAYS} },
                     "AbortIncompleteMultipartUpload": { "DaysAfterInitiation": 7 }
+                  }{{ if $volRule }},{{ end }}
+                  {{- end }}
+                  {{- if $volRule }}
+                  {
+                    "ID": "expire-volume-backups",
+                    "Status": "Enabled",
+                    "Filter": { "Prefix": "${VOL_PREFIX}/" },
+                    "Expiration": { "Days": ${VOL_EXPIRE_DAYS} },
+                    "AbortIncompleteMultipartUpload": { "DaysAfterInitiation": 7 }
                   }
+                  {{- end }}
                 ]
               }
               JSON
               aws --endpoint-url "$S3_ENDPOINT" s3api put-bucket-lifecycle-configuration \
                 --bucket "$S3_BUCKET" --lifecycle-configuration file:///tmp/lifecycle.json
+              {{- if $dbRule }}
               echo "Lifecycle applied: s3://${S3_BUCKET}/${PREFIX}/ expires after ${EXPIRE_DAYS} days."
+              {{- end }}
+              {{- if $volRule }}
+              echo "Lifecycle applied: s3://${S3_BUCKET}/${VOL_PREFIX}/ expires after ${VOL_EXPIRE_DAYS} days."
+              {{- end }}
               # Read it back so the Job fails loudly if the provider silently ignored it.
               aws --endpoint-url "$S3_ENDPOINT" s3api get-bucket-lifecycle-configuration \
                 --bucket "$S3_BUCKET"
