@@ -140,13 +140,14 @@ resource "cloudflare_record" "vanity" {
 # Traffic reaches Traefik via the tunnel catch-all ingress_rule, then the
 # fuzefront-website Ingress (host: fuzefront.com) in the FuzeFront Helm chart.
 resource "cloudflare_record" "website_apex" {
-  count   = local.cloudflare_enabled ? 1 : 0
-  zone_id = var.cloudflare_zone_id
-  name    = "@"
-  value   = cloudflare_zero_trust_tunnel_cloudflared.fuzeinfra[0].cname
-  type    = "CNAME"
-  proxied = true
-  ttl     = 1
+  count           = local.cloudflare_enabled ? 1 : 0
+  zone_id         = var.cloudflare_zone_id
+  name            = "@"
+  value           = cloudflare_zero_trust_tunnel_cloudflared.fuzeinfra[0].cname
+  type            = "CNAME"
+  proxied         = true
+  ttl             = 1
+  allow_overwrite = true
 }
 
 # ---------------------------------------------------------------------------
