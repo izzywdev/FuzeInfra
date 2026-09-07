@@ -1,0 +1,94 @@
+# kube-state-metrics CustomResourceState config — Longhorn Volume CRs.
+#
+# WHY THIS FILE EXISTS AT ALL
+# ---------------------------
+# Longhorn's own /metrics endpoint (longhorn-backend:9500) exposes NO replica
+# count. Verified 2026-09-07 against the running cluster by listing every
+# metric family the manager emits: longhorn_volume_{robustness,state,
+# capacity_bytes,actual_size_bytes,read_*,write_*} and nothing else volume-
+# scoped. There is no longhorn_volume_replica* family in any form.
+#
+# The HELP text on longhorn_volume_actual_size_bytes reads "Actual space used by
+# each replica of the volume on the corresponding node", which invites the
+# assumption that it is emitted once per replica and can therefore be counted:
+#
+#     count by (volume) (longhorn_volume_actual_size_bytes)      # WRONG
+#
+# It cannot. Each longhorn-manager emits exactly ONE series per volume it owns,
+# labelled with the OWNER node — not one series per replica. Measured across all
+# 8 manager pods on 2026-09-07: 18 volumes, 18 series, every one distinct. That
+# expression returns 1 for every volume in the cluster regardless of its real
+# replica count, so an alert built on it would have been silently incapable of
+# firing on the very condition it was written for.
+#
+# spec.numberOfReplicas exists ONLY on the Volume custom resource. Reading it
+# therefore requires kube-state-metrics' CustomResourceState collector, which is
+# what this file configures. This is the whole reason the under-replication
+# alert needs a config change rather than just a rule.
+#
+# Field paths below were read off a live CR (pvc-88752815, the restored
+# fuzeinfra-prometheus-data) on 2026-09-07, not from documentation:
+#   apiVersion:                     longhorn.io/v1beta2
+#   spec.numberOfReplicas:          3
+#   status.robustness:              healthy
+#   status.state:                   attached
+#   status.kubernetesStatus.pvcName:   fuzeinfra-prometheus-data
+#   status.kubernetesStatus.namespace: fuzeinfra
+#
+# Metric names are <metricNamePrefix>_<name>, i.e. longhorn_crd_volume_*.
+# tests/test_longhorn_alert_metrics.py cross-checks that every metric and label
+# rules/storage.yml selects on is actually produced here — the same class of
+# guard as tests/test_alert_label_allowlist.py, and for the same reason: a rule
+# that queries a dimension nothing emits is accepted by promtool, by helm and by
+# Prometheus, and is simply dead.
+kind: CustomResourceStateMetrics
+spec:
+  resources:
+    - groupVersionKind:
+        group: longhorn.io
+        version: v1beta2
+        kind: Volume
+      metricNamePrefix: longhorn_crd
+      # pvc/pvc_namespace come from status.kubernetesStatus and are EMPTY for a
+      # volume not bound to a PVC. They are carried for readability of the alert
+      # text only; the rules join on `volume`, which is metadata.name and is
+      # always present.
+      labelsFromPath:
+        volume: [metadata, name]
+        pvc: [status, kubernetesStatus, pvcName]
+        pvc_namespace: [status, kubernetesStatus, namespace]
+      metrics:
+        # spec, not status: the DESIRED replica count. This is the field that
+        # sat at 1 on fuzeinfra-prometheus-data for days before 2026-09-07 with
+        # nothing observing it. It is deliberately the spec value — a volume
+        # whose spec says 1 is unrecoverable by design even while status looks
+        # perfectly healthy, which is exactly why robustness alone never fired.
+        - name: volume_replicas_desired
+          help: "Desired replica count (spec.numberOfReplicas) of a Longhorn volume"
+          each:
+            type: Gauge
+            gauge:
+              path: [spec, numberOfReplicas]
+
+        # StateSet: one series per listed value carrying 0 or 1. Live values
+        # observed on the cluster are healthy / degraded / faulted / unknown
+        # ("unknown" is what a detached volume reports).
+        - name: volume_robustness
+          help: "Longhorn volume robustness (status.robustness) as a state set"
+          each:
+            type: StateSet
+            stateSet:
+              labelName: robustness
+              path: [status, robustness]
+              list: [healthy, degraded, faulted, unknown]
+
+        # Attach state gates the under-replication alert: an attached volume is
+        # one actively holding data a workload depends on.
+        - name: volume_state
+          help: "Longhorn volume state (status.state) as a state set"
+          each:
+            type: StateSet
+            stateSet:
+              labelName: state
+              path: [status, state]
+              list: [attached, detached, attaching, detaching, creating, deleting]
