@@ -1,0 +1,76 @@
+# Take the "default StorageClass" mark OFF k3s's `local-path`.
+#
+# Longhorn is the cluster default (argocd/applications/longhorn.yaml,
+# `persistence.defaultClass: true`). That change carried a PAIRED requirement it
+# could not express itself: k3s ALSO ships `local-path` marked default, from its
+# bundled `local-storage` Addon. Two classes claiming the default is an invalid
+# state — a PVC with no `storageClassName` then binds to whichever of the two the
+# DefaultStorageClass admission plugin happens to pick.
+#
+# That paired flip was done as a one-off `kubectl patch` and it did NOT hold.
+# Measured on prod 2026-09-07:
+#
+#   $ kubectl get sc
+#   local-path   (default)   rancher.io/local-path   Delete   WaitForFirstConsumer
+#   longhorn     (default)   driver.longhorn.io      Retain   Immediate
+#
+#   $ kubectl get sc local-path -o jsonpath='{.metadata.annotations}'
+#   ... "objectset.rio.cattle.io/owner-name":"local-storage",
+#       "storageclass.kubernetes.io/is-default-class":"true"
+#
+#   $ ls -l /var/lib/rancher/k3s/server/manifests/local-storage.yaml
+#   -rw------- 1 root root 3236 Sep  7 07:29 local-storage.yaml   # rewritten at k3s start
+#   $ sed -n '95p' /var/lib/rancher/k3s/server/manifests/local-storage.yaml
+#       storageclass.kubernetes.io/is-default-class: "true"
+#
+# The k3s addon controller regenerates that manifest and re-applies it on every
+# k3s start, so the hand patch is reverted by the next restart or control-plane
+# rebuild — and the annotation's only field manager is `deploy@vmi3383846`
+# (wrangler), i.e. no trace of the patch is left. The cluster has been sitting
+# with two defaults since 07:29.
+#
+# WHY IT MATTERS — this is the mechanism that destroys data, not a cosmetic nit.
+# `local-path` provisions node-LOCAL disk and pins the PV to that node by
+# nodeAffinity, on a cluster whose elastic nodes are created and REAPED (and
+# reinstalled under the SAME name) by the autoscaler. Measured 2026-09-07, three
+# PVCs are bound to local-path PVs pinned to `fuzeinfra-prod-elastic-v2-9b31f718`:
+#
+#   PV created            2026-09-01T19:15Z   (fuzekeys-data, fuzekeys-logs,
+#                                              mendys-wp/data-mendys-wp-mariadb-0)
+#   that Node object created  2026-09-06T19:20Z   <- the VM was REINSTALLED after
+#
+#   kubelet, now:  MountVolume.NewMounter initialization failed for volume
+#                  "pvc-df6f01eb-..." : path "/var/lib/rancher/k3s/storage/
+#                  pvc-df6f01eb-..._mendys-wp_data-mendys-wp-mariadb-0" does not exist
+#
+# The directory went with the reinstall. `fuzekeys-backend` (x2) and
+# `mendys-wp-mariadb-0` have been ContainerCreating ever since. Same class as the
+# 2026-07-24 incident in which local-path volumes were wiped by node reinstalls
+# and Neo4j was LOST.
+#
+# WHAT THIS FILE DOES. `apply-cluster-config` kubectl-applies argocd/cluster-bootstrap/
+# on every push to main touching it (and on workflow_dispatch), so the flip is now
+# owned by git and re-assertable without SSH. Deliberately MINIMAL: only the name,
+# the annotation and the required `provisioner` are declared, so a client-side
+# three-way merge touches nothing else — `reclaimPolicy: Delete` and
+# `volumeBindingMode: WaitForFirstConsumer` stay exactly as k3s set them, and no
+# immutable field is ever part of the patch. The provisioner and every existing
+# local-path PV are left alone; only "which class do you get when you don't ask"
+# changes.
+#
+# STILL OPEN (operator work, cannot be done from this repo): k3s re-asserts
+# `is-default-class: "true"` at every k3s start, so after a restart or a
+# control-plane rebuild this workflow must be re-run (Actions ->
+# apply-cluster-config -> Run workflow). The permanent fix is to stop the addon
+# reconciling at all — touch
+# /var/lib/rancher/k3s/server/manifests/local-storage.yaml.skip on each server
+# node (k3s then leaves the manifest, and this annotation, alone). `--disable
+# local-storage` is NOT the way: it removes the provisioner and the class, and
+# four PVCs are still bound to it.
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: local-path
+  annotations:
+    storageclass.kubernetes.io/is-default-class: "false"
+provisioner: rancher.io/local-path
