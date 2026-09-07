@@ -1,0 +1,165 @@
+name: ca-reinstall-controlplane
+
+# Reinstall a CONTROL-PLANE / durable node onto the private VLAN.
+#
+# WHY THIS EXISTS. ca-salvage-enroll deliberately refuses non-elastic templates:
+# it enrols agents into the autoscaler pool, and a control plane reinstalled with
+# an agent template silently loses its server role. That guard is correct and
+# must stay. But it left NO path at all for the operation the private-VLAN
+# cutover actually needs -- reinstalling a control plane so the Contabo eth1 NIC
+# appears -- so the last leg of that cutover had no tooling. mendys-worker-1 has
+# been NotReady since 2026-09-02 for exactly this reason: it carries the private
+# networking add-on and is enlisted in network 60932, but the NIC only
+# materialises on a reinstall (a reboot is not enough -- confirmed three times).
+#
+# This is the MIRROR of that guard, not a hole in it: control-plane/durable
+# templates ONLY, and it refuses any instance in the elastic name prefix.
+#
+# WHAT IT DELIBERATELY DOES NOT DO. The CP template does not join k3s. It only
+# prepares the host (eth1, firewall including the etcd peer/client ports a
+# server needs, Longhorn prerequisites). The k3s SERVER join stays a deliberate
+# operator step -- a control plane rejoining etcd is not something to put behind
+# a single button.
+#
+# BEFORE RUNNING, non-negotiable (docs/runbooks/k3s-ha-etcd-migration.md):
+#   1. k3s etcd-snapshot save                  -- the rollback net
+#   2. kubectl delete node <name>              -- k3s reconciles etcd membership
+#      from Node objects; reinstalling while the old member is still registered
+#      leaves a member whose data no longer exists.
+#   3. confirm every Longhorn volume has replicas OFF this node: the reinstall
+#      wipes /var/lib/longhorn.
+on:
+  workflow_dispatch:
+    inputs:
+      instance_id:
+        description: 'Contabo instance ID of the control-plane/durable node to reinstall.'
+        required: true
+      node_name:
+        description: 'k8s node name to render into the template (e.g. mendys-worker-1).'
+        required: true
+      template:
+        description: 'Control-plane cloud-init template. Elastic templates are REFUSED.'
+        default: 'cluster-autoscaler/contabo-externalgrpc/deploy/cp-userdata-eth1.template'
+      mode:
+        description: 'dry-run = render + validate (safe, no API write); reinstall = PUT reinstall (DESTRUCTIVE)'
+        type: choice
+        options: [dry-run, reinstall]
+        default: dry-run
+        required: true
+      confirm:
+        description: 'For mode=reinstall ONLY: type REINSTALL-CONTROL-PLANE to proceed.'
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  reinstall:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v4
+      - name: Reinstall control-plane node
+        env:
+          CID: ${{ secrets.CONTABO_CLIENT_ID }}
+          CSEC: ${{ secrets.CONTABO_CLIENT_SECRET }}
+          CUSER: ${{ secrets.CONTABO_API_USER }}
+          CPASS: ${{ secrets.CONTABO_API_PASSWORD }}
+          K3S_SERVER_URL: ${{ secrets.K3S_SERVER_URL }}
+          K3S_NODE_TOKEN: ${{ secrets.K3S_NODE_TOKEN }}
+          NODE_SSH_PUBLIC_KEY: ${{ secrets.NODE_SSH_PUBLIC_KEY }}
+          IMAGE_ID: ${{ vars.CONTABO_IMAGE_ID }}
+          ELASTIC_NAME_PREFIX: fuzeinfra-prod-elastic-v2
+          INSTANCE_ID: ${{ inputs.instance_id }}
+          NODE_NAME: ${{ inputs.node_name }}
+          TEMPLATE_IN: ${{ inputs.template }}
+          MODE: ${{ inputs.mode }}
+          CONFIRM: ${{ inputs.confirm }}
+        run: |
+          set -euo pipefail
+
+          if [ "$MODE" = "reinstall" ] && [ "$CONFIRM" != "REINSTALL-CONTROL-PLANE" ]; then
+            echo "::error::mode=reinstall requires confirm=REINSTALL-CONTROL-PLANE"; exit 1
+          fi
+
+          TMPL="$TEMPLATE_IN"
+          [ -f "$TMPL" ] || { echo "::error::template not found: $TMPL"; exit 1; }
+
+          # Mirror of ca-salvage-enroll's guard. An agent template here would
+          # silently demote a control plane to a worker.
+          case "$(basename "$TMPL")" in
+            cp-userdata*.template|durable-userdata*.template) ;;
+            *)
+              echo "::error::refusing non-control-plane template $TMPL (use ca-salvage-enroll for elastic nodes)"
+              exit 1 ;;
+          esac
+
+          case "$NODE_NAME" in
+            "$ELASTIC_NAME_PREFIX"-*)
+              echo "::error::refusing: node name is in the elastic prefix; use ca-salvage-enroll"
+              exit 1 ;;
+          esac
+
+          ID=$(printf '%s' "$INSTANCE_ID" | tr -dc '0-9')
+          [ -n "$ID" ] || { echo "::error::instance_id must be numeric"; exit 1; }
+          [ -n "$IMAGE_ID" ] || { echo "::error::CONTABO_IMAGE_ID repo variable is unset"; exit 1; }
+
+          TOK=$(curl -sS -X POST -H "Content-Type: application/x-www-form-urlencoded" \
+            "https://auth.contabo.com/auth/realms/contabo/protocol/openid-connect/token" \
+            --data-urlencode "client_id=${CID}" --data-urlencode "client_secret=${CSEC}" \
+            --data-urlencode "username=${CUSER}" --data-urlencode "password=${CPASS}" \
+            --data-urlencode "grant_type=password" | jq -r .access_token)
+          [ -n "$TOK" ] && [ "$TOK" != "null" ] || { echo "::error::Contabo auth failed"; exit 1; }
+
+          INST=$(curl -sS -H "Authorization: Bearer $TOK" \
+            -H "x-request-id: $(cat /proc/sys/kernel/random/uuid)" \
+            "https://api.contabo.com/v1/compute/instances/${ID}")
+          CURNAME=$(echo "$INST" | jq -r '.data[0].displayName')
+          STATUS=$(echo "$INST" | jq -r '.data[0].status')
+          echo "instance $ID contaboName=$CURNAME status=$STATUS -> node $NODE_NAME"
+
+          # Apply the inverse guard to what Contabo actually holds, not only to
+          # the operator-supplied name.
+          case "$CURNAME" in
+            "$ELASTIC_NAME_PREFIX"-*)
+              echo "::error::refusing: instance $ID belongs to the elastic pool"
+              exit 1 ;;
+          esac
+
+          RENDERED=$(sed \
+            -e "s|{{.NodeName}}|${NODE_NAME}|g" \
+            -e "s|{{.K3SServerURL}}|${K3S_SERVER_URL}|g" \
+            -e "s|{{.K3SNodeToken}}|${K3S_NODE_TOKEN}|g" \
+            -e "s|__SSH_PUBLIC_KEY__|${NODE_SSH_PUBLIC_KEY}|g" \
+            "$TMPL")
+          if printf '%s' "$RENDERED" | grep -q '{{'; then
+            echo "::error::unrendered template action remains"; exit 1; fi
+          if ! printf '%s' "$RENDERED" | head -1 | grep -q '^#cloud-config'; then
+            echo "::error::rendered userData must start with #cloud-config"; exit 1; fi
+          echo "rendered userData bytes: $(printf '%s' "$RENDERED" | wc -c)"
+          for m in "60-eth1-private.yaml" "fuzeinfra-cp-eth1-ready"; do
+            if printf '%s' "$RENDERED" | grep -qF "$m"; then
+              echo "  OK   $m"
+            else
+              echo "  MISS $m"
+            fi
+          done
+
+          if [ "$MODE" = "dry-run" ]; then
+            echo "[dry-run] WOULD PUT reinstall imageId=$IMAGE_ID onto instance $ID. No API write performed."
+            exit 0
+          fi
+
+          BODY=$(jq -n --arg img "$IMAGE_ID" --arg ud "$RENDERED" '{imageId:$img, userData:$ud, defaultUser:"root"}')
+          RC=$(curl -sS -o /tmp/reinstall.json -w '%{http_code}' -X PUT \
+            -H "Authorization: Bearer $TOK" -H "Content-Type: application/json" \
+            -H "x-request-id: $(cat /proc/sys/kernel/random/uuid)" \
+            -d "$BODY" "https://api.contabo.com/v1/compute/instances/${ID}")
+          echo "reinstall $ID -> HTTP $RC"
+          if [ "$RC" != "200" ] && [ "$RC" != "201" ]; then
+            cat /tmp/reinstall.json
+            echo "::error::reinstall failed"
+            exit 1
+          fi
+          echo "instance $ID is reinstalling."
+          echo "The CP template does NOT join k3s: perform the server join manually"
+          echo "once eth1 is up, per docs/runbooks/k3s-ha-etcd-migration.md."
