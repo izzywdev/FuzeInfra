@@ -237,10 +237,40 @@ spec:
           # this succeeds, so 60 x 10s allows a 10-minute cold start (which also
           # covers a slow first image pull on a fresh node) while still catching
           # a genuinely wedged process.
+          # timeoutSeconds IS EXPLICIT ON ALL THREE. Kubernetes defaults it to 1,
+          # and these probes omitted it -- so every health check had to complete a
+          # full HTTP round trip in under one second or count as a failure.
+          #
+          # LiteLLM cannot honour that bound. /health/liveliness is served by the
+          # same uvicorn worker that also talks to Postgres and Redis (spend-tracking
+          # commits, router cooldown state), so a response occasionally takes longer
+          # than 1s under entirely normal load.
+          #
+          # Measured on prod 2026-09-07: 56 restarts and climbing, with the pod
+          # events and the container log disagreeing at the same instant --
+          #   event: Readiness probe failed: context deadline exceeded
+          #          (Client.Timeout exceeded while awaiting headers)
+          #   event: Container litellm failed liveness probe, will be restarted
+          #   log:   "GET /health/liveliness HTTP/1.1" 200
+          #          "GET /health/readiness HTTP/1.1" 200
+          # A healthy process, killed for being one second slow, roughly every ten
+          # minutes -- and each kill drops the gateway for the whole cold start.
+          #
+          # THE SIGNATURE IS A TRAP. This presents as `exit 137 reason=Error`,
+          # identical to an OOM kill and to the cold-start loop the startupProbe
+          # below was added to fix. It was neither: the container had been up for
+          # minutes (so startup was long done) and was using 823Mi of a 3Gi limit.
+          # Before concluding "OOM" from a 137 here, check the pod events for
+          # `context deadline exceeded` and the container log for 200s.
+          #
+          # 5s absorbs a slow DB/Redis round trip without materially delaying
+          # detection of a genuinely wedged process: liveness still kills after
+          # 3 x 20s, so the worst case moves from ~60s to ~75s.
           startupProbe:
             httpGet: { path: /health/liveliness, port: http }
             periodSeconds: 10
             failureThreshold: 60
+            timeoutSeconds: 5
           # No initialDelaySeconds on either of these: the startupProbe already
           # gates them, and adding a delay on top would only slow recovery from
           # a real hang after the app is up.
@@ -248,10 +278,12 @@ spec:
             httpGet: { path: /health/liveliness, port: http }
             periodSeconds: 20
             failureThreshold: 3
+            timeoutSeconds: 5
           readinessProbe:
             httpGet: { path: /health/readiness, port: http }
             periodSeconds: 15
             failureThreshold: 3
+            timeoutSeconds: 5
           securityContext:
             allowPrivilegeEscalation: false
             capabilities:
