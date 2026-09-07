@@ -21,6 +21,22 @@ URL.
 > second-primary evidence (each was written after an actual API call). Verify
 > against those before asserting; this prompt is a map, not a substitute.
 
+## The confirmed dead-ends (read this before writing any code)
+
+Each of these was established by reading the spec/SDKs or by a live probe — not
+inferred. If you find yourself about to try one of these, stop.
+
+| You want… | It does not exist. Do this instead. |
+|---|---|
+| Reverse a cancellation | **Customer Control Panel → Revoke cancellation**, before `cancelDate`. §2 |
+| Hard-delete / terminate an instance now | Only `POST …/cancel`, effective at end of billing period. §1, §2 |
+| List or remove add-ons via API | No Add-ons API at all. Panel → Add-on Manager. §3 |
+| Look up what an add-on id means | No catalogue endpoint. Support ticket. §3 |
+| Order / create a VIP (floating IP) | Panel → Add-on Manager → Additional IPs (€3.50/mo). §5 |
+| Get `eth1` without a reinstall | A reboot was not sufficient here. Reinstall. §4 |
+| An idempotency key for safe retries | None. Confirm with a GET before retrying a write. §7 |
+| A billing / orders API | None. |
+
 ## Auth — OAuth2 password grant (there is no plain API key)
 
 ```
@@ -47,15 +63,42 @@ bytes formatted 8-4-4-4-12). This is the single most common cause of an
 otherwise-correct call failing.
 
 Documented purpose: "Uuid4 to identify individual requests for support cases" —
-so log it; Contabo support can trace a request by it.
+so log it; Contabo support can trace a request by it. An optional `x-trace-id`
+header also exists for correlating a chain of requests. **Neither is an
+idempotency key** (see §7).
 
 ## Base URL and shape
 
 - Base: `https://api.contabo.com`, all paths under `/v1/`.
 - Responses wrap payloads: `{ "data": [ { ... } ], "_links": {...}, "_pagination": {...} }`.
   **Even single-resource GETs return `data` as an array** — read `.data[0]`.
-- List endpoints page with `?page=<n>&size=<n>` (size caps at 100). Pagination
-  is 1-based. Always page; a single unpaged GET silently truncates.
+- List endpoints page with `?page=<n>&size=<n>`; no maximum is documented, but
+  `size=100` is what this repo uses everywhere and is known-good. Pagination is
+  1-based. Always page; a single unpaged GET silently truncates.
+
+### The whole API surface (there is nothing else)
+
+Compute **Instances** · Instance **Actions** · **Snapshots** · **Images** ·
+**Object Storages** · **Private Networks** · **VIP** · **Tags** +
+**Tag Assignments** · **Secrets** · **Users** + **Roles** · **Domains/DNS** ·
+**Firewalls** · plus a read-only **`*Audits`** twin for most of the above.
+
+Two absences matter and are load-bearing below: **there is no Add-ons API** and
+**there is no Billing/Orders API**. Anything that is a *purchase* or a *product
+lifecycle decision* is either a side effect of an instance call or lives only
+in the Customer Control Panel.
+
+### Audits — how to find out who did something
+
+```
+GET /v1/compute/instances/audits?instanceId=<id>&changedBy=<user>&startDate=&endDate=&page=&size=
+```
+
+This is the endpoint to reach for after an unexpected change — e.g. **"who or
+what cancelled this node?"**. It filters by `instanceId`, `requestId` (that is
+what the `x-request-id` you logged is for), `changedBy`, and a date range.
+Equivalent `*Audits` endpoints exist for private networks, tags, secrets, VIPs,
+images, snapshots, object storages, users and roles.
 
 ---
 
@@ -74,7 +117,16 @@ separate Actions API for start/stop/restart/shutdown/rescue).
 | **Reinstall** | `PUT /v1/compute/instances/{instanceId}` |
 | Order add-on / upsize | `POST /v1/compute/instances/{instanceId}/upgrade` |
 | **Cancel** | `POST /v1/compute/instances/{instanceId}/cancel` |
-| Start / stop / restart / shutdown / rescue | `POST /v1/compute/instances/{instanceId}/actions/{action}` |
+| Audit history | `GET /v1/compute/instances/audits` |
+
+Separately, the **InstanceActions** API — exactly six operations, all
+`POST /v1/compute/instances/{instanceId}/actions/<x>` where `<x>` is one of
+`start`, `stop`, `restart`, `shutdown`, `rescue`, `resetPassword`.
+
+That is the **complete** list. Independently corroborated: the community Python
+SDK's `InstancesApi` exposes precisely `cancel_instance`, `create_instance`,
+`patch_instance`, `reinstall_instance`, `retrieve_instance`,
+`retrieve_instances_list`, `upgrade_instance` — seven operations, nothing more.
 
 ### CONFIRMED DEAD END: there is no `DELETE /v1/compute/instances/{id}`
 
@@ -120,9 +172,12 @@ Consequences that bite:
 **This is the live question this agent exists to answer. The answer is no.**
 
 - The Instances API surface (create/retrieve/list/patch/reinstall/upgrade/
-  cancel + actions) contains **no** un-cancel, revoke, reactivate or
+  cancel + the six actions) contains **no** un-cancel, revoke, reactivate or
   restore operation. Nothing in the OpenAPI spec accepts a "revoke
-  cancellation" intent.
+  cancellation" intent, and no generated SDK exposes one.
+- There is **no Billing/Orders API at all** — the API can *spend* money
+  (`create`, `upgrade`) and *stop* spending it (`cancel`), but it cannot
+  manage the subscription lifecycle in either direction beyond that.
 - Guessed paths that were probed live and **all 404**:
   `/uncancel`, `/cancel/revoke`, `/revoke-cancellation`, `/reactivate`
   (see `.github/workflows/contabo-probe-uncancel.yml` — a read-only discovery
@@ -142,9 +197,15 @@ three-dot menu → **"Revoke cancellation"***. Constraints:
 
 **Operational rule:** a cancellation is a human-in-the-panel decision to undo,
 on a clock. If an automated path (e.g. the cluster-autoscaler provider or the
-reaper) cancels something it should not have, escalate to a human immediately
-with the instance id and the `cancelDate` — do not spend time hunting for an
-API route. There isn't one.
+reaper) cancels something it should not have:
+
+1. `GET /v1/compute/instances/{id}` → read `cancelDate`. That is your deadline.
+2. `GET /v1/compute/instances/audits?instanceId={id}` → establish who/what did
+   it, so the same thing does not happen again.
+3. **Escalate to a human to click "Revoke cancellation" in the panel**, before
+   `cancelDate`. Do not spend time hunting for an API route; there isn't one.
+4. If `cancelDate` has passed, the node is gone: re-provision (create a new
+   instance) rather than trying to restore.
 
 ---
 
@@ -172,11 +233,22 @@ Add-ons currently held by an instance come back on the instance resource:
 The list workflows in this repo lean on that:
 `jq -r '.data[] | [.instanceId, ..., .addOns[]?.id] | @tsv'`.
 
-### Removing
+### Removing / cataloguing — both are DEAD ENDS
 
-**There is no documented "remove add-on" endpoint.** The upgrade endpoint is
-additive. Removal is a panel/support action (and, in Terraform, dropping the
-`add_ons` block is what releases it at renewal).
+- **There is no Add-ons API.** No `GET /v1/add-ons`, no catalogue, no way to
+  resolve an add-on id to a name programmatically. (Confirmed by the API
+  surface listing above and by every generated SDK: there is no `AddOnsApi`.)
+- **There is no "remove add-on" endpoint.** `upgrade` is purely additive.
+  Removal is a panel/support action; in Terraform, dropping the `add_ons` block
+  is what releases it at renewal.
+
+Contabo's own help article ("What add-ons can I order and how?") documents six
+add-ons — **Auto Backup, Private Networking, Licenses (Windows/Plesk/cPanel),
+Additional IPs, Storage Extension, Full Monitoring** — and documents *only* the
+panel path for all of them: *Servers & Hosting → ⋯ (More) → **Add-on Manager**
+→ Order → Order & Pay*, "processed within 24 hours". The API exposes a strict
+subset (`privateNetworking`, `backup`) via `upgrade`; **everything else on that
+list is panel-only.**
 
 ### The ids
 
@@ -218,13 +290,28 @@ FuzeInfra's network is **60932** (`10.0.0.0/22`, region "European Union 2").
    *capability*; the assign call is what actually attaches the instance. Two
    separate steps — order, then assign. A 402 on assign means "you did not buy
    it," not "bad request."
-2. **A REINSTALL is required for `eth1` to appear — a reboot is NOT enough.**
-   Verified empirically in this repo, and consistent with Contabo's model
-   (the NIC is attached as part of provisioning, and the guest's network
-   config is written at install time). The working per-node sequence is:
-   **order add-on (`upgrade`) → reinstall with the `-privnet` cloud-init →
-   assign to the network → verify.** `docs/design/off-vlan-node-failure-policy.md`
-   and `docs/design/s3-and-private-networking.md` carry the full runbook.
+2. **A REINSTALL is required for `eth1` to appear — a reboot is NOT enough
+   (empirically verified on this estate).**
+
+   Read Contabo's own wording carefully, because it is weaker than our finding
+   and reading it optimistically is how this was got wrong the first time.
+   Contabo says: *"After creating the network (or adding/removing servers),
+   each affected server must be **restarted or reinstalled** to become fully
+   connected"* — and which one you get is **not your choice**: the panel shows
+   *"requires restart"* when the server already sits on a private-network-
+   capable vHost (data preserved), and *"requires reinstallation"* when it does
+   not — in which case **the IP address changes and "all data will be
+   permanently deleted."**
+
+   **On this cluster's nodes it has been the reinstall case every time.** A
+   reboot alone was tested and did not surface `eth1`. So: plan for a
+   destructive reinstall by default, treat "restart is enough" as a lucky
+   outcome you must verify per node, and never assume the cheap path.
+
+   The working per-node sequence is: **order add-on (`upgrade`) → reinstall
+   with the `-privnet` cloud-init → assign to the network → verify.**
+   `docs/design/off-vlan-node-failure-policy.md` and
+   `docs/design/s3-and-private-networking.md` carry the full runbook.
 
    Corollary: an off-VLAN node is not a cheaper node, it is a **broken** node —
    kubelet 10250 is only reachable on the VLAN, so `kubectl logs`/`exec`
@@ -234,34 +321,54 @@ FuzeInfra's network is **60932** (`10.0.0.0/22`, region "European Union 2").
 
 ## 5. VIPs — what they actually are
 
-```
-GET    /v1/vips                    # list VIPs you own
-GET    /v1/vips/{ip}               # get one by IP
-POST   /v1/vips                    # "Assign a VIP to a VPS/VDS/Bare Metal"
-DELETE /v1/vips/{ip}               # "Unassign a VIP from a VPS/VDS/Bare Metal"
-```
+The VIP API has **exactly four operations** — note that assign/unassign are
+addressed by IP *plus resource*, not by a bare `/v1/vips`:
 
-Read the verbs carefully: the API surface is **assign / unassign**, i.e. it
-*manages* VIPs you already own. **There is no ordering/purchase endpoint** —
-`POST /v1/vips` is an assignment, not a "create me a new floating IP." A VIP is
-an **additional IP address product you buy** (panel / support), which the API
-then lets you point at an instance.
+| Operation | Method + path |
+|---|---|
+| List VIPs | `GET /v1/vips` (filters: `resourceId`, `resourceType`, `resourceName`, `ipVersion`, `ips`, `ip`, `type`, `dataCenter`, `region`, `page`, `size`, `orderBy`) |
+| Get one VIP | `GET /v1/vips/{ip}` |
+| **Assign** | `POST /v1/vips/{ip}/{resourceType}/{resourceId}` |
+| **Unassign** | `DELETE /v1/vips/{ip}/{resourceType}/{resourceId}` |
 
-`GET /v1/vips` returning **HTTP 200 with an empty `data: []`** therefore means
-exactly one thing: **the API works, you are authorised, and you own zero VIPs.**
-It is not an error and not a permissions problem. Nothing will appear there
-until an additional-IP product is purchased.
+### CONFIRMED DEAD END: there is no create/order-a-VIP endpoint
 
-**Can it be a keepalived-style floating IP for an HA API endpoint?** In
-principle yes — assign/unassign is precisely "move this IP between instances" —
-but note the honest caveats before designing on it:
-- It must be **purchased first** out-of-band; nothing in the API bootstraps one.
-- Failover would be an **API call** (unassign + assign), not gratuitous-ARP at
-  layer 2 as keepalived does on a real L2 segment. Expect propagation delay of
-  the provider's own making, not sub-second VRRP behaviour. Do not promise an
-  RTO until it has been measured on a real pair of instances.
-- Untested in this repo. Treat "VIP == HA VIP" as a **hypothesis to validate**,
-  not an established capability.
+Read the verbs: the surface is **list / get / assign / unassign**. It *manages*
+VIPs you already own. There is no `createVip`/`orderVip` in the spec or in any
+generated SDK. A VIP is Contabo's **"Additional IP" product** — an extra IPv4
+you **buy in the Customer Control Panel** (Add-on Manager → *Additional IPs*,
+listed at **€3.50/month**), which the API then lets you point at a machine.
+
+**Purchase limits are per server type: 1 additional IPv4 for a VPS**, 15 for a
+VDS, 25 for a dedicated server. Our nodes are VPS, so **one** each.
+
+### So what does our `GET /v1/vips` → 200 with `data: []` mean?
+
+Exactly one thing: **the API works, the credentials are authorised, and the
+account owns zero additional IPs.** It is not an error, not a permissions
+problem, and not a sign the endpoint is wrong. Nothing appears there until an
+Additional IP is purchased in the panel.
+
+### Can it serve as a keepalived-style floating IP for an HA API endpoint?
+
+Plausibly, but **do not design on it yet** — here is the honest state:
+
+- ✅ Reassignable: `DELETE …/{ip}/{type}/{oldId}` then `POST …/{ip}/{type}/{newId}`
+  is precisely "move this IP to another machine", and Contabo markets floating
+  IPs for "load balancing and failover".
+- ⚠️ **Must be purchased out-of-band first.** Nothing in the API bootstraps one,
+  so it cannot be part of a self-healing automated failover story end-to-end.
+- ⚠️ **Guest-side config is manual.** Contabo states additional IPs "will not be
+  added to your system automatically but will have to be configured manually" —
+  so the new holder needs the address configured on its interface, which
+  cloud-init/automation must handle on both sides.
+- ⚠️ **Failover is two API calls, not layer-2 gratuitous ARP.** Expect
+  provider-side propagation delay, not sub-second VRRP. **Do not quote an RTO
+  until it has been measured** on a real pair of instances.
+- ⚠️ **Untested on this estate** (we own zero VIPs). Treat "VIP == HA VIP" as a
+  hypothesis to validate with a €3.50/mo experiment, not an established
+  capability. A keepalived VRRP setup **on the private VLAN (60932)** is the
+  alternative worth pricing against it.
 
 ---
 
@@ -288,8 +395,10 @@ PUT /v1/compute/instances/{instanceId}
   Sending base64 yields a node whose cloud-init silently did nothing. (Called
   out explicitly in `client.go`; there is a parity test for it.)
 - `sshKeys` and `rootPassword` are **`secretId` integers** referencing the
-  Secrets API (`/v1/secrets`), not inline key/password material. Store the key
-  as a secret first, then reference it.
+  Secrets API, not inline key/password material. Store the key as a secret
+  first, then reference it. Secrets API:
+  `POST /v1/secrets` · `GET /v1/secrets` · `GET /v1/secrets/{secretId}` ·
+  `PATCH /v1/secrets/{secretId}` · `DELETE /v1/secrets/{secretId}`.
 - Reinstall is the only way to get `eth1` after joining a private network
   (see §4).
 
@@ -301,11 +410,17 @@ PUT /v1/compute/instances/{instanceId}
   requests."** That is the entirety of what Contabo documents: no published
   quota, no window, no documented `Retry-After`/`X-RateLimit-*` headers. Assume
   a modest limit, back off on 429, and do not hammer list endpoints in a loop.
-- **No documented idempotency key.** `x-request-id` is for support tracing, NOT
-  an idempotency token — re-sending the same `x-request-id` does **not**
-  deduplicate a create. A retried `POST /v1/compute/instances` can and will
-  create a **second instance**. Retry writes only when you can first confirm,
-  by a GET, that the previous attempt did not land.
+- The other documented statuses: **400** "Your request was malformed"
+  (a non-UUID `x-request-id` lands here), **401** "You did not supply valid
+  authentication credentials", **403** "You are not allowed to perform the
+  request", **404** "No results were found for your request or resource does
+  not exist". **402 is not in the documented list** but is real — it is what
+  private-network assign returns when the paid add-on is missing (§4).
+- **CONFIRMED DEAD END: there is no idempotency-key header.** `x-request-id`
+  (and `x-trace-id`) are for support tracing only — re-sending the same
+  `x-request-id` does **not** deduplicate a write. A retried
+  `POST /v1/compute/instances` can and will create a **second instance**. Retry
+  writes only after confirming by a GET that the previous attempt did not land.
 - **Eventual consistency is real.** After a successful
   `POST /v1/compute/instances`, the new instance is **not immediately visible**
   to `GET /v1/compute/instances/{id}` or to tag assignment — both can return
@@ -375,3 +490,47 @@ instance stays in `ListByTag`. Filter on `cancelDate` if you need live-only.
 5. **Record every new fact where the next person will trip over it** — a code
    comment next to the call, plus this file. That is why the 404 list above
    exists.
+6. **Mark every claim verified / inferred / unknown.** The 1501 row above is
+   the model: it says plainly that it is unresolved rather than guessing a
+   name. A confident wrong answer about a paid resource costs real money.
+
+## Sources
+
+Primary (checked 2026-09-07):
+
+- Contabo API reference (Redoc over the official OpenAPI spec) — <https://api.contabo.com/>
+  · endpoint map, request/response schemas, `x-request-id` UUID4 requirement,
+  add-on object names, reinstall fields, documented 400/401/403/404/429.
+- "How can I revoke a cancellation of my product?" — <https://help.contabo.com/en/support/solutions/articles/103000396731-how-can-i-revoke-a-cancellation-of-my-product->
+  · panel-only revocation, must be before the termination date.
+- "How do I cancel a service?" — <https://help.contabo.com/en/support/solutions/articles/103000327515-how-do-i-cancel-a-service->
+  · service stays active until the cancellation date.
+- "What add-ons can I order and how?" — <https://help.contabo.com/en/support/solutions/articles/103000410222-what-add-ons-can-i-order-and-how->
+  · the six add-ons, Add-on Manager path, 24h processing.
+- "How can I create a private network for my Contabo server?" — <https://help.contabo.com/en/support/solutions/articles/103000274523-how-can-i-create-a-private-network-for-my-contabo-server->
+  · add-on required per server; "restarted **or** reinstalled"; reinstall wipes
+  data and changes the IP.
+- "Can I order additional IP addresses for my server?" — <https://help.contabo.com/en/support/solutions/articles/103000269701-can-i-order-additional-ip-addresses-for-my-server->
+  · €3.50/mo; limits 1 (VPS) / 15 (VDS) / 25 (dedicated).
+- "How can I configure additional & floating IP addresses…" — <https://help.contabo.com/en/support/solutions/articles/103000282044-how-can-i-configure-additional-floating-ip-addresses-on-my-contabo-server->
+  · panel IP Management reassignment; guest-side config is manual.
+
+Corroborating generated SDKs (built from Contabo's own OpenAPI spec) — used to
+confirm the *absence* of operations:
+
+- `p-fruck/python-contabo` `docs/InstancesApi.md` (7 ops, no un-cancel),
+  `docs/VIPApi.md` (4 ops, no create), `docs/PrivateNetworksApi.md`,
+  `docs/SecretsApi.md`, `docs/InstanceActionsApi.md`,
+  `docs/InstancesAuditsApi.md`. No `AddOnsApi` exists in the generated surface.
+- `contabo/terraform-provider-contabo` — `resourceInstanceDelete` calls
+  `CancelInstance`.
+
+In-repo, live-verified (each written after a real API call):
+
+- `cluster-autoscaler/contabo-externalgrpc/internal/contabo/client.go`
+  · no `DELETE` instance (404 spike), plaintext `userData`, non-UUID
+  `x-request-id` → 400, eventual-consistency polling, cancel retry policy.
+- `modules/contabo-k3s-node/main.tf` · add-on id 1477 confirmed 2026-09-03;
+  1501 observed live and unexplained.
+- `.github/workflows/contabo-probe-uncancel.yml` · the four guessed
+  cancellation-reversal paths, all 404.
