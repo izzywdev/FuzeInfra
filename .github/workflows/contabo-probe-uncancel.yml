@@ -1,0 +1,34 @@
+name: contabo-probe-uncancel
+on:
+  workflow_dispatch: {}
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Probe cancellation-reversal endpoints (read-only discovery)
+        env:
+          CID: ${{ secrets.CONTABO_CLIENT_ID }}
+          CSEC: ${{ secrets.CONTABO_CLIENT_SECRET }}
+          CUSER: ${{ secrets.CONTABO_API_USER }}
+          CPASS: ${{ secrets.CONTABO_API_PASSWORD }}
+        run: |
+          set -u
+          TOK=$(curl -sS -X POST -H "Content-Type: application/x-www-form-urlencoded" \
+            "https://auth.contabo.com/auth/realms/contabo/protocol/openid-connect/token" \
+            --data-urlencode "client_id=${CID}" --data-urlencode "client_secret=${CSEC}" \
+            --data-urlencode "username=${CUSER}" --data-urlencode "password=${CPASS}" \
+            --data-urlencode "grant_type=password" | jq -r .access_token)
+          ID=203547160
+          echo "=== OPTIONS on /cancel (what methods are allowed?) ==="
+          curl -sS -i -X OPTIONS -H "Authorization: Bearer $TOK" \
+            -H "x-request-id: $(cat /proc/sys/kernel/random/uuid)" \
+            "https://api.contabo.com/v1/compute/instances/${ID}/cancel" 2>&1 | head -12
+          echo
+          for p in "uncancel" "cancel/revoke" "revoke-cancellation" "reactivate"; do
+            code=$(curl -sS -o /dev/null -w "%{http_code}" -H "Authorization: Bearer $TOK" \
+              -H "x-request-id: $(cat /proc/sys/kernel/random/uuid)" \
+              "https://api.contabo.com/v1/compute/instances/${ID}/${p}")
+            echo "GET  /v1/compute/instances/{id}/${p} -> HTTP ${code}"
+          done
