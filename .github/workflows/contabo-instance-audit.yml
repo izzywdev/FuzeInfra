@@ -1,0 +1,31 @@
+name: contabo-instance-audit
+on:
+  workflow_dispatch:
+    inputs:
+      instance_id:
+        description: 'Contabo instanceId to pull audit history for'
+        required: true
+permissions:
+  contents: read
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fetch instance audit trail
+        env:
+          CID: ${{ secrets.CONTABO_CLIENT_ID }}
+          CSEC: ${{ secrets.CONTABO_CLIENT_SECRET }}
+          CUSER: ${{ secrets.CONTABO_API_USER }}
+          CPASS: ${{ secrets.CONTABO_API_PASSWORD }}
+          IID: ${{ inputs.instance_id }}
+        run: |
+          set -u
+          TOK=$(curl -sS -X POST -H "Content-Type: application/x-www-form-urlencoded" \
+            "https://auth.contabo.com/auth/realms/contabo/protocol/openid-connect/token" \
+            --data-urlencode "client_id=${CID}" --data-urlencode "client_secret=${CSEC}" \
+            --data-urlencode "username=${CUSER}" --data-urlencode "password=${CPASS}" \
+            --data-urlencode "grant_type=password" | jq -r .access_token)
+          curl -sS -H "Authorization: Bearer $TOK" \
+            -H "x-request-id: $(cat /proc/sys/kernel/random/uuid)" \
+            "https://api.contabo.com/v1/compute/instances/audits?instanceId=${IID}&size=50" \
+            | jq -r '.data[]? | "\(.timestamp)  by=\(.changedBy)  action=\(.action)  req=\(.requestId)  changes=\(.changes|tostring|.[0:300])"'
