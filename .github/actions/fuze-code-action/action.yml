@@ -280,8 +280,34 @@ runs:
       with:
         litellm-base-url: ${{ inputs.litellm-base-url }}
         litellm-key: ${{ inputs.litellm-key }}
-        fallback-vendor: anthropic
+        # FORWARD ALL THREE VENDOR KEYS, not just Anthropic.
+        #
+        # This previously passed `fallback-vendor: anthropic`, which is NOT an
+        # input llm-endpoint declares. Actions ignore unknown inputs with only a
+        # warning ("Unexpected input(s) 'fallback-vendor'"), so the line did
+        # nothing and the intent behind it was never expressed.
+        #
+        # The consequence was severe and silent. llm-endpoint builds its fallback
+        # chain from `fallback-chain` (default anthropic,openai,gemini) filtered to
+        # the vendors whose key input is actually non-empty. Passing only
+        # fallback-anthropic-key collapsed that chain to ONE vendor. A single-vendor
+        # anthropic chain then deliberately skips the runner-local LiteLLM container
+        # (a one-entry model_list with no `fallbacks:` adds nothing) and points
+        # claude-code-action straight at the Anthropic API.
+        #
+        # So the gateway that exists precisely to survive one provider being down
+        # was handed nothing to fall over TO. When Anthropic hit "Credit balance is
+        # too low" on 2026-09-07, every fuze-code-review and mcp-maintain run in the
+        # fleet failed closed -- with two other configured providers unused, because
+        # rungs 2 and 3 receive their keys separately and were skipped as
+        # "no openai-api-key" / "no gemini-api-key" too.
+        #
+        # llm-endpoint already skips a vendor whose key is empty (logged by name,
+        # not fatal), so forwarding all three is safe where only one is configured
+        # and is strictly better where more than one is.
         fallback-anthropic-key: ${{ inputs.anthropic-api-key }}
+        fallback-openai-key: ${{ inputs.openai-api-key }}
+        fallback-gemini-key: ${{ inputs.gemini-api-key }}
 
     # RUNG 1 — claude-code-action, credentialed via LiteLLM-or-direct-Anthropic
     # (see llm step above). Gated on the llm step's own outcome, not on raw input
