@@ -92,6 +92,39 @@ resolve_monitoring_node() {
 MONITORING_NODE="$(resolve_monitoring_node)"
 VERIFY_ONLY="${1:-}"
 
+# ---------------------------------------------------------------------------
+# DURABLE-NODE TAINT -- DEFAULT OFF, deliberately.
+#
+# `fuzeinfra.io/durable=true:NoSchedule` is what actually enforces "only core
+# infra and platform frontend run on the durable nodes". The existing
+# control-plane taint is only PreferNoSchedule, which is advisory -- the
+# scheduler ignores it under pressure, which is exactly what happened:
+# 70 and 57 pods on two durable nodes on 2026-09-07, 20,585 container restarts,
+# load average 59, and etcd losing heartbeats on the node that was also the
+# raft leader.
+#
+# WHY IT IS NOT ON BY DEFAULT YET. NoSchedule does not evict running pods, so
+# applying it looks harmless and then breaks things at the NEXT restart -- a
+# delayed failure that is easy to misattribute. Everything that must keep
+# running on these nodes has to tolerate it FIRST:
+#   * FuzeInfra chart workloads      -- done (#910)
+#   * longhorn / coredns / ARC / Argo -- done (#921)
+#   * FuzeFront                       -- NOT DONE (izzywdev/FuzeFront#913)
+#   * the LIVE Longhorn taint-toleration Setting -- NOT DONE; defaultSettings
+#     is not reapplied on upgrade, so the running cluster needs an explicit
+#     patch, and Longhorn requires no volume be attached when it changes.
+#
+# Flip the default to true in the same PR that closes those two, so the gate
+# and the readiness move together instead of drifting apart.
+#
+#   APPLY_DURABLE_TAINT=true ./scripts/label-durable-nodes.sh
+#
+# Removing it is the exact inverse and is safe to run any time:
+#   kubectl taint node <n> fuzeinfra.io/durable=true:NoSchedule-
+APPLY_DURABLE_TAINT="${APPLY_DURABLE_TAINT:-false}"
+DURABLE_TAINT_KEY="fuzeinfra.io/durable"
+DURABLE_TAINT="${DURABLE_TAINT_KEY}=true:NoSchedule"
+
 kubectl version --request-timeout=10s >/dev/null 2>&1 || {
   echo "ERROR: kubectl cannot reach a cluster" >&2; exit 1; }
 
@@ -115,12 +148,60 @@ if [ "$VERIFY_ONLY" != "--verify-only" ]; then
     # are unschedulable rather than merely misplaced.
     echo "  WARN $MONITORING_NODE not in cluster - Prometheus/Loki will stay Pending" >&2
   fi
+
+  if [ "$APPLY_DURABLE_TAINT" = "true" ]; then
+    echo "== applying the durable taint ($DURABLE_TAINT) =="
+    # Refuse if the cluster is not actually ready for it. Checking the two
+    # components whose failure is worst and least obvious: Longhorn loses the
+    # manager on every node that holds storage, and Argo stops reconciling the
+    # very thing that would undo the mistake. NoSchedule does not evict, so
+    # neither breaks until the next restart -- which is precisely why this has
+    # to be a pre-flight check and not a "watch and see".
+    unready=""
+    for sel in "app=longhorn-manager:longhorn-system" "app.kubernetes.io/name=argocd-application-controller:argocd"; do
+      s="${sel%%:*}"; ns="${sel##*:}"
+      if ! kubectl -n "$ns" get pods -l "$s" \
+           -o jsonpath="{range .items[*]}{range .spec.tolerations[*]}{.key}{'\n'}{end}{end}" 2>/dev/null \
+           | grep -qx "$DURABLE_TAINT_KEY"; then
+        unready="$unready $ns/$s"
+      fi
+    done
+    if [ -n "$unready" ]; then
+      echo "  REFUSING: these do not tolerate $DURABLE_TAINT_KEY yet:$unready" >&2
+      echo "  Tainting now would strand them at their next restart, not immediately," >&2
+      echo "  which makes the breakage look unrelated. Land the tolerations first." >&2
+      exit 1
+    fi
+    for n in $DURABLE_NODES; do
+      if kubectl get node "$n" >/dev/null 2>&1; then
+        kubectl taint node "$n" "$DURABLE_TAINT" --overwrite >/dev/null
+        echo "  ok   $n tainted"
+      else
+        echo "  SKIP $n (not in cluster)"
+      fi
+    done
+  else
+    echo "== durable taint NOT applied (APPLY_DURABLE_TAINT=false) =="
+    echo "   Placement is advisory until this is enabled -- PreferNoSchedule is"
+    echo "   a hint the scheduler drops under pressure. See the header comment."
+  fi
 fi
 
 echo "== verification =="
 labelled=$(kubectl get nodes -l node.longhorn.io/create-default-disk=true \
              --no-headers 2>/dev/null | wc -l | tr -d ' ')
 echo "  nodes labelled durable: $labelled"
+
+# Report the taint state explicitly. It is invisible in `kubectl get nodes` and
+# the difference between "placement is enforced" and "placement is a suggestion"
+# is not something to have to go looking for.
+tainted=$(kubectl get nodes -o jsonpath="{range .items[*]}{range .spec.taints[*]}{.key}{'\n'}{end}{end}" 2>/dev/null \
+            | grep -cx "$DURABLE_TAINT_KEY" || true)
+echo "  nodes carrying $DURABLE_TAINT_KEY: $tainted"
+if [ "$tainted" -eq 0 ]; then
+  echo "  NOTE: placement on durable nodes is ADVISORY only (control-plane taint is"
+  echo "        PreferNoSchedule). Application pods can and do land here anyway."
+fi
 [ "$labelled" -ge 3 ] || {
   echo "  WARN: Longhorn needs >=3 durable nodes for 3-replica volumes." >&2; }
 
