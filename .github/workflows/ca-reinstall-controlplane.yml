@@ -67,7 +67,7 @@ jobs:
           K3S_SERVER_URL: ${{ secrets.K3S_SERVER_URL }}
           K3S_NODE_TOKEN: ${{ secrets.K3S_NODE_TOKEN }}
           NODE_SSH_PUBLIC_KEY: ${{ secrets.NODE_SSH_PUBLIC_KEY }}
-          IMAGE_ID: ${{ vars.CONTABO_IMAGE_ID }}
+          IMAGE_ID: ${{ secrets.CONTABO_IMAGE_ID }}
           ELASTIC_NAME_PREFIX: fuzeinfra-prod-elastic-v2
           INSTANCE_ID: ${{ inputs.instance_id }}
           NODE_NAME: ${{ inputs.node_name }}
@@ -101,7 +101,7 @@ jobs:
 
           ID=$(printf '%s' "$INSTANCE_ID" | tr -dc '0-9')
           [ -n "$ID" ] || { echo "::error::instance_id must be numeric"; exit 1; }
-          [ -n "$IMAGE_ID" ] || { echo "::error::CONTABO_IMAGE_ID repo variable is unset"; exit 1; }
+          [ -n "$IMAGE_ID" ] || { echo "::error::CONTABO_IMAGE_ID secret is unset"; exit 1; }
 
           TOK=$(curl -sS -X POST -H "Content-Type: application/x-www-form-urlencoded" \
             "https://auth.contabo.com/auth/realms/contabo/protocol/openid-connect/token" \
