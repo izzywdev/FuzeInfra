@@ -6,8 +6,9 @@
 # Helm values files (that is why this lives in runners/arc/gitops/ and not
 # alongside runner-scale-set-values.yaml).
 #
-# It watches three independent failure modes that all end with "runner pods
-# Pending forever, CI queues silently":
+# It watches several independent failure modes that all end with "CI queues
+# silently" -- most because runner pods never start, and check 6 because they
+# start but can never come online:
 #
 #   1. CONTROLLER WEDGED (2026-07-24) — the gha-rs-controller stopped creating
 #      runner pods after transient generatejitconfig TLS timeouts; staging jobs
@@ -161,6 +162,23 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata: {name: arc-selfheal, namespace: arc-systems}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: arc-selfheal}
+subjects: [{kind: ServiceAccount, name: arc-selfheal, namespace: arc-systems}]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: {name: arc-selfheal, namespace: arc-runners}
+rules:
+  # Check 6 needs to know WHICH runner pods sit on a node it just quarantined,
+  # and only a Pod carries .spec.nodeName (an EphemeralRunner CR does not). Read
+  # only: the actual removal goes through the EphemeralRunner CR, whose delete
+  # verb is already granted cluster-wide above and which cascades to the Pod --
+  # so no pod delete permission is added here.
+  - {apiGroups: [""], resources: ["pods"], verbs: ["get", "list"]}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: arc-selfheal, namespace: arc-runners}
 roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: arc-selfheal}
 subjects: [{kind: ServiceAccount, name: arc-selfheal, namespace: arc-systems}]
 ---
@@ -413,6 +431,92 @@ spec:
                         echo "CRIT ARC runner-failed: $nn has been Failed for over ${FAILED_RUNNER_SECS}s - its pod was never created, ARC never garbage-collects a Failed EphemeralRunner, and the EphemeralRunnerSet still counts it, so it pins a maxRunners slot and that scale set's queue can never drain. Reason: ${msg:-(status.message empty)}. Deleting it to free the slot. If this CRIT REPEATS for the same scale set the podspec itself is being rejected - fix the podspec (runners/arc/runner-scale-set-values.yaml), reaping cannot help."
                         kubectl -n "$ns" delete ephemeralrunner "$name" --wait=false >/dev/null 2>&1
                         crit=1
+                      done
+                    fi
+                  fi
+
+                  # ---- check 6: a CI node registered OFF the private VLAN ----
+                  # Every check above assumes a runner pod that lands on a
+                  # pool=ci node can reach the network. On an off-VLAN node it
+                  # cannot, and NOTHING above notices: the pod is Running, both
+                  # containers Ready, the listener is healthy and reports
+                  # "assigned job"=1 -- but the runner process never resolves
+                  # pipelinesghubeus*.actions.githubusercontent.com, so GitHub
+                  # shows the runner status=offline busy=false and the job sits
+                  # queued until check 4 reaps it at 2h, whereupon a fresh pod
+                  # lands on the same node and repeats. Perfectly healthy-
+                  # looking CI that never runs a job.
+                  #
+                  # Observed 2026-09-07: fuzeinfra-ci-runner-2 joined with no
+                  # eth1 (cloud-init got no private-networking argument -- the
+                  # Terraform gap since fixed in terraform/contabo/ci-workers.tf),
+                  # so k3s registered InternalIP 13.140.158.203 + an IPv6 instead
+                  # of 10.0.0.x. From that node: `ping 10.0.0.8` and `ping
+                  # <coredns-pod-ip>` both 100% loss => no cluster DNS. Five
+                  # repos' runners were offline on it for ~2h with jobs queued.
+                  # A Terraform fix cannot repair a node that already joined
+                  # (k3s reads --node-ip/--node-label at REGISTRATION ONLY), and
+                  # the NodeQuarantinedOffVLAN alert only fires when Prometheus
+                  # is up -- which it was not. So quarantine it here, the same
+                  # way the elastic join path self-quarantines
+                  # (modules/contabo-k3s-node/cloud-init.tftpl, and see
+                  # docs/design/off-vlan-node-failure-policy.md): label
+                  # vlan=absent + taint off-vlan=true:NoSchedule. Runner pods
+                  # tolerate fuzeinfra.io/ci and fuzeinfra.io/elastic but NOT
+                  # off-vlan, so they stop landing there and go to the remaining
+                  # VLAN CI node (or make the autoscaler grow elastic, which the
+                  # affinity in runner-scale-set-values.yaml already permits).
+                  #
+                  # VLAN_RE is the private net 60932 range 10.0.0.0/22 in the
+                  # form jq can test. Widen it here if that range ever changes.
+                  # A node is on-VLAN if ANY of its InternalIPs matches; nodes
+                  # already carrying the off-vlan taint are skipped so a repaired
+                  # or deliberately-quarantined node is never re-processed.
+                  VLAN_RE='^10\.0\.[0-3]\.'
+                  ci_nodes_json=$(kubectl get nodes -l fuzeinfra.io/pool=ci -o json 2>/dev/null)
+
+                  if [ -z "$ci_nodes_json" ]; then
+                    echo "warn ci-node-vlan: could not list pool=ci nodes, skipping check 6"
+                  else
+                    offvlan=$(printf '%s' "$ci_nodes_json" | jq -r --arg re "$VLAN_RE" '
+                      .items[]
+                      | select([.spec.taints // [] | .[] | select(.key == "fuzeinfra.io/off-vlan")] | length == 0)
+                      | select([.status.addresses[]
+                                | select(.type == "InternalIP")
+                                | .address
+                                | select(test($re))] | length == 0)
+                      | .metadata.name' 2>/dev/null)
+
+                    if [ -z "$offvlan" ]; then
+                      echo "ok ci-node-vlan: every pool=ci node has an InternalIP on the private VLAN"
+                    else
+                      for _n in $offvlan; do
+                        _ips=$(printf '%s' "$ci_nodes_json" | jq -r --arg n "$_n" '
+                          .items[] | select(.metadata.name == $n)
+                          | [.status.addresses[] | select(.type == "InternalIP") | .address] | join(",")' 2>/dev/null)
+                        echo "CRIT ARC ci-node-vlan: $_n registered InternalIP(s) ${_ips:-(none)} - none on the private VLAN (10.0.0.0/22). Pods on it have no route to cluster DNS, so every ARC runner scheduled there registers with GitHub as status=offline and its repo's jobs stay queued while the pod looks Running and Ready. Quarantining the node (label fuzeinfra.io/vlan=absent + taint fuzeinfra.io/off-vlan=true:NoSchedule) so runner pods go to a VLAN node instead. The node itself still needs ops attention: k3s sets --node-ip at registration only, so it must be re-attached to the private network and rejoined - see docs/design/off-vlan-node-failure-policy.md."
+                        crit=1
+                        kubectl label node "$_n" fuzeinfra.io/vlan=absent --overwrite >/dev/null 2>&1 \
+                          && echo "AUTO-FIXED label: kubectl label node $_n fuzeinfra.io/vlan=absent --overwrite" \
+                          || echo "WARN: could not label node $_n"
+                        kubectl taint node "$_n" fuzeinfra.io/off-vlan=true:NoSchedule --overwrite >/dev/null 2>&1 \
+                          && echo "AUTO-FIXED taint: kubectl taint node $_n fuzeinfra.io/off-vlan=true:NoSchedule --overwrite" \
+                          || echo "WARN: could not taint node $_n"
+
+                        # The taint is NoSchedule, not NoExecute, so it stops the
+                        # NEXT pod but leaves the already-stranded ones Running
+                        # and offline for up to check 4's 2h threshold. Free them
+                        # now: an ARC runner Pod and its EphemeralRunner share a
+                        # name, and deleting the CR cascades to the Pod (same
+                        # mechanism checks 4 and 5 use), so the listener requests
+                        # a replacement that the fresh taint keeps off this node.
+                        _stranded=$(kubectl get pods -n arc-runners \
+                          --field-selector spec.nodeName="$_n" \
+                          -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null)
+                        for _p in $_stranded; do
+                          echo "freeing stranded runner arc-runners/$_p from $_n"
+                          kubectl -n arc-runners delete ephemeralrunner "$_p" --wait=false >/dev/null 2>&1
+                        done
                       done
                     fi
                   fi
