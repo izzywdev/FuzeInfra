@@ -174,13 +174,42 @@ jobs:
           if ! printf '%s' "$RENDERED" | head -1 | grep -q '^#cloud-config'; then
             echo "::error::rendered userData must start with #cloud-config"; exit 1; fi
           echo "rendered userData bytes: $(printf '%s' "$RENDERED" | wc -c)"
-          for m in "60-eth1-private.yaml" "fuzeinfra-cp-eth1-ready"; do
-            if printf '%s' "$RENDERED" | grep -qF "$m"; then
-              echo "  OK   $m"
+          # The netplan config is the ONE artifact every template here must carry:
+          # without it eth1 is never configured, and the whole point of this
+          # workflow is to bring a node up on the VLAN. This used to print "MISS"
+          # and CARRY ON, so a template missing it would happily reinstall a node
+          # that could never reach the VLAN -- the exact failure class that stranded
+          # fuzeinfra-ci-runner-2 and 871c48fc. It is now a hard failure.
+          if printf '%s' "$RENDERED" | grep -qF "60-eth1-private.yaml"; then
+            echo "  OK   60-eth1-private.yaml"
+          else
+            echo "::error::rendered userData has no 60-eth1-private.yaml — the node would come up with no eth1 config. Refusing."
+            exit 1
+          fi
+
+          # The readiness sentinel is CP-SPECIFIC. Asserting it for every template
+          # printed a bogus "MISS fuzeinfra-cp-eth1-ready" on the ci-userdata run
+          # (2026-09-07) — a scary-looking line on a render that was perfectly
+          # correct. Only claim it when the source template actually declares one.
+          if grep -qE '/etc/fuzeinfra-[a-z0-9-]*-ready' "$TMPL"; then
+            MARKER=$(grep -oE '/etc/fuzeinfra-[a-z0-9-]*-ready' "$TMPL" | head -1 | sed 's#^/etc/##')
+            if printf '%s' "$RENDERED" | grep -qF "$MARKER"; then
+              echo "  OK   $MARKER"
             else
-              echo "  MISS $m"
+              echo "::error::template declares $MARKER but the render lost it"; exit 1
             fi
-          done
+          else
+            echo "  --   (this template declares no readiness sentinel; not required)"
+          fi
+
+          # Does this template join the cluster by itself? Drives the closing
+          # message below, which used to assert "does NOT join" unconditionally.
+          if grep -qE 'get\.k3s\.io \| sh -s - (agent|server)' "$TMPL"; then
+            SELF_JOINS=yes
+          else
+            SELF_JOINS=no
+          fi
+          echo "  self-joins: $SELF_JOINS"
 
           if [ "$MODE" = "dry-run" ]; then
             echo "[dry-run] WOULD PUT reinstall imageId=$IMAGE_ID onto instance $ID. No API write performed."
@@ -199,5 +228,20 @@ jobs:
             exit 1
           fi
           echo "instance $ID is reinstalling."
-          echo "The CP template does NOT join k3s: perform the server join manually"
-          echo "once eth1 is up, per docs/runbooks/k3s-ha-etcd-migration.md."
+          # This used to assert unconditionally that the template does not join, which
+          # was already wrong for cp-userdata-eth1-join and became actively misleading
+          # for ci-userdata: on 2026-09-07 it told the operator to "perform the server
+          # join manually" for a node that had just joined itself as an agent. A
+          # closing instruction that contradicts what the workflow did is worse than
+          # no closing instruction.
+          if [ "$SELF_JOINS" = "yes" ]; then
+            echo "This template JOINS THE CLUSTER ITSELF once eth1 is up (systemd oneshot on boot)."
+            echo "Nothing further to run. Watch for the node with:"
+            echo "  kubectl get node $NODE_NAME -o wide     # InternalIP must be 10.0.0.x, not the public address"
+            echo "If it comes back on its PUBLIC address, the vNIC did not attach and the node is off-VLAN:"
+            echo "  pods on it cannot reach 10.43.0.1 even though the node reports Ready."
+          else
+            echo "This template does NOT join k3s -- it only prepares the host."
+            echo "Perform the server join manually once eth1 is up, per"
+            echo "docs/runbooks/k3s-ha-etcd-migration.md."
+          fi
