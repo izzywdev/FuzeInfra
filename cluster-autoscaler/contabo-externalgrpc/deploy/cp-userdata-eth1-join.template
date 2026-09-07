@@ -1,0 +1,194 @@
+#cloud-config
+# Cloud-init for reinstalling a CONTROL-PLANE (k3s server) node onto the private
+# VLAN (eth1) AND joining it to the cluster automatically.
+#
+# RELATIONSHIP TO cp-userdata-eth1.template. That template deliberately stops at
+# "prepared-not-joined" and leaves the k3s SERVER join to an operator. That was a
+# reasonable default when a control-plane rejoin was a once-a-cutover event done
+# with eyes on it. It is the wrong default for CI/CD: if Terraform provisions a
+# control plane, something has to join it, and the only supply route for the join
+# token that does not put a human (or an agent) in the middle is the one the
+# agent templates already use -- K3S_NODE_TOKEN (a GitHub secret) rendered into
+# userData, read once at first boot from a root-only file, never in argv and
+# never in the process table.
+#
+# So: use cp-userdata-eth1.template when you want to prepare a host and join it
+# by hand; use THIS one when the join should be automatic.
+#
+# Placeholders (rendered by ca-reinstall-controlplane.yml):
+#   {{.NodeName}}      - k8s node name; must be STABLE across reinstalls, because
+#                        k3s applies --node-label/--node-taint at REGISTRATION
+#                        ONLY and etcd membership is keyed on it.
+#   {{.K3SServerURL}}  - a LIVE server to join through. Must not be this node.
+#   {{.K3SNodeToken}}  - cluster join token.
+#   __SSH_PUBLIC_KEY__ - break-glass access.
+#
+# FAILURE POLICY: REFUSE, do not quarantine. The agent templates join off-VLAN
+# with a NoSchedule taint so a broken node is visible but harmless. A control
+# plane cannot do that: the other servers advertise 10.0.0.x, so a server that
+# joins without eth1 can never reach etcd quorum and instead sits NotReady,
+# holding a member slot and generating raft churn -- exactly the state
+# mendys-worker-1 was in from 2026-09-02. Better to not join at all and be
+# obviously absent than to join and be subtly broken.
+users:
+  - name: root
+    ssh_authorized_keys:
+      - __SSH_PUBLIC_KEY__
+
+package_update: true
+
+write_files:
+  # Join secrets in a root-only env file, never on a command line.
+  - path: /etc/k3s-server.env
+    permissions: "0600"
+    owner: root:root
+    content: |
+      K3S_URL={{.K3SServerURL}}
+      K3S_TOKEN={{.K3SNodeToken}}
+
+  - path: /etc/gai.conf
+    permissions: "0644"
+    owner: root:root
+    content: |
+      precedence ::ffff:0:0/96  100
+
+  # Contabo attaches the private network as eth1. `optional: true` so boot never
+  # blocks when the NIC is absent (add-on not ordered, or assign not landed).
+  - path: /etc/netplan/60-eth1-private.yaml
+    permissions: "0600"
+    owner: root:root
+    content: |
+      network:
+        version: 2
+        ethernets:
+          eth1:
+            dhcp4: true
+            optional: true
+
+  - path: /etc/fuzeinfra-cp-eth1-ready
+    permissions: "0644"
+    content: |
+      node={{.NodeName}} role=control-plane stage=join-on-boot
+
+  - path: /usr/local/sbin/fuzeinfra-cp-join.sh
+    permissions: "0750"
+    owner: root:root
+    content: |
+      #!/bin/sh
+      # Join this host to the cluster as a k3s SERVER, bound to the private VLAN.
+      # Runs on every boot until it succeeds (sentinel /etc/fuzeinfra-cp-joined).
+      # The Contabo private-network assign can reboot the instance after
+      # createInstance returns, so a once-per-instance runcmd is not a safe home
+      # for this: the reboot must re-run it, not lose it.
+      set -u
+      SENTINEL=/etc/fuzeinfra-cp-joined
+      LOGF=/var/log/fuzeinfra-cp-join.log
+      IFACE=eth1
+      WAIT_SECS=600
+      log() { echo "[fuzeinfra-cp-join] $(date -u +%Y-%m-%dT%H:%M:%SZ) $*" >>"$LOGF" 2>&1; echo "[fuzeinfra-cp-join] $*" >&2; }
+
+      [ -f "$SENTINEL" ] && { log "already joined; nothing to do"; exit 0; }
+      if [ -f /etc/systemd/system/k3s.service ]; then
+        log "k3s server already installed; leaving it alone"
+        touch "$SENTINEL"; exit 0
+      fi
+
+      ip4_of() { ip -4 -o addr show "$1" 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -n 1; }
+
+      # Wait for the VLAN. netplan is re-applied each poll because the vNIC can
+      # only appear once the out-of-band private-network ASSIGN has landed.
+      DEADLINE=$(( $(date +%s) + WAIT_SECS ))
+      PRIV=""
+      while : ; do
+        PRIV=$(ip4_of "$IFACE")
+        [ -n "$PRIV" ] && break
+        [ "$(date +%s)" -ge "$DEADLINE" ] && break
+        netplan apply >/dev/null 2>&1 || true
+        sleep 5
+      done
+      PUB=$(ip4_of eth0)
+
+      if [ -z "$PRIV" ]; then
+        # See FAILURE POLICY in the header: refusing beats joining broken.
+        log "FATAL: $IFACE has no IPv4 after ${WAIT_SECS}s. A control plane MUST be on the VLAN (peers advertise 10.0.0.x). REFUSING to join. Order the private-networking add-on, assign the instance to the network, and REINSTALL (a reboot does not surface the NIC)."
+        exit 1
+      fi
+
+      log "private NIC $IFACE has $PRIV (public $PUB) - joining as SERVER"
+
+      set -a
+      . /etc/k3s-server.env
+      set +a
+
+      mkdir -p /etc/rancher/k3s
+      # Written as a file rather than CLI flags so the token never reaches argv.
+      {
+        echo "server: $K3S_URL"
+        printf 'token: %s\n' "$K3S_TOKEN"
+        echo "flannel-backend: wireguard-native"
+        echo "node-name: {{.NodeName}}"
+        echo "flannel-iface: $IFACE"
+        echo "node-ip: $PRIV"
+        [ -n "$PUB" ] && echo "node-external-ip: $PUB"
+        echo "advertise-address: $PRIV"
+        echo "tls-san:"
+        [ -n "$PUB" ] && echo "  - $PUB"
+        echo "  - $PRIV"
+        echo "node-taint:"
+        echo "  - \"node-role.kubernetes.io/control-plane=:PreferNoSchedule\""
+      } > /etc/rancher/k3s/config.yaml
+      chmod 600 /etc/rancher/k3s/config.yaml
+
+      # INSTALL_K3S_SKIP_START=false: we want it up immediately. Version is
+      # pinned by the caller via INSTALL_K3S_VERSION in the unit below, because a
+      # server more than one minor from its peers is unsupported.
+      curl -sfL https://get.k3s.io | sh -s - server
+      RC=$?
+      if [ "$RC" -ne 0 ]; then
+        log "k3s server install exited $RC - the unit retries on next boot"
+        exit "$RC"
+      fi
+      touch "$SENTINEL"
+      log "joined as SERVER {{.NodeName}} ($PRIV) via $K3S_URL"
+      exit 0
+
+  - path: /etc/systemd/system/fuzeinfra-cp-join.service
+    permissions: "0644"
+    owner: root:root
+    content: |
+      [Unit]
+      Description=FuzeInfra: join this host to k3s as a control-plane server on the VLAN
+      After=network-online.target
+      Wants=network-online.target
+      ConditionPathExists=!/etc/fuzeinfra-cp-joined
+
+      [Service]
+      Type=oneshot
+      RemainAfterExit=no
+      Environment=INSTALL_K3S_VERSION=v1.36.2+k3s1
+      ExecStart=/usr/local/sbin/fuzeinfra-cp-join.sh
+      TimeoutStartSec=1200
+
+      [Install]
+      WantedBy=multi-user.target
+
+runcmd:
+  # Firewall. A k3s SERVER additionally needs etcd client(2379)+peer(2380) and
+  # the API (6443) reachable from the other servers; 51820/udp is the live
+  # flannel wireguard-native backend; 8472/udp kept for VXLAN parity.
+  - [ sh, -c, "ufw allow 22/tcp || true" ]
+  - [ sh, -c, "ufw allow 6443/tcp || true" ]
+  - [ sh, -c, "ufw allow 10250/tcp || true" ]
+  - [ sh, -c, "ufw allow 2379:2380/tcp || true" ]
+  - [ sh, -c, "ufw allow 8472/udp || true" ]
+  - [ sh, -c, "ufw allow 51820/udp || true" ]
+  - [ sh, -c, "ufw allow from 10.0.0.0/22 || true" ]
+  - [ sh, -c, "ufw --force enable || true" ]
+  # Longhorn prerequisites (this node hosts replicas).
+  - [ sh, -c, "export DEBIAN_FRONTEND=noninteractive; apt-get update -qq || true; apt-get install -y -qq open-iscsi nfs-common || true" ]
+  - [ sh, -c, "systemctl enable --now iscsid || true; modprobe iscsi_tcp || true; mkdir -p /var/lib/longhorn" ]
+  - [ sh, -c, "netplan apply || true; sleep 3" ]
+  - [ sh, -c, "ip -4 addr show eth1 > /etc/fuzeinfra-eth1.log 2>&1 || true" ]
+  # The join lives in a systemd unit, not here, so a post-assign reboot re-runs it.
+  - [ sh, -c, "systemctl daemon-reload" ]
+  - [ sh, -c, "systemctl enable --now fuzeinfra-cp-join.service" ]
