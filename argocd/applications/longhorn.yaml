@@ -99,6 +99,22 @@ spec:
           replicaReplenishmentWaitInterval: 30
           # Guard against replicas landing on autoscaled/reaped elastic nodes.
           allowVolumeCreationWithDegradedAvailability: false
+          # Toleration for the SYSTEM-MANAGED components -- instance managers,
+          # engine images and the CSI plugin pods. These are created by
+          # longhorn-manager at runtime, NOT by Helm, so the `tolerations:` keys
+          # below do not reach them; this setting is the only way to tolerate a
+          # taint on their behalf. Without it the Helm-managed DaemonSets would
+          # schedule on the durable nodes while the instance-manager pods that
+          # actually serve the volumes would not -- storage still broken, just
+          # less obviously.
+          #
+          # !! SAME FIRST-INSTALL CAVEAT as storageOverProvisioningPercentage
+          # above: defaultSettings is not reapplied on upgrade. Pair this with
+          #   kubectl -n longhorn-system patch settings.longhorn.io taint-toleration \
+          #     --type=merge -p '{"value":"fuzeinfra.io/durable=true:NoSchedule"}'
+          # Longhorn additionally requires that no volume be attached when this
+          # setting changes, so apply it during the same window as the taint.
+          taintToleration: "fuzeinfra.io/durable=true:NoSchedule"
         # LONGHORN IS NOW THE CLUSTER DEFAULT. This was `false`, with local-path
         # left as the default — and that default was silently destroying data.
         #
@@ -144,8 +160,39 @@ spec:
           provisionerReplicaCount: 1
           resizerReplicaCount: 1
           snapshotterReplicaCount: 1
+        # ---------------------------------------------------------------------
+        # DURABLE-NODE TAINT TOLERATION -- REQUIRED, NOT OPTIONAL.
+        #
+        # The durable nodes are being tainted `fuzeinfra.io/durable=true:NoSchedule`
+        # so application workloads stop landing on the three control-plane/etcd
+        # nodes (measured 2026-09-07: 70 and 57 pods on two of them, 20,585
+        # container restarts, load average 59, etcd losing heartbeats).
+        #
+        # Longhorn is the ONE component that must be exempt in the strongest
+        # sense: `createDefaultDiskLabeledNodes: true` means replica disks exist
+        # ONLY on nodes labelled node.longhorn.io/create-default-disk=true, and
+        # those are exactly the three durable nodes. If longhorn-manager cannot
+        # schedule there, Longhorn loses the manager on every node that holds
+        # storage -- volumes cannot attach, rebuild, or be scheduled at all.
+        # Tainting without these tolerations is a cluster-wide storage outage,
+        # delayed until the next pod restart (NoSchedule does not evict, so it
+        # would not fail at apply time -- it would fail later and look unrelated).
+        #
+        # Verified against the live cluster before writing this: NONE of
+        # longhorn-manager, argocd-application-controller, coredns or fuzefront
+        # carried any toleration beyond the default not-ready/unreachable set.
+        tolerations: &durableToleration
+          - key: fuzeinfra.io/durable
+            operator: Equal
+            value: "true"
+            effect: NoSchedule
         longhornManager:
           priorityClass: ""
+          tolerations: *durableToleration
+        longhornDriver:
+          tolerations: *durableToleration
+        longhornUI:
+          tolerations: *durableToleration
         # UI stays ClusterIP-only by default; expose via a CF Access app +
         # Traefik Ingress deliberately later (design O-2), never wide open.
         ingress:

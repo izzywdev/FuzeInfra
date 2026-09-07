@@ -26,3 +26,22 @@ leaderElectionEnabled: true
 # Restrict the controller to runner namespaces rather than cluster-wide.
 # Set to "" to watch all namespaces (not recommended for least-privilege).
 watchSingleNamespace: "arc-runners"
+
+# Tolerate the durable-node taint (fuzeinfra.io/durable=true:NoSchedule).
+#
+# This is the CONTROLLER, not the runners. The distinction matters:
+#   * runner pods must NOT get this toleration -- they belong on the ci/elastic
+#     pool and are already pinned there by affinity. Letting them onto the
+#     durable nodes is exactly the placement problem the taint exists to stop.
+#   * the controller is small (100m/64Mi), long-lived, and is what creates every
+#     runner. If it lands on an elastic node the autoscaler can reap it mid-
+#     reconcile, and while it is down no scale set produces runners at all --
+#     a fleet-wide CI stall caused by a node the CI workload does not even use.
+#
+# Tolerating is not pinning: the scheduler may still place it on an elastic node.
+# This only keeps the stable nodes eligible.
+tolerations:
+  - key: fuzeinfra.io/durable
+    operator: Equal
+    value: "true"
+    effect: NoSchedule
