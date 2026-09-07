@@ -213,14 +213,50 @@ cordoned=$(kubectl get nodes --no-headers 2>/dev/null | grep -c SchedulingDisabl
 $(kubectl get nodes --no-headers | awk '/SchedulingDisabled/{print "    "$1}')"
 
 if kubectl get nodes.longhorn.io -n longhorn-system >/dev/null 2>&1; then
-  echo "  Longhorn nodes with a schedulable disk:"
+  echo "  Longhorn disk scheduling status:"
+  # NOTE: no backslash-escaped quotes inside the f-string expression below.
+  # The previous revision used f"...{n[\"metadata\"][\"name\"]}..." and died on
+  # EVERY run with:
+  #     SyntaxError: unexpected character after line continuation character
+  # Reproduced directly on a prod node (python3 3.12.3) -- so this is NOT an old
+  # -interpreter problem; the escaped quote is simply invalid there. The `%`
+  # formatting below sidesteps the question entirely.
+  #
+  # Why it went unnoticed for so long: this is the LAST thing the script does and
+  # it is followed by `|| true`, so the traceback scrolled past under a cheerful
+  # "done." and the exit code stayed 0. The single line that reports whether
+  # Longhorn can actually place a replica has therefore never once printed.
+  #
+  # Also now reports UNSCHEDULABLE disks. Only ever printing the healthy ones
+  # made a starved cluster look identical to a healthy one: on 2026-09-07 two of
+  # three durable disks were Schedulable=False and this section would have shown
+  # a single node and no hint that anything was wrong.
   kubectl -n longhorn-system get nodes.longhorn.io -o json 2>/dev/null | python3 -c '
-import json,sys
-for n in json.load(sys.stdin)["items"]:
-    ds=n.get("status",{}).get("diskStatus",{})
-    ok=sum(1 for d in ds.values()
-           if any(c["type"]=="Schedulable" and c["status"]=="True" for c in d.get("conditions",[])))
-    if ok: print(f"    {n[\"metadata\"][\"name\"]}: {ok} disk(s)")
+import json, sys
+try:
+    items = json.load(sys.stdin).get("items", [])
+except Exception as e:
+    print("    (could not parse Longhorn node list: %s)" % e)
+    sys.exit(0)
+good = bad = 0
+for n in items:
+    name = n.get("metadata", {}).get("name", "?")
+    disks = n.get("status", {}).get("diskStatus", {}) or {}
+    for dname, d in disks.items():
+        conds = {c.get("type"): c.get("status") for c in (d.get("conditions") or [])}
+        sched = conds.get("Schedulable")
+        avail = d.get("storageAvailable") or 0
+        mx = d.get("storageMaximum") or 0
+        if sched == "True":
+            good += 1
+            print("    OK   %-16s avail=%.1fG max=%.1fG" % (name, avail/1e9, mx/1e9))
+        else:
+            bad += 1
+            print("    FULL %-16s avail=%.1fG max=%.1fG  Schedulable=%s" % (name, avail/1e9, mx/1e9, sched))
+print("    -> %d schedulable disk(s), %d unschedulable" % (good, bad))
+if good < 3:
+    print("    WARN: fewer than 3 schedulable disks; replicaSoftAntiAffinity=false")
+    print("          means a 3-replica volume cannot be satisfied.")
 ' || true
 fi
 echo "done."

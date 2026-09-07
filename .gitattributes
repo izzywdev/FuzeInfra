@@ -26,3 +26,11 @@ runners/arc/*.sh text eol=lf
 # a line-ending problem.
 cluster-autoscaler/contabo-externalgrpc/deploy/*.template text eol=lf
 modules/contabo-k3s-node/cloud-init.tftpl text eol=lf
+
+# Operator scripts are copied to prod Linux nodes and executed there (e.g.
+# `scp scripts/label-durable-nodes.sh <node>:/tmp && bash /tmp/...`). A CRLF
+# checkout on Windows makes bash read `set -euo pipefail\r`, which fails as
+# `set: pipefail: invalid option name` -- a confusing error that points nowhere
+# near line endings. Hit for real on 2026-09-07. autocrlf already normalises on
+# commit, but that is a per-developer git setting, not a repo guarantee; this is.
+scripts/*.sh text eol=lf
