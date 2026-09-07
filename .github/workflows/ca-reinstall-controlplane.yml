@@ -58,6 +58,38 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v4
+
+      # PREFLIGHT: refuse the reinstall if it would destroy the last copies of data.
+      #
+      # This replaces step 3 of the "BEFORE RUNNING, non-negotiable" comment in the
+      # header ("confirm every Longhorn volume has replicas OFF this node"). That
+      # instruction was followed on 2026-09-07 before reinstalling vmi3383846, it
+      # PASSED, and the Prometheus TSDB was destroyed anyway -- every metric the
+      # cluster had, gone. The instruction was not merely unenforced, it was the
+      # WRONG TEST: a replica that "exists elsewhere" may be a rebuild that started
+      # minutes ago and holds nothing. See scripts/preflight_node_teardown.py.
+      #
+      # Runs only for mode=reinstall: a dry-run mutates nothing, and gating it would
+      # stop operators from using dry-run to inspect a cluster that is already
+      # degraded -- exactly when they most need to look.
+      - name: Preflight — would this reinstall destroy the last copy of any volume?
+        if: ${{ inputs.mode == 'reinstall' }}
+        env:
+          KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
+          NODE_NAME: ${{ inputs.node_name }}
+        run: |
+          set -euo pipefail
+          if [ -z "${KUBE_CONFIG:-}" ]; then
+            echo "::error::KUBE_CONFIG is unset, so the data-safety preflight cannot run."
+            echo "::error::Refusing rather than reinstalling blind — this gate exists because"
+            echo "::error::an unchecked reinstall destroyed the Prometheus TSDB on 2026-09-07."
+            exit 1
+          fi
+          mkdir -p ~/.kube
+          printf '%s' "$KUBE_CONFIG" | base64 -d > ~/.kube/config
+          chmod 600 ~/.kube/config
+          python3 scripts/preflight_node_teardown.py --node "$NODE_NAME"
+
       - name: Reinstall control-plane node
         env:
           CID: ${{ secrets.CONTABO_CLIENT_ID }}

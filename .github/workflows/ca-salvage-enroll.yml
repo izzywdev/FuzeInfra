@@ -44,6 +44,38 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v4
+
+      # PREFLIGHT: same data-safety gate the control-plane path uses.
+      #
+      # Elastic nodes are not SUPPOSED to hold Longhorn replicas -- disks are scoped
+      # to the durable nodes -- so this normally passes trivially. It is here for the
+      # day that stops being true. "Elastic nodes hold no replicas" is an invariant
+      # maintained by node labels, and node labels have already been lost twice this
+      # year (k3s applies --node-label at REGISTRATION ONLY, so a rejoin under an
+      # existing Node object drops them). A cheap check that is trivially satisfied
+      # today is exactly the right shape for an invariant enforced by convention.
+      #
+      # Node name, not instance id: the preflight reasons about Longhorn replicas,
+      # which are keyed on the k8s node name. Skipped when it cannot be derived
+      # (multi-instance runs), since guessing the wrong node would check the wrong
+      # thing and report a false OK — worse than not running.
+      - name: Preflight — would this reinstall destroy the last copy of any volume?
+        if: ${{ inputs.mode == 'reinstall' && inputs.node_name != '' }}
+        env:
+          KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
+          NODE_NAME: ${{ inputs.node_name }}
+        run: |
+          set -euo pipefail
+          if [ -z "${KUBE_CONFIG:-}" ]; then
+            echo "::error::KUBE_CONFIG is unset, so the data-safety preflight cannot run."
+            echo "::error::Refusing rather than reinstalling blind."
+            exit 1
+          fi
+          mkdir -p ~/.kube
+          printf '%s' "$KUBE_CONFIG" | base64 -d > ~/.kube/config
+          chmod 600 ~/.kube/config
+          python3 scripts/preflight_node_teardown.py --node "$NODE_NAME"
+
       - name: Reinstall + enroll elastic instances
         env:
           CID: ${{ secrets.CONTABO_CLIENT_ID }}
