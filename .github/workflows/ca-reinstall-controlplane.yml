@@ -119,9 +119,15 @@ jobs:
           # Mirror of ca-salvage-enroll's guard. An agent template here would
           # silently demote a control plane to a worker.
           case "$(basename "$TMPL")" in
-            cp-userdata*.template|durable-userdata*.template) ;;
+            cp-userdata*.template|durable-userdata*.template|ci-userdata*.template) ;;
             *)
-              echo "::error::refusing non-control-plane template $TMPL (use ca-salvage-enroll for elastic nodes)"
+              # The invariant is NOT ELASTIC, not "control plane only". Elastic
+              # nodes belong to ca-salvage-enroll, whose own guard refuses any node
+              # name outside the elastic prefix. Between the two guards, CI nodes
+              # had no reinstall path at all -- which on 2026-09-07 turned an
+              # ordinary VLAN repair on fuzeinfra-ci-runner-2 into "quarantine the
+              # node and lose the capacity", stalling the whole fleet's CI.
+              echo "::error::refusing template $TMPL. This workflow handles non-elastic nodes (control-plane, durable, ci); elastic nodes go through ca-salvage-enroll."
               exit 1 ;;
           esac
 
