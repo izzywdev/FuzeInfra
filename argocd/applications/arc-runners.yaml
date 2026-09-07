@@ -50,6 +50,51 @@
 ---
 # -----------------------------------------------------------------------------
 # staging  ->  workflows target it with `runs-on: staging`
+#
+# NAMING-DRIFT AUDIT (2026-09-06, FuzeInfra issue tracking this file's naming
+# convention — see the fuzesdlc block below for the sibling finding):
+#
+# CONFIRMED: this set's githubConfigUrl is izzywdev/FuzeInfra, not a repo named
+# "staging" — live-verified via cluster-query (`autoscalingrunnerset.actions.
+# github.com/staging`, 1 current runner, spec.githubConfigUrl=FuzeInfra) and the
+# listener pod `staging-<hash>-listener` in arc-systems. Every OTHER set in this
+# file (20 of 21) is named after the repo it serves (fuzehub, fuzesales, ...),
+# so "staging" is the one name here that does not identify its repo — exactly
+# the convention violation flagged.
+#
+# WHY IT IS NAMED THIS AND WHY IT IS NOT A QUICK FIX: this is not a mistaken
+# one-off — it is FuzeInfra's own dedicated, always-on CI pool, and the FIRST
+# ARC runner this fleet ever created (commit cc6b693, "org-level ARC staging
+# runner for izzywdev"), predating the per-repo-name convention entirely. It
+# was later deliberately adopted as FuzeInfra's own CI pool name in issue #236
+# / runners/arc/WORKFLOW-MIGRATION.md ("Migrating FuzeInfra workflows off
+# ubuntu-latest -> self-hosted staging"). `runs-on: staging` is hardcoded today
+# in ~35 FuzeInfra workflow files, including cluster-critical ones: deploy-prod,
+# cluster-query, infra-request-handler, infra-request-apply-on-approve,
+# argo-outofsync-autofix, helm-validate, governance-nightly, nightly-integration
+# (full list: `git grep -l 'runs-on: staging' -- '*.yml'`). Renaming the
+# `runnerScaleSetName` parameter here WITHOUT renaming every one of those
+# `runs-on:` lines in the same merge queues every one of them forever the
+# moment Argo syncs — exactly the hazard the fuzesdlc block below hit for a
+# single repo; here the blast radius is FuzeInfra's own deploy/CI pipeline.
+#
+# TARGET NAME: FuzeSDLC's governance/ci-runners.md already establishes the
+# family's target naming convention as the uniform constant `fuze-runner` (see
+# the fuzesdlc block below, which has already migrated). Renaming `staging` to
+# match its own repo name (`fuzeinfra`) would fix the immediate violation but
+# create a second name that would just need renaming again once the rest of
+# the fleet uniforms on `fuze-runner` — so `fuze-runner` is the recommended
+# target, not `fuzeinfra`. On a personal account each set is repo-scoped by
+# `githubConfigUrl`, so FuzeInfra's `fuze-runner` set cannot collide with
+# FuzeSDLC's `fuze-runner` set even though the job-matching string is identical.
+#
+# NOT DONE HERE, ON PURPOSE: this session observed real queue congestion on
+# this exact pool tonight (multiple dispatches queued for minutes before
+# clearing). Cutting it over requires one atomic PR that changes this
+# `runnerScaleSetName` parameter AND every `runs-on: staging` line across ~35
+# workflow files in the SAME merge, during a coordinated low-traffic window —
+# not a quiet single-file change under active load. See the tracking issue
+# opened alongside this PR for the full file list and cutover checklist.
 # -----------------------------------------------------------------------------
 apiVersion: argoproj.io/v1alpha1
 kind: Application
@@ -670,6 +715,33 @@ spec:
 # job queued forever behind idle runners — the exact "flip the manifest and the
 # set rename together" hazard the doc describes.
 # Priority: FuzeSDLC#115 (v1.8.0 baseline release) is blocked on this set.
+#
+# CORRECTION (2026-09-06), live-verified: the "no orphan" claim above was WRONG.
+# The chart names the AutoscalingRunnerSet k8s object after `runnerScaleSetName`,
+# not after the Helm releaseName — so changing runnerScaleSetName fuzesdlc ->
+# fuze-runner made Argo render a NEW object named `fuze-runner` while the OLD
+# object named `fuzesdlc` (runner-scale-set-id "1", created 2026-08-19) simply
+# stopped being part of desired state. Because this Application's `prune` was
+# `false` (see below), Argo never deleted it. Confirmed live via cluster-query:
+#   kubectl -n arc-runners get autoscalingrunnersets
+#     -> BOTH `fuzesdlc` and `fuze-runner` exist, both spec.githubConfigUrl
+#        https://github.com/izzywdev/FuzeSDLC, both phase: Running
+#   kubectl -n arc-systems get pods
+#     -> BOTH `fuzesdlc-<hash>-listener` and `fuze-runner-<hash>-listener` are
+#        1/1 Running right now — two live listeners polling GitHub for the same
+#        repo, one of them (`fuzesdlc`) orphaned and unreferenced (no workflow
+#        anywhere in the family uses `runs-on: fuzesdlc` any more — confirmed via
+#        `gh search code`). Its pod spec is also stale: it predates the
+#        2026-08-31 node-affinity fix (elastic-pool scheduling), so it still
+#        carries the old single-value `nodeSelector: fuzeinfra.io/pool: ci`.
+# This IS the "fuze-runner and fuzesdlc both map to FuzeSDLC" duplicate-mapping
+# reported for this file — not two competing manifest declarations (there is
+# only ever one Application here), but one un-pruned leftover from an in-place
+# rename. Fix: flip `prune: true` for THIS Application only (scoped to this one
+# block, not the fleet-wide default) so Argo removes the orphaned `fuzesdlc`
+# object through its own finalizer-driven GitHub deregistration — the sanctioned
+# ARC cleanup path — on next sync. Nothing currently depends on it, so this is
+# not the disruptive half of this PR (see the `staging` block above for that).
 # -----------------------------------------------------------------------------
 apiVersion: argoproj.io/v1alpha1
 kind: Application
@@ -714,7 +786,14 @@ spec:
   syncPolicy:
     automated:
       selfHeal: true
-      prune: false
+      # prune TRUE here ONLY (every other Application in this file keeps prune:
+      # false — this is a scoped, single-Application exception, not a fleet-wide
+      # flip). Desired state for this Application is now exactly one rendered
+      # AutoscalingRunnerSet named `fuze-runner`; the live orphaned `fuzesdlc`
+      # object (see the audit comment above) is not in that render, so this
+      # sync will prune it — the sanctioned, finalizer-driven ARC cleanup path
+      # (GitHub deregistration + object deletion), not a manual kubectl delete.
+      prune: true
     syncOptions:
       - CreateNamespace=true
       - ServerSideApply=true
