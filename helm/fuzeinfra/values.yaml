@@ -953,8 +953,21 @@ kubeStateMetrics:
   # fuzeinfra.io/pool backs the CiNodePoolLabelMissing rule (rules/nodes.yml):
   # k3s sets --node-label only at agent registration, so a manual relabel is
   # never reconciled by Terraform and silently strands all CI runner pods.
+  # fuzeinfra.io/vlan backs NodeQuarantinedOffVLAN and NodeMissingVLANLabel
+  # (rules/nodes.yml). It was missing here until 2026-09-07, which did not make
+  # those two rules merely silent — it broke them in OPPOSITE directions:
+  #   * NodeQuarantinedOffVLAN selects label_fuzeinfra_io_vlan="absent" directly,
+  #     so with no such dimension it matched nothing and could never fire.
+  #   * NodeMissingVLANLabel is an `unless on(node) kube_node_labels{...vlan=~
+  #     "present|absent"}` exclusion. An always-empty right-hand side excludes
+  #     nothing, so it fired for EVERY non-control-plane node forever.
+  # Their promtool tests passed throughout, because the fixtures hand-feed a
+  # label_fuzeinfra_io_vlan dimension that kube-state-metrics was never
+  # configured to emit. tests/test_alert_label_allowlist.py now cross-checks the
+  # rules against this list so a rule can no longer reference a dropped label.
   nodeLabelsAllowlist:
     - fuzeinfra.io/pool
+    - fuzeinfra.io/vlan
   resources:
     requests: { cpu: 10m, memory: 32Mi }
     limits:   { cpu: 250m, memory: 128Mi }
