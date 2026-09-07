@@ -891,6 +891,54 @@ backups:
     image: neo4j:5             # ships cypher-shell; APOC stream export (online)
     host: fuzeinfra-neo4j
     boltPort: 7687
+  # -------------------------------------------------------------------------
+  # VOLUME backups (templates/backup-volume-cronjobs.yaml)
+  # -------------------------------------------------------------------------
+  # Prometheus has no logical dump tool — its state is a file tree on a PVC — so
+  # it was not covered by the per-database CronJobs above. That is what
+  # destroyed the whole metrics history on 2026-09-07 when two durable nodes
+  # were reinstalled 25 minutes apart and every Longhorn replica of
+  # `fuzeinfra-prometheus-data` was lost mid-rebuild: there was nothing to
+  # restore from. This job copies the TSDB to the SAME S3 bucket with the SAME
+  # credential (backups.s3.existingSecret) as the dumps.
+  #
+  # Loki is deliberately NOT here: with loki.s3.enabled its chunks and index are
+  # already written straight to `fuzeinfra-loki`, and the PVC holds only working
+  # set (WAL / shipper cache / compactor dir). See the template header.
+  #
+  # Requires backups.sink="s3" — a copy on the storage it protects against is
+  # not a backup. Off by default; enabled per-overlay.
+  volumes:
+    # Separate TOP-LEVEL key prefix (a sibling of backups.s3.prefix, not nested
+    # under it) so these copies get their own, shorter lifecycle rule without
+    # overlapping the dump rule. Tens of GB per run vs a few MB per dump.
+    prefix: "volumes"
+    # Age-out for volume copies, applied as its own BUCKET LIFECYCLE rule
+    # (backup-s3-lifecycle.yaml). 0 disables that rule — which, for objects this
+    # large, means the bucket grows forever. Do not set it to 0 casually.
+    lifecycleExpireDays: 14
+    # 20Gi of small TSDB block files: aws s3 sync wants headroom and time.
+    activeDeadlineSeconds: 10800
+    resources:
+      requests: { cpu: 100m, memory: 256Mi }
+      limits:   { cpu: "1",  memory: 1Gi }
+    prometheus:
+      enabled: false
+      # Staggered clear of the 02:00–03:00 DB dump window.
+      schedule: "20 3 * * *"
+      # Snapshots via POST /api/v1/admin/tsdb/snapshot — a consistent,
+      # hard-linked copy. Enabling this ALSO makes monitoring.yaml pass
+      # `--web.enable-admin-api` to Prometheus. The flag is tied to this switch
+      # rather than being on unconditionally because the admin API also exposes
+      # delete_series to anything that can reach port 9090 in-cluster.
+      snapshotImage: curlimages/curl:8.10.1   # sh + curl + sed, ~10MB
+      host: fuzeinfra-prometheus
+      port: 9090
+      # The standalone PVC declared in templates/monitoring.yaml.
+      pvcName: fuzeinfra-prometheus-data
+      # Must match the fsGroup Prometheus runs with (monitoring.yaml: 65534), or
+      # the Job cannot read — let alone remove — the snapshot tree.
+      runAsUser: 65534
 
 promtail:
   enabled: true

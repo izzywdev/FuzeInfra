@@ -1,0 +1,197 @@
+{{- /*
+================ Scheduled Prometheus TSDB backup → S3 ================
+Companion to backup-cronjobs.yaml. That file covers the stores that have a
+native LOGICAL dump tool (pg_dumpall / mongodump / mariadb-dump / APOC export).
+Prometheus has none — its state is a file tree on a PVC — so it was the one
+store in this chart with NO backup at all.
+
+That gap cost us the entire metrics history on 2026-09-07: two durable nodes
+were reinstalled 25 minutes apart, `fuzeinfra-prometheus-data`'s Longhorn
+replicas were still rebuilding from the first when the second was wiped, the
+volume went `robustness: faulted` with zero recoverable replicas, and there was
+nothing to restore from.
+
+WHAT ABOUT LOKI — checked, and it is NOT in the same position. `loki.s3.enabled`
+is true on the prod overlay and confirmed live (the rendered loki-config.yaml
+has `store: tsdb / object_store: s3` against bucket `fuzeinfra-loki`), so Loki's
+chunks and index are already written straight to object storage. All that
+remains on `fuzeinfra-loki-data` is working set — WAL, tsdb-shipper cache,
+compactor working dir — whose loss costs the minutes not yet shipped. A nightly
+file copy of that volume would not shorten that window, so no job is defined for
+it. If an overlay ever runs Loki with the filesystem backend, that overlay needs
+coverage and this note is the place to start.
+
+WHY NOT JUST `tar` THE LIVE DIRECTORY
+  Copying /prometheus while Prometheus is running yields a corrupt, unrestorable
+  TSDB: the head block is being written, the WAL is mid-segment, and compaction
+  can delete a block out from under the reader. Prometheus ships the correct
+  primitive instead — POST /api/v1/admin/tsdb/snapshot creates a consistent,
+  HARD-LINKED copy under <storage.tsdb.path>/snapshots/<name> that is safe to
+  read and nearly free to make. It requires `--web.enable-admin-api`, which
+  monitoring.yaml now adds *only* when this backup is enabled.
+
+WHY A CronJob CAN READ THE VOLUME AT ALL
+  ReadWriteOnce means "read-write by a single NODE", not "by a single pod" —
+  pods co-located on the node holding the attachment may all mount it (see the
+  Kubernetes PV access-modes doc; Longhorn implements the standard CSI stage /
+  publish split). The Job therefore carries a REQUIRED podAffinity onto the
+  Prometheus pod, so the scheduler can only place it on the node where the
+  volume is already attached. If Prometheus is down the Job pod stays Pending
+  and the Job fails on activeDeadlineSeconds — a visible failure
+  (kube_job_failed), never a silent skip.
+
+WHY `aws s3 sync` AND NOT ONE TARBALL
+  A 20Gi TSDB tarred into an emptyDir would need up to 20Gi of NODE ephemeral
+  disk before a single byte is uploaded — on these nodes that is its own
+  outage. `sync` streams file-by-file with no staging area, and restore is the
+  same command with the arguments reversed (docs/backups-and-blobs.md §4).
+
+Credentials: the SAME offline-sealed SealedSecret the DB dumps already use
+(`backups.s3.existingSecret`). No new credential is introduced here.
+Retention: a BUCKET LIFECYCLE rule (backup-s3-lifecycle.yaml), on its own
+top-level key prefix so these large copies age out faster than the small dumps.
+
+Gated OFF by default: needs `backups.enabled` AND
+`backups.volumes.prometheus.enabled`.
+*/ -}}
+
+{{- if .Values.backups.enabled }}
+{{- $b := .Values.backups }}
+{{- $v := $b.volumes }}
+{{- if $v.prometheus.enabled }}
+{{- if ne $b.sink "s3" }}
+{{- fail "backups.volumes.prometheus.enabled=true requires backups.sink=\"s3\" — a volume copy kept on the same Longhorn storage it protects against is not a backup (2026-07-29 incident)." }}
+{{- end }}
+{{- if not .Values.prometheus.enabled }}
+{{- fail "backups.volumes.prometheus.enabled=true but prometheus.enabled=false — nothing to back up." }}
+{{- end }}
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: fuzeinfra-backup-prometheus
+  labels:
+    {{- include "fuzeinfra.labels" . | nindent 4 }}
+    app.kubernetes.io/component: backup
+spec:
+  schedule: {{ $v.prometheus.schedule | default $b.schedule | quote }}
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 300
+  successfulJobsHistoryLimit: {{ $b.successfulJobsHistoryLimit }}
+  failedJobsHistoryLimit: {{ $b.failedJobsHistoryLimit }}
+  jobTemplate:
+    spec:
+      backoffLimit: {{ $b.backoffLimit }}
+      activeDeadlineSeconds: {{ $v.activeDeadlineSeconds }}
+      template:
+        metadata:
+          labels:
+            {{- include "fuzeinfra.labels" $ | nindent 12 }}
+            {{- include "fuzeinfra.selectorLabels" (dict "component" "backup-prometheus" "root" $) | nindent 12 }}
+            app.kubernetes.io/component: backup
+        spec:
+          restartPolicy: Never
+          # Run as the uid Prometheus itself runs as (monitoring.yaml sets
+          # fsGroup 65534) so the snapshot tree is readable AND removable.
+          securityContext:
+            runAsUser: {{ $v.prometheus.runAsUser }}
+            runAsGroup: {{ $v.prometheus.runAsUser }}
+            fsGroup: {{ $v.prometheus.runAsUser }}
+          # Land on the node that currently holds the RWO attachment (see header).
+          affinity:
+            podAffinity:
+              requiredDuringSchedulingIgnoredDuringExecution:
+                - topologyKey: kubernetes.io/hostname
+                  labelSelector:
+                    matchLabels:
+                      {{- include "fuzeinfra.selectorLabels" (dict "component" "prometheus" "root" $) | nindent 22 }}
+          {{- include "fuzeinfra.durableToleration" $ | nindent 10 }}
+          volumes:
+            - name: scratch
+              emptyDir: {}
+            # subPath CONFINES this mount to <tsdb>/snapshots — the TSDB blocks
+            # themselves are neither visible to nor touchable by this pod, which
+            # matters because the pod does delete things. kubelet creates the
+            # subdirectory if Prometheus has not yet.
+            - name: snapshots
+              persistentVolumeClaim:
+                claimName: {{ $v.prometheus.pvcName | quote }}
+          initContainers:
+            - name: snapshot
+              image: {{ $v.prometheus.snapshotImage | quote }}
+              imagePullPolicy: {{ include "fuzeinfra.pullPolicy" $ }}
+              env:
+                - name: PROM_URL
+                  value: {{ printf "http://%s:%v" $v.prometheus.host $v.prometheus.port | quote }}
+                - name: PREFIX
+                  value: {{ $v.prefix | quote }}
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  set -eu
+                  # Drop anything a previous run left behind BEFORE making a new
+                  # snapshot. Snapshots are hard links, so an abandoned one pins
+                  # blocks that retention has already dropped and silently grows
+                  # the TSDB volume. Confined to the snapshots subPath.
+                  rm -rf /snapshots/* 2>/dev/null || true
+                  resp="$(curl -sS -XPOST "$PROM_URL/api/v1/admin/tsdb/snapshot")"
+                  echo "$resp"
+                  case "$resp" in
+                    *'"status":"success"'*) : ;;
+                    *) echo "snapshot API did not report success (is --web.enable-admin-api set?)" >&2; exit 1 ;;
+                  esac
+                  name="$(printf '%s' "$resp" | sed -n 's/.*"name":"\([^"]*\)".*/\1/p')"
+                  [ -n "$name" ] || { echo "could not parse a snapshot name out of the response" >&2; exit 1; }
+                  [ -d "/snapshots/$name" ] || { echo "/snapshots/$name is missing — is $PROM_URL really backed by PVC {{ $v.prometheus.pvcName }}?" >&2; exit 1; }
+                  printf '%s' "$name" > /scratch/snapshot-name
+                  printf '%s/prometheus/%s' "$PREFIX" "$(date -u +%Y%m%dT%H%M%SZ)" > /scratch/remote-key
+                  echo "Snapshot $name taken ($(du -sh "/snapshots/$name" | cut -f1)) -> $(cat /scratch/remote-key)"
+              volumeMounts:
+                - name: scratch
+                  mountPath: /scratch
+                - name: snapshots
+                  mountPath: /snapshots
+                  subPath: snapshots
+              resources:
+                {{- toYaml $v.resources | nindent 16 }}
+          containers:
+            - name: upload
+              image: {{ $b.awsCliImage | quote }}
+              imagePullPolicy: {{ include "fuzeinfra.pullPolicy" $ }}
+              env:
+                {{- include "fuzeinfra.backup.s3env" (dict "b" $b "root" $) | nindent 16 }}
+                # IMDS is unreachable in-cluster; without this the CLI stalls on it.
+                - name: AWS_EC2_METADATA_DISABLED
+                  value: "true"
+                - name: HOME
+                  value: /tmp
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  set -eu
+                  name="$(cat /scratch/snapshot-name)"
+                  key="$(cat /scratch/remote-key)"
+                  echo "Uploading /snapshots/$name -> s3://$S3_BUCKET/$key/"
+                  aws --endpoint-url "$S3_ENDPOINT" s3 sync \
+                    "/snapshots/$name" "s3://$S3_BUCKET/$key/tsdb/" --only-show-errors
+                  # MANIFEST is written LAST, so its presence is the marker of a
+                  # COMPLETE backup. A restore must refuse any prefix without it —
+                  # a half-synced TSDB looks exactly like a whole one otherwise.
+                  printf 'snapshot=%s\ncompleted=%s\nsource_pvc=%s\nlayout=tsdb/\n' \
+                    "$name" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "{{ $v.prometheus.pvcName }}" > /tmp/MANIFEST
+                  aws --endpoint-url "$S3_ENDPOINT" s3 cp /tmp/MANIFEST "s3://$S3_BUCKET/$key/MANIFEST"
+                  # Release the hard links so retention can actually free blocks.
+                  rm -rf "/snapshots/$name"
+                  echo "Prometheus TSDB backup complete: s3://$S3_BUCKET/$key/"
+              volumeMounts:
+                - name: scratch
+                  mountPath: /scratch
+                - name: snapshots
+                  mountPath: /snapshots
+                  subPath: snapshots
+              resources:
+                {{- toYaml $v.resources | nindent 16 }}
+{{- end }}
+{{- end }}

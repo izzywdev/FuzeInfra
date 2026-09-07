@@ -4,17 +4,29 @@ FuzeInfra runs its stateful stores on **block / local-path** storage. Object
 storage (S3-compatible, Contabo Object Storage) is **not** a live data volume for
 any database — S3 has no POSIX/block semantics, so Postgres, MongoDB, Redis,
 Neo4j, Elasticsearch, ChromaDB, Kafka and RabbitMQ all keep their data on the
-node's block storage. S3 has exactly three roles on this platform:
+node's block storage. S3 has exactly four roles on this platform:
 
 | Use | Bucket | Mechanism | Default |
 |-----|--------|-----------|---------|
 | Loki log chunks + index | `fuzeinfra-loki` | Loki native S3 backend | **on** (prod, since 2026-09-01) |
-| Scheduled DB backup dumps | `fuzeinfra-backups` | backup CronJobs (this chart) | off |
+| Scheduled DB backup dumps | `fuzeinfra-backups`, `db/` | backup CronJobs (this chart) | off |
+| Prometheus TSDB backup | `fuzeinfra-backups`, `volumes/` | TSDB-snapshot CronJob (this chart) | off |
 | Application blob storage | `fuzeinfra-blobs` | app SDK (S3 client) | n/a |
 
 Everything is **default-disabled** and every enable step is human-gated and
-GitOps-driven. Prometheus long-term storage is a separate, deferred concern
-(documented at the bottom).
+GitOps-driven. Prometheus long-term storage (Thanos) is a separate, deferred
+concern (documented at the bottom) — §4 is a nightly disaster-recovery floor,
+not continuous durability.
+
+**Coverage, so it is auditable at a glance.** Postgres, MongoDB, MariaDB and
+Neo4j are covered by §2. The Prometheus TSDB is covered by §4 — it was **not**
+covered before 2026-09-07, which is exactly why the metrics history is gone.
+Loki needs no backup job while `loki.s3.enabled` is true: chunks and index go
+straight to `fuzeinfra-loki`, and `fuzeinfra-loki-data` holds only working set
+(WAL, tsdb-shipper cache, compactor working dir), whose loss costs the minutes
+not yet shipped. Redis, Kafka, RabbitMQ, Elasticsearch and ChromaDB are **not**
+backed up — caches, replayable streams and rebuildable indexes. If that ever
+stops being true for one of them, it needs a job here.
 
 Buckets and S3 key pairs are provisioned by Terraform (`object-storage.tf`, on
 the existing Contabo OAuth2 provider). Credentials are **never** created with
@@ -135,10 +147,103 @@ routing bytes through the app.
 
 ---
 
+## 4. Prometheus TSDB → S3 (`fuzeinfra-backups`, prefix `volumes/`)
+
+### Why this exists
+
+On **2026-09-07** two durable nodes were reinstalled 25 minutes apart. The
+Longhorn replicas of `fuzeinfra-prometheus-data` were still rebuilding from the
+first reinstall when the second one was wiped; the volume went
+`robustness: faulted` with **zero** recoverable replicas and every metric the
+cluster had was lost. The per-database CronJobs in §2 did not cover it, because
+Prometheus has no logical dump tool — its state is a file tree.
+
+### Why not `tar /prometheus`
+
+Copying the TSDB directory while Prometheus is running produces a **corrupt,
+unrestorable** snapshot: the head block is being written, the WAL is
+mid-segment, and compaction can delete a block out from under the reader.
+Prometheus ships the right primitive — `POST /api/v1/admin/tsdb/snapshot`
+creates a consistent, hard-linked copy under `<tsdb.path>/snapshots/<name>`.
+That endpoint requires `--web.enable-admin-api`, which `templates/monitoring.yaml`
+adds **only** when `backups.volumes.prometheus.enabled` is true (the same admin
+API also exposes `delete_series` to anything that can reach port 9090
+in-cluster, so it is not left on unconditionally).
+
+### How the job works
+
+`templates/backup-volume-cronjobs.yaml`, gated by `backups.enabled` **and**
+`backups.volumes.prometheus.enabled`, requires `backups.sink: "s3"`:
+
+- **initContainer `snapshot`** (`curlimages/curl`) prunes any snapshot a previous
+  run abandoned — they are hard links and pin blocks retention has already
+  dropped — then POSTs the snapshot API and records the returned name.
+- **container `upload`** (`amazon/aws-cli`) `aws s3 sync`s the snapshot tree to
+  `s3://fuzeinfra-backups/volumes/prometheus/<ts>/tsdb/`, writes a `MANIFEST`
+  object **last**, and removes the local snapshot so its hard links stop pinning
+  blocks.
+
+Both mount the TSDB PVC with `subPath: snapshots`, so the blocks themselves are
+not reachable from this pod. The pod carries a **required podAffinity** onto the
+Prometheus pod: `ReadWriteOnce` is per-*node*, so co-location is what makes the
+mount legal. If Prometheus is down the Job pod stays `Pending` and the Job fails
+on `activeDeadlineSeconds` — visible as `kube_job_failed`, never a silent skip.
+
+The credential is the **same** `fuzeinfra-backups-s3` SealedSecret the DB dumps
+use. Nothing new is provisioned.
+
+**Retention** is a second **bucket lifecycle rule** asserted by the same PostSync
+hook Job as §2 (`backup-s3-lifecycle.yaml`) —
+`backups.volumes.lifecycleExpireDays`, **14 days** in prod against the dumps'
+30, because a run is tens of GB rather than a few MB. Both rules go in one
+`put-bucket-lifecycle-configuration` call, which is a full replace.
+
+### Restore (break-glass, manual)
+
+**What you lose:** everything scraped between the last successful nightly run
+(03:20 UTC in prod) and the failure — **up to 24 hours of metrics**, plus
+anything older than the restored snapshot's own retention window. This is a
+disaster-recovery floor, not continuous protection; continuous would be Thanos
+(below).
+
+1. **Pick a backup and prove it is complete.** A prefix without `MANIFEST` is a
+   half-finished sync — do not restore it.
+   ```bash
+   aws --endpoint-url https://eu2.contabostorage.com \
+     s3 ls s3://fuzeinfra-backups/volumes/prometheus/
+   aws --endpoint-url https://eu2.contabostorage.com \
+     s3 cp s3://fuzeinfra-backups/volumes/prometheus/<TS>/MANIFEST -
+   ```
+2. **Stop the writer.** Prometheus must not be running against the volume while
+   it is repopulated. Via Git (prod is GitOps — do not `kubectl scale`): set
+   `prometheus.enabled: false` in `values-contabo.yaml`, merge, let Argo sync.
+   In a genuine break-glass, an operator may scale the Deployment to 0 knowing
+   Argo `selfHeal` will revert it.
+3. **Get an empty volume.** If the PVC is faulted, delete the PVC and let Argo
+   recreate it from `templates/monitoring.yaml`; otherwise reuse it.
+4. **Copy the data back in.** Run a throwaway pod that mounts
+   `fuzeinfra-prometheus-data` at `/prometheus` (any image with the aws CLI, the
+   S3 env from `fuzeinfra-backups-s3`, `runAsUser/fsGroup: 65534`):
+   ```bash
+   aws --endpoint-url "$S3_ENDPOINT" s3 sync \
+     "s3://$S3_BUCKET/volumes/prometheus/<TS>/tsdb/" /prometheus/
+   ```
+   The snapshot's layout **is** a TSDB directory — block dirs plus `chunks_head`
+   — so it goes in at the root of `storage.tsdb.path`, not into a subdirectory.
+   A snapshot carries no WAL; Prometheus starts a fresh one.
+5. **Start Prometheus** (revert step 2 through Git) and verify:
+   `curl -s localhost:9090/api/v1/query?query=up | head`, and check that
+   `prometheus_tsdb_head_series` is non-zero and that a range query reaches back
+   into the restored window.
+6. **Turn off any temporary out-of-band change** so Argo and Git agree again.
+
+---
+
 ## Deferred: Prometheus long-term storage (Thanos)
 
-Prometheus keeps only local TSDB today. Long-term/HA metrics on S3 is a separate
-effort via the **Thanos** sidecar + object-store path (`thanos-store`,
-`thanos-compact`) writing to a `fuzeinfra-metrics` bucket. It is **not** part of
-this work and is tracked separately; the DB-backup and Loki paths above do not
-depend on it.
+§4 is a nightly **disaster-recovery floor**, not long-term storage: it bounds
+loss at ~24h, it does not make metrics durable continuously or queryable across
+restores. Long-term/HA metrics on S3 remains a separate effort via the **Thanos**
+sidecar + object-store path (`thanos-store`, `thanos-compact`) writing to a
+`fuzeinfra-metrics` bucket. It is **not** part of this work and is tracked
+separately; the DB-backup, Loki and TSDB-backup paths above do not depend on it.

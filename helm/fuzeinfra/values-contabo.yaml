@@ -419,6 +419,25 @@ backups:
     prefix: "db"
     existingSecret: "fuzeinfra-backups-s3"
     lifecycleExpireDays: 30   # provider expires db/ objects after 30 days
+  # Volume backups — the gap that cost us every metric we had on 2026-09-07.
+  # `fuzeinfra-prometheus-data` is a file tree, so no per-database dump job
+  # covered it; when two durable nodes were reinstalled 25 minutes apart the
+  # TSDB's Longhorn replicas were still rebuilding from the first, the second
+  # wipe took the last one, the volume went robustness:faulted and the history
+  # was simply gone. Same bucket, same sealed credential as the dumps above —
+  # only the key prefix and the retention differ.
+  #
+  # Loki needs no entry here: loki.s3.enabled is true above, so its chunks and
+  # index already live in `fuzeinfra-loki` rather than on its PVC.
+  volumes:
+    prefix: "volumes"
+    # 14d, not the dumps' 30d: a run is tens of GB, not a few MB. Contabo object
+    # storage is billed by stored volume, so 30d here would roughly double the
+    # bucket for history nobody restores from that far back.
+    lifecycleExpireDays: 14
+    prometheus:
+      enabled: true
+      schedule: "20 3 * * *"   # 03:20 UTC — clear of the 02:00–03:00 dump window
 airflow:
   # Restored to 1 to make the SSO login exercisable — with no webserver pod the
   # flow cannot be tested at all, which is why the runbook lists this as a
