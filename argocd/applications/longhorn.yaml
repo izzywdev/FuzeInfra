@@ -150,6 +150,14 @@ spec:
         # annotation must be flipped to "false" as well. It is owned by the k3s
         # addon controller (objectset.rio.cattle.io/owner-name: local-storage),
         # not by this chart, so it cannot be expressed here.
+        #
+        # It now lives in argocd/cluster-bootstrap/local-path-not-default.yaml,
+        # applied by the `apply-cluster-config` workflow. It started life as a
+        # one-off `kubectl patch`, and that did NOT hold: k3s regenerates
+        # /var/lib/rancher/k3s/server/manifests/local-storage.yaml and re-applies
+        # it at every start, so prod was measured back on TWO defaults on
+        # 2026-09-07. Re-run that workflow after any k3s restart until the addon
+        # is skipped on the server nodes (see that file).
         persistence:
           defaultClass: true
           defaultClassReplicaCount: 3
