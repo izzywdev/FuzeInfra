@@ -134,6 +134,14 @@ write_files:
         echo "tls-san:"
         [ -n "$PUB" ] && echo "  - $PUB"
         echo "  - $PRIV"
+        # Longhorn places a replica ONLY on a node carrying this label, and k3s
+        # applies --node-label at REGISTRATION ONLY -- so a reinstall silently
+        # drops it and Longhorn quietly loses a third of its capacity. Baking it
+        # in here is what makes the label survive a rebuild; scripts/
+        # label-durable-nodes.sh remains the repair path for nodes that predate
+        # this template, not the primary mechanism.
+        echo "node-label:"
+        echo "  - node.longhorn.io/create-default-disk=true"
         echo "node-taint:"
         echo "  - \"node-role.kubernetes.io/control-plane=:PreferNoSchedule\""
       } > /etc/rancher/k3s/config.yaml
