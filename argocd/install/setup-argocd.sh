@@ -27,6 +27,37 @@ kubectl apply -n argocd \
 echo "==> Waiting for Argo CD server to be ready"
 kubectl -n argocd rollout status deploy/argocd-server --timeout=300s
 
+# -----------------------------------------------------------------------------
+# Tolerate the durable-node taint (fuzeinfra.io/durable=true:NoSchedule).
+#
+# Argo CD is installed from the upstream install.yaml, which carries no
+# tolerations and exposes no values file, so this cannot be expressed
+# declaratively the way the Helm-managed components do it -- it has to be a
+# patch applied after install.
+#
+# WHY ARGO NEEDS IT. The durable nodes are tainted so application workloads stop
+# piling onto the three control-plane/etcd nodes. Argo CD is not an application:
+# it is the thing that reconciles every application. Without a toleration it can
+# only run on autoscaled elastic nodes, which the reaper releases on billing
+# boundaries -- so the GitOps engine would be evicted on a billing schedule, and
+# while it is down nothing in the cluster reconciles, including whatever change
+# was meant to repair the situation.
+#
+# Tolerating is not pinning -- the scheduler may still choose an elastic node.
+# This only keeps the stable nodes eligible.
+#
+# Idempotent: re-running applies the same patch. Safe to run against an existing
+# install (including prod) without reinstalling Argo.
+echo "==> Patching Argo CD workloads to tolerate the durable-node taint"
+DURABLE_TOLERATION='{"spec":{"template":{"spec":{"tolerations":[{"key":"fuzeinfra.io/durable","operator":"Equal","value":"true","effect":"NoSchedule"}]}}}}'
+for kind in deployment statefulset; do
+  for w in $(kubectl -n argocd get "$kind" -o name 2>/dev/null); do
+    kubectl -n argocd patch "$w" --type=strategic -p "$DURABLE_TOLERATION" >/dev/null \
+      && echo "     ok   $w" \
+      || echo "     WARN could not patch $w" >&2
+  done
+done
+
 echo "==> Applying AppProjects (FuzeInfra owns the destination/security boundary)"
 kubectl apply -f "$ARGOCD_DIR/projects/fuzeinfra.yaml"
 # Consumer projects are FuzeInfra-owned + restricted (cannot deploy into the
