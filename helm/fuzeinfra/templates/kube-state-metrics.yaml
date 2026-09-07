@@ -91,6 +91,19 @@ rules:
     resources:
       - leases
     verbs: ["list", "watch"]
+  {{- if .Values.kubeStateMetrics.longhornVolumeMetrics.enabled }}
+  # Longhorn Volume CRs back the LonghornVolumeUnderReplicated and
+  # LonghornVolumeDegradedTooLong rules (rules/storage.yml). spec.numberOfReplicas
+  # exists ONLY on the CR — Longhorn's own /metrics has no replica-count metric of
+  # any kind — so the CustomResourceState collector must be able to watch them.
+  # Without this rule KSM logs a forbidden error once per resync and the
+  # longhorn_crd_* series simply never appear, which is silent: the pod still goes
+  # Ready and both rules load fine while being permanently unable to fire.
+  - apiGroups: ["longhorn.io"]
+    resources:
+      - volumes
+    verbs: ["list", "watch"]
+  {{- end }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -106,6 +119,18 @@ subjects:
   - kind: ServiceAccount
     name: fuzeinfra-kube-state-metrics
     namespace: {{ .Release.Namespace }}
+{{- if .Values.kubeStateMetrics.longhornVolumeMetrics.enabled }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: fuzeinfra-kube-state-metrics-crs
+  labels:
+    {{- include "fuzeinfra.labels" . | nindent 4 }}
+data:
+  custom-resource-state.yaml: |
+{{ .Files.Get "files/ksm-customresource-state.yaml" | indent 4 }}
+{{- end }}
 ---
 apiVersion: v1
 kind: Service
@@ -159,6 +184,12 @@ spec:
             # CiNodePoolLabelMissing rule in rules/nodes.yml can never fire.
             - --metric-labels-allowlist=nodes=[{{ join "," . }}]
             {{- end }}
+            {{- if .Values.kubeStateMetrics.longhornVolumeMetrics.enabled }}
+            # Generates longhorn_crd_volume_{replicas_desired,robustness,state}
+            # from the Longhorn Volume CRs. See files/ksm-customresource-state.yaml
+            # for why this is the only way to observe spec.numberOfReplicas.
+            - --custom-resource-state-config-file=/etc/ksm/custom-resource-state.yaml
+            {{- end }}
           ports:
             - name: http-metrics
               containerPort: 8080
@@ -178,6 +209,18 @@ spec:
             periodSeconds: 10
           resources:
             {{- toYaml .Values.kubeStateMetrics.resources | nindent 12 }}
+          {{- if .Values.kubeStateMetrics.longhornVolumeMetrics.enabled }}
+          volumeMounts:
+            - name: crs-config
+              mountPath: /etc/ksm
+              readOnly: true
+          {{- end }}
+      {{- if .Values.kubeStateMetrics.longhornVolumeMetrics.enabled }}
+      volumes:
+        - name: crs-config
+          configMap:
+            name: fuzeinfra-kube-state-metrics-crs
+      {{- end }}
       {{- with .Values.kubeStateMetrics.nodeSelector }}
       # PLACEMENT IS OPERATIONAL, NOT COSMETIC. kube-state-metrics is a monitoring
       # control-plane component and must not sit on an autoscaler-managed elastic node:

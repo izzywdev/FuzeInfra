@@ -1165,3 +1165,11 @@ chromadb:
 kubeStateMetrics:
   nodeSelector:
     node.longhorn.io/create-default-disk: "true"
+  # This is the only cluster running Longhorn, so it is the only overlay where
+  # the CustomResourceState collector has Volume CRs to read. It produces
+  # longhorn_crd_volume_{replicas_desired,robustness,state}, which back the two
+  # rules in rules/storage.yml — the alerts that were missing when
+  # fuzeinfra-prometheus-data sat at 1 replica for days and was lost on
+  # 2026-09-07.
+  longhornVolumeMetrics:
+    enabled: true

@@ -13,4 +13,6 @@ data:
 {{ .Files.Get "rules/kubernetes.yml" | indent 4 }}
   services.yml: |
 {{ .Files.Get "rules/services.yml" | indent 4 }}
+  storage.yml: |
+{{ .Files.Get "rules/storage.yml" | indent 4 }}
 {{- end }}

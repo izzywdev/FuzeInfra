@@ -968,6 +968,21 @@ kubeStateMetrics:
   nodeLabelsAllowlist:
     - fuzeinfra.io/pool
     - fuzeinfra.io/vlan
+  # Generate longhorn_crd_volume_* from the Longhorn Volume CRs via the
+  # CustomResourceState collector. This is what makes spec.numberOfReplicas
+  # observable AT ALL: Longhorn's own /metrics endpoint exposes no replica-count
+  # metric in any form (verified against prod 2026-09-07), so without this the
+  # LonghornVolumeUnderReplicated rule in rules/storage.yml has nothing to query
+  # — and that rule is the one that would have caught fuzeinfra-prometheus-data
+  # sitting at 1 replica for days before it was lost.
+  # Adds a ClusterRole rule for longhorn.io/volumes and mounts
+  # files/ksm-customresource-state.yaml.
+  # Default OFF: Longhorn is not part of this chart (it is a separate Argo
+  # Application) and is absent on local kind and on AWS, where the collector
+  # would log a not-found error every resync. Enabled in values-contabo.yaml,
+  # which is the overlay for the cluster that actually runs Longhorn.
+  longhornVolumeMetrics:
+    enabled: false
   resources:
     requests: { cpu: 10m, memory: 32Mi }
     limits:   { cpu: 250m, memory: 128Mi }
