@@ -25,8 +25,37 @@
 set -euo pipefail
 
 LABEL="node.longhorn.io/create-default-disk=true"
-# The three durable (replica-hosting) nodes. Override via DURABLE_NODES.
-DURABLE_NODES="${DURABLE_NODES:-vmi3383846 vmi3396106 mendys-worker-1}"
+
+# The durable (replica-hosting) nodes are DISCOVERED, not hardcoded.
+#
+# WHY NOT A NAME LIST. This defaulted to "vmi3383846 vmi3396106 mendys-worker-1"
+# and every one of those names is now wrong or on its way out: mendys-worker-1
+# was reinstalled as fuze-core-3 on 2026-09-07, and vmi3383846/vmi3396106 are
+# being renamed to fuze-core-1/fuze-core-2. A hardcoded list does not fail
+# loudly when it goes stale -- it prints "SKIP <name> (not in cluster)" and
+# exits 0, leaving that node without the label. Longhorn then sees fewer
+# schedulable disks than it needs, and because replicaSoftAntiAffinity=false a
+# 3-replica volume becomes unsatisfiable. That is the same class of silent
+# starvation this script was written to prevent, so the script must not itself
+# be a source of it.
+#
+# The control-plane role label is the right key: in this cluster durable ==
+# control-plane/etcd (the three nodes that own Longhorn disks), it is set by k3s
+# at registration so it survives every rename, and it can never match an elastic
+# node -- which preserves the "NEVER label an elastic node durable" invariant
+# above structurally rather than by convention.
+discover_durable_nodes() {
+  kubectl get nodes -l node-role.kubernetes.io/control-plane=true \
+    -o jsonpath='{range .items[*]}{.metadata.name}{" "}{end}' 2>/dev/null || true
+}
+DURABLE_NODES="${DURABLE_NODES:-$(discover_durable_nodes)}"
+if [ -z "${DURABLE_NODES// /}" ]; then
+  # Fail closed. Labelling nothing would look like success while leaving
+  # Longhorn with no disks at all.
+  echo "ERROR: no control-plane nodes discovered and DURABLE_NODES not set." >&2
+  echo "       Refusing to run: labelling zero nodes is indistinguishable from success." >&2
+  exit 1
+fi
 
 # The durable node that carries the heavy-I/O monitoring stack (Prometheus TSDB +
 # Loki), and which is therefore designated the LOWEST-priority holder of the API
@@ -45,7 +74,22 @@ DURABLE_NODES="${DURABLE_NODES:-vmi3383846 vmi3396106 mendys-worker-1}"
 # This MUST stay consistent with the keepalived VRRP priorities once the API
 # floating VIP lands: this node gets the lowest priority.
 MONITORING_LABEL="fuzeinfra.io/role=monitoring"
-MONITORING_NODE="${MONITORING_NODE:-vmi3396106}"
+# Resolved rather than hardcoded, for the same reason as DURABLE_NODES: this node
+# is mid-rename (vmi3396106 -> fuze-core-2). Order of preference:
+#   1. an explicit MONITORING_NODE from the environment,
+#   2. whichever node already carries the label (survives a rename),
+#   3. the first candidate name that actually exists (survives a reinstall,
+#      which drops the label).
+resolve_monitoring_node() {
+  [ -n "${MONITORING_NODE:-}" ] && { printf '%s' "$MONITORING_NODE"; return; }
+  local cur
+  cur=$(kubectl get nodes -l "$MONITORING_LABEL" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+  [ -n "$cur" ] && { printf '%s' "$cur"; return; }
+  for c in fuze-core-2 vmi3396106; do
+    kubectl get node "$c" >/dev/null 2>&1 && { printf '%s' "$c"; return; }
+  done
+}
+MONITORING_NODE="$(resolve_monitoring_node)"
 VERIFY_ONLY="${1:-}"
 
 kubectl version --request-timeout=10s >/dev/null 2>&1 || {
