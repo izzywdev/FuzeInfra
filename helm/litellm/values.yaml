@@ -27,6 +27,12 @@ imagePullSecrets: []
 
 replicas: 1
 
+# LiteLLM log verbosity (LITELLM_LOG). INFO in prod: DEBUG serialises verbose
+# JSON on the same uvicorn worker that answers the kubelet health probes, which
+# adds latency to /health/readiness. Raise to DEBUG only for a short debugging
+# window, then revert.
+logLevel: INFO
+
 # Service DNS contract consumers depend on:
 #   litellm.fuzeinfra.svc.cluster.local:4000
 # Changing either of these is a BREAKING change for every consumer — see
@@ -302,17 +308,21 @@ litellmSettings:
   # Console logging — request metadata, chosen model, and failure reason to
   # stdout (collected by Promtail into Loki).
   #
-  # TEMPORARY / DIAGNOSTIC. These were turned on to debug the virtual-key 403
-  # deadlock and should be dialled back once that is settled:
-  #   set_verbose + LITELLM_LOG=DEBUG are very chatty at prod request volume;
-  #   log_raw_request_response emits the raw upstream request/response bodies,
-  #   which means PROMPT AND COMPLETION CONTENT lands in Loki. Upstream masks
-  #   api-key fields, but do not treat that as a guarantee — this is not a
-  #   setting to leave on indefinitely on a shared gateway.
-  # Prefer `list-models` / `test-model` via .github/workflows/litellm-admin.yml
-  # for routine questions; it answers them without logging traffic at all.
-  set_verbose: true
-  log_raw_request_response: true
+  # set_verbose and log_raw_request_response are DIALLED BACK (were TEMPORARY,
+  # on to debug the virtual-key 403 deadlock). They are off for two reasons:
+  #   - they serialise heavy synchronous JSON on litellm's single uvicorn
+  #     worker — the same event loop that answers the kubelet health probes —
+  #     so under a provider-outage retry storm the loop starves and
+  #     /health/liveliness times out, exit-137-killing a healthy gateway
+  #     (see #736; env LITELLM_LOG is INFO for the same reason);
+  #   - log_raw_request_response emits raw upstream request/response bodies,
+  #     i.e. PROMPT AND COMPLETION CONTENT into Loki — not safe to leave on
+  #     indefinitely on a shared gateway.
+  # Re-enable ONLY for a short debugging window (pair with logLevel: DEBUG),
+  # then revert. For routine questions prefer `list-models` / `test-model`
+  # via .github/workflows/litellm-admin.yml — it logs no traffic at all.
+  set_verbose: false
+  log_raw_request_response: false
   json_logs: true
 
 # Free-form general_settings passthrough (master_key is injected by the template).
