@@ -1,0 +1,152 @@
+name: CodeQL
+
+# CodeQL code-scanning analysis (ADVANCED SETUP).
+#
+# WHAT THIS PRODUCES. The open code-scanning alerts (the "Security and Quality" reports)
+# that nightly-security-triage.yml consumes via GET /repos/{owner}/{repo}/code-scanning/
+# alerts. Without a workflow that RUNS CodeQL, that nightly has nothing to triage — this is
+# the producer half of that pipeline.
+#
+# PUBLIC REPOS ONLY — this is a CONDITIONAL (gated) template, NOT part of the always-on
+# STACK. CodeQL / code scanning is FREE on public repositories; on PRIVATE repositories it
+# requires paid GitHub Advanced Security. `scripts/bootstrap/caps/workflows.py` therefore
+# vends this file ONLY when the target repo's manifest declares `class: oss-public`
+# (== public, per governance/repo-classes.md), and fails CLOSED for every other class so a
+# paid-on-private feature can never land on a private repo. See that file's CONDITIONAL entry.
+#
+# ADVANCED vs DEFAULT SETUP. GitHub's default (UI) CodeQL setup and this advanced (workflow)
+# setup are MUTUALLY EXCLUSIVE on a repo. A repo adopting this workflow must NOT also have
+# default setup enabled (Settings -> Code security -> Code scanning), or configuration will
+# conflict.
+#
+# REPO-AGNOSTIC. Nothing here hardcodes a repository, path, service, or language. The
+# `resolve-languages` job asks the GitHub API which languages the repo actually contains and
+# keeps only the ones CodeQL supports, so the analyze matrix is built from the repo itself —
+# the same file is correct for every public repo in the fleet (Python, JS/TS, Go, ...).
+#
+# ACTION PINNING. Every third-party action is pinned to a full 40-char commit SHA (not a
+# mutable tag), with a trailing `# vX.Y.Z` comment preserving the human-readable version.
+# `github/codeql-action` v4.37.9 is an ANNOTATED tag; the commit it peels to
+# (`git ls-remote github/codeql-action v4.37.9^{}`) is
+# cdf488f595d80d6e07e03d4674febd5ab45fa938, used for init/autobuild/analyze below.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Weekly. Minute+hour are spread per-repo at stamp time so the fleet does not all fire
+    # at once; day-of-week (Mon) is preserved. fuze:spread-cron
+    - cron: '30 2 * * 1'  # fuze:spread-cron
+  workflow_dispatch:
+
+# Least privilege at the top; each job elevates only what it needs.
+permissions:
+  contents: read
+
+concurrency:
+  # Cancel a superseded analysis for the same ref rather than stacking runs onto the pool.
+  group: codeql-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  resolve-languages:
+    name: Resolve CodeQL languages
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      matrix: ${{ steps.langs.outputs.matrix }}
+      any: ${{ steps.langs.outputs.any }}
+    steps:
+      - name: Resolve CodeQL languages present in this repository
+        id: langs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          # Ask GitHub which languages this repo contains, then keep only the ones CodeQL can
+          # analyze. Repo-agnostic: no language is hardcoded, so the same file is correct for
+          # every repo. Linguist language names are mapped to CodeQL language identifiers.
+          langs_json="$(gh api "repos/${REPO}/languages")"
+
+          result="[]"
+          while IFS= read -r name; do
+            [ -z "$name" ] && continue
+            case "$name" in
+              Python)                ql="python" ;;
+              JavaScript|TypeScript) ql="javascript-typescript" ;;
+              Go)                    ql="go" ;;
+              Java|Kotlin)           ql="java-kotlin" ;;
+              C|C++)                 ql="c-cpp" ;;
+              "C#")                  ql="csharp" ;;
+              Ruby)                  ql="ruby" ;;
+              Swift)                 ql="swift" ;;
+              *)                     ql="" ;;
+            esac
+            if [ -n "$ql" ]; then
+              result="$(printf '%s' "$result" | jq -c --arg q "$ql" '. + [$q] | unique')"
+            fi
+          done < <(printf '%s' "$langs_json" | jq -r 'keys[]')
+
+          any="false"
+          if [ "$(printf '%s' "$result" | jq 'length')" -gt 0 ]; then
+            any="true"
+          fi
+
+          echo "matrix=${result}" >> "$GITHUB_OUTPUT"
+          echo "any=${any}" >> "$GITHUB_OUTPUT"
+
+          {
+            echo "## CodeQL — languages resolved"
+            echo ""
+            echo "- Repository: \`${REPO}\`"
+            echo "- CodeQL languages to analyze: \`${result}\`"
+            if [ "$any" != "true" ]; then
+              echo ""
+              echo "_No CodeQL-supported language detected — the analyze job is skipped (not a failure)._"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  analyze:
+    name: Analyze
+    needs: resolve-languages
+    # Skip cleanly (success, not failure) on a repo with no CodeQL-supported language.
+    if: needs.resolve-languages.outputs.any == 'true'
+    runs-on: ubuntu-latest
+    # CodeQL analysis can be long for large / compiled codebases; GitHub's own template uses
+    # a generous ceiling. A hung job still dies on this clock rather than pinning a runner.
+    timeout-minutes: 360
+    permissions:
+      # The one elevated scope: write the code-scanning results this whole workflow exists for.
+      security-events: write
+      contents: read
+      actions: read
+      packages: read
+    strategy:
+      fail-fast: false
+      matrix:
+        language: ${{ fromJSON(needs.resolve-languages.outputs.matrix) }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
+        with:
+          languages: ${{ matrix.language }}
+          # Emit BOTH the security and quality alerts nightly-security-triage.yml triages.
+          queries: security-and-quality
+
+      # No-op for interpreted languages (Python, JS/TS, Ruby); builds compiled ones. Kept so
+      # the template stays correct fleet-wide without a per-repo build step.
+      - name: Autobuild
+        uses: github/codeql-action/autobuild@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
+        with:
+          category: "/language:${{ matrix.language }}"
