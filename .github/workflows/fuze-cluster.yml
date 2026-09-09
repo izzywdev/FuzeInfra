@@ -82,7 +82,6 @@ jobs:
           contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.issue.author_association))
       )
     runs-on: staging
-    timeout-minutes: 120
     permissions:
       contents: write
       pull-requests: write
