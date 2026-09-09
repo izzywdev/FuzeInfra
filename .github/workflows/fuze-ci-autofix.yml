@@ -1,4 +1,4 @@
-# fuze:managed template=fuze-ci-autofix.yml baseline=v1 digest=sha256:6b346a752716fca7bafa70d49a2bbc267a7f2d93cdefdd4038e606094a5d7b1d
+# fuze:managed template=fuze-ci-autofix.yml baseline=v1 digest=sha256:386b56cba3d86abca389ac90bf98327c27496ad9910e69713e74e0d94d837482
 name: Fuze Auto-Fix CI
 
 # RENAMED from claude-ci-autofix.yml (the claude-* -> fuze-* fleet rename; see
@@ -181,6 +181,7 @@ jobs:
         uses: ./.github/actions/fuze-code-action
         with:
           anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY }}
+          claude-code-oauth-token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
           claude-args: >-
             --model claude-sonnet-4-6

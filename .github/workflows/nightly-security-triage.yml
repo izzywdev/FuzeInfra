@@ -304,6 +304,11 @@ jobs:
         uses: ./.github/actions/fuze-code-action
         with:
           anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY }}
+          # rung 1a (subscription OAuth): engaged when CLAUDE_CODE_OAUTH_TOKEN is present,
+          # falls through to the metered vendor rungs when empty (no regression). This file
+          # is repo-owned (no fuze:managed marker); the v1 canonical nightly-security-triage
+          # template does NOT yet wire this input, so this line is ahead of canonical here.
+          claude-code-oauth-token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           litellm-key: ${{ secrets.LITELLM_FUZE_KEY }}
           openai-api-key: ${{ secrets.OPENAI_API_KEY }}
           gemini-api-key: ${{ secrets.GEMINI_API_KEY }}
