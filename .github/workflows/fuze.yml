@@ -1,4 +1,4 @@
-# fuze:managed template=fuze.yml baseline=v1 digest=sha256:e9a5b6234d2b2341e1bb38ec4a68f4c4ceccac7338046f0393457dace68bca61
+# fuze:managed template=fuze.yml baseline=v1 digest=sha256:5455c280a383f74ac673719ef44a4ed5b3c4568a33cd5c0d0783413fca8cca1f
 name: Fuze
 
 # THE CANONICAL `@fuze` ENTRYPOINT. Every onboarded repo gets this file, and this is the
@@ -204,6 +204,7 @@ jobs:
           litellm-base-url: ${{ vars.FUZE_LITELLM_BASE_URL || 'http://litellm.fuzeinfra.svc.cluster.local:4000' }}
           litellm-key: ${{ secrets.LITELLM_FUZE_KEY }}
           anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY }}
+          claude-code-oauth-token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           # Inert on this path — see MENTION MODE in the header. Passed for shape-parity
           # with the fleet's other fuze-code-action call sites, NOT as a claimed fallback.
           openai-api-key: ${{ secrets.OPENAI_API_KEY }}
