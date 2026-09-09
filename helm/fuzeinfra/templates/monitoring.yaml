@@ -326,10 +326,27 @@ spec:
               mountPath: /etc/alertmanager
             - name: data
               mountPath: /alertmanager
+            {{- if .Values.alertmanager.githubBridge.enabled }}
+            # Bearer token for the CF Worker bridge (Alertmanager → GitHub @fuze).
+            - name: github-bridge-token
+              mountPath: /etc/alertmanager/secrets
+              readOnly: true
+            {{- end }}
       volumes:
         - name: config
           configMap:
             name: fuzeinfra-alertmanager-config
+        {{- if .Values.alertmanager.githubBridge.enabled }}
+        # Mounted as a FILE (not env) because Alertmanager does not substitute env
+        # vars in its config; the webhook receiver references it via
+        # http_config.authorization.credentials_file. See values.yaml alertmanager.githubBridge.
+        - name: github-bridge-token
+          secret:
+            secretName: {{ .Values.alertmanager.githubBridge.tokenSecretName | default "fuzeinfra-tunnel-secrets" }}
+            items:
+              - key: {{ .Values.alertmanager.githubBridge.tokenSecretKey | default "CRIT_BRIDGE_TOKEN" }}
+                path: crit_bridge_token
+        {{- end }}
   volumeClaimTemplates:
     - apiVersion: v1
       kind: PersistentVolumeClaim
