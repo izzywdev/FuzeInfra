@@ -256,41 +256,28 @@ jobs:
       # Agent-PR identity (governance/hardening-convention.md §8): open the fix PR under a
       # collaborator-backed identity so its head actually gets CI. A PR opened by the default
       # GITHUB_TOKEN is frozen as action_required (public) or gets no runs at all (private).
-      # App -> bot PAT -> GITHUB_TOKEN, the last emitting a ::warning:: so a repo lacking the
-      # App secrets degrades rather than breaks.
-      - name: Mint fuze-agent App token
-        id: app_token
-        continue-on-error: true
-        uses: actions/create-github-app-token@v1
+      # The canonical, already-vendored ./.github/actions/fuze-push-identity resolves
+      # App -> GH_RELEASE_PAT -> GITHUB_TOKEN, masks the token, configures git push auth, and
+      # warns when only GITHUB_TOKEN is left. Using the local action (rather than minting the
+      # App token inline via a `@v1` tag) also keeps every external action ref in this file
+      # pinned by SHA — no mutable-tag supply-chain surface.
+      - name: Resolve agent-PR push identity
+        id: identity
+        uses: ./.github/actions/fuze-push-identity
         with:
           app-id: ${{ secrets.FUZE_AGENT_APP_ID }}
           private-key: ${{ secrets.FUZE_AGENT_APP_PRIVATE_KEY }}
+          fallback-pat: ${{ secrets.GH_RELEASE_PAT }}
+          configure-git: 'true'
 
-      - name: Resolve agent-PR identity
-        id: identity
-        env:
-          APP_TOKEN: ${{ steps.app_token.outputs.token }}
-          BOT_PAT: ${{ secrets.GH_RELEASE_PAT }}
-          GH_DEFAULT: ${{ secrets.GITHUB_TOKEN }}
+      - name: Ensure a git commit identity exists
         run: |
           set -uo pipefail
-          if [ -n "${APP_TOKEN:-}" ]; then
-            tok="$APP_TOKEN"; who="fuze-agent (App installation token)"
-          elif [ -n "${BOT_PAT:-}" ]; then
-            tok="$BOT_PAT"; who="GH_RELEASE_PAT (bot PAT)"
-          else
-            tok="$GH_DEFAULT"; who="GITHUB_TOKEN"
-            echo "::warning title=agent-identity::No FUZE_AGENT_APP_* App secrets and no GH_RELEASE_PAT on this repo — opening this PR as GITHUB_TOKEN, whose head gets NO CI (hardening-convention.md §8). Set the fuze-agent App secrets to fix."
-          fi
-          echo "::add-mask::$tok"
-          echo "token=$tok" >> "$GITHUB_OUTPUT"
-          echo "Agent-PR identity: $who"
-
-      - name: Configure git identity
-        run: |
-          set -uo pipefail
-          git config --global user.email "fuze-agent[bot]@users.noreply.github.com"
+          # fuze-push-identity sets a --local committer identity only on the App rung; set a
+          # --global default so the agent's commit cannot fail for lack of one on any rung.
+          # A --global default never overrides the action's --local App identity.
           git config --global user.name "fuze-agent[bot]"
+          git config --global user.email "fuze-agent[bot]@users.noreply.github.com"
 
       - name: Create per-alert fix branch
         id: branch
