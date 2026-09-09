@@ -65,9 +65,51 @@ MCP is pull-only (can't inject a turn), so **inbound = the socket**, **outbound 
 - **Session bridge** (`a2a-bridge/wss_bridge.py`): outbound WSS client (auto-reconnect); inbound
   → inbox socket; localhost `127.0.0.1:8760` for the MCP tool's outbound sends. `a2a_mcp.py`
   exposes `a2a_whoami` / `a2a_set_peer` / `a2a_list_peers` / `a2a_send` (peers keyed by session-id).
-  Started by the repo `SessionStart` hook (`.claude/settings.json`), cloud-only + `FUZE_A2A_BRIDGE=1`.
+  Launched by a `SessionStart` hook at **two** levels — see below — cloud-only + `FUZE_A2A_BRIDGE=1`.
 - **DevOps env** installs `websockets`/`a2a-sdk`/`mcp` (+ `kubectl`) and sets
   `FUZE_A2A_RELAY_URL`; applied at claude.ai/code (the picker has no API).
+
+## Launcher: env-level, so it fires for EVERY cloud session (not just FuzeInfra's)
+
+The bridge daemon (`a2a-bridge/start.sh`) was originally launched only by FuzeInfra's
+**repo-level** `SessionStart` hook (`.claude/settings.json`). That hook runs only when the
+session's checked-out repo is FuzeInfra, so a session on any other repo (MendysRoboticsWP,
+FuzeSDLC, an A2A relay-test peer, …) never started the daemon — the bridge silently did not
+come up and those sessions could not receive A2A messages. This was the "a2a-bridge launcher
+missing from SessionStart hooks" finding.
+
+The cloud environment dialog at claude.ai/code exposes only three fields — Name, Environment
+variables, and a Bash **Setup script** (run as root at build time). There is **no hooks field**.
+So the launcher is now also installed at the **environment (user) level** by the Setup script
+that `render.py` generates (`fuze.setup.sh`, `devops.setup.sh`), which at build time:
+
+1. drops a stable, repo-independent copy of the four bridge scripts (`start.sh`, `wss_bridge.py`,
+   `a2a_mcp.py`, `a2a_mcp_launch.sh`) at **`/opt/fuze/a2a-bridge/`** — embedded inline via
+   heredoc, because build time has no guaranteed private-repo checkout and `render.py` must not
+   download release assets; and
+2. merges a **user-level** `~/.claude/settings.json` `SessionStart` hook (matcher
+   `startup|resume`) that runs `bash /opt/fuze/a2a-bridge/start.sh`. This settings file applies
+   to **every** session in that environment, regardless of the checked-out repo.
+
+`start.sh` is self-guarding (no-op unless `CLAUDE_CODE_REMOTE=true` **and** `FUZE_A2A_BRIDGE=1`)
+and idempotent (skips if `bridge.pid` is live), so the env-level hook and FuzeInfra's repo-level
+hook coexist safely — a double invocation is a no-op. The repo-level hook is **kept**, not removed.
+The merge is additive: it preserves any existing keys in `settings.json` and never double-registers.
+
+> **Scope note.** This installs the bridge **daemon** (inbound delivery + the localhost sender
+> that `a2a_send` posts to) at the env level. The outbound MCP *tools* (`a2a_whoami`/`a2a_send`/…)
+> are still registered through the repo's `.mcp.json` → `a2a_mcp_launch.sh`, so on a non-FuzeInfra
+> repo the MCP tool surface is not yet present (the stable `/opt/fuze/a2a-bridge` copy pre-stages
+> a future user-level `.mcp.json` for that). Universal outbound-tool registration is a follow-up.
+
+### Operator step (cannot be automated)
+
+The cloud env picker has **no API** (`render.py`'s docstring documents this), so after this change
+merges, an operator must paste the regenerated `fuze.setup.sh` and `devops.setup.sh` into the
+Setup-script field of the **Fuze** and **DevOps** cloud environments at claude.ai/code. Until then,
+existing cached env snapshots keep the old (repo-hook-only) behavior. `render.py --check` (guarded
+offline by `tests/test_desktop_env_projection.py`, run in the infrastructure-tests offline block)
+keeps the committed Setup scripts in sync with the source scripts and env JSONs.
 
 ## Auth (v0) and hardening
 
