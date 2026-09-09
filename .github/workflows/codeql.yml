@@ -24,9 +24,11 @@ name: CodeQL
 # keeps only the ones CodeQL supports, so the analyze matrix is built from the repo itself —
 # the same file is correct for every public repo in the fleet (Python, JS/TS, Go, ...).
 #
-# ACTION PINNING. `actions/checkout` is SHA-pinned (fleet convention). `github/codeql-action`
-# is pinned to the tag @v4.37.9 — the SAME pin harden-gate.yml already uses for
-# codeql-action/upload-sarif across the fleet; kept identical so both move together on a bump.
+# ACTION PINNING. Every third-party action is pinned to a full 40-char commit SHA (not a
+# mutable tag), with a trailing `# vX.Y.Z` comment preserving the human-readable version.
+# `github/codeql-action` v4.37.9 is an ANNOTATED tag; the commit it peels to
+# (`git ls-remote github/codeql-action v4.37.9^{}`) is
+# cdf488f595d80d6e07e03d4674febd5ab45fa938, used for init/autobuild/analyze below.
 
 on:
   push:
@@ -133,7 +135,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@v4.37.9
+        uses: github/codeql-action/init@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
         with:
           languages: ${{ matrix.language }}
           # Emit BOTH the security and quality alerts nightly-security-triage.yml triages.
@@ -142,9 +144,9 @@ jobs:
       # No-op for interpreted languages (Python, JS/TS, Ruby); builds compiled ones. Kept so
       # the template stays correct fleet-wide without a per-repo build step.
       - name: Autobuild
-        uses: github/codeql-action/autobuild@v4.37.9
+        uses: github/codeql-action/autobuild@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
 
       - name: Perform CodeQL Analysis
-        uses: github/codeql-action/analyze@v4.37.9
+        uses: github/codeql-action/analyze@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
         with:
           category: "/language:${{ matrix.language }}"
