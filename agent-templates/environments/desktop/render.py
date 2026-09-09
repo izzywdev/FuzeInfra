@@ -113,6 +113,96 @@ EXTRAS = {
 }
 
 
+# --- A2A bridge env-level launcher --------------------------------------------------
+# The a2a-bridge daemon (start.sh) is otherwise launched ONLY by FuzeInfra's repo-level
+# SessionStart hook (.claude/settings.json), so it starts only when FuzeInfra is the
+# checked-out repo — sessions on any other repo never get the cloud<->cloud A2A bridge.
+# To make it start for EVERY cloud session, the Setup script drops a stable, repo-independent
+# copy of the scripts at A2A_BRIDGE_INSTALL_DIR and writes a USER-level SessionStart hook that
+# invokes that copy. Scripts are embedded inline (heredoc) rather than fetched: build time has
+# no guaranteed private-repo checkout, and this generator must not download release assets.
+A2A_BRIDGE_DIR = os.path.join(HERE, "a2a-bridge")
+A2A_BRIDGE_FILES = ("start.sh", "wss_bridge.py", "a2a_mcp.py", "a2a_mcp_launch.sh")
+A2A_BRIDGE_INSTALL_DIR = "/opt/fuze/a2a-bridge"
+
+# Merges (never clobbers) the user-level ~/.claude/settings.json so the launcher fires for
+# every session; idempotent, so a rebuild or the repo-level hook does not duplicate it.
+_A2A_HOOK_MERGE_PY = """import json, os, sys
+settings_path, start_sh = sys.argv[1], sys.argv[2]
+cmd = "bash " + start_sh
+try:
+    with open(settings_path, encoding="utf-8") as f:
+        data = json.load(f)
+except (OSError, ValueError):
+    data = {}
+if not isinstance(data, dict):
+    data = {}
+hooks = data.setdefault("hooks", {})
+if not isinstance(hooks, dict):
+    hooks = data["hooks"] = {}
+session_start = hooks.setdefault("SessionStart", [])
+if not isinstance(session_start, list):
+    session_start = hooks["SessionStart"] = []
+already = any(
+    (h or {}).get("command", "").strip() == cmd
+    for entry in session_start
+    for h in (entry.get("hooks") or [])
+)
+if not already:
+    session_start.append({
+        "matcher": "startup|resume",
+        "hooks": [{"type": "command", "command": cmd}],
+    })
+    os.makedirs(os.path.dirname(settings_path) or ".", exist_ok=True)
+    with open(settings_path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
+        f.write("\\n")
+    print("[setup] a2a-bridge: user-level SessionStart hook installed")
+else:
+    print("[setup] a2a-bridge: user-level SessionStart hook already present")
+"""
+
+
+def _env_opts_into_bridge(spec):
+    """True when this environment sets FUZE_A2A_BRIDGE=1 — only those get the launcher."""
+    return any(k == "FUZE_A2A_BRIDGE" and v == "1" for k, v, _ in spec["env"])
+
+
+def render_a2a_bridge_block():
+    """Shell lines that install the repo-independent bridge launcher (see module comment)."""
+    lines = [
+        "# --- A2A cloud<->cloud bridge: env-level launcher (repo-independent) ---",
+        "# The bridge daemon otherwise starts only when FuzeInfra is the checked-out repo (its",
+        "# repo-level SessionStart hook). Drop a stable copy + a USER-level hook so it starts for",
+        "# EVERY cloud session in this env. start.sh is self-guarded (no-op unless CLAUDE_CODE_REMOTE",
+        "# =true AND FUZE_A2A_BRIDGE=1) and idempotent (skips if bridge.pid is live), so it safely",
+        "# coexists with the repo-level hook — double-invocation is a no-op. See docs/cloud-a2a-bridge.md.",
+        'echo "[setup] a2a-bridge (env-level launcher)"',
+        f"install -d -m 0755 {A2A_BRIDGE_INSTALL_DIR} || true",
+    ]
+    for name in A2A_BRIDGE_FILES:
+        with open(os.path.join(A2A_BRIDGE_DIR, name), encoding="utf-8") as f:
+            content = f.read()
+        delim = "__A2A_FILE_" + name.upper().replace(".", "_") + "__"
+        if delim in content:
+            raise SystemExit(f"heredoc delimiter {delim} collides with {name} content")
+        lines.append(f"cat > {A2A_BRIDGE_INSTALL_DIR}/{name} <<'{delim}'")
+        lines.append(content.rstrip("\n"))
+        lines.append(delim)
+    lines += [
+        f"chmod 0755 {A2A_BRIDGE_INSTALL_DIR}/*.sh 2>/dev/null || true",
+        "# Write/merge the user-level SessionStart hook (applies to ALL sessions in this env).",
+        'CLAUDE_HOME="${HOME:-/root}"',
+        'install -d -m 0755 "$CLAUDE_HOME/.claude" || true',
+        f"python3 - \"$CLAUDE_HOME/.claude/settings.json\" \"{A2A_BRIDGE_INSTALL_DIR}/start.sh\" "
+        "<<'__A2A_HOOK_MERGE__' || true",
+        _A2A_HOOK_MERGE_PY.rstrip("\n"),
+        "__A2A_HOOK_MERGE__",
+        "",
+    ]
+    return lines
+
+
 def load(basename):
     with open(os.path.join(ENV_DIR, f"{basename}.json"), encoding="utf-8") as f:
         return json.load(f)
@@ -202,6 +292,9 @@ def render_setup(basename, spec, doc):
 
     if parallel:
         L += ["# Independent of each other — run concurrently, then wait."] + parallel + ["wait", ""]
+
+    if _env_opts_into_bridge(spec):
+        L += render_a2a_bridge_block()
 
     L += [
         "# Leave a record in the session log of what actually landed.",
