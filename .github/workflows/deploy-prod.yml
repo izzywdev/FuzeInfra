@@ -22,6 +22,7 @@ jobs:
   validate-and-sync:
     name: Validate → ArgoCD sync
     runs-on: staging
+    timeout-minutes: 120
     environment: production
 
     env:

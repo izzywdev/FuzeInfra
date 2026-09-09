@@ -55,6 +55,7 @@ jobs:
   mint:
     name: Mint a2a-maintain-ci key
     runs-on: staging
+    timeout-minutes: 120
     environment: fuzeinfra-ops
     steps:
       - name: Checkout

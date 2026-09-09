@@ -62,6 +62,7 @@ env:
 jobs:
   spike-test:
     runs-on: staging
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v7.0.1
 

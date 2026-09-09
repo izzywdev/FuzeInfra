@@ -37,6 +37,7 @@ concurrency:
 jobs:
   preflight:
     runs-on: staging
+    timeout-minutes: 120
     outputs:
       skip: ${{ steps.gate.outputs.skip }}
       owner_repo: ${{ steps.route.outputs.owner_repo }}
@@ -83,6 +84,7 @@ jobs:
     needs: preflight
     if: needs.preflight.outputs.skip != 'true'
     runs-on: staging
+    timeout-minutes: 120
     steps:
       - name: Telegram 🔴 alert
         env:
@@ -105,6 +107,7 @@ jobs:
     needs: preflight
     if: needs.preflight.outputs.skip != 'true' && needs.preflight.outputs.is_self != 'true'
     runs-on: staging
+    timeout-minutes: 120
     env:
       APP: ${{ github.event.client_payload.app }}
       OWNER_REPO: ${{ needs.preflight.outputs.owner_repo }}
@@ -142,6 +145,7 @@ jobs:
     needs: preflight
     if: needs.preflight.outputs.skip != 'true' && needs.preflight.outputs.is_self == 'true'
     runs-on: staging
+    timeout-minutes: 120
     env:
       APP: ${{ github.event.client_payload.app }}
     steps:
