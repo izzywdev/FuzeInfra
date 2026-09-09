@@ -430,7 +430,11 @@ metadata:
     {{- include "fuzeinfra.labels" . | nindent 4 }}
 data:
   # ---------------------------------------------------------------------------
-  # Contact point — webhook to the CF Worker bridge that forwards to GHA.
+  # Contact point — webhook to the CF Worker bridge that forwards to GHA, which
+  # opens an `@fuze` issue so the fix runs through the canonical, VENDOR-INDEPENDENT
+  # `@fuze` handler (fuze-cluster.yml → fuze-code-action's multi-provider cascade),
+  # not a hardcoded single-vendor CLI. The receiver is named `fuze-autofix` for
+  # that reason — the downstream mechanism is `@fuze`, not any one model vendor.
   # CRIT_BRIDGE_TOKEN env var is injected into the Grafana pod from
   # fuzeinfra-tunnel-secrets (created by terraform/contabo — ArgoCD never touches it).
   # If the var is empty, no Authorization header is sent (acceptable for
@@ -440,9 +444,9 @@ data:
     apiVersion: 1
     contactPoints:
       - orgId: 1
-        name: claude-autofix
+        name: fuze-autofix
         receivers:
-          - uid: claude-autofix-webhook
+          - uid: fuze-autofix-webhook
             type: webhook
             settings:
               url: "https://crit-alert.{{ .Values.global.domain }}/"
@@ -454,19 +458,19 @@ data:
   # ---------------------------------------------------------------------------
   # Notification policy — route severity=critical labels to the webhook.
   # All other alerts fall through to the default grafana receiver.
-  # repeat_interval: 4h prevents flooding Claude with duplicate alerts.
+  # repeat_interval: 4h prevents flooding the @fuze handler with duplicate alerts.
   # ---------------------------------------------------------------------------
   policy.yaml: |
     apiVersion: 1
     policies:
       - orgId: 1
-        receiver: claude-autofix
+        receiver: fuze-autofix
         group_by: ['grafana_folder', 'alertname']
         group_wait: 30s
         group_interval: 5m
         repeat_interval: 4h
         routes:
-          - receiver: claude-autofix
+          - receiver: fuze-autofix
             matchers:
               - severity = critical
             group_wait: 0s

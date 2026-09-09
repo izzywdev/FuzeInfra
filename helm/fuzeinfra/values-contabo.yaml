@@ -1168,6 +1168,36 @@ alertmanager:
   # its volume (FailedAttachVolume: node.longhorn.io "..." not found).
   nodeSelector:
     node.longhorn.io/create-default-disk: "true"
+  # ADDITIVE GitHub @fuze routing. Prod holds CRIT_BRIDGE_TOKEN in
+  # fuzeinfra-tunnel-secrets already (same token Grafana uses for crit-alert), so
+  # enabling the file mount here needs no new secret. Critical alerts fan out to
+  # BOTH the existing no-op `default` (unchanged) AND the github-fuze webhook;
+  # `continue: true` keeps the previous behavior intact.
+  githubBridge:
+    enabled: true
+  receivers:
+    - name: default
+    - name: github-fuze
+      webhook_configs:
+        # Same CF Worker bridge as Grafana's crit-alert path; ?source=alertmanager
+        # makes the Worker emit an `alertmanager-alert` dispatch (metric alerts),
+        # distinct from Grafana's `grafana-crit-alert` (log alerts).
+        - url: "https://crit-alert.prod.fuzefront.com/?source=alertmanager"
+          send_resolved: false
+          http_config:
+            authorization:
+              type: Bearer
+              credentials_file: /etc/alertmanager/secrets/crit_bridge_token
+  routes:
+    # Route critical alerts to GitHub @fuze IN ADDITION to the catch-all. The
+    # Worker resolves the owning repo from the alert's `namespace` label, so a
+    # consumer product's pod alert lands in that product's repo; infra alerts with
+    # no namespace fall back to FuzeInfra.
+    - match:
+        severity: critical
+      receiver: github-fuze
+      continue: true
+      repeat_interval: 1h
 chromadb:
   # Pin to durable Longhorn-disk nodes. longhorn-manager only runs on the 3
   # durable nodes, so Longhorn registers node.longhorn.io objects only there;

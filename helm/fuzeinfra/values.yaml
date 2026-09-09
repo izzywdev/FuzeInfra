@@ -725,6 +725,18 @@ alertmanager:
   image: prom/alertmanager:latest
   port: 9093
   storage: 1Gi
+  # GitHub @fuze bridge (ADDITIVE, off by default). When enabled, a read-only
+  # secret file is mounted at /etc/alertmanager/secrets/crit_bridge_token so a
+  # `webhook_configs` receiver can authenticate to the CF Worker bridge
+  # (crit-alert.<domain>) via http_config.authorization.credentials_file. The
+  # Worker translates the Alertmanager webhook into a `alertmanager-alert`
+  # repository_dispatch, and .github/workflows/alertmanager-fuze.yml opens an
+  # `@fuze` issue in the repo that OWNS the alert's namespace (per-product routing).
+  # Enable + wire receivers/routes in the overlay that has the secret (values-contabo).
+  githubBridge:
+    enabled: false
+    tokenSecretName: fuzeinfra-tunnel-secrets
+    tokenSecretKey: CRIT_BRIDGE_TOKEN
   # Alertmanager routing/notification config. Defaults preserve the previous
   # behavior: a single no-op `default` receiver (alerts group but go nowhere).
   # Operators wire notifications by overriding `receivers` and `routes`, e.g. a
