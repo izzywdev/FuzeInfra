@@ -5,6 +5,7 @@ permissions:
 jobs:
   smoke:
     runs-on: staging
+    timeout-minutes: 120
     steps:
       - name: confirm runner
         run: |

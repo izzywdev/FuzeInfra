@@ -57,6 +57,7 @@ concurrency:
 jobs:
   reconcile:
     runs-on: staging
+    timeout-minutes: 120
     env:
       # Route through the in-cluster LiteLLM gateway — no provider key on the runner.
       ANTHROPIC_BASE_URL: http://litellm.fuzeinfra.svc.cluster.local:4000

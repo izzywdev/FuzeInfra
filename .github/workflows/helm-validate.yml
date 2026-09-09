@@ -35,6 +35,7 @@ jobs:
     # CronJob (arc-systems) auto-recovers stuck-controller and missing-pool-label
     # failure modes. Self-hosted = no GitHub Actions minutes consumed.
     runs-on: staging
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v7.0.1
 

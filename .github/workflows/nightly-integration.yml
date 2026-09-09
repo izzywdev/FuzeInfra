@@ -47,6 +47,7 @@ concurrency:
 jobs:
   integration:
     runs-on: staging
+    timeout-minutes: 120
     outputs:
       ran: ${{ steps.detect.outputs.ran }}
     steps:
@@ -149,6 +150,7 @@ jobs:
           needs.integration.outputs.ran == 'true' &&
           !startsWith(github.ref_name, 'nightly-autofix-') }}
     runs-on: staging
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v7.0.1
         with:

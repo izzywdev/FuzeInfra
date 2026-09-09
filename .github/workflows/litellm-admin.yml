@@ -51,6 +51,7 @@ jobs:
   admin:
     name: ${{ inputs.action }}
     runs-on: staging
+    timeout-minutes: 120
     environment: production
     steps:
       - uses: actions/checkout@v7.0.1
