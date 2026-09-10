@@ -38,8 +38,7 @@ def main():
         # _base is a defaults fragment merged into other roles, not a full manifest.
         if os.path.basename(os.path.dirname(path)) == "_base":
             continue
-        with open(path, encoding="utf-8") as manifest_file:
-            manifest = json.load(manifest_file)
+        manifest = json.load(open(path, encoding="utf-8"))
         try:
             jsonschema.validate(manifest, role_schema)
             # exercise the full render (persona read + merge) for non-base roles
