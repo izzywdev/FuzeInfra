@@ -73,7 +73,8 @@ def test_setup_script_installs_env_level_bridge_launcher(script):
 def test_embedded_bridge_scripts_match_source(script, name):
     """The inlined heredoc body is byte-for-byte the source script (no embed drift)."""
     source = open(os.path.join(BRIDGE_DIR, name), encoding="utf-8").read().rstrip("\n")
-    body = open(os.path.join(DESKTOP, script), encoding="utf-8").read()
+    with open(os.path.join(DESKTOP, script), encoding="utf-8") as setup_file:
+        body = setup_file.read()
     delim = "__A2A_FILE_" + name.upper().replace(".", "_") + "__"
     open_marker = f"cat > {INSTALL_DIR}/{name} <<'{delim}'\n"
     start = body.index(open_marker) + len(open_marker)
