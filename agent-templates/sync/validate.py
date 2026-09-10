@@ -52,8 +52,7 @@ def main():
             errors += 1
 
     for path in sorted(glob.glob(os.path.join(TEMPLATES_ROOT, "environments", "*.json"))):
-        with open(path, encoding="utf-8") as f:
-            manifest = json.load(f)
+        manifest = json.load(open(path, encoding="utf-8"))
         try:
             jsonschema.validate(manifest, env_schema)
             print(f"ok  {os.path.relpath(path, TEMPLATES_ROOT)}")
