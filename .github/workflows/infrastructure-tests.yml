@@ -83,7 +83,8 @@ jobs:
           tests/test_litellm_ci_routing.py \
           tests/test_capability_delegation.py \
           tests/test_deployment_watchdog.py \
-          tests/test_desktop_env_projection.py
+          tests/test_desktop_env_projection.py \
+          tests/test_selfheal_metrics.py
 
     - name: Install Docker Compose
       run: |
