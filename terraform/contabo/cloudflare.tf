@@ -1159,9 +1159,9 @@ resource "cloudflare_zero_trust_access_policy" "litellm_service_email_otp" {
 # SEPARATE group from "Access: Apps and Policies", so the token can create the
 # Access application + policies below and still fail HERE at apply with an empty
 # `error creating access service token:  (1010)` — the plan cannot catch it,
-# because Cloudflare only checks the permission on write. If that permission is
-# missing the apply is a no-op for this resource; add the group to the token in
-# the Cloudflare dashboard, then merge a terraform PR to re-plan+apply.
+# because Cloudflare only checks the permission on write. The permission group
+# was granted on the CD token (2026-09-14), so this resource applies on the
+# next merge; if it 1010s again, re-check the token still carries the group.
 # See docs/TERRAFORM_CD.md → "CLOUDFLARE_API_TOKEN scope".
 resource "cloudflare_zero_trust_access_service_token" "litellm_ci" {
   count      = local.cloudflare_enabled ? 1 : 0
