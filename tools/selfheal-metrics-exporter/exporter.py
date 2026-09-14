@@ -30,6 +30,27 @@ GITHUB_API = "https://api.github.com"
 PER_PAGE = 100
 USER_AGENT = "fuzeinfra-selfheal-metrics-exporter"
 
+# A hand-built OpenerDirector, NOT build_opener(): build_opener() merges in
+# ALL of urllib's default handlers (including FileHandler/FTPHandler) unless
+# one of the passed handlers subclasses them, so build_opener(HTTPSHandler())
+# still opens file:// — verified: it happily read()s a local file. Adding
+# exactly these handlers (no File/FTP/Data/Gopher) means the scheme lookup
+# itself fails for anything but http(s), regardless of what URL string a bug
+# ever constructs. HTTPHandler is required even though every URL we build is
+# https: HTTPErrorProcessor's error path is hardcoded to look up 'http' in
+# the handler table ("https is not different than http", per its source).
+_HTTPS_ONLY_OPENER = urllib.request.OpenerDirector()
+for _handler in (
+    urllib.request.ProxyHandler(),  # honors HTTP(S)_PROXY, same as urlopen()'s default opener
+    urllib.request.HTTPHandler(),
+    urllib.request.HTTPSHandler(),
+    urllib.request.HTTPDefaultErrorHandler(),
+    urllib.request.HTTPRedirectHandler(),
+    urllib.request.HTTPErrorProcessor(),
+    urllib.request.UnknownHandler(),
+):
+    _HTTPS_ONLY_OPENER.add_handler(_handler)
+
 DEFAULT_LABEL_SYSTEM_MAP = {
     "argo-autofix": "argocd",
     "crit-autofix": "loki",
@@ -90,10 +111,6 @@ def _parse_ts(value: str | None) -> float | None:
 
 def _get_json(path: str) -> list[dict]:
     url = f"{GITHUB_API}{path}"
-    # GITHUB_API is a fixed https:// literal, never operator/env-configurable,
-    # but this check keeps urlopen's argument provably non-dynamic to a static
-    # analyzer (and to a future edit that makes GITHUB_API configurable) —
-    # urllib.request.urlopen otherwise also accepts file:// on any str URL.
     if not url.startswith("https://api.github.com/"):
         raise ValueError(f"refusing to open a non-GitHub-API URL: {url!r}")
     req = urllib.request.Request(
@@ -108,7 +125,10 @@ def _get_json(path: str) -> list[dict]:
     if token:
         req.add_header("Authorization", f"Bearer {token}")
     try:
-        with urllib.request.urlopen(req, timeout=30) as resp:  # noqa: S310 - scheme validated above
+        # _HTTPS_ONLY_OPENER, not urlopen(): no FileHandler is registered, so
+        # a file:// URL 404s at the handler-lookup stage instead of reading a
+        # local path, regardless of what url ends up being.
+        with _HTTPS_ONLY_OPENER.open(req, timeout=30) as resp:
             return json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
         if exc.code in (403, 429):
