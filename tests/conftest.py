@@ -4,15 +4,13 @@ Pytest configuration and fixtures for FuzeInfra infrastructure testing.
 import os
 import pytest
 import time
-import requests
 import psycopg2
 import pymongo
 import redis
 import neo4j
 import pika
 from elasticsearch import Elasticsearch
-from kafka import KafkaProducer, KafkaConsumer
-from kafka.errors import KafkaError
+from kafka import KafkaProducer
 
 
 @pytest.fixture(scope="session")

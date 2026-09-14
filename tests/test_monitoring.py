@@ -1,7 +1,6 @@
 """
 Tests for monitoring and observability services: Prometheus, Grafana, Alertmanager, Loki
 """
-import pytest
 import requests
 import json
 import time
