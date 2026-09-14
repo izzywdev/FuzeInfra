@@ -1153,6 +1153,16 @@ resource "cloudflare_zero_trust_access_policy" "litellm_service_email_otp" {
 # human/local-terminal step via `terraform output`, same reasoning as every
 # other secret this repo hands to `scripts/provision_secrets.py` rather than
 # ever typing a value into a PR, a chat, or a commit).
+#
+# REQUIRED TOKEN SCOPE — this resource needs the CLOUDFLARE_API_TOKEN to carry
+# the **Account → Access: Service Tokens → Edit** permission group. It is a
+# SEPARATE group from "Access: Apps and Policies", so the token can create the
+# Access application + policies below and still fail HERE at apply with an empty
+# `error creating access service token:  (1010)` — the plan cannot catch it,
+# because Cloudflare only checks the permission on write. If that permission is
+# missing the apply is a no-op for this resource; add the group to the token in
+# the Cloudflare dashboard, then merge a terraform PR to re-plan+apply.
+# See docs/TERRAFORM_CD.md → "CLOUDFLARE_API_TOKEN scope".
 resource "cloudflare_zero_trust_access_service_token" "litellm_ci" {
   count      = local.cloudflare_enabled ? 1 : 0
   account_id = var.cloudflare_account_id
