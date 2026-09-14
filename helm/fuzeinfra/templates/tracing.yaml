@@ -64,7 +64,9 @@ data:
             send_exemplars: true
 
     overrides:
-      metrics_generator_processors: [service-graphs, span-metrics]
+      defaults:
+        metrics_generator:
+          processors: [service-graphs, span-metrics]
     {{- end }}
 ---
 apiVersion: v1
