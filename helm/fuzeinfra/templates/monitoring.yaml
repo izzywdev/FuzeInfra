@@ -184,6 +184,14 @@ spec:
             {{- end }}
             - '--storage.tsdb.retention.time={{ .Values.prometheus.retention.time | default "15d" }}'
             - '--storage.tsdb.retention.size={{ .Values.prometheus.retention.size | default "15GB" }}'
+            {{- if .Values.tempo.enabled }}
+            # Required for Tempo's metrics-generator (service-graphs + span-metrics)
+            # to remote_write RED metrics here, and for exemplars — the trace_id
+            # attached to a metric sample that Grafana uses to jump from a latency
+            # spike straight into the trace that caused it.
+            - '--web.enable-remote-write-receiver'
+            - '--enable-feature=exemplar-storage'
+            {{- end }}
           ports:
             - containerPort: 9090
               name: http
@@ -544,6 +552,10 @@ spec:
             - name: sidecar-dashboards
               mountPath: /var/lib/grafana/dashboards-discovered
             {{- end }}
+            {{- if $.Files.Glob "dashboards/community/*.json" }}
+            - name: community-dashboards
+              mountPath: /var/lib/grafana/dashboards-community
+            {{- end }}
           readinessProbe:
             httpGet:
               path: /api/health
@@ -604,9 +616,25 @@ spec:
                   name: fuzeinfra-grafana-dashboard-fuzeinfra-services
               - configMap:
                   name: fuzeinfra-grafana-dashboard-logs-explorer
+              - configMap:
+                  name: fuzeinfra-grafana-dashboard-selfheal-loop
+              - configMap:
+                  name: fuzeinfra-grafana-dashboard-observability-stack
+              - configMap:
+                  name: fuzeinfra-grafana-dashboard-tracing
         - name: alerting
           configMap:
             name: fuzeinfra-grafana-alerting
+        {{- if $.Files.Glob "dashboards/community/*.json" }}
+        - name: community-dashboards
+          projected:
+            sources:
+              {{- range $path, $_ := $.Files.Glob "dashboards/community/*.json" }}
+              {{- $name := base $path | trimSuffix ".json" }}
+              - configMap:
+                  name: fuzeinfra-grafana-dashboard-community-{{ $name }}
+              {{- end }}
+        {{- end }}
         {{- if .Values.grafana.dashboardSidecar.enabled }}
         - name: sidecar-dashboards
           emptyDir: {}

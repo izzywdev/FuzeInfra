@@ -159,6 +159,24 @@ data:
           - targets: ["fuzeinfra-selfheal-metrics:{{ .Values.selfHealMetrics.port }}"]
       {{- end }}
 
+      # Tempo self-metrics (ingester/compactor/metrics-generator health)
+      {{- if .Values.tempo.enabled }}
+      - job_name: tempo
+        static_configs:
+          - targets: ["fuzeinfra-tempo:{{ .Values.tempo.httpPort }}"]
+      {{- end }}
+
+      # otel-collector self-metrics (receive/export/drop counters) + its
+      # prometheus exporter (OTLP metrics apps sent through it)
+      {{- if .Values.otelCollector.enabled }}
+      - job_name: otel-collector
+        static_configs:
+          - targets: ["fuzeinfra-otel-collector:8888"]
+      - job_name: otel-collector-exported
+        static_configs:
+          - targets: ["fuzeinfra-otel-collector:{{ .Values.otelCollector.metricsPort }}"]
+      {{- end }}
+
       # Any pod annotated with prometheus.io/scrape: "true"
       - job_name: kubernetes-pods
         kubernetes_sd_configs:
@@ -414,6 +432,14 @@ data:
           prometheusType: Prometheus
           cacheLevel: Low
           incrementalQueryOverlapWindow: 10m
+          {{- if .Values.tempo.enabled }}
+          # Jump from a metric sample's exemplar (a trace_id Prometheus stored
+          # alongside it via --enable-feature=exemplar-storage) straight into the
+          # trace that produced it.
+          exemplarTraceIdDestinations:
+            - datasourceUid: fuzeinfra-tempo
+              name: trace_id
+          {{- end }}
       {{- end }}
       {{- if .Values.loki.enabled }}
       - name: Loki
@@ -423,6 +449,48 @@ data:
         url: http://fuzeinfra-loki:{{ .Values.loki.port }}
         jsonData:
           maxLines: 5000
+          {{- if .Values.tempo.enabled }}
+          # "Clicking trace_id should jump straight to Tempo" — apps must log a
+          # structured `trace_id` field (see OBSERVABILITY_DASHBOARDS.md) for this
+          # to match.
+          derivedFields:
+            - datasourceUid: fuzeinfra-tempo
+              matcherRegex: "trace_id[=\"':\\s]+([0-9a-fA-F]+)"
+              name: TraceID
+              url: '${__value.raw}'
+              urlDisplayLabel: "View trace"
+          {{- end }}
+      {{- end }}
+      {{- if .Values.tempo.enabled }}
+      - name: Tempo
+        type: tempo
+        access: proxy
+        uid: fuzeinfra-tempo
+        url: http://fuzeinfra-tempo:{{ .Values.tempo.httpPort }}
+        jsonData:
+          nodeGraph:
+            enabled: true
+          {{- if .Values.loki.enabled }}
+          tracesToLogsV2:
+            datasourceUid: fuzeinfra-loki
+            spanStartTimeShift: '-5m'
+            spanEndTimeShift: '5m'
+            filterByTraceID: true
+            tags:
+              - key: service.name
+                value: service
+          lokiSearch:
+            datasourceUid: fuzeinfra-loki
+          {{- end }}
+          {{- if .Values.prometheus.enabled }}
+          tracesToMetrics:
+            datasourceUid: fuzeinfra-prometheus
+            tags:
+              - key: service.name
+                value: service
+          serviceMap:
+            datasourceUid: fuzeinfra-prometheus
+          {{- end }}
       {{- end }}
 {{- end }}
 

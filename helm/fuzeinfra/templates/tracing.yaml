@@ -1,0 +1,330 @@
+{{- /*
+     ===================== Tracing: Tempo + OTel Collector =====================
+     Together these are the piece FuzeInfra's observability stack was missing:
+     Prometheus (metrics) + Loki (logs) existed, but there was nowhere for a
+     trace to go. Apps send OTLP to the collector; the collector fans out to
+     Tempo (traces), Loki (logs) and its own Prometheus exporter (metrics), so
+     no app needs to know Tempo/Loki hostnames directly. See
+     docs/consuming-repos/OBSERVABILITY_DASHBOARDS.md for the app-side contract.
+*/ -}}
+{{- if .Values.tempo.enabled }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: fuzeinfra-tempo-config
+  labels:
+    {{- include "fuzeinfra.labels" . | nindent 4 }}
+data:
+  tempo.yaml: |
+    server:
+      http_listen_port: {{ .Values.tempo.httpPort }}
+
+    distributor:
+      receivers:
+        otlp:
+          protocols:
+            grpc:
+              endpoint: 0.0.0.0:{{ .Values.tempo.otlpGrpcPort }}
+            http:
+              endpoint: 0.0.0.0:{{ .Values.tempo.otlpHttpPort }}
+
+    ingester:
+      trace_idle_period: 10s
+      max_block_bytes: 1000000
+      max_block_duration: 5m
+
+    compactor:
+      compaction:
+        block_retention: {{ .Values.tempo.retention }}
+
+    storage:
+      trace:
+        backend: local
+        local:
+          path: /var/tempo/traces
+        wal:
+          path: /var/tempo/wal
+
+    {{- if .Values.prometheus.enabled }}
+    # Derives RED (rate/error/duration) service-graph + span-latency metrics from
+    # trace data and remote_writes them into Prometheus. This is what lets the
+    # Tracing dashboard show a service graph and duration histograms without every
+    # app instrumenting its own RED metrics. Requires Prometheus'
+    # --web.enable-remote-write-receiver (templates/monitoring.yaml, gated on
+    # tempo.enabled).
+    metrics_generator:
+      registry:
+        external_labels:
+          source: tempo
+      storage:
+        path: /var/tempo/generator/wal
+        remote_write:
+          - url: http://fuzeinfra-prometheus:{{ .Values.prometheus.port }}/api/v1/write
+            send_exemplars: true
+
+    overrides:
+      defaults:
+        metrics_generator:
+          processors: [service-graphs, span-metrics]
+    {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: fuzeinfra-tempo
+  labels:
+    {{- include "fuzeinfra.labels" . | nindent 4 }}
+    {{- include "fuzeinfra.selectorLabels" (dict "component" "tempo" "root" $) | nindent 4 }}
+spec:
+  selector:
+    {{- include "fuzeinfra.selectorLabels" (dict "component" "tempo" "root" $) | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ .Values.tempo.httpPort }}
+    - name: otlp-grpc
+      port: {{ .Values.tempo.otlpGrpcPort }}
+    - name: otlp-http
+      port: {{ .Values.tempo.otlpHttpPort }}
+---
+{{- /*
+     Standalone PVC, deliberately NOT a StatefulSet volumeClaimTemplate — same
+     reasoning as fuzeinfra-loki-data (see the long comment above it in
+     monitoring.yaml): a standalone PVC's storage is mutable and Argo can grow it
+     in place, whereas a StatefulSet's volumeClaimTemplates is immutable and hidden
+     from sync by this chart's Argo ignoreDifferences rule. Trace data is
+     disposable (24h retention by default), so losing it on a rare re-provision is
+     an acceptable trade for GitOps-controlled sizing.
+*/}}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: fuzeinfra-tempo-data
+  labels:
+    {{- include "fuzeinfra.labels" . | nindent 4 }}
+    {{- include "fuzeinfra.selectorLabels" (dict "component" "tempo" "root" $) | nindent 4 }}
+  annotations:
+    helm.sh/resource-policy: keep
+    argocd.argoproj.io/sync-options: Prune=false
+spec:
+  accessModes: ["ReadWriteOnce"]
+  {{- include "fuzeinfra.storageClass" . | nindent 2 }}
+  resources:
+    requests:
+      storage: {{ .Values.tempo.storage }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fuzeinfra-tempo
+  labels:
+    {{- include "fuzeinfra.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  # Recreate, not RollingUpdate — the data volume is ReadWriteOnce (see Loki).
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "fuzeinfra.selectorLabels" (dict "component" "tempo" "root" $) | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        cluster-autoscaler.kubernetes.io/safe-to-evict: "false"
+      labels:
+        {{- include "fuzeinfra.labels" . | nindent 8 }}
+        {{- include "fuzeinfra.selectorLabels" (dict "component" "tempo" "root" $) | nindent 8 }}
+    spec:
+      securityContext:
+        fsGroup: 10001
+      containers:
+        - name: tempo
+          image: {{ .Values.tempo.image }}
+          imagePullPolicy: {{ include "fuzeinfra.pullPolicy" . }}
+          args:
+            - '-config.file=/etc/tempo/tempo.yaml'
+          ports:
+            - containerPort: {{ .Values.tempo.httpPort }}
+              name: http
+            - containerPort: {{ .Values.tempo.otlpGrpcPort }}
+              name: otlp-grpc
+            - containerPort: {{ .Values.tempo.otlpHttpPort }}
+              name: otlp-http
+          volumeMounts:
+            - name: config
+              mountPath: /etc/tempo
+            - name: data
+              mountPath: /var/tempo
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: {{ .Values.tempo.httpPort }}
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          {{- with .Values.tempo.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      {{- with .Values.tempo.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tempo.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+        {{- include "fuzeinfra.durableTolerationItem" $ | nindent 8 }}
+      {{- else }}
+      {{- include "fuzeinfra.durableToleration" $ | nindent 6 }}
+      {{- end }}
+      volumes:
+        - name: config
+          configMap:
+            name: fuzeinfra-tempo-config
+        - name: data
+          persistentVolumeClaim:
+            claimName: fuzeinfra-tempo-data
+{{- end }}
+
+{{- /* ===================== OTel Collector ===================== */ -}}
+{{- if .Values.otelCollector.enabled }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: fuzeinfra-otel-collector-config
+  labels:
+    {{- include "fuzeinfra.labels" . | nindent 4 }}
+data:
+  otel-collector-config.yaml: |
+    receivers:
+      otlp:
+        protocols:
+          grpc:
+            endpoint: 0.0.0.0:{{ .Values.otelCollector.otlpGrpcPort }}
+          http:
+            endpoint: 0.0.0.0:{{ .Values.otelCollector.otlpHttpPort }}
+
+    processors:
+      memory_limiter:
+        check_interval: 5s
+        limit_percentage: 80
+        spike_limit_percentage: 25
+      batch: {}
+
+    exporters:
+      {{- if .Values.tempo.enabled }}
+      otlp/tempo:
+        endpoint: fuzeinfra-tempo:{{ .Values.tempo.otlpGrpcPort }}
+        tls:
+          insecure: true
+      {{- end }}
+      {{- if .Values.loki.enabled }}
+      loki:
+        endpoint: http://fuzeinfra-loki:{{ .Values.loki.port }}/loki/api/v1/push
+      {{- end }}
+      prometheus:
+        endpoint: 0.0.0.0:{{ .Values.otelCollector.metricsPort }}
+
+    extensions:
+      health_check:
+        endpoint: 0.0.0.0:{{ .Values.otelCollector.healthCheckPort }}
+
+    service:
+      extensions: [health_check]
+      telemetry:
+        metrics:
+          address: 0.0.0.0:8888
+      pipelines:
+        traces:
+          receivers: [otlp]
+          processors: [memory_limiter, batch]
+          exporters: [{{ if .Values.tempo.enabled }}otlp/tempo{{ end }}]
+        metrics:
+          receivers: [otlp]
+          processors: [memory_limiter, batch]
+          exporters: [prometheus]
+        logs:
+          receivers: [otlp]
+          processors: [memory_limiter, batch]
+          exporters: [{{ if .Values.loki.enabled }}loki{{ end }}]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: fuzeinfra-otel-collector
+  labels:
+    {{- include "fuzeinfra.labels" . | nindent 4 }}
+    {{- include "fuzeinfra.selectorLabels" (dict "component" "otel-collector" "root" $) | nindent 4 }}
+spec:
+  selector:
+    {{- include "fuzeinfra.selectorLabels" (dict "component" "otel-collector" "root" $) | nindent 4 }}
+  ports:
+    - name: otlp-grpc
+      port: {{ .Values.otelCollector.otlpGrpcPort }}
+    - name: otlp-http
+      port: {{ .Values.otelCollector.otlpHttpPort }}
+    - name: metrics
+      port: {{ .Values.otelCollector.metricsPort }}
+    - name: health
+      port: {{ .Values.otelCollector.healthCheckPort }}
+    - name: self-metrics
+      port: 8888
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fuzeinfra-otel-collector
+  labels:
+    {{- include "fuzeinfra.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.otelCollector.replicas }}
+  selector:
+    matchLabels:
+      {{- include "fuzeinfra.selectorLabels" (dict "component" "otel-collector" "root" $) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "fuzeinfra.labels" . | nindent 8 }}
+        {{- include "fuzeinfra.selectorLabels" (dict "component" "otel-collector" "root" $) | nindent 8 }}
+    spec:
+      containers:
+        - name: otel-collector
+          image: {{ .Values.otelCollector.image }}
+          imagePullPolicy: {{ include "fuzeinfra.pullPolicy" . }}
+          args:
+            - '--config=/etc/otel-collector/otel-collector-config.yaml'
+          ports:
+            - containerPort: {{ .Values.otelCollector.otlpGrpcPort }}
+              name: otlp-grpc
+            - containerPort: {{ .Values.otelCollector.otlpHttpPort }}
+              name: otlp-http
+            - containerPort: {{ .Values.otelCollector.metricsPort }}
+              name: metrics
+            - containerPort: {{ .Values.otelCollector.healthCheckPort }}
+              name: health
+          volumeMounts:
+            - name: config
+              mountPath: /etc/otel-collector
+          readinessProbe:
+            httpGet:
+              path: /
+              port: {{ .Values.otelCollector.healthCheckPort }}
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          {{- with .Values.otelCollector.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      {{- with .Values.otelCollector.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.otelCollector.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      volumes:
+        - name: config
+          configMap:
+            name: fuzeinfra-otel-collector-config
+{{- end }}

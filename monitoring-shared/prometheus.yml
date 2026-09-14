@@ -20,6 +20,20 @@ scrape_configs:
     static_configs:
       - targets: ['node-exporter:9100']
 
+  # Tempo self-metrics (ingester/compactor/metrics-generator health)
+  - job_name: 'tempo'
+    static_configs:
+      - targets: ['tempo:3200']
+
+  # otel-collector self-metrics + its prometheus exporter (OTLP metrics apps
+  # sent through it)
+  - job_name: 'otel-collector'
+    static_configs:
+      - targets: ['otel-collector:8888']
+  - job_name: 'otel-collector-exported'
+    static_configs:
+      - targets: ['otel-collector:8889']
+
   # Application-specific targets should be configured in the application's own monitoring setup
 
   - job_name: 'kafka'
