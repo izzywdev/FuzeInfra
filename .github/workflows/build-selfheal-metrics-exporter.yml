@@ -1,0 +1,59 @@
+name: Build & Push Self-Heal Metrics Exporter Image
+
+# Builds the self-heal loop metrics exporter (tools/selfheal-metrics-exporter),
+# which turns the autofix-label history on this repo into Prometheus metrics.
+# See docs/self-heal-loop-metrics.md.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'tools/selfheal-metrics-exporter/**'
+      - '.github/workflows/build-selfheal-metrics-exporter.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'tools/selfheal-metrics-exporter/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build-and-push:
+    name: Build & push selfheal-metrics-exporter
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7.0.1
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to Container Registry
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/fuzeinfra/selfheal-metrics-exporter
+          tags: |
+            type=sha
+            type=ref,event=branch
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build and push image
+        uses: docker/build-push-action@v7
+        with:
+          context: tools/selfheal-metrics-exporter
+          file: tools/selfheal-metrics-exporter/Dockerfile
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
