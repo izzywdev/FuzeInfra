@@ -617,6 +617,8 @@ spec:
               - configMap:
                   name: fuzeinfra-grafana-dashboard-logs-explorer
               - configMap:
+                  name: fuzeinfra-grafana-dashboard-selfheal-loop
+              - configMap:
                   name: fuzeinfra-grafana-dashboard-observability-stack
               - configMap:
                   name: fuzeinfra-grafana-dashboard-tracing

@@ -1571,3 +1571,54 @@ longhorn:
     # scoping (set to e.g. "baseline" once baseline nodes are tagged in Longhorn).
     diskSelector: ""
     nodeSelector: ""
+
+# -----------------------------------------------------------------------------
+# Self-heal loop metrics exporter (OPT-IN, default OFF).
+#
+# Three workflows open a labelled GitHub issue/PR when something breaks and a
+# cloud coding agent is expected to fix it — argo-outofsync-autofix.yml
+# (argo-autofix), grafana-crit-fix.yml (crit-autofix, Loki-sourced) and
+# alertmanager-fuze.yml (alertmanager-autofix). Whether those loops ever CLOSE
+# was only answerable by hand-running GitHub label queries; this exporter
+# persists it as Prometheus metrics plus a Loki event feed.
+#
+# Source: tools/selfheal-metrics-exporter. Dashboard:
+# helm/fuzeinfra/dashboards/selfheal-loop.json. Doc: docs/self-heal-loop-metrics.md.
+#
+# ON only in values-contabo.yaml: prod is the cluster where the loop runs, and
+# the metric is about this repo's GitHub history, so a second exporter anywhere
+# else would just double-count the same numbers.
+# -----------------------------------------------------------------------------
+selfHealMetrics:
+  enabled: false
+  image: ghcr.io/izzywdev/fuzeinfra/selfheal-metrics-exporter
+  tag: latest
+  imagePullSecrets: []
+  # Empty = inherit global.imagePullPolicy. Set Always in any overlay still on
+  # the floating `latest` tag, or a node that cached it never sees a rebuild.
+  imagePullPolicy: ""
+  port: 9109
+
+  # Repo whose autofix labels are counted.
+  githubRepo: izzywdev/FuzeInfra
+  pollIntervalSeconds: 600
+
+  # label -> the `system` label value on every metric. Data-driven on purpose:
+  # a 4th autofix workflow is an entry here, not a code change.
+  labelSystemMap:
+    argo-autofix: argocd
+    crit-autofix: loki
+    alertmanager-autofix: alertmanager
+
+  # Read-only GitHub token, referenced ONLY — never a value in this chart. Seal
+  # it as deploy/sealed-secrets/selfheal-metrics-github-token.yaml (see the
+  # .template beside it). The env ref is `optional: true`, so a cluster without
+  # the SealedSecret runs unauthenticated (60 req/h, ample at a 10-minute poll)
+  # rather than crash-looping.
+  githubTokenSecretName: selfheal-metrics-github-token
+  githubTokenSecretKey: token
+
+  # A stdlib poller hitting one API a few times per 10 minutes.
+  resources:
+    requests: { cpu: "10m", memory: "32Mi" }
+    limits:   { cpu: "100m", memory: "128Mi" }

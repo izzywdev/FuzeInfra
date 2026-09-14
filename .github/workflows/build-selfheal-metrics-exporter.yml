@@ -1,0 +1,59 @@
+name: Build & Push Self-Heal Metrics Exporter Image
+
+# Builds the self-heal loop metrics exporter (tools/selfheal-metrics-exporter),
+# which turns the autofix-label history on this repo into Prometheus metrics.
+# See docs/self-heal-loop-metrics.md.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'tools/selfheal-metrics-exporter/**'
+      - '.github/workflows/build-selfheal-metrics-exporter.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'tools/selfheal-metrics-exporter/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build-and-push:
+    name: Build & push selfheal-metrics-exporter
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e  # v4.3.0
+
+      - name: Log in to Container Registry
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f  # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302  # v6.2.0
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/fuzeinfra/selfheal-metrics-exporter
+          tags: |
+            type=sha
+            type=ref,event=branch
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build and push image
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a  # v7.3.0
+        with:
+          context: tools/selfheal-metrics-exporter
+          file: tools/selfheal-metrics-exporter/Dockerfile
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}

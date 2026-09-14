@@ -68,3 +68,10 @@ customHostnameApi:
 # stateful services to RDS/ElastiCache/MSK/OpenSearch, disable them here
 # (e.g. postgres.enabled: false) and point apps/airflow at the managed
 # endpoints via the credentials/secret. See docs/kubernetes-migration.md.
+
+# Self-heal loop metrics — OFF on EKS. The autofix loop (Argo out-of-sync,
+# Grafana CRIT, Alertmanager) runs against the Contabo prod cluster, and the
+# counts come from one shared GitHub repo, so a second exporter here would
+# publish a duplicate copy of the same numbers under a different Prometheus.
+selfHealMetrics:
+  enabled: false

@@ -1,0 +1,82 @@
+{{- if .Values.selfHealMetrics.enabled }}
+{{- /*
+  Self-heal loop metrics exporter — turns the autofix-label history on the
+  GitHub repo (argo-autofix / crit-autofix / alertmanager-autofix) into
+  Prometheus metrics and a Loki-queryable event feed, so "how many self-closed
+  loops actually completed" stops being an ad-hoc label query.
+  Source: tools/selfheal-metrics-exporter. Doc: docs/self-heal-loop-metrics.md.
+*/ -}}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: fuzeinfra-selfheal-metrics
+  labels:
+    {{- include "fuzeinfra.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "fuzeinfra.selectorLabels" (dict "component" "selfheal-metrics" "root" $) | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ .Values.selfHealMetrics.port }}
+      targetPort: {{ .Values.selfHealMetrics.port }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fuzeinfra-selfheal-metrics
+  labels:
+    {{- include "fuzeinfra.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "fuzeinfra.selectorLabels" (dict "component" "selfheal-metrics" "root" $) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "fuzeinfra.selectorLabels" (dict "component" "selfheal-metrics" "root" $) | nindent 8 }}
+    spec:
+      {{- with .Values.selfHealMetrics.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- include "fuzeinfra.durableToleration" $ | nindent 6 }}
+      containers:
+        - name: selfheal-metrics
+          image: "{{ .Values.selfHealMetrics.image }}:{{ .Values.selfHealMetrics.tag }}"
+          imagePullPolicy: {{ .Values.selfHealMetrics.imagePullPolicy | default .Values.global.imagePullPolicy | default "IfNotPresent" }}
+          ports:
+            - containerPort: {{ .Values.selfHealMetrics.port }}
+          env:
+            - name: GITHUB_REPO
+              value: {{ .Values.selfHealMetrics.githubRepo | quote }}
+            - name: POLL_INTERVAL_SECONDS
+              value: {{ .Values.selfHealMetrics.pollIntervalSeconds | quote }}
+            - name: LISTEN_PORT
+              value: {{ .Values.selfHealMetrics.port | quote }}
+            - name: LABEL_SYSTEM_MAP
+              value: {{ .Values.selfHealMetrics.labelSystemMap | toJson | quote }}
+            - name: GITHUB_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.selfHealMetrics.githubTokenSecretName }}
+                  key: {{ .Values.selfHealMetrics.githubTokenSecretKey }}
+                  # Optional so a cluster without the SealedSecret yet still runs:
+                  # the exporter falls back to unauthenticated GitHub reads (60
+                  # req/h, ample at a 10-minute poll) instead of crash-looping on
+                  # CreateContainerConfigError, which is how a missing Secret
+                  # normally manifests and is far harder to diagnose than a warning.
+                  optional: true
+          readinessProbe:
+            httpGet: { path: /healthz, port: {{ .Values.selfHealMetrics.port }} }
+            initialDelaySeconds: 5
+            periodSeconds: 15
+          livenessProbe:
+            httpGet: { path: /healthz, port: {{ .Values.selfHealMetrics.port }} }
+            initialDelaySeconds: 15
+            periodSeconds: 30
+          resources:
+            {{- toYaml (.Values.selfHealMetrics.resources | default dict) | nindent 12 }}
+{{- end }}

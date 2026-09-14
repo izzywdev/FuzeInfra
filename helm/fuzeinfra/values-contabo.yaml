@@ -1235,3 +1235,19 @@ kubeStateMetrics:
   # 2026-09-07.
   longhornVolumeMetrics:
     enabled: true
+
+# -----------------------------------------------------------------------------
+# Self-heal loop metrics exporter — ON here only. This is the cluster whose
+# Argo/Grafana-CRIT/Alertmanager alerts open the autofix issues in the first
+# place, so it is the one place the "did the loop close?" number belongs.
+#
+# The GitHub token is a reference only. Until
+# deploy/sealed-secrets/selfheal-metrics-github-token.yaml exists the env ref is
+# optional and the pod polls GitHub unauthenticated — correct numbers, just a
+# 60 req/h ceiling. See the .template beside it for how to seal one.
+# -----------------------------------------------------------------------------
+selfHealMetrics:
+  enabled: true
+  # `latest` + IfNotPresent = a node that already cached the tag never pulls a
+  # rebuild. Drop this once the tag is pinned to an immutable sha-<commit>.
+  imagePullPolicy: Always

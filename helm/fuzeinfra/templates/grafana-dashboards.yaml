@@ -56,7 +56,7 @@ data:
       {{- end }}
 ---
 {{- /* One ConfigMap per dashboard to stay well under the 1 MiB ConfigMap limit. */ -}}
-{{- range $name := list "cluster-overview" "kubernetes-nodes" "kubernetes-pods" "fuzeinfra-services" "logs-explorer" "observability-stack" "tracing" }}
+{{- range $name := list "cluster-overview" "kubernetes-nodes" "kubernetes-pods" "fuzeinfra-services" "logs-explorer" "selfheal-loop" "observability-stack" "tracing" }}
 apiVersion: v1
 kind: ConfigMap
 metadata:
