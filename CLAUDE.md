@@ -65,13 +65,14 @@ Prod is **Contabo single-node k3s**, namespace `fuzeinfra`, owned by **Argo CD**
 
 ## Service / port inventory
 
-Databases: **Postgres** 5432 (+pgAdmin) · **MariaDB** 3306 (MySQL protocol; `mariadb.enabled` gate) · **MongoDB** 27017 (+Mongo Express) · **Redis** 6379 · **Neo4j** 7474/7687 · **Elasticsearch** 9200 · **ChromaDB** 8003 (vector). Messaging: **Kafka** 29092 (+Kafka UI, Zookeeper) · **RabbitMQ** 5672/15672. Network: **dnsmasq** 53 (UI 8053, `*.dev.local`) · **Consul** 8500/8600 · **nginx** reverse proxy · **Cloudflare tunnel**. Monitoring: **Prometheus** 9090 · **Grafana** 3001 · **Alertmanager** 9093 · **Loki** 3100 · **Promtail** · **node-exporter** 9100 · **kube-state-metrics** (k8s only). Workflow: **Airflow** 8082 (init/webserver/scheduler/worker) · **Flower** 5555.
+Databases: **Postgres** 5432 (+pgAdmin) · **MariaDB** 3306 (MySQL protocol; `mariadb.enabled` gate) · **MongoDB** 27017 (+Mongo Express) · **Redis** 6379 · **Neo4j** 7474/7687 · **Elasticsearch** 9200 · **ChromaDB** 8003 (vector). Messaging: **Kafka** 29092 (+Kafka UI, Zookeeper) · **RabbitMQ** 5672/15672. Network: **dnsmasq** 53 (UI 8053, `*.dev.local`) · **Consul** 8500/8600 · **nginx** reverse proxy · **Cloudflare tunnel**. Monitoring: **Prometheus** 9090 · **Grafana** 3001 · **Alertmanager** 9093 · **Loki** 3100 · **Promtail** · **node-exporter** 9100 · **kube-state-metrics** (k8s only). Tracing: **Tempo** 3200 (query) / 4317+4318 (OTLP) · **otel-collector** 4317+4318 (OTLP in) / 8889 (metrics out) — apps send OTLP to the collector, never to Tempo/Loki directly; see `docs/consuming-repos/OBSERVABILITY_DASHBOARDS.md`. Workflow: **Airflow** 8082 (init/webserver/scheduler/worker) · **Flower** 5555.
 
 ## Project-integration guide (pointers)
 
 Apps onboard onto the shared platform — they don't fork it. Mechanics live in the tooling, not here:
 
 - **Deploy a consumer app to prod**: `docs/consuming-repos/ONBOARDING_A_CONSUMER_APP.md` — FuzeInfra owns the ArgoCD `Application` **and** the `AppProject`; consumers own only their chart, must not self-register, and must not render into a foreign namespace (Argo rejects the *whole* app, not just the stray resource). Also covers tunnel-only ingress hosts, offline sealing, and the FuzeFront registration-token chain.
+- **Observability for a product**: `docs/consuming-repos/OBSERVABILITY_DASHBOARDS.md` — send OTLP traces/logs/metrics to the otel-collector (never to Tempo/Loki directly), the `trace_id`-in-logs + exemplar contract that makes Prometheus/Loki/Tempo clickable into each other, and how to ship your own product dashboards (Overview/API/Pipeline/Tracing/Logs) via the `grafana_dashboard: "1"` sidecar label — same "consumer owns it, FuzeInfra doesn't fork for it" split as onboarding above.
 
 - **Connect**: `networks: { FuzeInfra: { external: true } }`; reach services by container name (`postgres`, `redis`, `mongodb`, …) via `DATABASE_URL`/`REDIS_URL`/`MONGODB_URL` env.
 - **DNS / HTTPS**: `tools/dns-manager/dns-manager.py add <project>` (`*.dev.local`); `tools/cert-manager/setup-local-certs.sh` (mkcert).

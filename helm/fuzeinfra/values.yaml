@@ -956,6 +956,46 @@ promtail:
   enabled: true
   image: grafana/promtail:3.2.0
 
+tempo:
+  # Distributed-tracing backend (Grafana Tempo, single-binary/local-storage
+  # mode). Receives OTLP traces exclusively from the otel-collector below —
+  # apps never talk to Tempo directly. Also runs the metrics-generator, which
+  # derives RED service-graph + span-latency metrics from trace data and
+  # remote-writes them into Prometheus (requires
+  # `--web.enable-remote-write-receiver`, wired in templates/monitoring.yaml
+  # gated on tempo.enabled) — that's what powers the Tracing dashboard's
+  # service graph and duration panels without every app exporting its own
+  # RED metrics.
+  enabled: true
+  image: grafana/tempo:2.6.1
+  httpPort: 3200
+  otlpGrpcPort: 4317
+  otlpHttpPort: 4318
+  # How long trace blocks are kept before compaction removes them.
+  retention: 24h
+  storage: 10Gi
+  resources: {}
+  nodeSelector: {}
+  tolerations: []
+
+otelCollector:
+  # Single OTLP ingestion point for every consuming app's traces/metrics/logs
+  # — send to http://fuzeinfra-otel-collector.fuzeinfra:4317 (grpc) or :4318
+  # (http) and never wire up Tempo/Loki/Prometheus hostnames directly in app
+  # code. Fans out: traces -> Tempo, logs -> Loki, metrics -> its own
+  # Prometheus exporter (scraped like any other target). Stateless — safe to
+  # scale replicas horizontally.
+  enabled: true
+  image: otel/opentelemetry-collector-contrib:0.112.0
+  otlpGrpcPort: 4317
+  otlpHttpPort: 4318
+  metricsPort: 8889
+  healthCheckPort: 13133
+  replicas: 1
+  resources: {}
+  nodeSelector: {}
+  tolerations: []
+
 nodeExporter:
   enabled: true
   image: prom/node-exporter:latest

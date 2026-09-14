@@ -4,15 +4,13 @@ Pytest configuration and fixtures for FuzeInfra infrastructure testing.
 import os
 import pytest
 import time
-import requests
 import psycopg2
 import pymongo
 import redis
 import neo4j
 import pika
 from elasticsearch import Elasticsearch
-from kafka import KafkaProducer, KafkaConsumer
-from kafka.errors import KafkaError
+from kafka import KafkaProducer
 
 
 @pytest.fixture(scope="session")
@@ -121,6 +119,8 @@ def service_urls():
         "grafana": "http://localhost:3001",
         "alertmanager": "http://localhost:9093",
         "loki": "http://localhost:3100",
+        "tempo": "http://localhost:3200",
+        "otel_collector": "http://localhost:13133",
         "node_exporter": "http://localhost:9100",
         "mongo_express": "http://localhost:8081",
         "kafka_ui": "http://localhost:8080",

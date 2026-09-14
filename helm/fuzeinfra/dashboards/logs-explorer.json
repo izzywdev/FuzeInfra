@@ -14,7 +14,7 @@
         },
         "overrides": []
       },
-      "gridPos": {"h": 6, "w": 12, "x": 0, "y": 0},
+      "gridPos": {"h": 6, "w": 8, "x": 0, "y": 0},
       "id": 1,
       "options": {
         "legend": {"calcs": [], "displayMode": "list", "placement": "bottom"},
@@ -25,7 +25,7 @@
       "targets": [
         {
           "datasource": {"type": "loki", "uid": "${loki_datasource}"},
-          "expr": "sum by (pod) (rate({namespace=~\"$namespace\", pod=~\"$pod\"}[$__interval]))",
+          "expr": "sum by (pod) (rate({namespace=~\"$namespace\", app=~\"$app\", pod=~\"$pod\"}[$__interval]))",
           "legendFormat": "{{ pod }}"
         }
       ]
@@ -40,7 +40,7 @@
         },
         "overrides": []
       },
-      "gridPos": {"h": 6, "w": 12, "x": 12, "y": 0},
+      "gridPos": {"h": 6, "w": 8, "x": 8, "y": 0},
       "id": 2,
       "options": {
         "legend": {"calcs": [], "displayMode": "list", "placement": "bottom"},
@@ -51,18 +51,42 @@
       "targets": [
         {
           "datasource": {"type": "loki", "uid": "${loki_datasource}"},
-          "expr": "sum by (pod) (rate({namespace=~\"$namespace\", pod=~\"$pod\"} |~ \"(?i)(error|exception|fatal|panic)\" [$__interval]))",
+          "expr": "sum by (pod) (rate({namespace=~\"$namespace\", app=~\"$app\", pod=~\"$pod\"} |~ \"(?i)(error|exception|fatal|panic)\" [$__interval]))",
           "legendFormat": "{{ pod }} errors"
         },
         {
           "datasource": {"type": "loki", "uid": "${loki_datasource}"},
-          "expr": "sum by (pod) (rate({namespace=~\"$namespace\", pod=~\"$pod\"} |~ \"(?i)(warn|warning)\" [$__interval]))",
+          "expr": "sum by (pod) (rate({namespace=~\"$namespace\", app=~\"$app\", pod=~\"$pod\"} |~ \"(?i)(warn|warning)\" [$__interval]))",
           "legendFormat": "{{ pod }} warnings"
         }
       ]
     },
     {
       "datasource": {"type": "loki", "uid": "${loki_datasource}"},
+      "description": "Requires structured JSON logs with a `level` field (the family pino logging standard — see the `logging` skill). Pods logging plain text show no data here; the Error/Warn Rate panel still works for them via regex.",
+      "fieldConfig": {"defaults": {"unit": "short"}, "overrides": []},
+      "gridPos": {"h": 6, "w": 8, "x": 16, "y": 0},
+      "id": 5,
+      "options": {
+        "displayLabels": ["percent"],
+        "legend": {"displayMode": "list", "placement": "right", "values": ["value"]},
+        "pieType": "donut",
+        "reduceOptions": {"calcs": ["sum"], "values": false}
+      },
+      "title": "Log Level Distribution",
+      "type": "piechart",
+      "targets": [
+        {
+          "datasource": {"type": "loki", "uid": "${loki_datasource}"},
+          "expr": "sum by (level) (count_over_time({namespace=~\"$namespace\", app=~\"$app\", pod=~\"$pod\"} | json | __error__=\"\" [$__range]))",
+          "legendFormat": "{{ level }}",
+          "instant": true
+        }
+      ]
+    },
+    {
+      "datasource": {"type": "loki", "uid": "${loki_datasource}"},
+      "description": "Trace ID, span ID and request ID are structured fields — click a log line's `trace_id` to jump straight into the matching Tempo trace (wired via the Loki datasource's derivedFields).",
       "fieldConfig": {"defaults": {}, "overrides": []},
       "gridPos": {"h": 18, "w": 24, "x": 0, "y": 6},
       "id": 3,
@@ -81,7 +105,7 @@
       "targets": [
         {
           "datasource": {"type": "loki", "uid": "${loki_datasource}"},
-          "expr": "{namespace=~\"$namespace\", pod=~\"$pod\"} |~ \"(?i)$search\"",
+          "expr": "{namespace=~\"$namespace\", app=~\"$app\", pod=~\"$pod\"} |~ \"(?i)$search\"",
           "legendFormat": ""
         }
       ]
@@ -114,7 +138,7 @@
     }
   ],
   "refresh": "30s",
-  "schemaVersion": 38,
+  "schemaVersion": 39,
   "tags": ["logs", "loki", "fuzeinfra"],
   "templating": {
     "list": [
@@ -145,14 +169,28 @@
       {
         "current": {"selected": true, "text": ["All"], "value": ["$__all"]},
         "datasource": {"type": "loki", "uid": "${loki_datasource}"},
-        "definition": "label_values({namespace=~\"$namespace\"}, pod)",
+        "definition": "label_values({namespace=~\"$namespace\"}, app)",
+        "hide": 0,
+        "includeAll": true,
+        "allValue": ".+",
+        "label": "Service",
+        "multi": true,
+        "name": "app",
+        "query": "label_values({namespace=~\"$namespace\"}, app)",
+        "refresh": 2,
+        "type": "query"
+      },
+      {
+        "current": {"selected": true, "text": ["All"], "value": ["$__all"]},
+        "datasource": {"type": "loki", "uid": "${loki_datasource}"},
+        "definition": "label_values({namespace=~\"$namespace\", app=~\"$app\"}, pod)",
         "hide": 0,
         "includeAll": true,
         "allValue": ".+",
         "label": "Pod",
         "multi": true,
         "name": "pod",
-        "query": "label_values({namespace=~\"$namespace\"}, pod)",
+        "query": "label_values({namespace=~\"$namespace\", app=~\"$app\"}, pod)",
         "refresh": 2,
         "type": "query"
       },
@@ -171,5 +209,5 @@
   "timezone": "browser",
   "title": "Logs Explorer",
   "uid": "fuzeinfra-logs",
-  "version": 1
+  "version": 2
 }

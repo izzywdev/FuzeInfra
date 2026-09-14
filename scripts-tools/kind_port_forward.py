@@ -48,6 +48,8 @@ FORWARDS = [
     (3001, 3000, "grafana"),          # conftest expects grafana on 3001
     (9093, 9093, "alertmanager"),
     (3100, 3100, "loki"),
+    (3200, 3200, "tempo"),              # conftest's tempo URL (query/ready/metrics)
+    (13133, 13133, "otel-collector"),   # conftest's otel_collector health-check URL
     (8081, 8081, "mongo-express"),
     (8080, 8080, "kafka-ui"),
     (5672, 5672, "rabbitmq"),         # AMQP — tests/test_messaging.py

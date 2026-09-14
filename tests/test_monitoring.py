@@ -1,7 +1,6 @@
 """
 Tests for monitoring and observability services: Prometheus, Grafana, Alertmanager, Loki
 """
-import pytest
 import requests
 import json
 import time
@@ -212,6 +211,40 @@ class TestLoki:
 
         query_data = response.json()
         assert "data" in query_data
+
+
+class TestTracing:
+    """Test the tracing backend (Tempo) and its OTLP ingestion point (otel-collector)."""
+
+    def test_tempo_ready(self, service_urls, wait_for_services):
+        """Test Tempo's readiness endpoint.
+
+        Tempo's /ready gates on its ring lifecycler + metrics-generator reaching
+        Running, which can lag behind the container simply being up — the same
+        "up but not ready yet" gap every other service in this suite handles with
+        a poll loop (see wait_for_health/wait_for_port in the CI workflow) rather
+        than a single one-shot request.
+        """
+        deadline = time.time() + 60
+        last_status = None
+        while time.time() < deadline:
+            response = requests.get(f"{service_urls['tempo']}/ready", timeout=10)
+            last_status = response.status_code
+            if last_status == 200:
+                return
+            time.sleep(2)
+        assert last_status == 200, f"Tempo never became ready (last status: {last_status})"
+
+    def test_tempo_metrics(self, service_urls, wait_for_services):
+        """Test Tempo exposes its own Prometheus metrics (scraped by the tempo job)."""
+        response = requests.get(f"{service_urls['tempo']}/metrics", timeout=10)
+        assert response.status_code == 200
+        assert "tempo_" in response.text
+
+    def test_otel_collector_health(self, service_urls, wait_for_services):
+        """Test the otel-collector's health_check extension endpoint."""
+        response = requests.get(f"{service_urls['otel_collector']}", timeout=10)
+        assert response.status_code == 200
 
 
 class TestNodeExporter:

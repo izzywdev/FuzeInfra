@@ -382,6 +382,19 @@ loki:
     insecure: false
     existingSecret: "loki-s3"
 
+tempo:
+  # Same reasoning as prometheus/loki above: pin to a durable Longhorn node so
+  # the PVC can attach, and to the monitoring node so trace-ingest I/O doesn't
+  # share a disk with the etcd serving the API VIP.
+  nodeSelector:
+    node.longhorn.io/create-default-disk: "true"
+    fuzeinfra.io/role: monitoring
+  storage: 20Gi
+
+otelCollector:
+  # Stateless — no PVC, so no node pin needed. Left on the default scheduler.
+  replicas: 1
+
 # Scheduled DB backups → S3 (Contabo Object Storage). Bucket/endpoint wired for
 # prod; kept OFF until the `fuzeinfra-backups-s3` SealedSecret is committed.
 # See docs/backups-and-blobs.md for the enable + retention-policy steps.
