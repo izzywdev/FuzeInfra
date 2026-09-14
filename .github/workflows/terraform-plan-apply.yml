@@ -247,15 +247,20 @@ jobs:
               await github.rest.issues.createComment({ owner, repo, issue_number, body });
             }
 
-      # Drift gate: a non-empty plan (has_changes=true) fails THIS check — loudly —
-      # after the plan was saved + commented above. The artifact still exists, so you
-      # can deliberately merge past the red check to apply the reviewed plan; but a
-      # green plan check now guarantees "no changes" (state matches config).
-      - name: Fail the check on a non-empty plan (drift)
+      # Non-empty plan → a loud WARNING (not a check failure) on PRs. The plan was
+      # already saved as an artifact and posted as the PR comment above — that comment
+      # ("merging applies exactly this saved plan") IS the apply-approval review, so no
+      # signal is lost by not failing here. A non-empty plan is the NORMAL state for any
+      # PR that intends an infra change, so failing the check trained reviewers to ignore
+      # a permanent red X on every terraform PR. Genuine DRIFT (a non-empty plan on a PR
+      # you did NOT expect to change infra) still surfaces in the plan comment — read it.
+      # TRADE-OFF: a green plan check no longer proves "no changes"; the plan comment is
+      # now the source of truth for what a merge will apply. The apply-on-merge job is
+      # unaffected (it downloads the saved artifact regardless of this step).
+      - name: Warn on a non-empty plan (review the plan comment)
         if: steps.detect.outputs.tf == 'true' && github.event.pull_request.head.repo.fork != true && steps.plan.outputs.has_changes == 'true'
         run: |
-          echo "::error::terraform plan is NON-EMPTY — config and live state differ (drift or unapplied changes). See the plan comment. Reconcile/import until clean, or merge deliberately to apply the reviewed plan."
-          exit 1
+          echo "::warning::terraform plan is NON-EMPTY — merging this PR applies the reviewed plan (see the plan comment on the PR). If you did NOT intend an infra change, this is drift: reconcile/import until the plan is clean before merging."
 
   # =========================================================================
   # APPLY — on merge to main. Applies the SAVED plan that was reviewed.
