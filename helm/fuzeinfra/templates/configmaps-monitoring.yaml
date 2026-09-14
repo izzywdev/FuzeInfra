@@ -152,6 +152,13 @@ data:
           - targets: ["fuzeinfra-loki:{{ .Values.loki.port }}"]
       {{- end }}
 
+      # Self-heal loop metrics (autofix issue/PR outcomes from the GitHub API)
+      {{- if .Values.selfHealMetrics.enabled }}
+      - job_name: selfheal-metrics
+        static_configs:
+          - targets: ["fuzeinfra-selfheal-metrics:{{ .Values.selfHealMetrics.port }}"]
+      {{- end }}
+
       # Any pod annotated with prometheus.io/scrape: "true"
       - job_name: kubernetes-pods
         kubernetes_sd_configs:
