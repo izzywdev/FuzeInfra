@@ -89,8 +89,15 @@ def _parse_ts(value: str | None) -> float | None:
 
 
 def _get_json(path: str) -> list[dict]:
+    url = f"{GITHUB_API}{path}"
+    # GITHUB_API is a fixed https:// literal, never operator/env-configurable,
+    # but this check keeps urlopen's argument provably non-dynamic to a static
+    # analyzer (and to a future edit that makes GITHUB_API configurable) —
+    # urllib.request.urlopen otherwise also accepts file:// on any str URL.
+    if not url.startswith("https://api.github.com/"):
+        raise ValueError(f"refusing to open a non-GitHub-API URL: {url!r}")
     req = urllib.request.Request(
-        f"{GITHUB_API}{path}",
+        url,
         headers={
             "Accept": "application/vnd.github+json",
             "X-GitHub-Api-Version": "2022-11-28",
@@ -101,7 +108,7 @@ def _get_json(path: str) -> list[dict]:
     if token:
         req.add_header("Authorization", f"Bearer {token}")
     try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
+        with urllib.request.urlopen(req, timeout=30) as resp:  # noqa: S310 - scheme validated above
             return json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
         if exc.code in (403, 429):
