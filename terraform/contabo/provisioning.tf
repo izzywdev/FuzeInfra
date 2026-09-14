@@ -148,12 +148,23 @@ resource "null_resource" "provision" {
       # Fixes GHCR pulls TCP-reset on Contabo IPv6 CDN paths (FuzeInfra#616).
       # Written before k3s so containerd inherits the preference from first boot.
       "printf 'precedence ::ffff:0:0/96  100\\n' > /etc/gai.conf",
+      # Avoid raw `curl | sh`: fetch the installer, verify it against the
+      # published checksum, then execute the local file with an explicit
+      # channel pin. This keeps the bootstrap path aligned with the fleet's
+      # verified-download convention used elsewhere in this repo.
+      "export INSTALL_K3S_CHANNEL='${var.k3s_channel}'",
+      "export INSTALL_K3S_EXEC='--tls-san ${local.server_ip} --node-taint node-role.kubernetes.io/control-plane=:PreferNoSchedule'",
+      "curl -sfL -o /tmp/install.sh https://get.k3s.io",
+      "curl -sfL -o /tmp/install.sh.sha256sum https://raw.githubusercontent.com/k3s-io/k3s/main/install.sh.sha256sum",
+      "cd /tmp && sha256sum -c install.sh.sha256sum",
+      "chmod 700 /tmp/install.sh",
       "if ! command -v k3s &>/dev/null; then",
-      "  curl -sfL https://get.k3s.io | INSTALL_K3S_EXEC='--tls-san ${local.server_ip} --node-taint node-role.kubernetes.io/control-plane=:PreferNoSchedule' sh -",
+      "  /tmp/install.sh",
       "else",
       "  echo 'k3s already installed, running upgrade check'",
-      "  curl -sfL https://get.k3s.io | INSTALL_K3S_EXEC='--tls-san ${local.server_ip} --node-taint node-role.kubernetes.io/control-plane=:PreferNoSchedule' sh - || true",
+      "  /tmp/install.sh || true",
       "fi",
+      "rm -f /tmp/install.sh /tmp/install.sh.sha256sum",
       "sleep 15",
       "kubectl wait --for=condition=ready node --all --timeout=120s",
 
@@ -325,4 +336,3 @@ resource "null_resource" "extract_kubeconfig" {
     EOT
   }
 }
-
