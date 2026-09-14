@@ -214,6 +214,26 @@ class TestLoki:
         assert "data" in query_data
 
 
+class TestTracing:
+    """Test the tracing backend (Tempo) and its OTLP ingestion point (otel-collector)."""
+
+    def test_tempo_ready(self, service_urls, wait_for_services):
+        """Test Tempo's readiness endpoint."""
+        response = requests.get(f"{service_urls['tempo']}/ready", timeout=10)
+        assert response.status_code == 200
+
+    def test_tempo_metrics(self, service_urls, wait_for_services):
+        """Test Tempo exposes its own Prometheus metrics (scraped by the tempo job)."""
+        response = requests.get(f"{service_urls['tempo']}/metrics", timeout=10)
+        assert response.status_code == 200
+        assert "tempo_" in response.text
+
+    def test_otel_collector_health(self, service_urls, wait_for_services):
+        """Test the otel-collector's health_check extension endpoint."""
+        response = requests.get(f"{service_urls['otel_collector']}", timeout=10)
+        assert response.status_code == 200
+
+
 class TestNodeExporter:
     """Test Node Exporter service."""
     

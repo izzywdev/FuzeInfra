@@ -81,6 +81,19 @@ root-owned) · `backups.sink: pvc` nightly `pg_dumpall`/`mongodump`/neo4j-APOC t
 Longhorn PVC · Argo `ignoreDifferences` on StatefulSet `.spec.volumeClaimTemplates`
 (the immutable field that once caused DBs to be recreated onto empty local-path PVCs).
 
+**Observability (metrics/logs/traces) is also on by default, not a follow-up
+step.** `prometheus`, `loki`, `tempo` and `otelCollector` are all
+`enabled: true` at the base `values.yaml` — a from-zero cluster gets the full
+Prometheus + Loki + Tempo + otel-collector stack, with Grafana's
+Prometheus/Loki/Tempo datasources cross-wired (exemplars → traces, log
+`trace_id` → traces, trace → logs/metrics) the moment the chart syncs. Prod
+additionally pins `tempo` to the same durable + monitoring node as
+`loki`/`prometheus` (`values-contabo.yaml`) for the same reason described
+above for Loki (§ node pinning history). Nothing here needs a manual step;
+it's listed so a from-zero operator knows tracing isn't a gap to fill in
+later. See `docs/consuming-repos/OBSERVABILITY_DASHBOARDS.md` for how a
+product wires itself up against this backend.
+
 ## 5. Verify
 
 ```bash

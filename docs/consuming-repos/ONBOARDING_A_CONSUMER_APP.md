@@ -157,3 +157,10 @@ prod deploy entirely, producing **no run at all** rather than a red one.
 To verify from your own repo without cluster access, use the self-service
 read-only `kubectl` in [CLUSTER_QUERY.md](./CLUSTER_QUERY.md) rather than asking a
 human to relay output.
+
+## Wiring up metrics, logs, traces and dashboards
+
+Once deployed, see [OBSERVABILITY_DASHBOARDS.md](./OBSERVABILITY_DASHBOARDS.md) —
+same ownership split as above: FuzeInfra runs the shared Prometheus/Loki/Tempo/
+otel-collector backend and Grafana, your product sends OTLP to the collector and
+ships its own dashboards via the `grafana_dashboard: "1"` sidecar label.

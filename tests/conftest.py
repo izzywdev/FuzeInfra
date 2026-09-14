@@ -121,6 +121,8 @@ def service_urls():
         "grafana": "http://localhost:3001",
         "alertmanager": "http://localhost:9093",
         "loki": "http://localhost:3100",
+        "tempo": "http://localhost:3200",
+        "otel_collector": "http://localhost:13133",
         "node_exporter": "http://localhost:9100",
         "mongo_express": "http://localhost:8081",
         "kafka_ui": "http://localhost:8080",

@@ -23,6 +23,10 @@ data:
           path: /var/lib/grafana/dashboards
       {{- if .Values.grafana.dashboardSidecar.enabled }}
       # Discovered dashboards written by the k8s-sidecar (see grafana.dashboardSidecar).
+      # This is how a CONSUMING APP ships its own product dashboards (an "Overview",
+      # an "API" dashboard, a pipeline dashboard, ...) without forking this chart —
+      # see docs/consuming-repos/OBSERVABILITY_DASHBOARDS.md. FuzeInfra only owns
+      # the generic platform/observability-stack dashboards below.
       - name: discovered
         orgId: 1
         folder: {{ .Values.grafana.dashboardSidecar.folderName | quote }}
@@ -34,9 +38,25 @@ data:
           path: /var/lib/grafana/dashboards-discovered
           foldersFromFilesStructure: true
       {{- end }}
+      # Vendored community dashboards (Node Exporter Full, etc.) — see
+      # scripts-tools/vendor-grafana-dashboard.sh. Filed under their own folder so
+      # they read as "generic infra" rather than being mixed into the FuzeInfra
+      # folder's custom dashboards.
+      {{- if $.Files.Glob "dashboards/community/*.json" }}
+      - name: community
+        orgId: 1
+        folder: "Infrastructure (Community)"
+        folderUid: fuzeinfra-community-folder
+        type: file
+        disableDeletion: false
+        updateIntervalSeconds: 30
+        allowUiUpdates: true
+        options:
+          path: /var/lib/grafana/dashboards-community
+      {{- end }}
 ---
 {{- /* One ConfigMap per dashboard to stay well under the 1 MiB ConfigMap limit. */ -}}
-{{- range $name := list "cluster-overview" "kubernetes-nodes" "kubernetes-pods" "fuzeinfra-services" "logs-explorer" }}
+{{- range $name := list "cluster-overview" "kubernetes-nodes" "kubernetes-pods" "fuzeinfra-services" "logs-explorer" "observability-stack" "tracing" }}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -46,6 +66,20 @@ metadata:
 data:
   {{ $name }}.json: |
 {{ $.Files.Get (printf "dashboards/%s.json" $name) | indent 4 }}
+---
+{{- end }}
+{{- /* One ConfigMap per vendored community dashboard JSON, if any are present. */ -}}
+{{- range $path, $_ := $.Files.Glob "dashboards/community/*.json" }}
+{{- $name := base $path | trimSuffix ".json" }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: fuzeinfra-grafana-dashboard-community-{{ $name }}
+  labels:
+    {{- include "fuzeinfra.labels" $ | nindent 4 }}
+data:
+  {{ $name }}.json: |
+{{ $.Files.Get $path | indent 4 }}
 ---
 {{- end }}
 {{- end }}
