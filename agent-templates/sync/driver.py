@@ -56,7 +56,6 @@ def _stream_thread(session_id, q):
                     try:
                         q.put(json.loads(payload))
                     except json.JSONDecodeError:
-                        # Ignore malformed or non-JSON stream frames (e.g. keep-alives) to keep connection open
                         pass
     except (OSError, ValueError) as e:
         # The stream reader: a dropped connection (OSError) or an undecodable frame
