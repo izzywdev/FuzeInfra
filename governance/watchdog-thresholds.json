@@ -24,13 +24,27 @@
   },
 
   "dark_node": {
-    "$doc": "Added 2026-09-15 after a Contabo-autoscaler-alert investigation found fuze-core-3 (control-plane/etcd) with Ready/MemoryPressure/DiskPressure/PIDPressure all Unknown for 4.5 days ('Kubelet stopped posting node status') and nothing had ever flagged it. It still held its etcd vote and its scheduled pods the whole time while contributing zero usable capacity. NOT auto-remediated (see auto_restart below) — the filed issue mentions @fuze with enough facts (control-plane role, etcd-voter status, how many OTHER control-plane nodes are currently Ready, external IP) for the agent to decide, and if it decides to proceed, dispatch contabo-instance-reboot.yml itself. Runbook: docs/runbooks/dark-node-reboot.md.",
+    "$doc": "Added 2026-09-15 after a Contabo-autoscaler-alert investigation found fuze-core-3 (control-plane/etcd) with Ready/MemoryPressure/DiskPressure/PIDPressure all Unknown for 4.5 days ('Kubelet stopped posting node status') and nothing had ever flagged it. It still held its etcd vote and its scheduled pods the whole time while contributing zero usable capacity. UPDATED 2026-09-16: the manual hand-to-@fuze flow this shipped with took FIVE DAYS end to end for that exact node (detected 09-10, resolved 09-15/16) — the facts a human needs to decide are the same facts a bounded state machine can check, so it is now an automated ladder: reboot (bounded, spaced out) then reinstall (gated on time + quorum + node class), see decide_dark_node_escalation in scripts-tools/deployment_watchdog.py. Runbook: docs/runbooks/dark-node-reboot.md.",
     "enabled": true,
     "unknown_minutes": 30,
     "$unknown_minutes": "A kubelet restart, a brief network blip to the API server, or a node reboot already in progress legitimately reports Unknown for a few minutes. 30 is long enough to skip that noise, short enough that a genuinely dark node (the incident was 4.5 DAYS) is caught the same run-cycle instead of by accident.",
     "ignore_nodes": [],
-    "auto_restart": false,
-    "$auto_restart": "Deliberately false and, unlike auto_terminate above, there is no code path that would honor true — dark_node has no dispatch step in deployment_watchdog.py at all. Restarting a node is not obviously safe/reversible the way terminating a stale Argo op is (it can matter which workloads are pinned there and whether it is an etcd voter), so the decision is handed to @fuze on the filed issue rather than made unconditionally here."
+    "auto_restart": true,
+    "$auto_restart": "Was deliberately false through 2026-09-15 ('there is no code path that would honor true') because rebooting a node is not obviously safe/reversible the way terminating a stale Argo op is. Flipped to true on 2026-09-16 once the decision was made BOUNDED rather than unconditional: at most max_reboot_attempts, each spaced reboot_cooldown_minutes apart, dispatched through the same contabo-instance-reboot.yml a human would have run by hand, which comments its own result back onto the tracked issue either way.",
+    "max_reboot_attempts": 3,
+    "$max_reboot_attempts": "A node that doesn't recover after 3 reboots has a problem a reboot doesn't fix (hardware, a wedged disk, a Contabo host issue) — repeating it forever just delays the reinstall that actually helps.",
+    "reboot_cooldown_minutes": 30,
+    "$reboot_cooldown_minutes": "Matches the cooldown scripts/preflight_node_teardown.py already uses for the analogous 'is a previous action still settling' question. A Contabo restart plus k3s/kubelet coming back up can take several minutes; 30 gives real headroom before concluding attempt N failed and trying attempt N+1.",
+    "escalate_after_minutes": 120,
+    "$escalate_after_minutes": "Reinstall requires BOTH max_reboot_attempts exhausted AND at least this much total dark time — not either alone — so a node whose 3 reboots happen to burn through quickly (e.g. cooldown races) still gets a full 2h of a machine actually being unreachable before its disk is wiped. 2h is long enough that a slow-but-genuine recovery isn't preempted, short enough that this is still hours, not days.",
+    "auto_reinstall": true,
+    "$auto_reinstall": "Gated behind auto_restart's attempts being exhausted, escalate_after_minutes elapsed, AND (for control-plane/etcd nodes) the quorum check below. The two things that made a bare 'yes' unsafe on 2026-09-07 — Longhorn data loss and etcd quorum — are enforced INSIDE ca-reinstall-controlplane.yml itself (preflight_node_teardown.py; the reinstall_min_other_ready_control_plane check below is belt-and-suspenders before the dispatch even happens), not trusted to this flag alone.",
+    "reinstall_min_other_ready_control_plane": 2,
+    "$reinstall_min_other_ready_control_plane": "Refuses auto-reinstall of an etcd-voter node unless at least this many OTHER control-plane nodes are currently Ready — the exact quorum-safety check the dark-node issue already surfaced for a human (other_ready_control_plane_nodes) is now also a hard gate on the automated path. Non-voter control-plane/durable nodes skip this check entirely (no quorum to protect).",
+    "reinstall_template_cp": "cluster-autoscaler/contabo-externalgrpc/deploy/cp-userdata-eth1-join.template",
+    "$reinstall_template_cp": "The SELF-JOINING control-plane template, deliberately not cp-userdata-eth1.template (which stops at 'prepared, not joined' and expects a human to run the k3s server join by hand). An unattended ladder cannot leave a half-finished node waiting on a human step it never asked for.",
+    "reinstall_workflow": "ca-reinstall-controlplane.yml",
+    "$reinstall_workflow": "Elastic nodes are explicitly OUT OF SCOPE for this ladder (decide_dark_node_escalation returns refuse-elastic) — they already have autoscaler-driven replacement via ca-salvage-enroll.yml / the reaper, and ca-reinstall-controlplane.yml itself refuses any node in the elastic name prefix."
   },
 
   "container_creating": {
