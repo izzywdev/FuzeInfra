@@ -1,4 +1,4 @@
-# fuze:managed template=fuze-code-review.yml baseline=v1 digest=sha256:ef3855ac041ab21debf6c81d9371aef2ada4f58c5e6cde6bcd50b3c33ac05705
+# fuze:managed template=fuze-code-review.yml baseline=v1 digest=sha256:9943843d9bfe2a1dcc714cb1e6167ee5319ee8a498b028349acc6973a2f2150c
 name: Fuze Code Review
 
 # THE CANONICAL LLM CODE REVIEW + APPROVAL GATE — now a MANDATORY approve-or-fail check.
@@ -142,7 +142,11 @@ jobs:
   # gate-required-checks accept this fallback (C3). This chooser job is NOT itself a required
   # status context — only the decisive `Fuze Code Review` job below is.
   pick-runner:
-    runs-on: fuze-runner
+    # Public repositories have unmetered GitHub-hosted capacity. Sending their
+    # chooser to a self-hosted pool first can deadlock every PR before the
+    # workflow has a chance to select the hosted path. Private repositories
+    # retain the budget-aware fallback pool.
+    runs-on: ${{ github.event.repository.private && 'fuze-runner' || 'ubuntu-latest' }}
     outputs:
       runner: ${{ steps.pick.outputs.runner }}
     steps:
