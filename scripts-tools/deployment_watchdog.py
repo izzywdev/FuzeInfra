@@ -42,6 +42,18 @@ DESIGN RULES (do not weaken)
 Everything that decides *whether something is wrong* is a pure function over
 parsed JSON (`detect_*`, `filter_new_findings`), so the predicates are unit
 tested offline with no cluster: tests/test_deployment_watchdog.py.
+
+ADDED 2026-09-15 — dark nodes (detect_dark_nodes / KIND_DARK_NODE). A Contabo
+autoscaler-health alert investigation found `fuze-core-3` (a control-plane/etcd
+node) silently dark — Ready/MemoryPressure/DiskPressure/PIDPressure all
+`Unknown`, kubelet not posting status — for 4.5 days, still counted as an etcd
+voting member, with nothing having ever flagged it. Same silent-freeze shape as
+the incident above, so it lives in the same watchdog. Deliberately NOT
+auto-remediated the way a stale Argo op is: rebooting a node is not obviously
+safe or reversible (it can matter which workloads are on it and whether it is
+an etcd voter), so this only FILES the issue with enough facts for `@fuze` to
+decide and, if it decides to proceed, dispatch `contabo-instance-reboot.yml`
+itself. See docs/runbooks/dark-node-reboot.md.
 """
 
 from __future__ import annotations
@@ -67,6 +79,7 @@ KIND_ARGO = "stuck-argo-op"
 KIND_CRASHLOOP = "chronic-crashloop"
 KIND_CREATING = "stuck-containercreating"
 KIND_PVC = "pvc-nearing-full"
+KIND_DARK_NODE = "dark-node"
 
 
 class ClusterUnreachable(RuntimeError):
@@ -216,6 +229,122 @@ def detect_stuck_argo_ops(applications: dict, config: dict, now: datetime) -> li
                     "revision": revision,
                     "sync_status": ((app.get("status") or {}).get("sync") or {}).get("status"),
                     "health_status": ((app.get("status") or {}).get("health") or {}).get("status"),
+                },
+            )
+        )
+    return findings
+
+
+def _node_condition(node: dict, cond_type: str) -> dict | None:
+    for cond in (node.get("status") or {}).get("conditions") or []:
+        if cond.get("type") == cond_type:
+            return cond
+    return None
+
+
+def _node_address(node: dict, addr_type: str) -> str | None:
+    for addr in (node.get("status") or {}).get("addresses") or []:
+        if addr.get("type") == addr_type:
+            return addr.get("address")
+    return None
+
+
+def detect_dark_nodes(nodes: dict, config: dict, now: datetime) -> list[Finding]:
+    """Nodes whose kubelet has stopped posting status (Ready condition == Unknown).
+
+    `fuze-core-3` sat in this state for 4.5 days — still labelled a
+    control-plane node and still an etcd voting member, per its own
+    `EtcdIsVoter` condition, while `Ready`/`MemoryPressure`/`DiskPressure`/
+    `PIDPressure` were all `Unknown` ("Kubelet stopped posting node status").
+    That combination is exactly what makes this dangerous silently: the node
+    keeps its etcd vote and keeps holding scheduled pods (they are never
+    evicted while the node object itself still exists) while contributing zero
+    usable capacity — the same "everything reports fine, nothing works" shape
+    as the Aug30 Loki freeze this watchdog already exists for.
+
+    Facts carried on the finding are chosen so `@fuze` (mentioned in the filed
+    issue) can decide whether a restart is safe WITHOUT re-querying the
+    cluster itself: `is_control_plane` + `is_etcd_voter` +
+    `other_ready_control_plane_nodes` are the quorum-safety check, and
+    `external_ip` is what `contabo-instance-reboot.yml` needs to resolve the
+    Contabo instanceId (nodes carry no instanceId label at bootstrap — the
+    public IP is the only reliable link). See
+    docs/runbooks/dark-node-reboot.md for the full decision + action flow.
+    """
+    cfg = config.get("dark_node", {})
+    if not cfg.get("enabled", True):
+        return []
+    threshold = float(cfg.get("unknown_minutes", 30))
+    ignore = set(cfg.get("ignore_nodes") or [])
+    items = nodes.get("items", []) or []
+
+    control_plane_ready = 0
+    for node in items:
+        labels = (node.get("metadata") or {}).get("labels") or {}
+        ready = _node_condition(node, "Ready")
+        if "node-role.kubernetes.io/control-plane" in labels and ready and ready.get("status") == "True":
+            control_plane_ready += 1
+
+    findings: list[Finding] = []
+    for node in items:
+        name = (node.get("metadata") or {}).get("name") or "<unnamed>"
+        if name in ignore:
+            continue
+        ready = _node_condition(node, "Ready")
+        if ready is None or ready.get("status") != "Unknown":
+            continue
+        since = parse_k8s_time(ready.get("lastTransitionTime")) or parse_k8s_time(
+            ready.get("lastHeartbeatTime")
+        )
+        if since is None:
+            # Unknown with no parseable transition time: cannot age it. Never
+            # silently swallowed — same convention as the unparseable-startedAt
+            # case in detect_stuck_argo_ops.
+            print(
+                f"::warning::{name}: Ready=Unknown with unparseable "
+                f"lastTransitionTime={ready.get('lastTransitionTime')!r} — cannot age it",
+                file=sys.stderr,
+            )
+            continue
+        minutes = age_minutes(since, now)
+        if minutes <= threshold:
+            continue
+
+        labels = (node.get("metadata") or {}).get("labels") or {}
+        is_control_plane = "node-role.kubernetes.io/control-plane" in labels
+        etcd_voter = _node_condition(node, "EtcdIsVoter")
+        is_etcd_voter = bool(etcd_voter and etcd_voter.get("status") == "True")
+        # control_plane_ready only counts nodes whose Ready condition is True, and
+        # this node's Ready is Unknown (that's why it's being flagged) — it was
+        # never counted in the first place, so no self-subtraction is needed here.
+        other_cp_ready = control_plane_ready
+
+        findings.append(
+            Finding(
+                kind=KIND_DARK_NODE,
+                subject=name,
+                summary=(
+                    f"Node `{name}` has had Ready=Unknown (kubelet stopped posting "
+                    f"status) for {_fmt_age(minutes)} (threshold {threshold:.0f}m)."
+                ),
+                facts={
+                    "node": name,
+                    "unknown_since": ready.get("lastTransitionTime"),
+                    "unknown_minutes": round(minutes, 1),
+                    "threshold_minutes": threshold,
+                    "internal_ip": _node_address(node, "InternalIP"),
+                    "external_ip": _node_address(node, "ExternalIP"),
+                    "is_control_plane": is_control_plane,
+                    "is_etcd_voter": is_etcd_voter,
+                    "other_ready_control_plane_nodes": other_cp_ready,
+                    "next_step": (
+                        "Decide whether a restart is safe (e.g. NOT the last Ready "
+                        "control-plane/etcd-voter node — see other_ready_control_plane_nodes "
+                        "above). If safe, dispatch contabo-instance-reboot.yml with "
+                        "node_name and external_ip set (it resolves the Contabo instanceId "
+                        "by matching ipConfig.v4.ip and calls the restart action). See "
+                        "docs/runbooks/dark-node-reboot.md."
+                    ),
                 },
             )
         )
@@ -436,7 +565,7 @@ def prioritize(findings, priority=None):
     arrives before a volume fills (after that nothing inside the pod can free
     it). Unknown kinds sort last but are never dropped.
     """
-    order = list(priority or [KIND_ARGO, KIND_PVC, KIND_CREATING, KIND_CRASHLOOP])
+    order = list(priority or [KIND_ARGO, KIND_DARK_NODE, KIND_PVC, KIND_CREATING, KIND_CRASHLOOP])
 
     def rank(finding):
         return (order.index(finding.kind) if finding.kind in order else len(order), finding.key)
@@ -894,11 +1023,12 @@ def dispatch_terminate_op(repo: str, workflow: str, app: str, ref: str = "main")
 # main
 # --------------------------------------------------------------------------
 
-def collect_cluster_state(config: dict) -> tuple[dict, dict]:
+def collect_cluster_state(config: dict) -> tuple[dict, dict, dict]:
     argo_ns = (config.get("argo_stuck_op") or {}).get("namespace", "argocd")
     applications = kubectl_json(["-n", argo_ns, "get", "applications", "-o", "json"])
     pods = kubectl_json(["get", "pods", "-A", "-o", "json"])
-    return applications, pods
+    nodes = kubectl_json(["get", "nodes", "-o", "json"])
+    return applications, pods, nodes
 
 
 def write_summary(text: str) -> None:
@@ -928,9 +1058,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     prefix = issues_cfg.get("title_prefix", "[watchdog]")
 
     # --- look. Any failure here is fatal: blind must never render as clear. ---
-    applications, pods = collect_cluster_state(config)
+    applications, pods, nodes = collect_cluster_state(config)
     findings: list[Finding] = []
     findings += detect_stuck_argo_ops(applications, config, now)
+    findings += detect_dark_nodes(nodes, config, now)
     findings += detect_chronic_crashloop(pods, config, now)
     findings += detect_stuck_container_creating(pods, config, now)
 
@@ -942,6 +1073,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "",
         f"- checked at: `{now.isoformat()}`",
         f"- Argo Applications scanned: {len(applications.get('items') or [])}",
+        f"- nodes scanned: {len(nodes.get('items') or [])}",
         f"- pods scanned: {len(pods.get('items') or [])}",
         f"- PVC usage source: **{usage_source}** ({len(usage)} volumes)",
         f"- findings: **{len(findings)}**",
