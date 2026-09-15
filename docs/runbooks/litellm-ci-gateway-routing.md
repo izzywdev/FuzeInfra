@@ -22,49 +22,58 @@ the gateway (with its cross-provider failover) instead of a single vendor key.
   alongside the human Google/email-OTP policies, so the admin console is
   unchanged.
 - **`llm-endpoint` CF-Access support** — the action accepts
-  `cf-access-client-id` / `cf-access-client-secret`, sends them on its readiness
-  probe, and echoes them back as its `custom-headers` output.
+  `cf-access-client-id` / `cf-access-client-secret`, masks the secret on entry,
+  uses them on its readiness probe, and returns them only through its pre-masked
+  `custom-headers` output (the same masked-output channel as `auth-token`).
 - **`fuze-code-action` wiring** — forwards those inputs to `llm-endpoint` and
   sets the returned headers as `ANTHROPIC_CUSTOM_HEADERS` on the claude rung, so
   the model requests clear Access too (the probe passing is not enough on its
   own — Claude Code v2.1.227+ parses newline-separated `Name: Value`).
-- **`fuze.yml`** already forwards `secrets.CF_ACCESS_CLIENT_ID` /
-  `secrets.CF_ACCESS_CLIENT_SECRET`. Because `scripts/provision_secrets.py`
-  (FuzeSDLC) derives required secrets by scanning `secrets.NAME` references, the
-  two names are auto-registered for provisioning the moment the template lands —
-  no manifest edit.
+- **`fuze.yml`** forwards `secrets.CF_ACCESS_CLIENT_ID` /
+  `secrets.CF_ACCESS_CLIENT_SECRET`, and both names are registered in
+  `scripts/provision_secrets.py`'s `FLEET_SOURCED` (+ the `SRC_` block in
+  `provision-secrets.yml`), so FuzeSDLC provisions them fleet-wide — no manifest
+  edit.
 
 With the two secrets **unset**, the `cf-access-client-*` inputs are empty, no CF
 headers are sent, and behaviour is byte-identical to before (in-cluster probe →
-vendor fallback). Activation is entirely the three human steps below.
+vendor fallback). Activation is entirely the human steps below.
 
 ## Activation (human steps — deliberately not automated)
 
-The `client_secret` lives only in terraform state (S3 backend). Extract it from a
-**local terminal**, pipe it straight into the provisioner's environment, and
+`CF_ACCESS_CLIENT_ID` / `CF_ACCESS_CLIENT_SECRET` are **fleet-sourced** (FuzeSDLC
+`provision_secrets.py` `FLEET_SOURCED`): FuzeSDLC holds the source of truth and
+fans them out to every repo that installs `fuze.yml`. The `client_secret` lives
+only in terraform state (S3 backend); extract it from a **local terminal** and
 never print, paste, or commit it.
 
-1. **Extract the token and provision the two repo secrets** (from
-   `terraform/contabo`, then FuzeSDLC — mirrors `outputs.tf`):
+1. **Set the two source secrets on FuzeSDLC** (`izzywdev/FuzeSDLC` → Settings →
+   Secrets → Actions), with the values from FuzeInfra terraform:
 
    ```bash
-   export CF_ACCESS_CLIENT_ID="$(terraform output -raw litellm_ci_service_token_client_id)"
-   export CF_ACCESS_CLIENT_SECRET="$(terraform output -raw litellm_ci_service_token_client_secret)"
-   # from FuzeSDLC, with the two vars still exported:
-   python scripts/provision_secrets.py --owner izzywdev --apply
+   cd terraform/contabo
+   terraform output -raw litellm_ci_service_token_client_id      # -> FuzeSDLC secret CF_ACCESS_CLIENT_ID
+   terraform output -raw litellm_ci_service_token_client_secret  # -> FuzeSDLC secret CF_ACCESS_CLIENT_SECRET
    ```
 
-   This seals `CF_ACCESS_CLIENT_ID` / `CF_ACCESS_CLIENT_SECRET` to each repo that
-   installs `fuze.yml`. The plaintext never leaves the process.
+   `provision-secrets.yml` maps `secrets.CF_ACCESS_CLIENT_ID` → `SRC_CF_ACCESS_CLIENT_ID`
+   (and the secret) for the provisioner.
 
-2. **Point CI at the public gateway** — set the repo (or org) Actions **variable**
+2. **Fan out to consuming repos** — run the FuzeSDLC **`provision-secrets.yml`**
+   workflow (`workflow_dispatch`). It seals `CF_ACCESS_CLIENT_ID` /
+   `CF_ACCESS_CLIENT_SECRET` to each repo installing `fuze.yml`; the plaintext
+   never leaves the job. (A local `python scripts/provision_secrets.py --apply`
+   works too, but it reads the values from `SRC_`-prefixed env vars —
+   `export SRC_CF_ACCESS_CLIENT_ID=…`.)
+
+3. **Point CI at the public gateway** — set the repo (or org) Actions **variable**
    `FUZE_LITELLM_BASE_URL` to `https://litellm.prod.fuzefront.com`.
 
-   > Do **not** do step 2 without step 1. With the secrets unset, the probe would
-   > 302 to the Access login page and still fall back — a config that looks
+   > Do **not** do step 3 without steps 1–2. With the secrets unset, the probe
+   > would 302 to the Access login page and still fall back — a config that looks
    > deliberate but is worse than leaving the var unset.
 
-3. **Verify** — trigger a `@fuze` run (or re-run any `fuze-code-action` job) and
+4. **Verify** — trigger a `@fuze` run (or re-run any `fuze-code-action` job) and
    read its `llm-endpoint` notice: it should report `mode=litellm vendor=litellm`
    routing through `https://litellm.prod.fuzefront.com`, not a
    `fallback-*` mode. `.github/workflows/litellm-check-keys.yml`
