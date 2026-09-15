@@ -23,8 +23,7 @@ SCHEMA_DIR = os.path.join(TEMPLATES_ROOT, "schema")
 
 
 def _schema(name):
-    with open(os.path.join(SCHEMA_DIR, name), encoding="utf-8") as fh:
-        return json.load(fh)
+    return json.load(open(os.path.join(SCHEMA_DIR, name), encoding="utf-8"))
 
 
 def main():
