@@ -253,9 +253,11 @@ def render_setup(basename, spec, doc):
 
     if spec.get("needs_kubectl"):
         # Serial (uses dpkg). kubectl isn't in the base image; install from the k8s
-        # community apt repo (pkgs.k8s.io is in the Trusted default allowlist). Read-only
-        # cluster access still goes through cluster-query.yml — kubectl alone can't reach
-        # the tunnel-only prod API — but it's here for parsing/other read use.
+        # community apt repo. pkgs.k8s.io is NOT covered by the Trusted defaults (the
+        # sandbox proxy 403s it otherwise) — it must be in this env's own
+        # networking.allowed_hosts. Read-only cluster access still goes through
+        # cluster-query.yml — kubectl alone can't reach the tunnel-only prod API —
+        # but it's here for parsing/other read use.
         L += [
             'echo "[setup] kubectl"',
             "install -d -m 0755 /etc/apt/keyrings",
