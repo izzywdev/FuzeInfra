@@ -26,9 +26,12 @@ name: CodeQL
 #
 # ACTION PINNING. Every third-party action is pinned to a full 40-char commit SHA (not a
 # mutable tag), with a trailing `# vX.Y.Z` comment preserving the human-readable version.
-# `github/codeql-action` v4.37.9 is an ANNOTATED tag; the commit it peels to
-# (`git ls-remote github/codeql-action v4.37.9^{}`) is
-# cdf488f595d80d6e07e03d4674febd5ab45fa938, used for init/autobuild/analyze below.
+# `github/codeql-action` v4.38.0 is an ANNOTATED tag; the commit it peels to
+# (`git ls-remote github/codeql-action v4.38.0^{}`) is
+# b96794f015dfd88f77b49b1c93e0fa7110f94c63, used for init/autobuild/analyze below. All
+# three MUST share the same SHA — a mismatch fails analyze with "Loaded a configuration
+# file for version 'X', but running version 'Y'" (seen when only init/autobuild got
+# bumped and analyze was left on the previous version).
 
 on:
   push:
@@ -147,6 +150,6 @@ jobs:
         uses: github/codeql-action/autobuild@b96794f015dfd88f77b49b1c93e0fa7110f94c63 # v4.38.0
 
       - name: Perform CodeQL Analysis
-        uses: github/codeql-action/analyze@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
+        uses: github/codeql-action/analyze@b96794f015dfd88f77b49b1c93e0fa7110f94c63 # v4.38.0
         with:
           category: "/language:${{ matrix.language }}"
