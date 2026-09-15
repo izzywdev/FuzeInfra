@@ -58,7 +58,8 @@ def test_render_check_matches_committed_projection():
 @pytest.mark.parametrize("script", SETUP_SCRIPTS)
 def test_setup_script_installs_env_level_bridge_launcher(script):
     """Each Setup script drops the stable bridge copy and writes a user-level hook."""
-    body = open(os.path.join(DESKTOP, script), encoding="utf-8").read()
+    with open(os.path.join(DESKTOP, script), encoding="utf-8") as f:
+        body = f.read()
     assert f"install -d -m 0755 {INSTALL_DIR}" in body
     for name in BRIDGE_FILES:
         assert f"cat > {INSTALL_DIR}/{name} <<" in body, f"{script} missing embed of {name}"
@@ -74,7 +75,8 @@ def test_embedded_bridge_scripts_match_source(script, name):
     """The inlined heredoc body is byte-for-byte the source script (no embed drift)."""
     with open(os.path.join(BRIDGE_DIR, name), encoding="utf-8") as source_file:
         source = source_file.read().rstrip("\n")
-    body = open(os.path.join(DESKTOP, script), encoding="utf-8").read()
+    with open(os.path.join(DESKTOP, script), encoding="utf-8") as f:
+        body = f.read()
     delim = "__A2A_FILE_" + name.upper().replace(".", "_") + "__"
     open_marker = f"cat > {INSTALL_DIR}/{name} <<'{delim}'\n"
     start = body.index(open_marker) + len(open_marker)
