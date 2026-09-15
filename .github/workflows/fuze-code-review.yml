@@ -142,10 +142,7 @@ jobs:
   # gate-required-checks accept this fallback (C3). This chooser job is NOT itself a required
   # status context — only the decisive `Fuze Code Review` job below is.
   pick-runner:
-    # FuzeInfra is public, so GitHub-hosted runners are unmetered. Keeping the
-    # chooser itself on the in-cluster pool makes every PR deadlock before it
-    # can select the public-hosted path when that pool is unavailable.
-    runs-on: ubuntu-latest
+    runs-on: fuze-runner
     outputs:
       runner: ${{ steps.pick.outputs.runner }}
     steps:
