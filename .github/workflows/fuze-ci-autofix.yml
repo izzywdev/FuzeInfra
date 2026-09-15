@@ -107,10 +107,6 @@ jobs:
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Hardened checkout — restore trusted .github state from target branch
-        if: steps.keys.outputs.present == 'true'
-        run: git checkout ${{ github.sha }} -- .github
-
       - name: Configure git identity
         if: steps.keys.outputs.present == 'true'
         run: |
@@ -299,10 +295,6 @@ jobs:
           ref: ${{ github.event.workflow_run.head_branch }}
           fetch-depth: 0
           token: ${{ steps.identity.outputs.token }}
-
-      - name: Hardened checkout — restore trusted .github state from target branch
-        if: steps.keys.outputs.present == 'true' && steps.pr.outputs.found == 'true'
-        run: git checkout ${{ github.sha }} -- .github
 
       - name: Configure git identity
         if: steps.keys.outputs.present == 'true' && steps.pr.outputs.found == 'true'
