@@ -88,9 +88,23 @@ write_files:
       log() { echo "[fuzeinfra-cp-join] $(date -u +%Y-%m-%dT%H:%M:%SZ) $*" >>"$LOGF" 2>&1; echo "[fuzeinfra-cp-join] $*" >&2; }
 
       [ -f "$SENTINEL" ] && { log "already joined; nothing to do"; exit 0; }
+      # "The unit file exists" is NOT the same as "this node joined". A k3s
+      # install that downloads the binary and writes the unit, then fails to
+      # bootstrap (bad K3S_URL, unreachable peer, token mismatch), leaves
+      # /etc/systemd/system/k3s.service behind while k3s crash-loops forever.
+      # This guard used to accept that as "already installed" and write the
+      # SENTINEL -- which is ConditionPathExists=! on the unit, so it PERMANENTLY
+      # disabled the retry-on-boot mechanism this whole design rests on, while
+      # the previous boot's log still claimed "the unit retries on next boot".
+      # fuze-core-3 was stranded exactly this way on 2026-09-15: k3s installed at
+      # 22:09, bootstrap failed, next boot wrote the sentinel, node never
+      # registered and could never recover on its own. Only an ACTIVE k3s counts.
       if [ -f /etc/systemd/system/k3s.service ]; then
-        log "k3s server already installed; leaving it alone"
-        touch "$SENTINEL"; exit 0
+        if systemctl is-active --quiet k3s 2>/dev/null; then
+          log "k3s server already installed and ACTIVE; leaving it alone"
+          touch "$SENTINEL"; exit 0
+        fi
+        log "WARNING: k3s.service exists but is not active (state=$(systemctl is-active k3s 2>/dev/null || echo unknown)). A previous install left it behind WITHOUT a working join. NOT writing $SENTINEL, so this unit still runs on the next boot. Inspect: journalctl -u k3s -n 50"
       fi
 
       ip4_of() { ip -4 -o addr show "$1" 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -n 1; }
@@ -119,6 +133,24 @@ write_files:
       set -a
       . /etc/k3s-server.env
       set +a
+
+      # K3S_URL must be a LIVE OTHER server (see the header). If it points at
+      # THIS node, bootstrap can never succeed: k3s asks $K3S_URL/cacerts before
+      # it starts serving, so it is waiting on a listener only it could provide.
+      # The observable symptom is a silent 5-second crash-loop with
+      # "failed to validate token: failed to get CA certs: ... connection refused"
+      # and a node that never registers -- indistinguishable, from outside, from
+      # a dead host. fuze-core-3 burned 341 restarts this way on 2026-09-15
+      # because the K3S_SERVER_URL secret held its own public IP. Fail fast and
+      # name the cause instead.
+      for _self in "$PRIV" "$PUB"; do
+        [ -n "$_self" ] || continue
+        case "$K3S_URL" in
+          *"//$_self:"*|*"//$_self/"*|*"//$_self")
+            log "FATAL: K3S_URL ($K3S_URL) points at THIS node ($_self). A joining server must bootstrap from a DIFFERENT, live control plane. REFUSING to join -- fix the K3S_SERVER_URL secret to a peer's VLAN address (e.g. https://10.0.0.6:6443) and reinstall."
+            exit 1 ;;
+        esac
+      done
 
       mkdir -p /etc/rancher/k3s
       # Written as a file rather than CLI flags so the token never reaches argv.
