@@ -142,11 +142,18 @@ so the Trusted defaults (package registries, GitHub, cloud SDKs) still apply and
 adds what the defaults miss:
 
 - **Fuze** adds `get.helm.sh` (the Helm release tarball) and `*.fuzefront.com` to reach FuzeFront services/APIs.
-- **DevOps** adds `get.helm.sh` (the Helm release tarball), `*.fuzefront.com`, and `*.cloudflare.com`.
+- **DevOps** adds `get.helm.sh` (the Helm release tarball), `*.fuzefront.com`, `*.cloudflare.com`, and
+  `pkgs.k8s.io` + `prod-cdn.packages.k8s.io` (the Kubernetes community apt repo `kubectl` installs
+  from — `pkgs.k8s.io` 302s to the `prod-cdn.packages.k8s.io` CDN for the actual file, so both hosts
+  must be allowed or only the redirect response gets through).
 
 `github.com` is listed in both for explicitness, but it is **redundant**: it is already a Trusted
 default, and GitHub traffic uses a dedicated proxy that bypasses this allowlist entirely (see the note
-below). The net-new reach is `get.helm.sh` (both) and `*.fuzefront.com` (both), plus `*.cloudflare.com` (DevOps).
+below). The net-new reach is `get.helm.sh` (both) and `*.fuzefront.com` (both), plus `*.cloudflare.com`
+and the `pkgs.k8s.io`/`prod-cdn.packages.k8s.io` pair (DevOps). Neither `pkgs.k8s.io` nor its CDN is
+covered by the Trusted "common package managers" defaults — omitting them from `allowed_hosts` makes
+the proxy 403 the connection, which silently breaks the kubectl install (masked by the setup script's
+`|| true`).
 
 Note the constraint that shaped the setup scripts: the GitHub proxy scopes release-asset requests
 to repositories **attached to the session**, so downloading a release from an unattached repo
