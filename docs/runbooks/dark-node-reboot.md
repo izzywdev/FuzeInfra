@@ -143,6 +143,62 @@ uses (see `contabo-rename-instance.yml`, `ca-delete-instance.yml`).
 `deployment-watchdog.yml` decides *when*; it never holds the credential that
 lets it act directly.
 
+## When the reinstall "succeeds" but the node never appears
+
+`ca-reinstall-controlplane.yml` reporting HTTP 200, and Contabo reporting
+`status=running`, only mean the *hypervisor* did its job. Neither says anything
+about whether k3s joined. On 2026-09-15 `fuze-core-3` sat in exactly that state:
+instance running, `kubectl get node fuze-core-3` → `NotFound`, for ~50 minutes.
+
+Check these in order — the first three need no host access:
+
+1. **Is the OS up?** `nc -z <public-ip> 22`. Open ⇒ the guest booted; this is not
+   a hung kernel and another reboot/power-cycle will not help.
+2. **Did cloud-init's `runcmd` finish?** Probe the ufw fingerprint: 6443/10250/2380
+   should answer with a fast **RST** (allowed, nothing listening yet) while 80/443
+   **time out** (not in the allow-list). That asymmetry only exists if
+   `ufw --force enable` ran, which is near the end of `runcmd`.
+3. **Is k3s listening?** `nc -z <public-ip> 6443`. Refused ⇒ k3s is not up.
+4. **Why isn't it up?** This needs the break-glass key (`NODE_SSH_PUBLIC_KEY`'s
+   private half):
+   ```bash
+   ssh root@<public-ip> 'cat /var/log/fuzeinfra-cp-join.log; systemctl is-active k3s'
+   ssh root@<public-ip> 'journalctl -u k3s -n 50 -o cat | grep level=fatal'
+   ```
+
+### Known failure: `K3S_SERVER_URL` pointing at the node being reinstalled
+
+The symptom is a **silent 5-second crash-loop** (restart counter in the hundreds)
+with:
+
+```
+failed to validate token: failed to get CA certs:
+  Get "https://<THIS node's own IP>:6443/cacerts": connect: connection refused
+```
+
+A joining server fetches `$K3S_URL/cacerts` *before* it starts serving, so if that
+URL is its own address it is waiting on a listener only it could provide. The
+template header has always required `{{.K3SServerURL}}` be "a LIVE server to join
+through. **Must not be this node**" — but nothing enforced it until the guard added
+alongside this section, which now refuses and names the cause.
+
+**Fix:** point the `K3S_SERVER_URL` repo secret at a *peer's VLAN* address
+(`https://10.0.0.6:6443` = fuze-core-1, `https://10.0.0.2:6443` = fuze-core-2),
+then re-dispatch `ca-reinstall-controlplane.yml`. Re-dispatching *before* fixing
+the secret just repeats the same failure and wipes the disk again for nothing.
+
+This compounded with a second bug: the failed install still wrote
+`/etc/systemd/system/k3s.service`, so the next boot took the "already installed"
+branch and wrote `/etc/fuzeinfra-cp-joined` — the sentinel that gates
+`ConditionPathExists=!` on the join unit. The node could then never retry on any
+future boot, while its own log still said "the unit retries on next boot". Both
+are guarded by `tests/test_cp_userdata_join_guards.py`.
+
+> A node stuck this way is **inert, not dangerous** — it holds no pods, no
+> Longhorn replicas and no etcd membership (the reinstall workflow deletes the
+> Node object first). There is no clock on fixing it, so fix the secret rather
+> than improvising around it.
+
 ## Resolving instanceId by IP
 
 Nodes are not labelled with their Contabo `instanceId` at bootstrap
