@@ -127,6 +127,13 @@ design, not an omission:
   **per session** on claude.ai. Committing a `.mcp.json` does not help for these two: they are
   remote OAuth servers, and interactive auth cannot complete inside a cloud session.
 - **`FUZESDLC_DEPLOY_KEY` — never here.** See the Fuze section above.
+- **DevOps does hold a handful of manually-added secrets** (`FUZEINFRA_DISPATCH_TOKEN`, the
+  `CONTABO_*` credentials, `KUBECONFIG_B64`) — pasted directly into the dialog's Environment
+  variables field, outside this generator, because that field has no separate secrets store to
+  put them in instead. `render.py` never emits a value for them (see the "Secrets" comment block
+  at the bottom of `devops.env`) — it only lists the **names** as a reminder, because re-pasting
+  a freshly generated `devops.env` **replaces the whole field** and silently wipes any value that
+  isn't in the generated text. If you regenerate and re-paste, re-add these by hand afterward.
 
 ## Network access
 
