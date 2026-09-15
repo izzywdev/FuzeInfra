@@ -10,15 +10,38 @@ jobs:
       - name: Check key model restrictions
         env:
           KEY: ${{ secrets.LITELLM_MASTER_KEY }}
+          # Cloudflare Access service-token creds. The gateway's public host is behind
+          # Cloudflare Access; without these headers every request is 302'd to the CF login
+          # page (service_token_status:false) instead of reaching the API — which is why the
+          # original run of this workflow (no CF headers) failed. Masked below before use.
+          CF_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}
+          CF_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
         run: |
-          set -euo pipefail
+          set -uo pipefail
+          # Never let the service-token values surface in the log.
+          [ -n "${CF_ID:-}" ] && echo "::add-mask::$CF_ID"
+          [ -n "${CF_SECRET:-}" ] && echo "::add-mask::$CF_SECRET"
+
           BASE="https://litellm.prod.fuzefront.com"
+          CF_ARGS=()
+          if [ -n "${CF_ID:-}" ] && [ -n "${CF_SECRET:-}" ]; then
+            CF_ARGS=(-H "CF-Access-Client-Id: $CF_ID" -H "CF-Access-Client-Secret: $CF_SECRET")
+            echo "CF-Access service-token headers: PRESENT"
+          else
+            echo "CF-Access service-token headers: ABSENT (expect 302 to the CF login page)"
+          fi
+
+          echo "=== CF-Access gate: authed /v1/models status (200 == service token accepted) ==="
+          CODE=$(curl -sS -m 20 -o /dev/null -w "%{http_code}" "${CF_ARGS[@]}" \
+            -H "Authorization: Bearer $KEY" "$BASE/v1/models" || echo "000")
+          echo "HTTP $CODE"
+
           echo "=== readiness ==="
-          curl -sS -m 10 "$BASE/health/readiness" || echo "(unreachable)"
+          curl -sS -m 10 "${CF_ARGS[@]}" "$BASE/health/readiness" || echo "(unreachable)"
           echo
           echo "=== key list (models restriction only, no secrets) ==="
-          curl -sS -m 15 -H "Authorization: Bearer $KEY" "$BASE/key/list?return_full_object=true&size=100" \
+          curl -sS -m 15 "${CF_ARGS[@]}" -H "Authorization: Bearer $KEY" "$BASE/key/list?return_full_object=true&size=100" \
             | jq '[.keys[]? // .data[]? | {alias: (.key_alias // .key_name // "n/a"), models, token_prefix: (.token // .key // "")[0:8]}]'
           echo "=== model_list (what the gateway actually has loaded) ==="
-          curl -sS -m 15 -H "Authorization: Bearer $KEY" "$BASE/model/info" \
+          curl -sS -m 15 "${CF_ARGS[@]}" -H "Authorization: Bearer $KEY" "$BASE/model/info" \
             | jq '[.data[]?.model_name] | unique' 2>&1 || echo "(model/info failed)"
