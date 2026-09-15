@@ -168,6 +168,117 @@ def test_default_threshold_matches_the_governance_file():
     assert CFG["argo_stuck_op"]["running_minutes"] == 45
 
 
+def node(name, *, ready_status="True", unknown_minutes_ago=None, control_plane=False,
+         etcd_voter=None, internal_ip="10.0.0.1", external_ip="203.0.113.1") -> dict:
+    """A Node fixture. `unknown_minutes_ago` set means Ready=Unknown since then;
+    otherwise Ready has whatever `ready_status` says (default healthy True)."""
+    if unknown_minutes_ago is not None:
+        ready = {"type": "Ready", "status": "Unknown",
+                  "lastTransitionTime": _ts(unknown_minutes_ago),
+                  "lastHeartbeatTime": _ts(5)}
+    else:
+        ready = {"type": "Ready", "status": ready_status,
+                  "lastTransitionTime": _ts(0), "lastHeartbeatTime": _ts(0)}
+    conditions = [ready]
+    if etcd_voter is not None:
+        conditions.append({"type": "EtcdIsVoter",
+                           "status": "True" if etcd_voter else "False"})
+    labels = {}
+    if control_plane:
+        labels["node-role.kubernetes.io/control-plane"] = "true"
+    return {
+        "metadata": {"name": name, "labels": labels},
+        "status": {
+            "conditions": conditions,
+            "addresses": [
+                {"type": "InternalIP", "address": internal_ip},
+                {"type": "ExternalIP", "address": external_ip},
+            ],
+        },
+    }
+
+
+# ---------------------------------------------------------------------------
+# 1b. dark node (kubelet stopped posting status)
+# ---------------------------------------------------------------------------
+
+def test_healthy_node_is_never_flagged_regardless_of_age():
+    nodes = {"items": [node("fuze-core-1", ready_status="True")]}
+    assert wd.detect_dark_nodes(nodes, CFG, NOW) == []
+
+
+def test_recently_unknown_node_below_threshold_is_not_flagged():
+    """A kubelet restart or a brief API-server blip legitimately reports Unknown briefly."""
+    nodes = {"items": [node("fuze-core-3", unknown_minutes_ago=10)]}
+    assert wd.detect_dark_nodes(nodes, CFG, NOW) == []
+
+
+def test_dark_control_plane_node_is_flagged_with_quorum_facts():
+    """The real incident: fuze-core-3 dark 4.5 days, still an etcd voter."""
+    nodes = {"items": [
+        node("fuze-core-1", control_plane=True, etcd_voter=True),
+        node("fuze-core-2", control_plane=True, etcd_voter=True),
+        node("fuze-core-3", control_plane=True, etcd_voter=True,
+             unknown_minutes_ago=4.5 * 24 * 60, external_ip="194.163.136.242"),
+    ]}
+    findings = wd.detect_dark_nodes(nodes, CFG, NOW)
+    assert len(findings) == 1
+    f = findings[0]
+    assert f.kind == wd.KIND_DARK_NODE
+    assert f.subject == "fuze-core-3"
+    assert f.facts["is_control_plane"] is True
+    assert f.facts["is_etcd_voter"] is True
+    # The other two control-plane nodes are Ready — not the last vote standing.
+    assert f.facts["other_ready_control_plane_nodes"] == 2
+    assert f.facts["external_ip"] == "194.163.136.242"
+    assert f.facts["unknown_minutes"] == pytest.approx(4.5 * 24 * 60)
+
+
+def test_dark_worker_node_is_flagged_and_is_not_marked_control_plane():
+    nodes = {"items": [node("fuzeinfra-prod-elastic-v2-c056a22a", unknown_minutes_ago=60)]}
+    findings = wd.detect_dark_nodes(nodes, CFG, NOW)
+    assert len(findings) == 1
+    assert findings[0].facts["is_control_plane"] is False
+    assert findings[0].facts["is_etcd_voter"] is False
+
+
+def test_dark_node_threshold_is_read_from_config_not_hardcoded():
+    nodes = {"items": [node("fuze-core-3", unknown_minutes_ago=40)]}
+    assert len(wd.detect_dark_nodes(nodes, CFG, NOW)) == 1
+    relaxed = {**CFG, "dark_node": {**CFG["dark_node"], "unknown_minutes": 120}}
+    assert wd.detect_dark_nodes(nodes, relaxed, NOW) == []
+
+
+def test_dark_node_ignore_list_excludes_a_node():
+    nodes = {"items": [node("known-flapping-node", unknown_minutes_ago=60)]}
+    cfg = {**CFG, "dark_node": {**CFG["dark_node"], "ignore_nodes": ["known-flapping-node"]}}
+    assert wd.detect_dark_nodes(nodes, cfg, NOW) == []
+
+
+def test_dark_node_default_threshold_matches_the_governance_file():
+    assert CFG["dark_node"]["unknown_minutes"] == 30
+
+
+def test_dark_node_is_never_auto_restarted():
+    """Unlike the stuck-Argo-op, rebooting a node is not provably safe/reversible —
+    the config documents there is no dispatch path, and detect_dark_nodes performs
+    no mutation (it returns Finding objects only; nothing calls gh/subprocess)."""
+    assert CFG["dark_node"]["auto_restart"] is False
+    import inspect
+    source = inspect.getsource(wd.detect_dark_nodes)
+    assert "dispatch_terminate_op" not in source
+    assert "subprocess" not in source
+    assert "gh(" not in source
+
+
+def test_dark_node_facts_point_at_the_existing_reboot_workflow():
+    assert (ROOT / ".github" / "workflows" / "contabo-instance-reboot.yml").is_file()
+    finding = wd.detect_dark_nodes(
+        {"items": [node("fuze-core-3", unknown_minutes_ago=60)]}, CFG, NOW
+    )[0]
+    assert "contabo-instance-reboot.yml" in finding.facts["next_step"]
+
+
 # ---------------------------------------------------------------------------
 # 2. chronic CrashLoopBackOff
 # ---------------------------------------------------------------------------
@@ -552,7 +663,7 @@ def test_end_to_end_caps_issues_filed_reports_everything_and_dispatches_terminat
     filed: list[tuple[str, str]] = []
     dispatched: list[str] = []
 
-    monkeypatch.setattr(wd, "collect_cluster_state", lambda cfg: (apps, pods))
+    monkeypatch.setattr(wd, "collect_cluster_state", lambda cfg: (apps, pods, {"items": []}))
     monkeypatch.setattr(wd, "collect_pvc_usage", lambda p, cfg: ([], "prometheus"))
     monkeypatch.setattr(wd, "list_open_watchdog_issues", lambda repo, label: [])
     monkeypatch.setattr(wd, "ensure_label", lambda *a, **k: None)
@@ -572,7 +683,7 @@ def test_end_to_end_caps_issues_filed_reports_everything_and_dispatches_terminat
 
 
 def test_no_findings_files_nothing_and_exits_zero(monkeypatch):
-    monkeypatch.setattr(wd, "collect_cluster_state", lambda cfg: ({"items": []}, {"items": []}))
+    monkeypatch.setattr(wd, "collect_cluster_state", lambda cfg: ({"items": []}, {"items": []}, {"items": []}))
     monkeypatch.setattr(wd, "collect_pvc_usage", lambda p, cfg: ([], "prometheus"))
     monkeypatch.setattr(wd, "create_issue", lambda *a, **k: pytest.fail("filed an issue with no findings"))
     assert wd.main(["--repo", "izzywdev/FuzeInfra"]) == 0
@@ -631,7 +742,7 @@ def test_open_issue_ceiling_stops_filing_until_something_is_closed(monkeypatch):
     already_open = [{"number": n, "url": f"u{n}", "title": f"[watchdog] x: {n}", "body": ""}
                     for n in range(CFG["issues"]["max_open"])]
 
-    monkeypatch.setattr(wd, "collect_cluster_state", lambda cfg: (apps, {"items": []}))
+    monkeypatch.setattr(wd, "collect_cluster_state", lambda cfg: (apps, {"items": []}, {"items": []}))
     monkeypatch.setattr(wd, "collect_pvc_usage", lambda p, cfg: ([], "prometheus"))
     monkeypatch.setattr(wd, "list_open_watchdog_issues", lambda repo, label: already_open)
     monkeypatch.setattr(wd, "ensure_label", lambda *a, **k: pytest.fail("touched labels with no slot"))
@@ -651,7 +762,7 @@ def test_ceiling_leaves_room_for_a_partial_batch(monkeypatch):
     already_open = [{"number": n, "url": "u", "title": "t", "body": ""}
                     for n in range(CFG["issues"]["max_open"] - 3)]
 
-    monkeypatch.setattr(wd, "collect_cluster_state", lambda cfg: (apps, {"items": []}))
+    monkeypatch.setattr(wd, "collect_cluster_state", lambda cfg: (apps, {"items": []}, {"items": []}))
     monkeypatch.setattr(wd, "collect_pvc_usage", lambda p, cfg: ([], "prometheus"))
     monkeypatch.setattr(wd, "list_open_watchdog_issues", lambda repo, label: already_open)
     monkeypatch.setattr(wd, "ensure_label", lambda *a, **k: None)
