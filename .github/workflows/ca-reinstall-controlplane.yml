@@ -90,6 +90,49 @@ jobs:
           chmod 600 ~/.kube/config
           python3 scripts/preflight_node_teardown.py --node "$NODE_NAME"
 
+      # Automates step 2 of the header's "BEFORE RUNNING, non-negotiable" list:
+      # `kubectl delete node <name>` so k3s reconciles etcd membership from the
+      # remaining Node objects. This used to be a manual operator step -- easy
+      # to forget, and forgetting it leaves an etcd member registered whose
+      # data the reinstall is about to wipe. Runs only for mode=reinstall, after
+      # the Longhorn preflight has already passed.
+      #
+      # SAFETY GUARD: refuses to delete a node that currently reports Ready=True.
+      # This step exists to clear a DEAD node's stale registration, never to
+      # remove a live one -- a Ready node is either the wrong node_name was
+      # given, or the node has recovered since the incident was triaged, and
+      # either way deleting it would be the wrong action.
+      - name: Delete stale Node object (etcd membership reconciliation)
+        if: ${{ inputs.mode == 'reinstall' }}
+        env:
+          KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
+          NODE_NAME: ${{ inputs.node_name }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.kube
+          printf '%s' "$KUBE_CONFIG" | base64 -d > ~/.kube/config
+          chmod 600 ~/.kube/config
+
+          if ! kubectl get node "$NODE_NAME" >/tmp/node-check.json 2>/tmp/node-check.err; then
+            if grep -q "NotFound" /tmp/node-check.err; then
+              echo "node $NODE_NAME already absent from the API — nothing to delete."
+              exit 0
+            fi
+            echo "::error::could not read node $NODE_NAME: $(cat /tmp/node-check.err)"
+            exit 1
+          fi
+
+          READY=$(kubectl get node "$NODE_NAME" -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}')
+          if [ "$READY" = "True" ]; then
+            echo "::error::refusing to delete node $NODE_NAME: it currently reports Ready=True."
+            echo "::error::This step only clears a DEAD node's stale registration. If you"
+            echo "::error::genuinely intend to reinstall a live node, delete it manually first."
+            exit 1
+          fi
+
+          echo "node $NODE_NAME is Ready=$READY — deleting so etcd membership reconciles."
+          kubectl delete node "$NODE_NAME"
+
       - name: Reinstall control-plane node
         env:
           CID: ${{ secrets.CONTABO_CLIENT_ID }}
