@@ -231,6 +231,43 @@ jobs:
           [ -n "$RESOLVED" ] || { echo "::error::no Contabo instance found with ipConfig.v4.ip=$IP"; exit 1; }
           echo "instance_id=$RESOLVED" >> "$GITHUB_OUTPUT"
 
+      # 2026-09-16 incident: K3S_SERVER_URL is a single static repo secret shared
+      # by every control-plane reinstall, and it happened to hold fuze-core-3's
+      # own external IP. Reinstalling fuze-core-3 with that secret rendered
+      # `server: https://<fuze-core-3's own IP>:6443` into its own config.yaml --
+      # a node trying to fetch its join CA certs from itself, before its own k3s
+      # server is listening. It crash-looped ("failed to bootstrap cluster data")
+      # for ~6 hours until the secret was manually pointed at a different,
+      # healthy control-plane node (fuze-core-1's internal IP). Whichever node
+      # K3S_SERVER_URL currently names will hit this exact failure the next time
+      # IT is the one being reinstalled -- this guard makes that a clear refusal
+      # instead of another silent multi-hour crash loop.
+      #
+      # This only catches the external-IP form (what actually broke here, and
+      # what Contabo's own instance record can verify against). It cannot check
+      # an internal-IP (10.0.0.x) match, since that mapping lives in k3s config,
+      # not in anything this workflow can look up authoritatively.
+      - name: Guard — refuse if K3S_SERVER_URL points at the node being reinstalled
+        env:
+          TOK: ${{ steps.auth.outputs.token }}
+          IID: ${{ steps.resolve.outputs.instance_id }}
+          K3S_SERVER_URL: ${{ secrets.K3S_SERVER_URL }}
+        run: |
+          set -euo pipefail
+          [ -n "${K3S_SERVER_URL:-}" ] || { echo "::error::K3S_SERVER_URL secret is unset"; exit 1; }
+          TARGET_IP=$(curl -sS -H "Authorization: Bearer $TOK" \
+            -H "x-request-id: $(cat /proc/sys/kernel/random/uuid)" \
+            "https://api.contabo.com/v1/compute/instances/${IID}" | jq -r '.data[0].ipConfig.v4.ip')
+          [ -n "$TARGET_IP" ] && [ "$TARGET_IP" != "null" ] || { echo "::error::could not resolve the target instance's own IP to check against K3S_SERVER_URL"; exit 1; }
+          SERVER_HOST=$(printf '%s' "$K3S_SERVER_URL" | sed -E 's#^https?://##; s#:.*$##')
+          echo "K3S_SERVER_URL host: $SERVER_HOST — instance $IID's own IP: $TARGET_IP"
+          if [ "$SERVER_HOST" = "$TARGET_IP" ]; then
+            echo "::error::K3S_SERVER_URL ($K3S_SERVER_URL) points at this same instance ($TARGET_IP)."
+            echo "::error::Reinstalling with this config would make the node try to fetch its own join CA certs from itself before its own k3s server is up -- it will crash-loop forever (this happened to fuze-core-3 on 2026-09-16)."
+            echo "::error::Fix: update the K3S_SERVER_URL secret to a DIFFERENT, currently-healthy control-plane node's address (internal IP, e.g. https://10.0.0.x:6443) before retrying."
+            exit 1
+          fi
+
       - name: Reinstall control-plane node
         id: reinstall
         env:
