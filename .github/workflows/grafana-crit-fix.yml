@@ -262,7 +262,7 @@ jobs:
       # ── email that an @fuze issue was opened ────────────────────────────────
       - name: Send email
         if: steps.suppress.outputs.skip != 'true' && steps.act.outputs.action == 'filed'
-        uses: dawidd6/action-send-mail@v21
+        uses: dawidd6/action-send-mail@03a02a49409134de07636216fb379a026c52991e # v21
         with:
           server_address: smtp.gmail.com
           server_port: 587
