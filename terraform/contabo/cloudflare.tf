@@ -1186,15 +1186,25 @@ resource "cloudflare_zero_trust_access_policy" "litellm_service_email_otp" {
 # ALSO failed: `access.api.error.invalid_request: client_secret_version may
 # only be incremented if previous_client_secret_expires_at is set (12130)`.
 # Cloudflare's rotate API requires an explicit grace-period expiry for the
-# outgoing secret in the same request. That failed apply still wrote
-# client_secret_version = 2 into state despite erroring server-side before the
-# rotation took effect (Cloudflare is still serving the original, version-1
-# secret) — so this bumps to 3, past whatever the (now-inconsistent) state
-# holds, paired with previous_client_secret_expires_at so the request is
-# valid. The specific expiry value is disposable — this token has never had a
-# working client actually depending on graceful secret overlap (its prior
-# secret was never once accepted, per the dashboard's "Last Seen: Not Seen
-# Yet"), so a short window is fine.
+# outgoing secret in the same request.
+#
+# A third attempt (#1034) added previous_client_secret_expires_at but jumped
+# straight to client_secret_version = 3 (reasoning that the prior failed apply
+# had left state showing 2, stale relative to Cloudflare's real value). That
+# ALSO failed, with the FULL constraint finally surfaced: `client_secret_version
+# may only be incremented by one (current client_secret_version: 1) (12130)` —
+# Cloudflare's real live value was 1 the whole time (both failed applies never
+# took effect server-side); the rotate API requires each request to increment
+# by exactly one from whatever the CURRENT live value is, not an arbitrary
+# higher number. `terraform plan` always refreshes against the live provider
+# before diffing (confirmed: earlier plans correctly showed "1 -> N" despite
+# stale local state), so no manual state fix is needed here — targeting the
+# correct next value (2) is enough.
+#
+# The previous_client_secret_expires_at value is disposable — this token has
+# never had a working client actually depending on graceful secret overlap
+# (its prior secret was never once accepted, per the dashboard's "Last Seen:
+# Not Seen Yet"), so a short grace window is fine.
 #
 # Rotation keeps the resource id/client_id untouched, so the paired Access
 # policy's `service_token = [...]` reference (by id) needs no change. After
@@ -1204,7 +1214,7 @@ resource "cloudflare_zero_trust_access_service_token" "litellm_ci" {
   count                             = local.cloudflare_enabled ? 1 : 0
   account_id                        = var.cloudflare_account_id
   name                              = "fuze.yml LLM routing (hosted-runner CI)"
-  client_secret_version             = 3
+  client_secret_version             = 2
   previous_client_secret_expires_at = "2026-09-16T08:00:00Z"
 }
 
