@@ -1163,6 +1163,13 @@ resource "cloudflare_zero_trust_access_policy" "litellm_service_email_otp" {
 # was granted on the CD token (2026-09-14), so this resource applies on the
 # next merge; if it 1010s again, re-check the token still carries the group.
 # See docs/TERRAFORM_CD.md → "CLOUDFLARE_API_TOKEN scope".
+#
+# 2026-09-16 drift check: a live CF-Access curl against litellm.prod.fuzefront.com
+# using this token's current terraform-output values returned HTTP 302 (rejected),
+# even though `terraform state list` shows this resource and the policy below both
+# already exist. Triggering this plan to refresh against live Cloudflare state and
+# confirm whether either resource has actually drifted since the 2026-09-14 token
+# permission fix, or whether they're in sync and the gap is elsewhere.
 resource "cloudflare_zero_trust_access_service_token" "litellm_ci" {
   count      = local.cloudflare_enabled ? 1 : 0
   account_id = var.cloudflare_account_id
