@@ -111,13 +111,23 @@ def test_gateway_base_url_is_configurable_not_hardcoded_standalone():
     verbatim in-cluster URL would fail DNS everywhere but FuzeInfra. It must stay
     overridable via `vars.FUZE_LITELLM_BASE_URL`, falling back to the in-cluster
     host (harmless elsewhere because llm-endpoint falls back to a vendor key when
-    the probe fails)."""
-    raw = WORKFLOW.read_text()
-    assert "vars.FUZE_LITELLM_BASE_URL" in raw, (
-        "the gateway URL must be overridable per-repo via a variable, not a bare literal"
+    the probe fails).
+
+    Asserted as an exact match on the resolved GHA expression (rather than a
+    substring scan of the whole file) so this isn't shaped like a URL-substring
+    sanitization check on untrusted input — it's an equality check on one known
+    workflow field.
+    """
+    fuze_step = next(
+        s for s in _workflow()["jobs"]["fuze"]["steps"]
+        if s.get("uses") == "./.github/actions/fuze-code-action"
     )
-    assert "http://litellm.fuzeinfra.svc.cluster.local:4000" in raw, (
-        "the in-cluster gateway must stay the default when the var is unset"
+    base_url_expr = fuze_step["with"]["litellm-base-url"]
+    assert base_url_expr == (
+        "${{ vars.FUZE_LITELLM_BASE_URL || 'http://litellm.fuzeinfra.svc.cluster.local:4000' }}"
+    ), (
+        "litellm-base-url must stay overridable via vars.FUZE_LITELLM_BASE_URL, "
+        f"defaulting to the in-cluster gateway when unset. Got: {base_url_expr!r}"
     )
 
 
