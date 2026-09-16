@@ -1164,52 +1164,39 @@ resource "cloudflare_zero_trust_access_policy" "litellm_service_email_otp" {
 # next merge; if it 1010s again, re-check the token still carries the group.
 # See docs/TERRAFORM_CD.md → "CLOUDFLARE_API_TOKEN scope".
 #
-# 2026-09-16 drift check + rotation: a live CF-Access curl against
-# litellm.prod.fuzefront.com using this token's current terraform-output values
-# returned HTTP 302 (rejected). `terraform plan` showed zero drift (state matches
-# live Cloudflare exactly), and Cloudflare's own Service Tokens dashboard showed
-# this token's "Last Seen" as "Not Seen Yet" — it had never once been accepted,
-# despite the app/policy/domain/aud all being independently verified correct via
-# the dashboard. A service token's client_secret is write-once (Cloudflare never
-# returns it again after creation), so Terraform can never detect a secret that's
-# wrong from creation or has gone stale — "no changes" only proves the resource
-# still exists, not that the secret it holds still works.
+# THE SECRET IS NOT WHAT BREAKS HERE — the POLICY ACTION is. Read the `decision`
+# comment on litellm_service_ci_token below before touching anything in this
+# pair. A token whose secret is perfectly valid still 302s to the IdP login page
+# if its policy action is `allow` instead of `non_identity`, and the dashboard's
+# "Last Seen: Not Seen Yet" on this token is the SYMPTOM of the policy never
+# admitting it — not evidence of a bad secret.
 #
-# A prior attempt (#1030) tainted this resource to force destroy+recreate, but
-# Cloudflare's API refused the delete: `access.api.error.service_token_in_use:
-# cannot delete service token because it is used by a policy, group, or app
-# SCIM configuration ... or rotate the service token to invalidate existing
-# clients (12139)`. Rotation, not replacement, is the correct operation — this
-# provider models it via `client_secret_version`.
+# 2026-09-16: that "Not Seen Yet" was misread as a stale secret, and four applies
+# (#1030 taint-replace, #1032/#1034/#1037 rotations) were burned chasing it. The
+# rotation recorded below did eventually succeed and is harmless, but it fixed
+# nothing: the 302 persisted identically afterwards, from both a laptop and a CI
+# runner, with a provably fresh secret. If this endpoint 302s, check the policy
+# `decision` FIRST — a service token's client_secret is write-once, so terraform
+# genuinely cannot validate it, which makes "bad secret" a seductive and very
+# expensive wrong answer.
 #
-# A second attempt (#1032) bumped client_secret_version alone (1 -> 2), which
-# ALSO failed: `access.api.error.invalid_request: client_secret_version may
-# only be incremented if previous_client_secret_expires_at is set (12130)`.
-# Cloudflare's rotate API requires an explicit grace-period expiry for the
-# outgoing secret in the same request.
-#
-# A third attempt (#1034) added previous_client_secret_expires_at but jumped
-# straight to client_secret_version = 3 (reasoning that the prior failed apply
-# had left state showing 2, stale relative to Cloudflare's real value). That
-# ALSO failed, with the FULL constraint finally surfaced: `client_secret_version
-# may only be incremented by one (current client_secret_version: 1) (12130)` —
-# Cloudflare's real live value was 1 the whole time (both failed applies never
-# took effect server-side); the rotate API requires each request to increment
-# by exactly one from whatever the CURRENT live value is, not an arbitrary
-# higher number. `terraform plan` always refreshes against the live provider
-# before diffing (confirmed: earlier plans correctly showed "1 -> N" despite
-# stale local state), so no manual state fix is needed here — targeting the
-# correct next value (2) is enough.
-#
-# The previous_client_secret_expires_at value is disposable — this token has
-# never had a working client actually depending on graceful secret overlap
-# (its prior secret was never once accepted, per the dashboard's "Last Seen:
-# Not Seen Yet"), so a short grace window is fine.
+# Rotation mechanics, kept only so the attributes below are legible (each was a
+# separate failed apply before the constraint was known): Cloudflare refuses to
+# DELETE a token still referenced by a policy (12139 — rotate, don't replace);
+# `client_secret_version` may only be incremented if
+# `previous_client_secret_expires_at` is also set (12130); and it may only be
+# incremented BY ONE from the current live value (12130). Both attributes are
+# optional+computed, so they can be dropped from config without a diff once this
+# rotation has settled — leaving them pinned risks a future apply trying to
+# re-drive a rotation Cloudflare will not legally repeat.
 #
 # Rotation keeps the resource id/client_id untouched, so the paired Access
-# policy's `service_token = [...]` reference (by id) needs no change. After
-# this merges, re-provision the new output values to GitHub secrets via the
-# usual `terraform output -raw ... | gh secret set ...` stdin pipe.
+# policy's `service_token = [...]` reference (by id) needs no change. When this
+# token IS legitimately rotated, re-provision the new values to GitHub secrets
+# via `terraform output -raw ... | gh secret set ...` — note that
+# FuzeSDLC's provision-secrets.yml only FILLS MISSING secrets, it never
+# overwrites an existing one, so a rotated value must be pushed to each
+# consuming repo directly.
 resource "cloudflare_zero_trust_access_service_token" "litellm_ci" {
   count                             = local.cloudflare_enabled ? 1 : 0
   account_id                        = var.cloudflare_account_id
@@ -1224,7 +1211,25 @@ resource "cloudflare_zero_trust_access_policy" "litellm_service_ci_token" {
   application_id = cloudflare_zero_trust_access_application.litellm_service[0].id
   name           = "CI service token (fuze.yml LLM routing)"
   precedence     = 3
-  decision       = "allow"
+
+  # MUST be `non_identity` ("Service Auth" in the dashboard), NOT `allow`.
+  # `allow` is an IDENTITY decision: it requires a human IdP login on top of
+  # whatever `include` matches, so a request carrying only CF-Access-Client-Id
+  # / CF-Access-Client-Secret is redirected (302) to the Access login page
+  # instead of being admitted — exactly what this app did from 2026-09-14 until
+  # 2026-09-16. Cloudflare states it plainly: "Make sure to set the policy
+  # action to Service Auth; otherwise, Access will prompt for an identity
+  # provider login."
+  # (developers.cloudflare.com/cloudflare-one/identity/service-tokens/)
+  #
+  # The failure is SILENT everywhere it would normally be caught: `include`
+  # still references the right token id, the app/aud/domain still match, plan
+  # reports "No changes", and the redirect's own JWT just says
+  # service_token_status:false / auth_status:NONE — which reads like a bad
+  # credential, and is why this was misdiagnosed as a stale secret and "fixed"
+  # with four pointless token rotations. `non_identity` is the only difference
+  # that mattered.
+  decision = "non_identity"
 
   include {
     service_token = [cloudflare_zero_trust_access_service_token.litellm_ci[0].id]
