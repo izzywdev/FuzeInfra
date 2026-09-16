@@ -1164,7 +1164,7 @@ resource "cloudflare_zero_trust_access_policy" "litellm_service_email_otp" {
 # next merge; if it 1010s again, re-check the token still carries the group.
 # See docs/TERRAFORM_CD.md → "CLOUDFLARE_API_TOKEN scope".
 #
-# 2026-09-16 drift check + recreation: a live CF-Access curl against
+# 2026-09-16 drift check + rotation: a live CF-Access curl against
 # litellm.prod.fuzefront.com using this token's current terraform-output values
 # returned HTTP 302 (rejected). `terraform plan` showed zero drift (state matches
 # live Cloudflare exactly), and Cloudflare's own Service Tokens dashboard showed
@@ -1173,18 +1173,24 @@ resource "cloudflare_zero_trust_access_policy" "litellm_service_email_otp" {
 # the dashboard. A service token's client_secret is write-once (Cloudflare never
 # returns it again after creation), so Terraform can never detect a secret that's
 # wrong from creation or has gone stale — "no changes" only proves the resource
-# still exists, not that the secret it holds still works. Tainted this resource
-# (state-only, via the S3 backend, no Cloudflare credentials touched) to force a
-# clean destroy+recreate on this PR's apply, producing a guaranteed-fresh,
-# guaranteed-correct client_id/client_secret pair. The paired Access policy
-# references this resource's id (not its client_id), so it does not need any
-# change here — Terraform updates the reference automatically post-recreation.
-# After this merges, re-provision the new output values to GitHub secrets via
-# the usual `terraform output -raw ... | gh secret set ...` stdin pipe.
+# still exists, not that the secret it holds still works.
+#
+# A prior attempt (#1030) tainted this resource to force destroy+recreate, but
+# Cloudflare's API refused the delete: `access.api.error.service_token_in_use:
+# cannot delete service token because it is used by a policy, group, or app
+# SCIM configuration ... or rotate the service token to invalidate existing
+# clients (12139)`. Rotation, not replacement, is the correct operation — this
+# provider models it via `client_secret_version`: bumping it past the value
+# already in state (was 1) triggers Cloudflare's rotate-secret API in-place, so
+# the resource id/client_id are untouched and the paired Access policy's
+# `service_token = [...]` reference (by id) needs no change. After this merges,
+# re-provision the new output values to GitHub secrets via the usual
+# `terraform output -raw ... | gh secret set ...` stdin pipe.
 resource "cloudflare_zero_trust_access_service_token" "litellm_ci" {
-  count      = local.cloudflare_enabled ? 1 : 0
-  account_id = var.cloudflare_account_id
-  name       = "fuze.yml LLM routing (hosted-runner CI)"
+  count                 = local.cloudflare_enabled ? 1 : 0
+  account_id            = var.cloudflare_account_id
+  name                  = "fuze.yml LLM routing (hosted-runner CI)"
+  client_secret_version = 2
 }
 
 resource "cloudflare_zero_trust_access_policy" "litellm_service_ci_token" {
