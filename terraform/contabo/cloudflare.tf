@@ -1180,17 +1180,32 @@ resource "cloudflare_zero_trust_access_policy" "litellm_service_email_otp" {
 # cannot delete service token because it is used by a policy, group, or app
 # SCIM configuration ... or rotate the service token to invalidate existing
 # clients (12139)`. Rotation, not replacement, is the correct operation — this
-# provider models it via `client_secret_version`: bumping it past the value
-# already in state (was 1) triggers Cloudflare's rotate-secret API in-place, so
-# the resource id/client_id are untouched and the paired Access policy's
-# `service_token = [...]` reference (by id) needs no change. After this merges,
-# re-provision the new output values to GitHub secrets via the usual
-# `terraform output -raw ... | gh secret set ...` stdin pipe.
+# provider models it via `client_secret_version`.
+#
+# A second attempt (#1032) bumped client_secret_version alone (1 -> 2), which
+# ALSO failed: `access.api.error.invalid_request: client_secret_version may
+# only be incremented if previous_client_secret_expires_at is set (12130)`.
+# Cloudflare's rotate API requires an explicit grace-period expiry for the
+# outgoing secret in the same request. That failed apply still wrote
+# client_secret_version = 2 into state despite erroring server-side before the
+# rotation took effect (Cloudflare is still serving the original, version-1
+# secret) — so this bumps to 3, past whatever the (now-inconsistent) state
+# holds, paired with previous_client_secret_expires_at so the request is
+# valid. The specific expiry value is disposable — this token has never had a
+# working client actually depending on graceful secret overlap (its prior
+# secret was never once accepted, per the dashboard's "Last Seen: Not Seen
+# Yet"), so a short window is fine.
+#
+# Rotation keeps the resource id/client_id untouched, so the paired Access
+# policy's `service_token = [...]` reference (by id) needs no change. After
+# this merges, re-provision the new output values to GitHub secrets via the
+# usual `terraform output -raw ... | gh secret set ...` stdin pipe.
 resource "cloudflare_zero_trust_access_service_token" "litellm_ci" {
-  count                 = local.cloudflare_enabled ? 1 : 0
-  account_id            = var.cloudflare_account_id
-  name                  = "fuze.yml LLM routing (hosted-runner CI)"
-  client_secret_version = 2
+  count                             = local.cloudflare_enabled ? 1 : 0
+  account_id                        = var.cloudflare_account_id
+  name                              = "fuze.yml LLM routing (hosted-runner CI)"
+  client_secret_version             = 3
+  previous_client_secret_expires_at = "2026-09-16T08:00:00Z"
 }
 
 resource "cloudflare_zero_trust_access_policy" "litellm_service_ci_token" {
