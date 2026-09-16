@@ -1187,10 +1187,11 @@ resource "cloudflare_zero_trust_access_policy" "litellm_service_email_otp" {
 # re-provision the new output values to GitHub secrets via the usual
 # `terraform output -raw ... | gh secret set ...` stdin pipe.
 resource "cloudflare_zero_trust_access_service_token" "litellm_ci" {
-  count                 = local.cloudflare_enabled ? 1 : 0
-  account_id            = var.cloudflare_account_id
-  name                  = "fuze.yml LLM routing (hosted-runner CI)"
-  client_secret_version = 2
+  count                             = local.cloudflare_enabled ? 1 : 0
+  account_id                        = var.cloudflare_account_id
+  name                              = "fuze.yml LLM routing (hosted-runner CI)"
+  client_secret_version             = 3
+  previous_client_secret_expires_at = "2026-10-16T00:00:00Z"
 }
 
 resource "cloudflare_zero_trust_access_policy" "litellm_service_ci_token" {
