@@ -1,0 +1,33 @@
+name: contabo-list-all-instances
+on:
+  workflow_dispatch: {}
+permissions:
+  contents: read
+jobs:
+  list:
+    runs-on: ubuntu-latest
+    steps:
+      - name: List all Contabo instances
+        env:
+          CID: ${{ secrets.CONTABO_CLIENT_ID }}
+          CSEC: ${{ secrets.CONTABO_CLIENT_SECRET }}
+          CUSER: ${{ secrets.CONTABO_API_USER }}
+          CPASS: ${{ secrets.CONTABO_API_PASSWORD }}
+        run: |
+          set -euo pipefail
+          TOK=$(curl -sS -X POST -H "Content-Type: application/x-www-form-urlencoded" \
+            "https://auth.contabo.com/auth/realms/contabo/protocol/openid-connect/token" \
+            --data-urlencode "client_id=${CID}" --data-urlencode "client_secret=${CSEC}" \
+            --data-urlencode "username=${CUSER}" --data-urlencode "password=${CPASS}" \
+            --data-urlencode "grant_type=password" | jq -r .access_token)
+          [ -n "$TOK" ] && [ "$TOK" != "null" ] || { echo "::error::auth failed"; exit 1; }
+          page=1
+          while :; do
+            RESP=$(curl -sS -H "Authorization: Bearer $TOK" \
+              -H "x-request-id: $(cat /proc/sys/kernel/random/uuid)" \
+              "https://api.contabo.com/v1/compute/instances?size=100&page=${page}")
+            n=$(echo "$RESP" | jq '.data | length')
+            [ "$n" -gt 0 ] || break
+            echo "$RESP" | jq -r '.data[] | [.instanceId, .displayName, .name, .status, .productId, .region, .addOns[]?.id] | @tsv'
+            page=$((page+1)); [ "$page" -gt 30 ] && break
+          done

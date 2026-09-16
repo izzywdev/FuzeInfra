@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strconv"
 	"time"
 
 	"github.com/izzywdev/fuzeinfra/contabo-externalgrpc/internal/contabo"
@@ -29,9 +30,11 @@ import (
 //   - RELEASE_WINDOW        (optional) Go duration string; how far ahead of
 //     an instance's projected monthly renewal the reaper will consider
 //     releasing it, if idle. Default: 24h.
-//   - BILLING_PERIOD        (optional) Go duration string; the length of
-//     Contabo's monthly billing cycle used to project the next renewal from
-//     an instance's CreatedDate. Default: 720h (~30d).
+//   - RENEWAL_DAY           (optional) integer 1-31; the calendar day of the
+//     month Contabo renews billing for every elastic instance, used to
+//     project the next renewal from the current time. Confirmed 2026-09:
+//     Contabo bills the whole fleet calendar-aligned to the 15th, not on a
+//     per-instance CreatedDate anniversary. Default: 15.
 //   - ELASTIC_TAG           (optional) Contabo tag identifying elastic
 //     instances. Default: fuzeinfra-elastic.
 //   - CONTABO_CLIENT_ID     (required) Contabo OAuth2 client ID.
@@ -48,7 +51,7 @@ import (
 // (fuzeinfra-ca-reaper), never locally against an out-of-cluster kubeconfig.
 const (
 	defaultReleaseWindow  = 24 * time.Hour
-	defaultBillingPeriod  = 720 * time.Hour
+	defaultRenewalDay     = 15
 	defaultElasticTag     = "fuzeinfra-elastic"
 	defaultContaboBaseURL = "https://api.contabo.com"
 	defaultContaboAuthURL = "https://auth.contabo.com/auth/realms/contabo/protocol/openid-connect/token"
@@ -72,13 +75,16 @@ func loadConfig(getenv func(string) string) (reaper.Config, contabo.Config, erro
 		releaseWindow = parsed
 	}
 
-	billingPeriod := defaultBillingPeriod
-	if v := get("BILLING_PERIOD"); v != "" {
-		parsed, err := time.ParseDuration(v)
+	renewalDay := defaultRenewalDay
+	if v := get("RENEWAL_DAY"); v != "" {
+		parsed, err := strconv.Atoi(v)
 		if err != nil {
-			return reaper.Config{}, contabo.Config{}, fmt.Errorf("parsing BILLING_PERIOD=%q: %w", v, err)
+			return reaper.Config{}, contabo.Config{}, fmt.Errorf("parsing RENEWAL_DAY=%q: %w", v, err)
 		}
-		billingPeriod = parsed
+		if parsed < 1 || parsed > 31 {
+			return reaper.Config{}, contabo.Config{}, fmt.Errorf("RENEWAL_DAY=%d out of range (must be 1-31)", parsed)
+		}
+		renewalDay = parsed
 	}
 
 	contaboClientID := get("CONTABO_CLIENT_ID")
@@ -100,7 +106,7 @@ func loadConfig(getenv func(string) string) (reaper.Config, contabo.Config, erro
 
 	reaperCfg := reaper.Config{
 		ReleaseWindow:   releaseWindow,
-		BillingPeriod:   billingPeriod,
+		RenewalDay:      renewalDay,
 		ElasticTag:      getDefault("ELASTIC_TAG", defaultElasticTag),
 		EvictionTimeout: 60 * time.Second,
 	}
@@ -136,8 +142,8 @@ func main() {
 
 	r := reaper.New(contaboClient, k8sClient, reaperCfg)
 
-	log.Printf("reaper: starting one-shot pass (elastic tag=%q, releaseWindow=%s, billingPeriod=%s)",
-		reaperCfg.ElasticTag, reaperCfg.ReleaseWindow, reaperCfg.BillingPeriod)
+	log.Printf("reaper: starting one-shot pass (elastic tag=%q, releaseWindow=%s, renewalDay=%d)",
+		reaperCfg.ElasticTag, reaperCfg.ReleaseWindow, reaperCfg.RenewalDay)
 
 	// A CronJob pod has no external deadline signal of its own beyond the
 	// job's activeDeadlineSeconds (enforced by Kubernetes, not this

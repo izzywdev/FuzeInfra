@@ -61,6 +61,7 @@ spec:
         checksum/gateway-code: {{ $root.Files.Get "files/a2a-gateway/gateway.mjs" | sha256sum }}
         checksum/gateway-secret: {{ .Values.a2aGateway.secretRotation | default "0" | toString | sha256sum }}
     spec:
+      {{- include "fuzeinfra.durableToleration" $ | nindent 6 }}
       containers:
         - name: a2a-gateway
           image: {{ .Values.a2aGateway.image | default "node:20-slim" }}

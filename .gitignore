@@ -187,3 +187,8 @@ dev-overrides/
 # password written for the operator to file in a password manager). They are
 # NOT sealed and must never be committed. Delete after storing.
 *.local.txt
+
+# Terraform working dirs anywhere in the tree (a local `terraform init` in
+# modules/ or a render harness must never commit provider binaries).
+**/.terraform/
+**/.terraform.lock.hcl

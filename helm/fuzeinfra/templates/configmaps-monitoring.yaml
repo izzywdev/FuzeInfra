@@ -152,6 +152,31 @@ data:
           - targets: ["fuzeinfra-loki:{{ .Values.loki.port }}"]
       {{- end }}
 
+      # Self-heal loop metrics (autofix issue/PR outcomes from the GitHub API)
+      {{- if .Values.selfHealMetrics.enabled }}
+      - job_name: selfheal-metrics
+        static_configs:
+          - targets: ["fuzeinfra-selfheal-metrics:{{ .Values.selfHealMetrics.port }}"]
+      {{- end }}
+
+      # Tempo self-metrics (ingester/compactor/metrics-generator health)
+      {{- if .Values.tempo.enabled }}
+      - job_name: tempo
+        static_configs:
+          - targets: ["fuzeinfra-tempo:{{ .Values.tempo.httpPort }}"]
+      {{- end }}
+
+      # otel-collector self-metrics (receive/export/drop counters) + its
+      # prometheus exporter (OTLP metrics apps sent through it)
+      {{- if .Values.otelCollector.enabled }}
+      - job_name: otel-collector
+        static_configs:
+          - targets: ["fuzeinfra-otel-collector:8888"]
+      - job_name: otel-collector-exported
+        static_configs:
+          - targets: ["fuzeinfra-otel-collector:{{ .Values.otelCollector.metricsPort }}"]
+      {{- end }}
+
       # Any pod annotated with prometheus.io/scrape: "true"
       - job_name: kubernetes-pods
         kubernetes_sd_configs:
@@ -277,7 +302,18 @@ data:
       ingestion_rate_mb: 16
       ingestion_burst_size_mb: 32
       max_query_length: 721h
-      retention_period: 744h
+      # 336h = 14 days. Deliberately shortened from 744h (31 days) on 2026-09-01.
+      # Loki OSS has NO size-based retention — only time — so this number, not the
+      # PVC size, is the only knob that bounds growth from inside Loki. 31 days of
+      # fleet logs from 22 repos overran a 5Gi volume, and a FULL Loki volume is
+      # self-sealing (retention is enforced by the compactor, the compactor runs
+      # inside Loki, and Loki cannot start on a full disk): it crash-looped 694
+      # times over 2d11h and wedged an Argo sync in phase=Running for 37 hours,
+      # silently freezing every prod deployment behind it. Two weeks is the
+      # explicit decision — it covers the incident investigations this serves.
+      # Shrinking this is safe and takes effect on the compactor's next run;
+      # chunks older than the window are deleted, not orphaned.
+      retention_period: 336h
 
     compactor:
       working_directory: /loki/compactor
@@ -396,6 +432,14 @@ data:
           prometheusType: Prometheus
           cacheLevel: Low
           incrementalQueryOverlapWindow: 10m
+          {{- if .Values.tempo.enabled }}
+          # Jump from a metric sample's exemplar (a trace_id Prometheus stored
+          # alongside it via --enable-feature=exemplar-storage) straight into the
+          # trace that produced it.
+          exemplarTraceIdDestinations:
+            - datasourceUid: fuzeinfra-tempo
+              name: trace_id
+          {{- end }}
       {{- end }}
       {{- if .Values.loki.enabled }}
       - name: Loki
@@ -405,6 +449,48 @@ data:
         url: http://fuzeinfra-loki:{{ .Values.loki.port }}
         jsonData:
           maxLines: 5000
+          {{- if .Values.tempo.enabled }}
+          # "Clicking trace_id should jump straight to Tempo" — apps must log a
+          # structured `trace_id` field (see OBSERVABILITY_DASHBOARDS.md) for this
+          # to match.
+          derivedFields:
+            - datasourceUid: fuzeinfra-tempo
+              matcherRegex: "trace_id[=\"':\\s]+([0-9a-fA-F]+)"
+              name: TraceID
+              url: '${__value.raw}'
+              urlDisplayLabel: "View trace"
+          {{- end }}
+      {{- end }}
+      {{- if .Values.tempo.enabled }}
+      - name: Tempo
+        type: tempo
+        access: proxy
+        uid: fuzeinfra-tempo
+        url: http://fuzeinfra-tempo:{{ .Values.tempo.httpPort }}
+        jsonData:
+          nodeGraph:
+            enabled: true
+          {{- if .Values.loki.enabled }}
+          tracesToLogsV2:
+            datasourceUid: fuzeinfra-loki
+            spanStartTimeShift: '-5m'
+            spanEndTimeShift: '5m'
+            filterByTraceID: true
+            tags:
+              - key: service.name
+                value: service
+          lokiSearch:
+            datasourceUid: fuzeinfra-loki
+          {{- end }}
+          {{- if .Values.prometheus.enabled }}
+          tracesToMetrics:
+            datasourceUid: fuzeinfra-prometheus
+            tags:
+              - key: service.name
+                value: service
+          serviceMap:
+            datasourceUid: fuzeinfra-prometheus
+          {{- end }}
       {{- end }}
 {{- end }}
 
@@ -419,7 +505,11 @@ metadata:
     {{- include "fuzeinfra.labels" . | nindent 4 }}
 data:
   # ---------------------------------------------------------------------------
-  # Contact point — webhook to the CF Worker bridge that forwards to GHA.
+  # Contact point — webhook to the CF Worker bridge that forwards to GHA, which
+  # opens an `@fuze` issue so the fix runs through the canonical, VENDOR-INDEPENDENT
+  # `@fuze` handler (fuze-cluster.yml → fuze-code-action's multi-provider cascade),
+  # not a hardcoded single-vendor CLI. The receiver is named `fuze-autofix` for
+  # that reason — the downstream mechanism is `@fuze`, not any one model vendor.
   # CRIT_BRIDGE_TOKEN env var is injected into the Grafana pod from
   # fuzeinfra-tunnel-secrets (created by terraform/contabo — ArgoCD never touches it).
   # If the var is empty, no Authorization header is sent (acceptable for
@@ -429,9 +519,9 @@ data:
     apiVersion: 1
     contactPoints:
       - orgId: 1
-        name: claude-autofix
+        name: fuze-autofix
         receivers:
-          - uid: claude-autofix-webhook
+          - uid: fuze-autofix-webhook
             type: webhook
             settings:
               url: "https://crit-alert.{{ .Values.global.domain }}/"
@@ -443,19 +533,19 @@ data:
   # ---------------------------------------------------------------------------
   # Notification policy — route severity=critical labels to the webhook.
   # All other alerts fall through to the default grafana receiver.
-  # repeat_interval: 4h prevents flooding Claude with duplicate alerts.
+  # repeat_interval: 4h prevents flooding the @fuze handler with duplicate alerts.
   # ---------------------------------------------------------------------------
   policy.yaml: |
     apiVersion: 1
     policies:
       - orgId: 1
-        receiver: claude-autofix
+        receiver: fuze-autofix
         group_by: ['grafana_folder', 'alertname']
         group_wait: 30s
         group_interval: 5m
         repeat_interval: 4h
         routes:
-          - receiver: claude-autofix
+          - receiver: fuze-autofix
             matchers:
               - severity = critical
             group_wait: 0s

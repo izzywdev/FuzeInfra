@@ -53,4 +53,23 @@ module "ci_workers" {
 
   image_id       = var.image_id
   ssh_public_key = var.ssh_public_key
+
+  # PRIVATE VLAN. This was the gap that produced fuzeinfra-ci-runner-2 off-VLAN
+  # on 2026-08-30, two days AFTER the cutover: this module call never passed any
+  # private-networking argument, so private_network_enabled defaulted to false
+  # and the node came up with no eth1 netplan, no --node-ip and no
+  # --flannel-iface. k3s then auto-detected both address families and registered
+  # InternalIP 13.140.158.203 + 2a02:c207:2354:3725::1 while ci-runner-1 sits on
+  # 10.0.0.4. Measured cost: `kubectl logs` against a pod on runner-2 fails with
+  # 502 dialing 13.140.158.203:10250 (kubelet unreachable, since 10250 is only
+  # open on the VLAN) while the same call against runner-1 succeeds. Unlike an
+  # elastic node this one is NOT autoscaler-managed, so the reaper will never
+  # replace it -- it had to be fixed at the source, here.
+  #
+  # private_network_id (not private_network_name) is deliberate: name-mode would
+  # make Terraform CREATE and reconcile a contabo_private_network whose
+  # instance_ids are exactly this request set, which against live net 60932 would
+  # try to DETACH the control planes and every elastic node. See the
+  # ELASTIC-EXCLUSION note in private-network.tf.
+  private_network_id = var.node_private_network_id
 }

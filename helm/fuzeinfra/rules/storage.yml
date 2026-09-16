@@ -1,0 +1,111 @@
+groups:
+  # ---------------------------------------------------------------------------
+  # LONGHORN VOLUME REDUNDANCY
+  #
+  # Both rules here exist because of the 2026-09-07 loss of
+  # fuzeinfra-prometheus-data. That volume sat at spec.numberOfReplicas=1 for
+  # DAYS. A single-copy volume on a cluster whose nodes are routinely reinstalled
+  # is unrecoverable by construction, and nothing in the stack said so: robustness
+  # reported "healthy" the entire time, because one replica out of one desired IS
+  # healthy by Longhorn's definition. The node holding that copy was reinstalled,
+  # then a second node 25 minutes later while the rebuild was still in flight, and
+  # the volume went robustness=faulted with zero recoverable replicas. Every
+  # metric the cluster had was lost.
+  #
+  # So the two silent conditions get one alert each, and they are NOT redundant:
+  #   * LonghornVolumeUnderReplicated reads SPEC. It fires while everything still
+  #     looks healthy — it is the only one of the two that would have fired
+  #     during the days of exposure before the incident.
+  #   * LonghornVolumeDegradedTooLong reads STATUS. It fires when redundancy you
+  #     believe you have is not actually being restored.
+  #
+  # METRIC PROVENANCE — read this before editing either expr.
+  # These are kube-state-metrics CustomResourceState metrics generated from the
+  # Longhorn Volume CRs (files/ksm-customresource-state.yaml), NOT Longhorn's own
+  # /metrics endpoint. Two independent reasons, both verified against prod on
+  # 2026-09-07:
+  #   1. Longhorn exposes no replica-count metric of any kind. spec.numberOfReplicas
+  #      lives only on the CR. count()-ing longhorn_volume_actual_size_bytes does
+  #      NOT work — see the long note in files/ksm-customresource-state.yaml.
+  #   2. Nothing scrapes longhorn-backend:9500 in this cluster at all. Querying the
+  #      live Prometheus for longhorn_volume_robustness returns an empty vector, so
+  #      every longhorn_* metric name is currently unqueryable here. A rule written
+  #      against one would have parsed, linted, unit-tested and deployed green
+  #      while being incapable of ever firing.
+  #
+  # That second point is the same failure mode as the VLAN alerts (see
+  # tests/test_alert_label_allowlist.py): a rule matching on a dimension nothing
+  # emits is rejected by no tool in the chain. tests/test_longhorn_alert_metrics.py
+  # guards these rules the same way.
+  # ---------------------------------------------------------------------------
+  - name: longhorn-redundancy
+    rules:
+      # THE ALERT THAT WOULD HAVE PREVENTED THE INCIDENT.
+      #
+      # Gated on attached because an attached volume is one a workload is
+      # actively writing to. Note this is a real, current gap and not a
+      # hypothetical: on 2026-09-07 data-fuzeinfra-mariadb-0 is sitting at
+      # numberOfReplicas=1 while detached, so it does not fire today — and will
+      # fire within 15m of anything attaching it. That is the intended behaviour,
+      # not an oversight.
+      #
+      # `and on(volume)` deliberately joins on volume alone (metadata.name).
+      # pvc/pvc_namespace come from status.kubernetesStatus and are empty strings
+      # for an unbound volume; joining on them would work today but would silently
+      # stop matching the moment a volume has no PVC ref.
+      #
+      # for: 15m — this reads SPEC, which does not flap. The window exists only to
+      # ride out provisioning, where a volume can briefly exist before its final
+      # replica count is applied. It is NOT sized against rebuild time; nothing
+      # about a rebuild changes spec.numberOfReplicas.
+      - alert: LonghornVolumeUnderReplicated
+        expr: >-
+          (longhorn_crd_volume_replicas_desired < 2)
+          and on(volume)
+          (longhorn_crd_volume_state{state="attached"} == 1)
+        for: 15m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Longhorn volume {{ $labels.pvc }} has only {{ $value }} replica — data loss on the next node event"
+          description: >-
+            Volume {{ $labels.volume }} (PVC {{ $labels.pvc_namespace }}/{{ $labels.pvc }})
+            is attached with spec.numberOfReplicas={{ $value }}. Robustness will keep
+            reporting "healthy" — one replica out of one desired IS healthy — so this
+            alert is the only signal that the volume cannot survive losing its node.
+            Nodes in this cluster are reinstalled routinely; this is not a hypothetical
+            risk. Raise the replica count in Git (prod is GitOps under selfHeal; never
+            `kubectl patch` the live Volume): set the replica count on the StorageClass
+            in helm/fuzeinfra/templates/storageclass-longhorn.yaml for new volumes, and
+            for an existing volume raise spec.numberOfReplicas so Longhorn schedules the
+            extra replicas. Then confirm the rebuild finishes — a volume left mid-rebuild
+            is what LonghornVolumeDegradedTooLong catches.
+
+      # A rebuild that is not completing means the redundancy you think you have
+      # does not exist. This is the condition that was true during the 25-minute
+      # window between the two node reinstalls on 2026-09-07.
+      #
+      # for: 30m is chosen against measured rebuild time, not guessed: the volumes
+      # on this cluster are 5-25GB (fuzeinfra-prometheus-data is 25Gi) and a
+      # rebuild of that size completes in minutes over the private VLAN. 30m is
+      # comfortably clear of a healthy rebuild while still leaving the operator
+      # time to act before a second node event — the exact sequence that destroyed
+      # the volume. Do not lower this below ~20m or normal rebuilds will page.
+      - alert: LonghornVolumeDegradedTooLong
+        expr: longhorn_crd_volume_robustness{robustness="degraded"} == 1
+        for: 30m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Longhorn volume {{ $labels.pvc }} has been degraded for 30m — rebuild is not completing"
+          description: >-
+            Volume {{ $labels.volume }} (PVC {{ $labels.pvc_namespace }}/{{ $labels.pvc }})
+            has been in robustness=degraded for over 30 minutes, far longer than a healthy
+            rebuild of these volume sizes. At least one replica is missing or stuck
+            rebuilding, so the redundancy this volume appears to have is not real and a
+            single further node event can fault it. DO NOT reinstall, drain or delete any
+            node until this clears — that sequence, two node events 25 minutes apart with
+            a rebuild in flight, is exactly what destroyed fuzeinfra-prometheus-data on
+            2026-09-07. Check replica scheduling first (`kubectl -n longhorn-system get
+            replicas.longhorn.io`); the usual causes are no schedulable node with free
+            space, or a disk over its over-provisioning limit.

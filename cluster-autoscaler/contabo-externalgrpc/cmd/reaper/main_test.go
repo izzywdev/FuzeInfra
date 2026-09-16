@@ -21,7 +21,7 @@ func getenvFromMap(m map[string]string) func(string) string {
 func TestLoadConfig_FullyPopulated(t *testing.T) {
 	env := fullEnv()
 	env["RELEASE_WINDOW"] = "48h"
-	env["BILLING_PERIOD"] = "360h"
+	env["RENEWAL_DAY"] = "1"
 	env["ELASTIC_TAG"] = "custom-tag"
 	env["CONTABO_BASE_URL"] = "https://api.example.com"
 	env["CONTABO_AUTH_URL"] = "https://auth.example.com/token"
@@ -34,8 +34,8 @@ func TestLoadConfig_FullyPopulated(t *testing.T) {
 	if reaperCfg.ReleaseWindow != 48*time.Hour {
 		t.Errorf("ReleaseWindow = %s, want 48h", reaperCfg.ReleaseWindow)
 	}
-	if reaperCfg.BillingPeriod != 360*time.Hour {
-		t.Errorf("BillingPeriod = %s, want 360h", reaperCfg.BillingPeriod)
+	if reaperCfg.RenewalDay != 1 {
+		t.Errorf("RenewalDay = %d, want 1", reaperCfg.RenewalDay)
 	}
 	if reaperCfg.ElasticTag != "custom-tag" {
 		t.Errorf("ElasticTag = %q, want custom-tag", reaperCfg.ElasticTag)
@@ -61,8 +61,8 @@ func TestLoadConfig_Defaults(t *testing.T) {
 	if reaperCfg.ReleaseWindow != defaultReleaseWindow {
 		t.Errorf("ReleaseWindow = %s, want default %s", reaperCfg.ReleaseWindow, defaultReleaseWindow)
 	}
-	if reaperCfg.BillingPeriod != defaultBillingPeriod {
-		t.Errorf("BillingPeriod = %s, want default %s", reaperCfg.BillingPeriod, defaultBillingPeriod)
+	if reaperCfg.RenewalDay != defaultRenewalDay {
+		t.Errorf("RenewalDay = %d, want default %d", reaperCfg.RenewalDay, defaultRenewalDay)
 	}
 	if reaperCfg.ElasticTag != defaultElasticTag {
 		t.Errorf("ElasticTag = %q, want default %q", reaperCfg.ElasticTag, defaultElasticTag)
@@ -87,7 +87,7 @@ func TestLoadConfig_MissingRequiredVar(t *testing.T) {
 	}
 }
 
-func TestLoadConfig_InvalidDurationErrors(t *testing.T) {
+func TestLoadConfig_InvalidValueErrors(t *testing.T) {
 	env := fullEnv()
 	env["RELEASE_WINDOW"] = "not-a-duration"
 	if _, _, err := loadConfig(getenvFromMap(env)); err == nil {
@@ -95,8 +95,14 @@ func TestLoadConfig_InvalidDurationErrors(t *testing.T) {
 	}
 
 	env2 := fullEnv()
-	env2["BILLING_PERIOD"] = "not-a-duration"
+	env2["RENEWAL_DAY"] = "not-a-number"
 	if _, _, err := loadConfig(getenvFromMap(env2)); err == nil {
-		t.Fatal("expected an error for an invalid BILLING_PERIOD")
+		t.Fatal("expected an error for an invalid RENEWAL_DAY")
+	}
+
+	env3 := fullEnv()
+	env3["RENEWAL_DAY"] = "32"
+	if _, _, err := loadConfig(getenvFromMap(env3)); err == nil {
+		t.Fatal("expected an error for an out-of-range RENEWAL_DAY")
 	}
 }

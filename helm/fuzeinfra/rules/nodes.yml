@@ -111,3 +111,77 @@ groups:
         annotations:
           summary: "Clock skew on {{ $labels.instance }}"
           description: "System clock offset is {{ $value }}s. TLS and logs may be affected."
+
+      # ---------------------------------------------------------------------
+      # PRIVATE-VLAN MEMBERSHIP (net 60932, 10.0.0.0/22)
+      #
+      # An off-VLAN node is not benign. It registers Ready and runs pods, but its
+      # kubelet is unreachable from the control plane (10250 is only open on the
+      # VLAN), so `kubectl logs`/`exec`/`port-forward` against anything on it
+      # fail with a 502 while the same call against a VLAN node succeeds -- the
+      # node becomes undebuggable. Measured 2026-09-02 against
+      # fuzeinfra-ci-runner-2 (off-VLAN) vs fuzeinfra-ci-runner-1 (10.0.0.4).
+      #
+      # THREE alerts on purpose, because each catches a different failure:
+      #  * NodeOffPrivateVLAN is PATH-INDEPENDENT -- it reads the node's actual
+      #    InternalIP, so it catches a node created by ANY provisioning path,
+      #    including one nobody has audited yet. This is the backstop: the
+      #    ci-runner-2 incident happened because a fix covered only the paths
+      #    that were known at the time.
+      #  * NodeQuarantinedOffVLAN catches a node whose cloud-init deliberately
+      #    self-quarantined (the add-on or the network assign never landed).
+      #  * NodeMissingVLANLabel catches a node from a provisioning path that
+      #    predates the vlan= labelling, i.e. one that is not being audited at
+      #    all. "No label" must never read as healthy.
+      # ---------------------------------------------------------------------
+      - alert: NodeOffPrivateVLAN
+        # kube_node_info.internal_ip is the address k3s registered. Anything
+        # outside 10.0.0.0/22 (including an IPv6 InternalIP, which is what k3s
+        # picks when --node-ip is absent) means the node is off the VLAN.
+        expr: kube_node_info{internal_ip!~"10[.]0[.][0-3][.].*"}
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Node {{ $labels.node }} is OFF the private VLAN (InternalIP {{ $labels.internal_ip }})"
+          description: >-
+            k3s registered this node on {{ $labels.internal_ip }} instead of an address in
+            10.0.0.0/22. Its kubelet is unreachable from the control plane, so logs/exec/
+            port-forward for every pod on it will fail with a 502. Remediation:
+            docs/design/off-vlan-node-failure-policy.md.
+
+      - alert: NodeQuarantinedOffVLAN
+        expr: kube_node_labels{label_fuzeinfra_io_vlan="absent"}
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Node {{ $labels.node }} self-quarantined: private NIC never appeared"
+          description: >-
+            cloud-init waited for eth1 to carry an IPv4 and gave up, so the node joined with
+            fuzeinfra.io/off-vlan=true:NoSchedule and carries no workload. The paid
+            privateNetworking add-on or the assign to network 60932 did not land. Fix with
+            the ca-private-net workflow (action=upgrade then action=assign); the node's join
+            unit re-runs on the next boot and repairs itself.
+
+      - alert: NodeMissingVLANLabel
+        # Control planes are excluded: they are provisioned by
+        # terraform/contabo/provisioning.tf, which sets node-ip from
+        # config.yaml rather than from the node cloud-init, so they will never
+        # carry this label. Expect this to fire for the agent nodes that
+        # predate the labelling and to clear as each is recycled -- that is the
+        # point: an unaudited node must not read as healthy. Kept at info with a
+        # 24h window so it is a coverage signal, not a page.
+        expr: >-
+          (kube_node_info unless on(node)
+            kube_node_labels{label_fuzeinfra_io_vlan=~"present|absent"})
+          unless on(node) kube_node_role{role="control-plane"}
+        for: 24h
+        labels:
+          severity: info
+        annotations:
+          summary: "Node {{ $labels.node }} carries no fuzeinfra.io/vlan label"
+          description: >-
+            This node was created by a provisioning path that does not report VLAN status,
+            so nothing is auditing it. Identify the path and bring it onto the contract --
+            see the provisioning-path table in docs/design/off-vlan-node-failure-policy.md.

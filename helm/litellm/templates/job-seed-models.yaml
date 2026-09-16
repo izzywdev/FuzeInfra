@@ -1,0 +1,148 @@
+{{- if and .Values.enabled .Values.storeModelInDB .Values.database.enabled (gt (len .Values.seedModels) 0) }}
+{{- /*
+PostSync hook: seed the full model catalog into LiteLLM's database.
+
+Runs after every Argo sync. Idempotent — queries /model/info for existing
+model names and only adds models that are missing. Config.yaml models are
+also checked (they appear in /model/info too) so a model in both places
+doesn't get double-registered.
+
+Requires:
+  - storeModelInDB: true  (STORE_MODEL_IN_DB env var)
+  - database.enabled: true (Postgres backing store)
+  - seedModels list non-empty
+
+Models use `os.environ/<KEY>` references for API keys — the literal string
+goes into the DB and LiteLLM resolves it from the pod's env at runtime.
+No secret value is ever written to the database in cleartext.
+
+IMAGE + FAILURE POLICY: see the long note in job-sync-key-models.yaml. Same
+reasoning applies verbatim — this runs on the gateway's own image (already on
+the node, guaranteed python3, nothing to install) and exits 0 on every failure
+path so a seeding problem can never fail an unrelated prod sync.
+*/ -}}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: litellm-seed-models
+  labels:
+    {{- include "litellm.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": post-upgrade,post-install
+    "helm.sh/hook-weight": "20"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+    "argocd.argoproj.io/hook": PostSync
+    "argocd.argoproj.io/hook-delete-policy": BeforeHookCreation,HookSucceeded
+spec:
+  ttlSecondsAfterFinished: 600
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        {{- include "litellm.selectorLabels" . | nindent 8 }}
+        job: seed-models
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: seed
+          image: "{{ .Values.image }}:{{ .Values.tag }}"
+          imagePullPolicy: {{ .Values.imagePullPolicy }}
+          command: ["python3", "-c"]
+          args:
+            - |
+              import json, os, sys, time, urllib.error, urllib.request
+
+              BASE = "http://litellm:{{ .Values.port }}"
+              KEY = os.environ.get("LITELLM_MASTER_KEY", "")
+              SEED = json.loads({{ .Values.seedModels | toJson | quote }})
+
+              print("=== litellm-seed-models PostSync hook ===", flush=True)
+              print("Target: " + BASE, flush=True)
+              print("Catalog to seed: " + str(len(SEED)) + " model(s)", flush=True)
+
+              def api(path, payload=None, timeout=30):
+                  body = json.dumps(payload).encode() if payload is not None else None
+                  req = urllib.request.Request(
+                      BASE + path,
+                      data=body,
+                      method="POST" if payload is not None else "GET",
+                  )
+                  req.add_header("Authorization", "Bearer " + KEY)
+                  req.add_header("Content-Type", "application/json")
+                  with urllib.request.urlopen(req, timeout=timeout) as r:
+                      raw = r.read().decode() or "null"
+                  return json.loads(raw)
+
+              def bail(msg):
+                  print("SKIP: " + msg, flush=True)
+                  print("=== hook complete (skipped) ===", flush=True)
+                  sys.exit(0)
+
+              if not KEY:
+                  bail("LITELLM_MASTER_KEY is empty")
+
+              ready = False
+              for attempt in range(60):
+                  try:
+                      urllib.request.urlopen(BASE + "/health/readiness", timeout=5).read()
+                      ready = True
+                      print("LiteLLM ready after " + str(attempt) + " probes.", flush=True)
+                      break
+                  except Exception:
+                      time.sleep(5)
+              if not ready:
+                  bail("LiteLLM not ready after 5 minutes (will retry next sync)")
+
+              try:
+                  info = api("/model/info")
+              except Exception as e:
+                  bail("/model/info failed: " + repr(e))
+
+              existing = set()
+              for m in (info or {}).get("data", []):
+                  name = m.get("model_name")
+                  if name:
+                      existing.add(name)
+              print("Existing models: " + str(len(existing)), flush=True)
+
+              added = skipped = failed = 0
+              for m in SEED:
+                  name = m.get("name")
+                  if not name:
+                      continue
+                  if name in existing:
+                      skipped += 1
+                      continue
+                  params = {
+                      "model": m.get("provider"),
+                      "api_key": "os.environ/" + str(m.get("keyEnv")),
+                  }
+                  try:
+                      api("/model/new", {"model_name": name, "litellm_params": params})
+                      print("  + " + name, flush=True)
+                      added += 1
+                  except urllib.error.HTTPError as e:
+                      failed += 1
+                      print("  ! " + name + " HTTP " + str(e.code) + ": " +
+                            e.read().decode()[:200], flush=True)
+                  except Exception as e:
+                      failed += 1
+                      print("  ! " + name + ": " + repr(e), flush=True)
+
+              print("=== seed complete: " + str(added) + " added, " + str(skipped) +
+                    " present, " + str(failed) + " failed ===", flush=True)
+              sys.exit(0)
+          env:
+            - name: LITELLM_MASTER_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secretName }}
+                  key: LITELLM_MASTER_KEY
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests: { cpu: "10m", memory: "64Mi" }
+            limits:   { cpu: "250m", memory: "256Mi" }
+{{- end }}

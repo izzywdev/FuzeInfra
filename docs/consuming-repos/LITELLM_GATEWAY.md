@@ -250,6 +250,56 @@ Register the Argo Application once on a new cluster:
 kubectl apply -f argocd/applications/litellm.yaml
 ```
 
+## Diagnosing it — start here, do not start with a deploy
+
+Run the **`litellm-admin`** workflow (Actions → `litellm-admin` → *Run
+workflow*). It answers the common questions against the **running** gateway in
+about 45 seconds, with no merge and no Argo sync:
+
+| Action | What it tells you |
+|---|---|
+| `list-keys` | every virtual key: alias, whether it is restricted to a model subset or has ALL MODELS, and a hashed-token prefix |
+| `list-models` | every model the gateway actually serves right now |
+| `clear-key-models` | **mutates** — sets `models: []` (all models) on every restricted key |
+| `test-model` | proves a model is reachable *by a virtual key*: mints a temporary `models: []` key, calls the model with it, deletes it, and reports **which model actually served** the request |
+
+`test-model` is usually the one you want, because it distinguishes the three
+failures that look identical from outside: the key cannot reach the model, the
+model is not served at all, or the primary errored and a **fallback hop**
+answered (it prints the served model, so a silent fallover is visible).
+
+Why this exists: the same questions used to be answered by editing a PostSync
+hook, merging, waiting for `deploy-prod`, waiting for an Argo sync, then reading
+the Job's logs — about 15 minutes per hypothesis. On 2026-08-31 a day was spent
+that way on a virtual-key `403` that had **already been fixed** by adding the
+model to `model_list`; a single `list-keys` would have shown both keys already
+carried ALL MODELS. Check the live state before theorising about it.
+
+Two things worth knowing about the mechanics:
+
+- It runs on the `staging` ARC runner and reaches the gateway over cluster DNS
+  (`http://litellm.fuzeinfra.svc.cluster.local:4000`). `arc-runners` is on
+  `networkPolicy.allowedNamespaces` for exactly this reason.
+- It deliberately does **not** use `kubectl exec`. The API server cannot
+  currently reach the kubelet on the node hosting the pod, which breaks `exec`,
+  `port-forward` **and `logs`** — so a Job on that node can look silent when it
+  is running fine (issue #748). Pod-to-pod traffic is unaffected.
+
+No credential is printed: only 8-character *hashed*-token prefixes, and
+`test-model`'s temporary key is held in memory and deleted in a `finally` block.
+FuzeInfra job logs are public — keep it that way if you extend the script
+(`scripts/litellm_admin.py`, pinned by `tests/test_litellm_admin.py`).
+
+### Adding a model is two steps, not one
+
+A model must be in **`model_list`** (`helm/litellm/values.yaml`) *and* reachable
+by the calling **key**. They are independent: a virtual key carries its own
+`models` allow-list in LiteLLM's database, and the gateway `403`s
+(`key not allowed to access model`) **before** the fallback chain runs — so a
+restricted key produces a hard failure, not a fallover. `models: []` means "all
+models"; the `litellm-sync-key-models` PostSync hook enforces that on every
+sync, and `clear-key-models` does it on demand.
+
 ## The admin UI
 
 `https://litellm.prod.fuzefront.com/ui`, reached from the Cloudflare App

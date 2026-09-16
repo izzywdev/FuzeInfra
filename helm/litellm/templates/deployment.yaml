@@ -116,6 +116,28 @@ spec:
                 secretKeyRef:
                   name: {{ .Values.secretName }}
                   key: LITELLM_MASTER_KEY
+            # Encryption key for provider credentials LiteLLM stores in Postgres
+            # (STORE_MODEL_IN_DB is on below). MUST be set explicitly and MUST be
+            # decoupled from the master key.
+            #
+            # When LITELLM_SALT_KEY is unset, LiteLLM falls back to
+            # LITELLM_MASTER_KEY for that encryption. That silently welds the
+            # ADMIN credential to the DATA-AT-REST key: rotating the master key
+            # then makes every stored provider credential undecryptable, and
+            # because FuzeInfra's deployed workflows are LiteLLM-only and
+            # fail-closed, that is agent CI down fleet-wide -- an outage that
+            # looks exactly like a security fix.
+            #
+            # It is seeded to the CURRENT master value, so introducing it is a
+            # no-op for decryption (same key, same ciphertext). What it buys is
+            # that the master key becomes rotatable on its own from here on.
+            # Do NOT rotate this one: it is the key the stored ciphertext was
+            # written with, and changing it is a data migration, not a rotation.
+            - name: LITELLM_SALT_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secretName }}
+                  key: LITELLM_SALT_KEY
             {{- range .Values.providerKeys }}
             - name: {{ .name }}
               valueFrom:
@@ -153,6 +175,27 @@ spec:
             - name: PROXY_BASE_URL
               value: {{ .Values.sso.proxyBaseUrl | quote }}
             {{- end }}
+            {{- if .Values.storeModelInDB }}
+            - name: STORE_MODEL_IN_DB
+              value: "True"
+            {{- end }}
+            {{- if .Values.redis.enabled }}
+            - name: REDIS_HOST
+              value: {{ .Values.redis.host | quote }}
+            - name: REDIS_PORT
+              value: {{ .Values.redis.port | quote }}
+            {{- if .Values.redis.db }}
+            - name: REDIS_DB
+              value: {{ .Values.redis.db | quote }}
+            {{- end }}
+            {{- if .Values.redis.passwordSecret }}
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.redis.passwordSecret }}
+                  key: {{ .Values.redis.passwordKey | default "REDIS_PASSWORD" }}
+            {{- end }}
+            {{- end }}
             {{- if .Values.database.enabled }}
             # ORDER IS LOAD-BEARING: Kubernetes only expands $(VAR) references to
             # variables declared EARLIER in this list, so these two must precede
@@ -171,6 +214,14 @@ spec:
             - name: DATABASE_URL
               value: "postgresql://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@{{ .Values.database.host }}:{{ .Values.database.port }}/{{ .Values.database.name }}"
             {{- end }}
+            # INFO by default. DEBUG on LiteLLM serialises verbose JSON on the
+            # same uvicorn worker that answers the kubelet health probes, adding
+            # latency to /health/readiness on an otherwise near-idle process.
+            # Override via values (logLevel) only for short debugging windows.
+            - name: LITELLM_LOG
+              value: {{ .Values.logLevel | default "INFO" | quote }}
+            - name: JSON_LOGS
+              value: "True"
           volumeMounts:
             - name: config
               mountPath: /etc/litellm
@@ -190,21 +241,63 @@ spec:
           # this succeeds, so 60 x 10s allows a 10-minute cold start (which also
           # covers a slow first image pull on a fresh node) while still catching
           # a genuinely wedged process.
+          # timeoutSeconds IS EXPLICIT ON ALL THREE. Kubernetes defaults it to 1,
+          # and these probes omitted it -- so every health check had to complete a
+          # full HTTP round trip in under one second or count as a failure.
+          #
+          # LiteLLM cannot honour that bound. /health/liveliness is served by the
+          # same uvicorn worker that also talks to Postgres and Redis (spend-tracking
+          # commits, router cooldown state), so a response occasionally takes longer
+          # than 1s under entirely normal load.
+          #
+          # Measured on prod 2026-09-07: 56 restarts and climbing, with the pod
+          # events and the container log disagreeing at the same instant --
+          #   event: Readiness probe failed: context deadline exceeded
+          #          (Client.Timeout exceeded while awaiting headers)
+          #   event: Container litellm failed liveness probe, will be restarted
+          #   log:   "GET /health/liveliness HTTP/1.1" 200
+          #          "GET /health/readiness HTTP/1.1" 200
+          # A healthy process, killed for being one second slow, roughly every ten
+          # minutes -- and each kill drops the gateway for the whole cold start.
+          #
+          # THE SIGNATURE IS A TRAP. This presents as `exit 137 reason=Error`,
+          # identical to an OOM kill and to the cold-start loop the startupProbe
+          # below was added to fix. It was neither: the container had been up for
+          # minutes (so startup was long done) and was using 823Mi of a 3Gi limit.
+          # Before concluding "OOM" from a 137 here, check the pod events for
+          # `context deadline exceeded` and the container log for 200s.
+          #
+          # 5s (PR #939) was still not enough: measured on prod 2026-09-08 the
+          # readiness probe kept failing "context deadline exceeded" 179x over 13h
+          # and the container was exit-137 killed ~hourly, while `kubectl top` showed
+          # the pod near-idle (13m CPU of a 1-core limit, 824Mi/3Gi) -- so it is
+          # neither CPU-throttled nor OOM. The health path just stalls >5s
+          # intermittently. So timeoutSeconds is 10s and liveness/readiness
+          # failureThreshold is 5 (was 3): a healthy-but-slow gateway is tolerated
+          # rather than killed. Liveness now kills only after 5 x 20s, moving the
+          # worst-case detection of a genuinely wedged process from ~75s to ~115s --
+          # an acceptable trade to stop a self-inflicted hourly outage. The deeper
+          # cause of the >5s stalls (suspected: LiteLLM background provider
+          # health-checks against out-of-credit providers, or DEBUG logging) is
+          # tracked separately; this widens tolerance, it is not the root fix.
           startupProbe:
             httpGet: { path: /health/liveliness, port: http }
             periodSeconds: 10
             failureThreshold: 60
+            timeoutSeconds: 10
           # No initialDelaySeconds on either of these: the startupProbe already
           # gates them, and adding a delay on top would only slow recovery from
           # a real hang after the app is up.
           livenessProbe:
             httpGet: { path: /health/liveliness, port: http }
             periodSeconds: 20
-            failureThreshold: 3
+            failureThreshold: 5
+            timeoutSeconds: 10
           readinessProbe:
             httpGet: { path: /health/readiness, port: http }
             periodSeconds: 15
-            failureThreshold: 3
+            failureThreshold: 5
+            timeoutSeconds: 10
           securityContext:
             allowPrivilegeEscalation: false
             capabilities:

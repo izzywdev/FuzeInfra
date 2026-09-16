@@ -1,0 +1,94 @@
+name: Recover stuck Terminating pods on an unreachable node
+
+# One-off incident-response tool: force-delete pods stuck Terminating because
+# the node they were scheduled on is NotReady/unreachable, so the kubelet can
+# never confirm the container actually stopped. The owning controller
+# (StatefulSet/Deployment) is untouched -- this only clears the stuck pod
+# object so a fresh replica can be scheduled onto a healthy node from the
+# SAME spec Argo already manages. This is standard k8s incident response
+# (equivalent in spirit to `kubectl rollout restart`), not a GitOps config
+# change, so it does not conflict with "prod is GitOps" -- desired state is
+# unchanged; only a wedged pod object is cleared.
+#
+# INCIDENT CONTEXT (2026-09): mendys-worker-1 (control-plane+etcd node) has
+# been NotReady since 2026-09-02. fuzeinfra-postgres-0, fuzeinfra-mariadb-0,
+# and one replica each of fuzeinfra-prometheus and
+# fuzeinfra-airflow-scheduler have been stuck Terminating on it for 4+ days,
+# breaking cluster DNS for the headless Services backing them and (via
+# Postgres) the security/auth service, blocking every sign-in.
+#
+# REAL RISK, not hypothetical: --grace-period=0 --force tells the API server
+# to forget the pod immediately without confirmation the container process
+# has actually stopped. If the node comes back online while its old
+# container is still somehow running, that process and a freshly-scheduled
+# replacement could both write to the same PVC at once (split-write). Verify
+# a recent, clean backup exists for any stateful workload before targeting
+# it. SAFE DEFAULT below is list-only.
+on:
+  workflow_dispatch:
+    inputs:
+      namespace:
+        description: 'Namespace holding the stuck pod(s)'
+        required: true
+        default: 'fuzeinfra'
+        type: string
+      pod_names:
+        description: 'Comma-separated exact pod names to force-delete'
+        required: true
+        type: string
+      mode:
+        description: 'list = show current pod status only (safe, no mutations); delete = force-delete each named pod'
+        type: choice
+        options: [list, delete]
+        default: list
+        required: true
+      confirm:
+        description: 'For mode=delete ONLY: type FORCE-DELETE to proceed. Ignored in list mode.'
+        default: ''
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  recover:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: azure/setup-kubectl@829323503d1be3d00ca8346e5391ca0b07a9ab0d # v5.1.0
+
+      - name: Setup kubeconfig
+        run: |
+          mkdir -p ~/.kube
+          echo "${{ secrets.KUBE_CONFIG }}" | base64 -d > ~/.kube/config
+          chmod 600 ~/.kube/config
+
+      - name: Show current status
+        run: |
+          set -euo pipefail
+          IFS=',' read -ra PODS <<< "${{ inputs.pod_names }}"
+          for p in "${PODS[@]}"; do
+            p="$(echo "$p" | xargs)"
+            echo "=== ${{ inputs.namespace }}/$p ==="
+            kubectl -n "${{ inputs.namespace }}" get pod "$p" -o wide 2>&1 || echo "(not found)"
+          done
+
+      - name: Force-delete stuck pods
+        if: inputs.mode == 'delete'
+        run: |
+          set -euo pipefail
+          if [ "${{ inputs.confirm }}" != "FORCE-DELETE" ]; then
+            echo "::error::mode=delete requires confirm=FORCE-DELETE"; exit 1
+          fi
+          IFS=',' read -ra PODS <<< "${{ inputs.pod_names }}"
+          for p in "${PODS[@]}"; do
+            p="$(echo "$p" | xargs)"
+            echo "=== force-deleting ${{ inputs.namespace }}/$p ==="
+            kubectl -n "${{ inputs.namespace }}" delete pod "$p" --grace-period=0 --force
+          done
+
+      - name: Post-delete status
+        if: inputs.mode == 'delete'
+        run: |
+          set -euo pipefail
+          sleep 5
+          kubectl -n "${{ inputs.namespace }}" get pods

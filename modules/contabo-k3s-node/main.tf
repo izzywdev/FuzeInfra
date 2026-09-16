@@ -2,6 +2,13 @@ locals {
   # Key the instances by request name so adding/removing a request only touches
   # that node (a positional list would force-recreate everything after an insert).
   requests = { for r in var.requests : r.name => r }
+
+  # Private networking is on when the caller either asks this module to CREATE a
+  # network (private_network_name) or points at an EXISTING one to attach to
+  # (private_network_id). Only the former creates a contabo_private_network;
+  # membership for the latter is ordered out-of-band by the ca-private-net
+  # workflow, so Terraform can never detach a member it did not author.
+  private_network_enabled = var.private_network_name != "" || var.private_network_id > 0
 }
 
 # ---------------------------------------------------------------------------
@@ -28,7 +35,7 @@ resource "contabo_instance" "node" {
     enable_longhorn_prereqs = var.enable_longhorn_prereqs
     # Private networking (Contabo VPC): bring up the private NIC + route k3s
     # over it only when the caller opted into a private network by name.
-    private_network_enabled = var.private_network_name != ""
+    private_network_enabled = local.private_network_enabled
     private_iface           = var.private_iface
     # node-role=<role> first (the contract label), then any extra labels.
     node_labels = join(" ", concat(
@@ -38,9 +45,61 @@ resource "contabo_instance" "node" {
     ))
   })
 
+  # PRIVATE NETWORKING ADD-ON. Contabo's per-instance Private Networking add-on
+  # is a PAID capability that must be ORDERED at create time (or via a
+  # separate upgrade call for an existing instance -- see
+  # docs/design/off-vlan-node-failure-policy.md section 2a). Without it, a
+  # later attach to the private network returns HTTP 402 regardless of
+  # anything else being correct.
+  #
+  # This was the exact gap that stranded fuzeinfra-ci-runner-2 off-VLAN: this
+  # module already wrote a working eth1 netplan config into cloud-init purely
+  # from private_network_enabled, with no corresponding purchase -- so a node
+  # could come up believing it has a private NIC and never actually get one.
+  # Ordering it HERE, gated on the identical condition that drives the
+  # cloud-init eth1 config, makes "configures eth1" and "paid for eth1" a
+  # single atomic decision instead of two things that can silently drift.
+  #
+  # Add-on id 1477 confirmed against the live API on 2026-09-03 while ordering
+  # it for fuzeinfra-ci-runner-2 (POST /v1/compute/instances/{id}/upgrade
+  # {"privateNetworking":{}} -> HTTP 200, {"addonsIds":[1477]}). The provider
+  # schema types `id` as a string.
+  dynamic "add_ons" {
+    for_each = local.private_network_enabled ? [1] : []
+    content {
+      id       = "1477"
+      quantity = 1
+    }
+  }
+
+  # Add-on id 1501 -- present live on BOTH fuzeinfra-ci-runner-1 and -2
+  # (verified via GET /v1/compute/instances/{id}), but never declared here,
+  # so an unrelated PR's plan surfaced it as drift Terraform would REMOVE on
+  # apply (2026-09-06). Owner's assessment: the same VLAN/private-networking
+  # purchase as 1477. That does not fully square with 1477 alone being the id
+  # a single `{"privateNetworking":{}}` upgrade call returned -- if this were
+  # a straightforward SKU-specific alias for the same feature, only one of
+  # the two ci-runner nodes (different product SKUs, see ci-workers.tf) would
+  # be expected to show it, not both. Declared here anyway, paired with 1477
+  # under the identical condition, on the least-risk reading available: this
+  # only ever PRESERVES what is already live and paid for, never removes it,
+  # and if private networking is ever disabled for a node both ids release
+  # together as one purchase, matching the owner's belief. Revisit if Contabo
+  # support or the panel ever gives this id an actual name.
+  dynamic "add_ons" {
+    for_each = local.private_network_enabled ? [1] : []
+    content {
+      id       = "1501"
+      quantity = 1
+    }
+  }
+
   lifecycle {
     # cloud-init only runs on first boot, so re-rendering user_data (e.g. a
     # whitespace change) must not trigger a destroy/recreate of a live node.
+    # add_ons is deliberately NOT in this list: unlike user_data, a change to
+    # whether the add-on is ordered is not something that should be silently
+    # absorbed -- it is a real cost/capability change and should plan visibly.
     ignore_changes = [user_data]
   }
 }

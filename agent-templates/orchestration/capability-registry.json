@@ -1,0 +1,43 @@
+{
+  "$about": "Capability -> owning-environment registry for cross-session capability delegation (CAPABILITY_DELEGATION.md Phase 3). Read by capability_delegation.py load_registry(); each key is a PRE-AGREED cap= token (never an arbitrary command). `environment` is the environment_id from .fuze/manifest.json roles.environments that OWNS the credential -- the caller spawns/finds a session there and delegates, never receiving the credential itself. `environment: null` = not wired to any env yet -> delegation MUST fail closed (Phase 3 provisioning owed). This file is caller-side resolution only; it enables no callee. A callee is only enabled by a providesTo grant + a2a.enabled flip in the callee manifest, which is the security-signed exec-tier rollout PR (CLAUDE.md) and is NOT part of this change.",
+  "prod-kubectl": {
+    "environment": "selfhosted-devops",
+    "read_only": false,
+    "notes": "Prod cluster kubectl/logs/exec -- selfhosted-devops owns the prod kubeconfig (kubelet 10250 is VLAN-only). For a PURE read prefer the read-only cluster-query.yml path (docs/consuming-repos/CLUSTER_QUERY.md), which refuses mutating/exec verbs, Secret reads and --raw. Mutating/exec delegations keep their existing human/GitOps gate (CAPABILITY_DELEGATION.md §4.4); prod is GitOps -- never hand-apply, edit helm/fuzeinfra and let Argo sync."
+  },
+  "gitops-pr": {
+    "environment": "cloud-devops",
+    "read_only": false,
+    "notes": "Helm/Argo/values edit + PR only. cloud-devops runs FUZE_GITOPS_ONLY=true with no kubeconfig -- it edits manifests and opens PRs, never applies to prod directly. To change prod: edit helm/fuzeinfra (or its values), commit to main, let Argo sync (CLAUDE.md GitOps)."
+  },
+  "github-secret-provisioning": {
+    "environment": null,
+    "read_only": false,
+    "notes": "NOT wired to any managed-agent env today (CAPABILITY_DELEGATION.md §5). cloud-devops has the `gh` CLI but GITHUB_TOKEN is unset -- the agent proxy injects git creds only, not org/secret admin. Provisioning repo/org secrets needs an explicit secret-write-scoped token added to an owning env in Phase 3 before a delegate can honor it. Resolves to null so callers fail closed."
+  },
+  "branch-prune": {
+    "environment": "cloud-devops",
+    "read_only": false,
+    "notes": "Delete merged/stale remote branches via git push (delete ref) -- the same git-write credential the proxy provides for GitOps edit+PR in cloud-devops; does NOT need org/secret admin. Keep repo-cleaner discipline: never delete unmerged, open-PR, or protected branches, and never the default branch."
+  },
+  "backend-work": {
+    "environment": "cloud-backend",
+    "read_only": false,
+    "notes": "Backend slice -- per-slice environment (CAPABILITY_DELEGATION.md §5)."
+  },
+  "frontend-work": {
+    "environment": "cloud-frontend",
+    "read_only": false,
+    "notes": "Frontend slice -- per-slice environment (CAPABILITY_DELEGATION.md §5)."
+  },
+  "qa-work": {
+    "environment": "cloud-qa",
+    "read_only": false,
+    "notes": "Test/QA slice -- per-slice environment (CAPABILITY_DELEGATION.md §5)."
+  },
+  "infra-work": {
+    "environment": "cloud-devops",
+    "read_only": false,
+    "notes": "Infra slice -- shared-platform chart/CI/GitOps work. There is no separate cloud-infra env; §5 maps infra edits (Helm/Argo/values) to the GitOps env cloud-devops. Live-cluster operations belong to prod-kubectl (selfhosted-devops) instead."
+  }
+}

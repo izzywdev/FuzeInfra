@@ -1,0 +1,42 @@
+name: contabo-rename-instance
+
+# One-off: PATCH a Contabo instance's displayName. Cosmetic-only in the
+# Contabo panel -- does NOT touch k3s node-name, does NOT restart anything,
+# does NOT affect the cluster. Safe to run anytime.
+on:
+  workflow_dispatch:
+    inputs:
+      instance_id:
+        description: 'Contabo numeric instanceId'
+        required: true
+        type: string
+      new_name:
+        description: 'New displayName'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  rename:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Rename
+        env:
+          CID: ${{ secrets.CONTABO_CLIENT_ID }}
+          CSEC: ${{ secrets.CONTABO_CLIENT_SECRET }}
+          CUSER: ${{ secrets.CONTABO_API_USER }}
+          CPASS: ${{ secrets.CONTABO_API_PASSWORD }}
+        run: |
+          set -euo pipefail
+          TOK=$(curl -sS -X POST -H "Content-Type: application/x-www-form-urlencoded" \
+            "https://auth.contabo.com/auth/realms/contabo/protocol/openid-connect/token" \
+            --data-urlencode "client_id=${CID}" --data-urlencode "client_secret=${CSEC}" \
+            --data-urlencode "username=${CUSER}" --data-urlencode "password=${CPASS}" \
+            --data-urlencode "grant_type=password" | jq -r .access_token)
+          [ -n "$TOK" ] && [ "$TOK" != "null" ] || { echo "::error::auth failed"; exit 1; }
+          curl -sS -X PATCH -H "Authorization: Bearer $TOK" -H "Content-Type: application/json" \
+            -H "x-request-id: $(cat /proc/sys/kernel/random/uuid)" \
+            "https://api.contabo.com/v1/compute/instances/${{ inputs.instance_id }}" \
+            -d "{\"displayName\": \"${{ inputs.new_name }}\"}" | jq .

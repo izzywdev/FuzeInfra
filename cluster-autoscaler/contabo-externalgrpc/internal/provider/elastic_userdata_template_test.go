@@ -80,6 +80,15 @@ func TestElasticUserDataTemplate_RendersValidCloudConfig(t *testing.T) {
 		"--node-name 'fuzeinfra-elastic-a1b2c3d4'",
 		"--kubelet-arg 'provider-id=contabo://fuzeinfra-elastic-a1b2c3d4'",
 		"--node-label 'fuzeinfra.io/pool=elastic'",
+		// node-role=workload is the label the product workloads' nodeSelector
+		// targets. k3s only applies --node-label at agent REGISTRATION, so if
+		// this flag is ever dropped the label cannot be recovered by relabelling
+		// -- every node the pool creates from then on is unschedulable for
+		// fuzekeys/fuzebi/fuzehub/fuzedeploy/fuzeexecutive, and a hand-applied
+		// `kubectl label` evaporates at the next scale event.
+		// TestElasticNodeLabelParity additionally checks this against the CA
+		// scale-from-zero simulation in template.go.
+		"--node-label 'node-role=workload'",
 		"--node-taint 'fuzeinfra.io/elastic=true:PreferNoSchedule'",
 		// Pinned to the same channel as the baseline module (v1.36, per
 		// #318/#366) rather than a floating "stable" channel, so an elastic
@@ -94,8 +103,48 @@ func TestElasticUserDataTemplate_RendersValidCloudConfig(t *testing.T) {
 			t.Errorf("rendered userdata missing %q\n--- rendered ---\n%s", want, rendered)
 		}
 	}
-	if !strings.Contains(joinLine, "get.k3s.io") {
-		t.Errorf("want the last runcmd entry to be the k3s join command, got: %v", joinLine)
+	// The join deliberately does NOT live in runcmd any more.
+	//
+	// The Contabo private-network ASSIGN happens after createInstance returns
+	// and MAY REBOOT the instance, and cloud-init `runcmd` is a once-per-instance
+	// module: a reboot part-way through it can leave the join half-done and never
+	// retried. The join therefore runs from a systemd oneshot that re-runs on
+	// every boot until it has succeeded on the VLAN, which turns that reboot into
+	// the repair trigger instead of the failure mode. Putting the installer back
+	// into runcmd would silently reintroduce the race, so assert both halves:
+	// runcmd only ENABLES the unit, and the installer lives in the unit's script.
+	if strings.Contains(joinLine, "get.k3s.io") {
+		t.Errorf("the k3s installer must not run from runcmd (a post-assign reboot would destroy it); got: %v", joinLine)
+	}
+	if !strings.Contains(joinLine, "systemctl enable --now fuzeinfra-vlan-join.service") {
+		t.Errorf("want the last runcmd entry to enable the join unit, got: %v", joinLine)
+	}
+
+	joinScript := renderedWriteFile(t, doc, "/usr/local/sbin/fuzeinfra-vlan-join.sh")
+	if !strings.Contains(joinScript, "get.k3s.io") {
+		t.Errorf("the join script does not install the k3s agent:\n%s", joinScript)
+	}
+	unit := renderedWriteFile(t, doc, "/etc/systemd/system/fuzeinfra-vlan-join.service")
+	for _, want := range []string{
+		// Without this the unit runs once and a post-assign reboot never retries.
+		"ConditionPathExists=!/etc/fuzeinfra-vlan-joined",
+		"WantedBy=multi-user.target",
+	} {
+		if !strings.Contains(unit, want) {
+			t.Errorf("join unit missing %q:\n%s", want, unit)
+		}
+	}
+
+	// The private NIC must be CONFIGURED, not merely waited for. cloud-init's
+	// fallback network config brings up only the primary NIC, so without this
+	// drop-in eth1 never gets a DHCP lease and any wait for its address is
+	// guaranteed to time out -- which is exactly why every elastic node joined
+	// off-VLAN despite the wait added in #830.
+	netplan := renderedWriteFile(t, doc, "/etc/netplan/60-eth1-private.yaml")
+	for _, want := range []string{"eth1:", "dhcp4: true", "optional: true"} {
+		if !strings.Contains(netplan, want) {
+			t.Errorf("eth1 netplan drop-in missing %q:\n%s", want, netplan)
+		}
 	}
 }
 
@@ -125,4 +174,25 @@ func elasticUserDataTemplatePath(t *testing.T) string {
 	// two directories up from there (internal/provider -> internal ->
 	// contabo-externalgrpc -> deploy).
 	return filepath.Join(filepath.Dir(thisFile), "..", "..", "deploy", "elastic-userdata.template")
+}
+
+// renderedWriteFile returns the content of the write_files entry at path.
+func renderedWriteFile(t *testing.T, doc map[string]interface{}, path string) string {
+	t.Helper()
+	files, ok := doc["write_files"].([]interface{})
+	if !ok {
+		t.Fatalf("write_files is not a list: %#v", doc["write_files"])
+	}
+	for _, f := range files {
+		m, ok := f.(map[interface{}]interface{})
+		if !ok {
+			continue
+		}
+		if p, _ := m["path"].(string); p == path {
+			c, _ := m["content"].(string)
+			return c
+		}
+	}
+	t.Fatalf("no write_files entry for %q", path)
+	return ""
 }

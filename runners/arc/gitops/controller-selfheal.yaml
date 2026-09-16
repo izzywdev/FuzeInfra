@@ -6,8 +6,9 @@
 # Helm values files (that is why this lives in runners/arc/gitops/ and not
 # alongside runner-scale-set-values.yaml).
 #
-# It watches three independent failure modes that all end with "runner pods
-# Pending forever, CI queues silently":
+# It watches several independent failure modes that all end with "CI queues
+# silently" -- most because runner pods never start, and check 6 because they
+# start but can never come online:
 #
 #   1. CONTROLLER WEDGED (2026-07-24) — the gha-rs-controller stopped creating
 #      runner pods after transient generatejitconfig TLS timeouts; staging jobs
@@ -79,6 +80,36 @@
 #      on the jobs (canonical workflows in FuzeSDLC workflow-templates/,
 #      repo-owned ones like ci-cd.yml in the repo) so pods self-terminate.
 #
+#   5. AN EPHEMERALRUNNER STUCK "Failed" PINS A maxRunners SLOT (2026-08-31) --
+#      check 4 reaps a runner that starts a job and never finishes; this is the
+#      mirror image: a runner whose POD IS NEVER CREATED AT ALL. When the API
+#      server rejects the runner pod (an invalid podspec, a quota denial, a
+#      rejected securityContext), the EphemeralRunner goes phase=Failed with the
+#      rejection in .status.message and NO pod. ARC does not garbage-collect a
+#      Failed EphemeralRunner, and the EphemeralRunnerSet still counts it in
+#      CurrentReplicas -- so once maxRunners of them pile up the listener sees
+#      currentRunnerCount == desired, stops asking for runners, and re-patches
+#      the same set forever while every job on that repo queues. Nothing above
+#      catches it: the controller is healthy (check 1), the CI node is labelled
+#      and schedulable (check 2), the listener pod exists and is Running
+#      (checks 3/3b), and no runner is Running-too-long (check 4). Argo also
+#      reports Synced, because the object matches Git.
+#      Observed: EIGHT scale sets (fuzecontact, fuzehub, fuzemarket, fuzepicker,
+#      fuzesales, fuzeservice, fuzesocial, mendysrobotics) dead for up to 30h,
+#      each with 5/5 EphemeralRunners Failed on
+#        "spec.initContainers[1].name: Duplicate value: \"dind\""
+#      -- a stale dind initContainer left behind by the old imperative
+#      `containerMode: dind` helm release that Argo's ServerSideApply could not
+#      prune because the "helm" field manager still owned it (root-caused and
+#      fixed in runners/arc/register-repo.sh).
+#      Check 5 deletes any EphemeralRunner Failed longer than
+#      $FAILED_RUNNER_SECS, freeing the slot, and emits CRIT carrying
+#      .status.message -- so the NEXT occurrence names its own cause in the
+#      alert instead of costing a multi-hour investigation. Reaping is a
+#      symptom fix: if the podspec itself is rejected the replacement fails
+#      too, so a REPEATING runner-failed CRIT means "fix the podspec", not
+#      "reap harder".
+#
 # NOTE ON THE IMAGE: this ran with `rancher/kubectl` + `command: ["sh","-c"]`
 # from creation until 2026-07-27 and StartError'd on EVERY run — that image
 # ships no shell. Any replacement image MUST contain /bin/sh. Check 3 also
@@ -94,11 +125,14 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata: {name: arc-selfheal}
 rules:
-  # check 4 deletes an EphemeralRunner that has been Running past the reap
-  # threshold (a job hung with no timeout-minutes holding a maxRunners slot),
-  # so this needs delete in addition to get/list. Deleting the EphemeralRunner
-  # CR cascades to its runner Pod via ownerReferences, freeing the scale-set
-  # slot AND the CI-node capacity the zombie was pinning.
+  # checks 4 and 5 both delete an EphemeralRunner, so this needs delete in
+  # addition to get/list. Check 4 reaps one Running past the hang threshold (a
+  # job with no timeout-minutes holding a maxRunners slot) -- that delete
+  # cascades to its runner Pod via ownerReferences, freeing the slot AND the
+  # CI-node capacity the zombie was pinning. Check 5 reaps one stuck Failed,
+  # whose pod was never created at all; there is nothing to cascade to, but the
+  # CR itself still counts against the EphemeralRunnerSet's replica total, so
+  # deleting it is what frees that scale set to request a working runner.
   - {apiGroups: ["actions.github.com"], resources: ["ephemeralrunners"], verbs: ["get","list","delete"]}
   # autoscalingrunnersets: check 3b diffs the desired scale-set list against
   # the actual listener pods to catch a listener that is absent entirely
@@ -128,6 +162,23 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata: {name: arc-selfheal, namespace: arc-systems}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: arc-selfheal}
+subjects: [{kind: ServiceAccount, name: arc-selfheal, namespace: arc-systems}]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: {name: arc-selfheal, namespace: arc-runners}
+rules:
+  # Check 6 needs to know WHICH runner pods sit on a node it just quarantined,
+  # and only a Pod carries .spec.nodeName (an EphemeralRunner CR does not). Read
+  # only: the actual removal goes through the EphemeralRunner CR, whose delete
+  # verb is already granted cluster-wide above and which cascades to the Pod --
+  # so no pod delete permission is added here.
+  - {apiGroups: [""], resources: ["pods"], verbs: ["get", "list"]}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: arc-selfheal, namespace: arc-runners}
 roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: arc-selfheal}
 subjects: [{kind: ServiceAccount, name: arc-selfheal, namespace: arc-systems}]
 ---
@@ -346,6 +397,126 @@ spec:
                         echo "CRIT ARC runner-hung: $nn has been Running over ${RUNNER_STUCK_SECS}s - a job hung with no timeout-minutes is holding a maxRunners slot (and CI-node capacity) up to GitHub's 6h cap, so this scale set's queue cannot drain. Deleting the EphemeralRunner (cascades to its Pod) to free the slot; the durable fix is a timeout-minutes on that job so the pod self-terminates."
                         kubectl -n "$ns" delete ephemeralrunner "$name" --wait=false >/dev/null 2>&1
                         crit=1
+                      done
+                    fi
+                  fi
+
+                  # ---- check 5: EphemeralRunner stuck Failed (pod never created) ----
+                  # Terminal state: ARC never GCs these and never retries them, so a
+                  # Failed runner holds its maxRunners slot until something deletes it.
+                  # 10 min is far longer than any legitimate transient (a pod is either
+                  # admitted or rejected within seconds) while still clearing a wedged
+                  # scale set inside one cron period.
+                  FAILED_RUNNER_SECS=600
+                  failed_json=$(kubectl get ephemeralrunner -A -o json 2>/dev/null)
+
+                  if [ -z "$failed_json" ]; then
+                    echo "warn runner-failed: could not list ephemeralrunners, skipping check 5"
+                  else
+                    stuck=$(printf '%s' "$failed_json" | jq -r --argjson thresh "$FAILED_RUNNER_SECS" '
+                      .items[]
+                      | select(.status.phase == "Failed")
+                      | select((now - (.metadata.creationTimestamp | fromdateiso8601)) > $thresh)
+                      | .metadata.namespace + "/" + .metadata.name' 2>/dev/null)
+
+                    if [ -z "$stuck" ]; then
+                      echo "ok runner-failed: no ephemeralrunner Failed past ${FAILED_RUNNER_SECS}s"
+                    else
+                      for nn in $stuck; do
+                        ns=${nn%%/*}; name=${nn##*/}
+                        # Carry the rejection reason into the alert -- this is the whole
+                        # point of check 5. Truncated so one bad podspec cannot flood the
+                        # log; jsonpath yields "" (not an error) when status.message is unset.
+                        msg=$(kubectl -n "$ns" get ephemeralrunner "$name"                           -o jsonpath='{.status.message}' 2>/dev/null | head -c 300)
+                        echo "CRIT ARC runner-failed: $nn has been Failed for over ${FAILED_RUNNER_SECS}s - its pod was never created, ARC never garbage-collects a Failed EphemeralRunner, and the EphemeralRunnerSet still counts it, so it pins a maxRunners slot and that scale set's queue can never drain. Reason: ${msg:-(status.message empty)}. Deleting it to free the slot. If this CRIT REPEATS for the same scale set the podspec itself is being rejected - fix the podspec (runners/arc/runner-scale-set-values.yaml), reaping cannot help."
+                        kubectl -n "$ns" delete ephemeralrunner "$name" --wait=false >/dev/null 2>&1
+                        crit=1
+                      done
+                    fi
+                  fi
+
+                  # ---- check 6: a CI node registered OFF the private VLAN ----
+                  # Every check above assumes a runner pod that lands on a
+                  # pool=ci node can reach the network. On an off-VLAN node it
+                  # cannot, and NOTHING above notices: the pod is Running, both
+                  # containers Ready, the listener is healthy and reports
+                  # "assigned job"=1 -- but the runner process never resolves
+                  # pipelinesghubeus*.actions.githubusercontent.com, so GitHub
+                  # shows the runner status=offline busy=false and the job sits
+                  # queued until check 4 reaps it at 2h, whereupon a fresh pod
+                  # lands on the same node and repeats. Perfectly healthy-
+                  # looking CI that never runs a job.
+                  #
+                  # Observed 2026-09-07: fuzeinfra-ci-runner-2 joined with no
+                  # eth1 (cloud-init got no private-networking argument -- the
+                  # Terraform gap since fixed in terraform/contabo/ci-workers.tf),
+                  # so k3s registered InternalIP 13.140.158.203 + an IPv6 instead
+                  # of 10.0.0.x. From that node: `ping 10.0.0.8` and `ping
+                  # <coredns-pod-ip>` both 100% loss => no cluster DNS. Five
+                  # repos' runners were offline on it for ~2h with jobs queued.
+                  # A Terraform fix cannot repair a node that already joined
+                  # (k3s reads --node-ip/--node-label at REGISTRATION ONLY), and
+                  # the NodeQuarantinedOffVLAN alert only fires when Prometheus
+                  # is up -- which it was not. So quarantine it here, the same
+                  # way the elastic join path self-quarantines
+                  # (modules/contabo-k3s-node/cloud-init.tftpl, and see
+                  # docs/design/off-vlan-node-failure-policy.md): label
+                  # vlan=absent + taint off-vlan=true:NoSchedule. Runner pods
+                  # tolerate fuzeinfra.io/ci and fuzeinfra.io/elastic but NOT
+                  # off-vlan, so they stop landing there and go to the remaining
+                  # VLAN CI node (or make the autoscaler grow elastic, which the
+                  # affinity in runner-scale-set-values.yaml already permits).
+                  #
+                  # VLAN_RE is the private net 60932 range 10.0.0.0/22 in the
+                  # form jq can test. Widen it here if that range ever changes.
+                  # A node is on-VLAN if ANY of its InternalIPs matches; nodes
+                  # already carrying the off-vlan taint are skipped so a repaired
+                  # or deliberately-quarantined node is never re-processed.
+                  VLAN_RE='^10\.0\.[0-3]\.'
+                  ci_nodes_json=$(kubectl get nodes -l fuzeinfra.io/pool=ci -o json 2>/dev/null)
+
+                  if [ -z "$ci_nodes_json" ]; then
+                    echo "warn ci-node-vlan: could not list pool=ci nodes, skipping check 6"
+                  else
+                    offvlan=$(printf '%s' "$ci_nodes_json" | jq -r --arg re "$VLAN_RE" '
+                      .items[]
+                      | select([.spec.taints // [] | .[] | select(.key == "fuzeinfra.io/off-vlan")] | length == 0)
+                      | select([.status.addresses[]
+                                | select(.type == "InternalIP")
+                                | .address
+                                | select(test($re))] | length == 0)
+                      | .metadata.name' 2>/dev/null)
+
+                    if [ -z "$offvlan" ]; then
+                      echo "ok ci-node-vlan: every pool=ci node has an InternalIP on the private VLAN"
+                    else
+                      for _n in $offvlan; do
+                        _ips=$(printf '%s' "$ci_nodes_json" | jq -r --arg n "$_n" '
+                          .items[] | select(.metadata.name == $n)
+                          | [.status.addresses[] | select(.type == "InternalIP") | .address] | join(",")' 2>/dev/null)
+                        echo "CRIT ARC ci-node-vlan: $_n registered InternalIP(s) ${_ips:-(none)} - none on the private VLAN (10.0.0.0/22). Pods on it have no route to cluster DNS, so every ARC runner scheduled there registers with GitHub as status=offline and its repo's jobs stay queued while the pod looks Running and Ready. Quarantining the node (label fuzeinfra.io/vlan=absent + taint fuzeinfra.io/off-vlan=true:NoSchedule) so runner pods go to a VLAN node instead. The node itself still needs ops attention: k3s sets --node-ip at registration only, so it must be re-attached to the private network and rejoined - see docs/design/off-vlan-node-failure-policy.md."
+                        crit=1
+                        kubectl label node "$_n" fuzeinfra.io/vlan=absent --overwrite >/dev/null 2>&1 \
+                          && echo "AUTO-FIXED label: kubectl label node $_n fuzeinfra.io/vlan=absent --overwrite" \
+                          || echo "WARN: could not label node $_n"
+                        kubectl taint node "$_n" fuzeinfra.io/off-vlan=true:NoSchedule --overwrite >/dev/null 2>&1 \
+                          && echo "AUTO-FIXED taint: kubectl taint node $_n fuzeinfra.io/off-vlan=true:NoSchedule --overwrite" \
+                          || echo "WARN: could not taint node $_n"
+
+                        # The taint is NoSchedule, not NoExecute, so it stops the
+                        # NEXT pod but leaves the already-stranded ones Running
+                        # and offline for up to check 4's 2h threshold. Free them
+                        # now: an ARC runner Pod and its EphemeralRunner share a
+                        # name, and deleting the CR cascades to the Pod (same
+                        # mechanism checks 4 and 5 use), so the listener requests
+                        # a replacement that the fresh taint keeps off this node.
+                        _stranded=$(kubectl get pods -n arc-runners \
+                          --field-selector spec.nodeName="$_n" \
+                          -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null)
+                        for _p in $_stranded; do
+                          echo "freeing stranded runner arc-runners/$_p from $_n"
+                          kubectl -n arc-runners delete ephemeralrunner "$_p" --wait=false >/dev/null 2>&1
+                        done
                       done
                     fi
                   fi

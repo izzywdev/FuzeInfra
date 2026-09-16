@@ -71,6 +71,16 @@ CAPABILITY_REGISTRY: dict[str, dict] = {
         "notes": "cloud-devops has `gh` but GITHUB_TOKEN is unset; needs a secret-write token added "
         "to the owning env in Phase 3 before a delegate can actually do it",
     },
+    "database.provision": {
+        "environment": None,  # NOT wired to any managed-agent env today.
+        "read_only": False,
+        "notes": "the second half of FuzeInfra's infra-platform A2A tenant "
+        "(.claude/skills/fuzeinfra-platform-expert) -- no handler exists yet that turns a "
+        "request into an actual data-tier reconciliation. Naming this entry is the "
+        "declared intent, same shape as github.secret.provision above; wiring it needs a "
+        "real owning environment and a call path into the data-tier reconciler before any "
+        "delegate may honor it as done rather than as UNSUPPORTED.",
+    },
 }
 
 

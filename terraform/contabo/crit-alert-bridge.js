@@ -36,7 +36,7 @@ export default {
     const firstAlert = alerts[0] ?? {};
 
     // Only dispatch to GitHub for severity=critical alerts.
-    // The notification policy uses claude-autofix as the root receiver so all
+    // The notification policy uses fuze-autofix as the root receiver so all
     // alerts flow through here; this guard prevents non-critical alerts from
     // triggering the GHA workflow.
     const severity =
@@ -57,6 +57,14 @@ export default {
     const labels = JSON.stringify(firstAlert.labels ?? body.commonLabels ?? {});
     const firedAt = firstAlert.startsAt ?? new Date().toISOString();
 
+    // Two producers share this Worker, distinguished by ?source=:
+    //   (default)            Grafana CRIT-log alert  -> grafana-crit-fix.yml
+    //   ?source=alertmanager Alertmanager metric alert -> alertmanager-fuze.yml
+    // Both open an @fuze issue in the repo that owns the alert's namespace.
+    const source = new URL(request.url).searchParams.get("source") || "";
+    const eventType =
+      source === "alertmanager" ? "alertmanager-alert" : "grafana-crit-alert";
+
     const repo = env.GITHUB_REPO; // "owner/repo"
     const resp = await fetch(`https://api.github.com/repos/${repo}/dispatches`, {
       method: "POST",
@@ -67,7 +75,7 @@ export default {
         "User-Agent": "FuzeInfra-CritAlert-Bridge/1.0",
       },
       body: JSON.stringify({
-        event_type: "grafana-crit-alert",
+        event_type: eventType,
         client_payload: { summary, description, labels, fired_at: firedAt },
       }),
     });

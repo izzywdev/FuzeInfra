@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/izzywdev/fuzeinfra/contabo-externalgrpc/internal/contabo"
 	"github.com/izzywdev/fuzeinfra/contabo-externalgrpc/internal/protos"
@@ -184,5 +185,140 @@ func TestNodeGroupTargetSize_EmptyReturnsZero(t *testing.T) {
 	}
 	if resp.TargetSize != 0 {
 		t.Fatalf("want TargetSize=0, got %d", resp.TargetSize)
+	}
+}
+
+// --- Cancelled-instance convergence guards ---------------------------------
+//
+// Contabo has no immediate-terminate API: Delete() only schedules removal at
+// the end of the paid month, and until then the instance keeps running and
+// keeps matching ListByNamePrefix. Without filtering, the pool would re-wedge
+// at MaxSize on the FIRST reclaim after the NodeGroupForNode fix — unwedged
+// once, then stuck again for up to a month. See liveElasticInstances.
+
+func cancelledInst(id int64, name string) contabo.Instance {
+	return contabo.Instance{
+		ID: id, Name: name, Status: "running",
+		CancelDate: time.Date(2026, 9, 30, 0, 0, 0, 0, time.UTC),
+	}
+}
+
+// TestNodeGroupTargetSize_CountsCancelledButRunning is the convergence guard
+// for the OTHER direction of the same bug: Contabo cancellation is
+// end-of-billing-period only, so a cancelled instance keeps running, fully
+// paid for, until that date. A caller must see that capacity as usable target
+// size -- not zero it out -- or k3s is never told it can still schedule onto
+// compute that's already being paid for. (The cap itself, in
+// NodeGroupIncreaseSize, still excludes cancelled instances via
+// liveElasticInstances so scale-up isn't blocked -- that's a separate call
+// site, unchanged.)
+func TestNodeGroupTargetSize_CountsCancelledButRunning(t *testing.T) {
+	fc := &fakeCloud{instances: []contabo.Instance{
+		cancelledInst(1, "fuzeinfra-prod-elastic-v2-aaaaaaaa"),
+		cancelledInst(2, "fuzeinfra-prod-elastic-v2-bbbbbbbb"),
+		{ID: 3, Name: "fuzeinfra-prod-elastic-v2-cccccccc", Status: "running"},
+	}}
+	s := provider.New(provider.Config{
+		NamePrefix: "fuzeinfra-prod-elastic-v2", ElasticTag: "fuzeinfra-prod-elastic-v2",
+		MinSize: 0, MaxSize: 4,
+	}, fc)
+
+	resp, err := s.NodeGroupTargetSize(context.Background(), &protos.NodeGroupTargetSizeRequest{})
+	if err != nil {
+		t.Fatalf("NodeGroupTargetSize error: %v", err)
+	}
+	if resp.TargetSize != 3 {
+		t.Fatalf("cancelled-but-still-running instances are still paid-for, schedulable capacity: "+
+			"want targetSize=3, got %d", resp.TargetSize)
+	}
+}
+
+// TestNodeGroupNodes_ReportsCancelledButRunning: a cancelled instance is
+// already on Contabo's termination path, but not gone yet -- see
+// TestNodeGroupTargetSize_CountsCancelledButRunning. CA must keep seeing it
+// as group membership until Contabo actually tears it down.
+func TestNodeGroupNodes_ReportsCancelledButRunning(t *testing.T) {
+	fc := &fakeCloud{instances: []contabo.Instance{
+		cancelledInst(1, "fuzeinfra-prod-elastic-v2-aaaaaaaa"),
+		{ID: 2, Name: "fuzeinfra-prod-elastic-v2-bbbbbbbb", Status: "running"},
+	}}
+	s := provider.New(provider.Config{
+		NamePrefix: "fuzeinfra-prod-elastic-v2", ElasticTag: "fuzeinfra-prod-elastic-v2",
+		MinSize: 0, MaxSize: 4,
+	}, fc)
+
+	resp, err := s.NodeGroupNodes(context.Background(), &protos.NodeGroupNodesRequest{})
+	if err != nil {
+		t.Fatalf("NodeGroupNodes error: %v", err)
+	}
+	if len(resp.Instances) != 2 {
+		t.Fatalf("want both the cancelled-but-running and the live instance reported, got %v", resp.Instances)
+	}
+}
+
+// TestNodeGroupNodes_StillReportsUncancelledOrphan is the anti-stranding
+// guard. A never-joined instance we did NOT cancel must STILL be reported, so
+// CA can attribute and reclaim it. Hiding it would unwedge scale-up while
+// leaking a billed VPS invisible to every reclaim path — strictly worse than
+// the bug being fixed.
+func TestNodeGroupNodes_StillReportsUncancelledOrphan(t *testing.T) {
+	fc := &fakeCloud{instances: []contabo.Instance{
+		{ID: 203547162, Name: "fuzeinfra-prod-elastic-v2-adca9568", Status: "running"},
+	}}
+	s := provider.New(provider.Config{
+		NamePrefix: "fuzeinfra-prod-elastic-v2", ElasticTag: "fuzeinfra-prod-elastic-v2",
+		MinSize: 0, MaxSize: 4,
+	}, fc)
+
+	resp, err := s.NodeGroupNodes(context.Background(), &protos.NodeGroupNodesRequest{})
+	if err != nil {
+		t.Fatalf("NodeGroupNodes error: %v", err)
+	}
+	if len(resp.Instances) != 1 {
+		t.Fatalf("an uncancelled orphan must remain visible to CA so it can be reclaimed, got %v", resp.Instances)
+	}
+}
+
+// TestNodeGroupIncreaseSize_CancelledDoesNotBindCap: the pool must be able to
+// replace capacity it released. Cancelled instances do not bind the cap...
+func TestNodeGroupIncreaseSize_CancelledDoesNotBindCap(t *testing.T) {
+	fc := &fakeCloud{instances: []contabo.Instance{
+		cancelledInst(1, "fuzeinfra-prod-elastic-v2-aaaaaaaa"),
+		cancelledInst(2, "fuzeinfra-prod-elastic-v2-bbbbbbbb"),
+	}}
+	s := provider.New(provider.Config{
+		NamePrefix: "fuzeinfra-prod-elastic-v2", ElasticTag: "fuzeinfra-prod-elastic-v2",
+		MinSize: 0, MaxSize: 2,
+	}, fc)
+
+	if _, err := s.NodeGroupIncreaseSize(context.Background(), &protos.NodeGroupIncreaseSizeRequest{Delta: 1}); err != nil {
+		t.Fatalf("cancelled instances must not bind the cap: %v", err)
+	}
+
+	// ...but they MUST still reserve their display names, because Contabo
+	// keeps a cancelled instance's name until it is actually terminated and
+	// 400s on a duplicate.
+	for _, inst := range fc.instances {
+		if inst.Name == "fuzeinfra-prod-elastic-v2-aaaaaaaa" && inst.ID != 1 {
+			t.Fatalf("a new instance reused a cancelled instance's display name: %+v", inst)
+		}
+	}
+}
+
+// TestNodeGroupIncreaseSize_UncancelledOrphanStillBindsCap proves the filter
+// did not reopen the untagged-orphan runaway hole that cost real money: an
+// instance we never cancelled still counts against MaxSize.
+func TestNodeGroupIncreaseSize_UncancelledOrphanStillBindsCap(t *testing.T) {
+	fc := &fakeCloud{instances: []contabo.Instance{
+		{ID: 1, Name: "fuzeinfra-prod-elastic-v2-aaaaaaaa", Status: "running"},
+		{ID: 2, Name: "fuzeinfra-prod-elastic-v2-bbbbbbbb", Status: "running"},
+	}}
+	s := provider.New(provider.Config{
+		NamePrefix: "fuzeinfra-prod-elastic-v2", ElasticTag: "fuzeinfra-prod-elastic-v2",
+		MinSize: 0, MaxSize: 2,
+	}, fc)
+
+	if _, err := s.NodeGroupIncreaseSize(context.Background(), &protos.NodeGroupIncreaseSizeRequest{Delta: 1}); err == nil {
+		t.Fatal("uncancelled instances at MaxSize must still refuse scale-up (anti-runaway cap)")
 	}
 }

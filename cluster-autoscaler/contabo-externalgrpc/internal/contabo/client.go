@@ -51,6 +51,15 @@ type Instance struct {
 	// non-zero CancelDate as the authoritative termination anchor and MUST
 	// NOT re-cancel an instance that already carries one.
 	CancelDate time.Time
+	// RawCancelDate is Contabo's cancelDate EXACTLY as returned, before any
+	// parsing. Diagnostic only -- never a decision input. It exists because a
+	// zero CancelDate is ambiguous: it can mean "not cancelled", "field absent
+	// from this endpoint", or "present but unparsable". Only the first is
+	// benign, and the provider behaved very differently in the other two
+	// (cancelled instances kept being reported to CA, which re-issued cancel
+	// in a loop against Contabo). The parsed field alone could not tell them
+	// apart, so the raw value is retained and logged.
+	RawCancelDate string
 }
 
 // CreateReq is the request to create a new instance.
@@ -406,9 +415,10 @@ func (c *HTTPClient) ListByTag(ctx context.Context, tag string) ([]Instance, err
 			Name:        inst.DisplayName,
 			Status:      inst.Status,
 			PrivateIP:   privateIP,
-			Tags:        []string{tag},
-			CreatedDate: createdDate,
-			CancelDate:  cancelDate,
+			Tags:          []string{tag},
+			CreatedDate:   createdDate,
+			CancelDate:    cancelDate,
+			RawCancelDate: inst.CancelDate,
 		})
 	}
 
@@ -517,12 +527,13 @@ func (c *HTTPClient) fetchComputeInstancesPage(ctx context.Context, tok string, 
 		}
 
 		items = append(items, Instance{
-			ID:          inst.InstanceID,
-			Name:        inst.DisplayName,
-			Status:      inst.Status,
-			PrivateIP:   privateIP,
-			CreatedDate: createdDate,
-			CancelDate:  cancelDate,
+			ID:            inst.InstanceID,
+			Name:          inst.DisplayName,
+			Status:        inst.Status,
+			PrivateIP:     privateIP,
+			CreatedDate:   createdDate,
+			CancelDate:    cancelDate,
+			RawCancelDate: inst.CancelDate,
 		})
 	}
 	return items, nil
@@ -569,6 +580,26 @@ func parseContaboTime(s string) (time.Time, bool) {
 	}
 	if t, err := time.Parse(time.RFC3339, s); err == nil {
 		return t, true
+	}
+	// DATE-ONLY. Contabo returns cancelDate as "2026-09-14", not a timestamp, and
+	// this function accepted only the two RFC3339 layouts -- so every cancelled
+	// instance parsed as unparsable, CancelDate stayed zero, and the caller could
+	// not tell a cancelled instance from a live one.
+	//
+	// The consequence was not cosmetic. Three cancelled instances kept occupying
+	// slots in the elastic node group, so the group read as full at MAX_SIZE=4 with
+	// exactly ONE real node, and cluster-autoscaler logged
+	//     Skipping node group elastic - max size reached
+	//     No expansion options
+	// while 27 runner pods sat Pending. #831 added the logic to stop cancelled
+	// instances holding slots; that logic could never fire, because this parse
+	// failed first and left the field zero.
+	//
+	// Parsed as UTC midnight: Contabo cancels at end of the billing DAY, so
+	// midnight-of-that-date is the conservative anchor -- it never treats an
+	// instance as still-paid-for longer than it actually is.
+	if t, err := time.Parse("2006-01-02", s); err == nil {
+		return t.UTC(), true
 	}
 	return time.Time{}, false
 }

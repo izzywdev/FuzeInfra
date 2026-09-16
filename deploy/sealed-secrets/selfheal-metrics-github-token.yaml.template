@@ -1,0 +1,65 @@
+# =============================================================================
+# PLACEHOLDER / TEMPLATE — GitHub read token for the self-heal metrics exporter.
+#
+# This is a *.template file on purpose: it is NOT a real SealedSecret and is NOT
+# synced by Argo (the fuzeinfra-sealed-secrets Application recurses
+# deploy/sealed-secrets/ for *.yaml; a `.template` suffix is excluded). It exists
+# so the credential-wiring path is committed and reviewable WITHOUT committing a
+# real token. Seal the real file next to it as
+# deploy/sealed-secrets/selfheal-metrics-github-token.yaml.
+#
+# ── This secret is OPTIONAL ──────────────────────────────────────────────────
+# The Deployment references it with `optional: true`
+# (helm/fuzeinfra/templates/selfheal-metrics.yaml). Without it the exporter runs
+# unauthenticated against the public GitHub REST API — the counts are identical,
+# the only difference is the rate limit: 60 requests/hour instead of 5000. At the
+# default 10-minute poll over 3 labels that is ~18 req/h, so unauthenticated is
+# genuinely workable. Seal a token when the label map grows or the repo goes
+# private, not as a prerequisite for enabling the exporter.
+#
+# ── Keys this Secret must carry ──────────────────────────────────────────────
+#   token   A GitHub token with READ-ONLY access to izzywdev/FuzeInfra issues.
+#           A fine-grained PAT with `Issues: Read` (or `Contents: Read` on a
+#           public repo) is sufficient — the exporter only ever issues
+#           GET /repos/{repo}/issues. Give it NOTHING else: this pod's stdout is
+#           shipped to Loki and its metrics are scraped by Prometheus, so the
+#           blast radius of a leak is the token's own scope.
+#
+#           Alphanumeric-only is not achievable for a GitHub PAT (they contain
+#           `_`), but it must have NO trailing newline — `printf %s`, never
+#           `echo`, or the newline becomes part of the Authorization header and
+#           every call 401s.
+#
+# ── How to produce the real file (human, one-time, offline) ──────────────────
+#   printf %s '<GITHUB READ-ONLY PAT>' > /tmp/selfheal_token
+#   scripts/seal-secret.sh fuzeinfra/selfheal-metrics-github-token \
+#     token=@/tmp/selfheal_token \
+#     --out deploy/sealed-secrets/selfheal-metrics-github-token.yaml
+#   shred -u /tmp/selfheal_token
+#
+# Sealing needs no cluster access — see docs/SECRETS_MANAGEMENT.md §1 for the
+# published public cert and the container fallback when kubeseal is unavailable.
+#
+# ── After a reseal ───────────────────────────────────────────────────────────
+# Kubernetes does not restart a pod when a Secret it reads as env changes, and
+# Argo applies this ciphertext from OUTSIDE the Helm release, so the chart cannot
+# hash it. Roll the pod by hand after a rotation:
+#   kubectl -n fuzeinfra rollout restart deploy/fuzeinfra-selfheal-metrics
+# There is no `secretRotation` knob here (unlike handoffMcp) because a stale
+# token degrades to unauthenticated polling, not to a silent auth failure.
+#
+# ── Shape of the REAL sealed output (for reference only) ─────────────────────
+# apiVersion: bitnami.com/v1alpha1
+# kind: SealedSecret
+# metadata:
+#   name: selfheal-metrics-github-token
+#   namespace: fuzeinfra
+# spec:
+#   encryptedData:
+#     token: AgB...   # ciphertext, safe to commit
+#   template:
+#     metadata:
+#       name: selfheal-metrics-github-token
+#       namespace: fuzeinfra
+#     type: Opaque
+# =============================================================================

@@ -1,0 +1,475 @@
+name: ca-reinstall-controlplane
+
+# Reinstall a CONTROL-PLANE / durable node onto the private VLAN.
+#
+# WHY THIS EXISTS. ca-salvage-enroll deliberately refuses non-elastic templates:
+# it enrols agents into the autoscaler pool, and a control plane reinstalled with
+# an agent template silently loses its server role. That guard is correct and
+# must stay. But it left NO path at all for the operation the private-VLAN
+# cutover actually needs -- reinstalling a control plane so the Contabo eth1 NIC
+# appears -- so the last leg of that cutover had no tooling. mendys-worker-1 has
+# been NotReady since 2026-09-02 for exactly this reason: it carries the private
+# networking add-on and is enlisted in network 60932, but the NIC only
+# materialises on a reinstall (a reboot is not enough -- confirmed three times).
+#
+# This is the MIRROR of that guard, not a hole in it: control-plane/durable
+# templates ONLY, and it refuses any instance in the elastic name prefix.
+#
+# AUTOMATED-REMEDIATION UPDATE (2026-09-16). This workflow is now the reinstall
+# half of the dark-node escalation ladder in scripts-tools/deployment_watchdog.py
+# (see governance/watchdog-thresholds.json dark_node.auto_reinstall and
+# docs/runbooks/dark-node-reboot.md). The watchdog dispatches it with node_name +
+# external_ip (mirroring contabo-instance-reboot.yml) ONLY after 3 reboot
+# attempts have failed AND the node has been dark for
+# dark_node.escalate_after_minutes, AND ONLY when the node is not the etcd
+# quorum's last line of defence (other_ready_control_plane_nodes >=
+# dark_node.reinstall_min_other_ready_control_plane). The two hard safety gates
+# below -- Longhorn preflight and the Ready=True delete-guard -- apply
+# identically whether a human or the watchdog dispatched this, which is what
+# makes the automation safe to add: nothing about *how the workflow behaves*
+# changed, only *who is allowed to press the button* did.
+#
+# WHAT IT DELIBERATELY DOES NOT DO. When given a template that does not
+# self-join (cp-userdata-eth1.template), this only prepares the host (eth1,
+# firewall including the etcd peer/client ports a server needs, Longhorn
+# prerequisites) -- the k3s SERVER join stays a deliberate operator step for
+# that template. The watchdog always uses cp-userdata-eth1-join.template
+# instead, which DOES join itself (see that template's own header for why a
+# self-joining template is the right default for CI/CD but the wrong default
+# for a once-a-cutover human operation).
+#
+# BEFORE RUNNING (dry-run first is always safe; for mode=reinstall these are
+# all enforced by the steps below, not left to operator memory):
+#   1. Longhorn data-safety preflight (scripts/preflight_node_teardown.py)
+#   2. kubectl delete node <name> -- k3s reconciles etcd membership from Node
+#      objects; reinstalling while the old member is still registered leaves a
+#      member whose data no longer exists. Guarded: refuses to delete a node
+#      that currently reports Ready=True.
+#   3. instanceId resolution by external_ip (when instance_id isn't given
+#      directly), same mechanism as contabo-instance-reboot.yml.
+on:
+  workflow_dispatch:
+    inputs:
+      instance_id:
+        description: 'Contabo numeric instanceId (leave empty to resolve via node_name/external_ip)'
+        required: false
+        default: ''
+      node_name:
+        description: 'k8s node name to render into the template (e.g. fuze-core-3).'
+        required: true
+      external_ip:
+        description: "Node's Contabo public IP (kubectl get node <name> -o wide) — used to resolve instance_id when it is not given directly"
+        required: false
+        default: ''
+      template:
+        description: 'Control-plane cloud-init template. Elastic templates are REFUSED.'
+        default: 'cluster-autoscaler/contabo-externalgrpc/deploy/cp-userdata-eth1.template'
+      mode:
+        description: 'dry-run = render + validate (safe, no API write); reinstall = PUT reinstall (DESTRUCTIVE)'
+        type: choice
+        options: [dry-run, reinstall]
+        default: dry-run
+        required: true
+      confirm:
+        description: 'For mode=reinstall ONLY: type REINSTALL-CONTROL-PLANE to proceed.'
+        default: ''
+      issue_number:
+        description: 'Optional: watchdog issue number to comment the result back onto'
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+  issues: write
+  actions: write # to dispatch cluster-query.yml and read its run for the optional Ready check
+
+jobs:
+  reinstall:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v4
+
+      - name: Interlock
+        env:
+          MODE: ${{ inputs.mode }}
+          CONFIRM: ${{ inputs.confirm }}
+          IID: ${{ inputs.instance_id }}
+          IP: ${{ inputs.external_ip }}
+        run: |
+          set -euo pipefail
+          if [ "$MODE" = "reinstall" ] && [ "$CONFIRM" != "REINSTALL-CONTROL-PLANE" ]; then
+            echo "::error::mode=reinstall requires confirm=REINSTALL-CONTROL-PLANE"; exit 1
+          fi
+          [ -n "$IID" ] || [ -n "$IP" ] || { echo "::error::need instance_id or external_ip to identify the instance"; exit 1; }
+
+      # PREFLIGHT: refuse the reinstall if it would destroy the last copies of data.
+      #
+      # This replaces step 3 of the "BEFORE RUNNING, non-negotiable" comment in the
+      # header ("confirm every Longhorn volume has replicas OFF this node"). That
+      # instruction was followed on 2026-09-07 before reinstalling vmi3383846, it
+      # PASSED, and the Prometheus TSDB was destroyed anyway -- every metric the
+      # cluster had, gone. The instruction was not merely unenforced, it was the
+      # WRONG TEST: a replica that "exists elsewhere" may be a rebuild that started
+      # minutes ago and holds nothing. See scripts/preflight_node_teardown.py.
+      #
+      # Runs only for mode=reinstall: a dry-run mutates nothing, and gating it would
+      # stop operators from using dry-run to inspect a cluster that is already
+      # degraded -- exactly when they most need to look. This gate applies
+      # identically to a watchdog-triggered dispatch: it is enforced here, not in
+      # the caller, so it cannot be bypassed by calling this workflow directly.
+      - name: Preflight — would this reinstall destroy the last copy of any volume?
+        if: ${{ inputs.mode == 'reinstall' }}
+        env:
+          KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
+          NODE_NAME: ${{ inputs.node_name }}
+        run: |
+          set -euo pipefail
+          if [ -z "${KUBE_CONFIG:-}" ]; then
+            echo "::error::KUBE_CONFIG is unset, so the data-safety preflight cannot run."
+            echo "::error::Refusing rather than reinstalling blind — this gate exists because"
+            echo "::error::an unchecked reinstall destroyed the Prometheus TSDB on 2026-09-07."
+            exit 1
+          fi
+          mkdir -p ~/.kube
+          printf '%s' "$KUBE_CONFIG" | base64 -d > ~/.kube/config
+          chmod 600 ~/.kube/config
+          python3 scripts/preflight_node_teardown.py --node "$NODE_NAME"
+
+      # Automates step 2 of the header's "BEFORE RUNNING" list: `kubectl delete
+      # node <name>` so k3s reconciles etcd membership from the remaining Node
+      # objects. This used to be a manual operator step -- easy to forget, and
+      # forgetting it leaves an etcd member registered whose data the reinstall
+      # is about to wipe. Runs only for mode=reinstall, after the Longhorn
+      # preflight has already passed.
+      #
+      # SAFETY GUARD: refuses to delete a node that currently reports Ready=True.
+      # This step exists to clear a DEAD node's stale registration, never to
+      # remove a live one -- a Ready node is either the wrong node_name was
+      # given, or the node has recovered since the incident was triaged, and
+      # either way deleting it would be the wrong action. This is also what
+      # makes automatic dispatch safe: if the node recovered between the
+      # watchdog's decision and this run actually starting, this guard refuses
+      # instead of wiping a node that fixed itself.
+      - name: Delete stale Node object (etcd membership reconciliation)
+        if: ${{ inputs.mode == 'reinstall' }}
+        env:
+          KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
+          NODE_NAME: ${{ inputs.node_name }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.kube
+          printf '%s' "$KUBE_CONFIG" | base64 -d > ~/.kube/config
+          chmod 600 ~/.kube/config
+
+          if ! kubectl get node "$NODE_NAME" >/tmp/node-check.json 2>/tmp/node-check.err; then
+            if grep -q "NotFound" /tmp/node-check.err; then
+              echo "node $NODE_NAME already absent from the API — nothing to delete."
+              exit 0
+            fi
+            echo "::error::could not read node $NODE_NAME: $(cat /tmp/node-check.err)"
+            exit 1
+          fi
+
+          READY=$(kubectl get node "$NODE_NAME" -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}')
+          if [ "$READY" = "True" ]; then
+            echo "::error::refusing to delete node $NODE_NAME: it currently reports Ready=True."
+            echo "::error::This step only clears a DEAD node's stale registration. If you"
+            echo "::error::genuinely intend to reinstall a live node, delete it manually first."
+            exit 1
+          fi
+
+          echo "node $NODE_NAME is Ready=$READY — deleting so etcd membership reconciles."
+          kubectl delete node "$NODE_NAME"
+
+      - name: Auth
+        id: auth
+        env:
+          CID: ${{ secrets.CONTABO_CLIENT_ID }}
+          CSEC: ${{ secrets.CONTABO_CLIENT_SECRET }}
+          CUSER: ${{ secrets.CONTABO_API_USER }}
+          CPASS: ${{ secrets.CONTABO_API_PASSWORD }}
+        run: |
+          set -euo pipefail
+          TOK=$(curl -sS -X POST -H "Content-Type: application/x-www-form-urlencoded" \
+            "https://auth.contabo.com/auth/realms/contabo/protocol/openid-connect/token" \
+            --data-urlencode "client_id=${CID}" --data-urlencode "client_secret=${CSEC}" \
+            --data-urlencode "username=${CUSER}" --data-urlencode "password=${CPASS}" \
+            --data-urlencode "grant_type=password" | jq -r .access_token)
+          [ -n "$TOK" ] && [ "$TOK" != "null" ] || { echo "::error::Contabo auth failed"; exit 1; }
+          echo "::add-mask::$TOK"
+          echo "token=$TOK" >> "$GITHUB_OUTPUT"
+
+      # Same mechanism contabo-instance-reboot.yml uses: nodes carry no
+      # Contabo-instanceId label at bootstrap, so the public IP is the only
+      # reliable link from a k8s Node object to a Contabo instance.
+      - name: Resolve instanceId
+        id: resolve
+        env:
+          TOK: ${{ steps.auth.outputs.token }}
+          IID: ${{ inputs.instance_id }}
+          IP: ${{ inputs.external_ip }}
+        run: |
+          set -euo pipefail
+          if [ -n "$IID" ]; then
+            echo "instance_id=$IID" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          RESOLVED=""
+          page=1
+          while :; do
+            RESP=$(curl -sS -H "Authorization: Bearer $TOK" \
+              -H "x-request-id: $(cat /proc/sys/kernel/random/uuid)" \
+              "https://api.contabo.com/v1/compute/instances?size=100&page=${page}")
+            n=$(printf '%s' "$RESP" | jq '.data | length')
+            [ "$n" -gt 0 ] || break
+            RESOLVED=$(printf '%s' "$RESP" | jq -r --arg ip "$IP" \
+              '.data[] | select(.ipConfig.v4.ip == $ip) | .instanceId' | head -1)
+            [ -n "$RESOLVED" ] && break
+            page=$((page + 1))
+            [ "$page" -gt 30 ] && break
+          done
+          [ -n "$RESOLVED" ] || { echo "::error::no Contabo instance found with ipConfig.v4.ip=$IP"; exit 1; }
+          echo "instance_id=$RESOLVED" >> "$GITHUB_OUTPUT"
+
+      - name: Reinstall control-plane node
+        id: reinstall
+        env:
+          TOK: ${{ steps.auth.outputs.token }}
+          K3S_SERVER_URL: ${{ secrets.K3S_SERVER_URL }}
+          K3S_NODE_TOKEN: ${{ secrets.K3S_NODE_TOKEN }}
+          NODE_SSH_PUBLIC_KEY: ${{ secrets.NODE_SSH_PUBLIC_KEY }}
+          IMAGE_ID: ${{ secrets.CONTABO_IMAGE_ID }}
+          ELASTIC_NAME_PREFIX: fuzeinfra-prod-elastic-v2
+          ID: ${{ steps.resolve.outputs.instance_id }}
+          NODE_NAME: ${{ inputs.node_name }}
+          TEMPLATE_IN: ${{ inputs.template }}
+          MODE: ${{ inputs.mode }}
+        run: |
+          set -euo pipefail
+
+          TMPL="$TEMPLATE_IN"
+          [ -f "$TMPL" ] || { echo "::error::template not found: $TMPL"; exit 1; }
+
+          # Mirror of ca-salvage-enroll's guard. An agent template here would
+          # silently demote a control plane to a worker.
+          case "$(basename "$TMPL")" in
+            cp-userdata*.template|durable-userdata*.template|ci-userdata*.template) ;;
+            *)
+              # The invariant is NOT ELASTIC, not "control plane only". Elastic
+              # nodes belong to ca-salvage-enroll, whose own guard refuses any node
+              # name outside the elastic prefix. Between the two guards, CI nodes
+              # had no reinstall path at all -- which on 2026-09-07 turned an
+              # ordinary VLAN repair on fuzeinfra-ci-runner-2 into "quarantine the
+              # node and lose the capacity", stalling the whole fleet's CI.
+              echo "::error::refusing template $TMPL. This workflow handles non-elastic nodes (control-plane, durable, ci); elastic nodes go through ca-salvage-enroll."
+              exit 1 ;;
+          esac
+
+          case "$NODE_NAME" in
+            "$ELASTIC_NAME_PREFIX"-*)
+              echo "::error::refusing: node name is in the elastic prefix; use ca-salvage-enroll"
+              exit 1 ;;
+          esac
+
+          [ -n "$ID" ] || { echo "::error::instance_id could not be resolved"; exit 1; }
+          [ -n "$IMAGE_ID" ] || { echo "::error::CONTABO_IMAGE_ID secret is unset"; exit 1; }
+
+          INST=$(curl -sS -H "Authorization: Bearer $TOK" \
+            -H "x-request-id: $(cat /proc/sys/kernel/random/uuid)" \
+            "https://api.contabo.com/v1/compute/instances/${ID}")
+          CURNAME=$(echo "$INST" | jq -r '.data[0].displayName')
+          STATUS=$(echo "$INST" | jq -r '.data[0].status')
+          echo "instance $ID contaboName=$CURNAME status=$STATUS -> node $NODE_NAME"
+
+          # Apply the inverse guard to what Contabo actually holds, not only to
+          # the operator-supplied name.
+          case "$CURNAME" in
+            "$ELASTIC_NAME_PREFIX"-*)
+              echo "::error::refusing: instance $ID belongs to the elastic pool"
+              exit 1 ;;
+          esac
+
+          RENDERED=$(sed \
+            -e "s|{{.NodeName}}|${NODE_NAME}|g" \
+            -e "s|{{.K3SServerURL}}|${K3S_SERVER_URL}|g" \
+            -e "s|{{.K3SNodeToken}}|${K3S_NODE_TOKEN}|g" \
+            -e "s|__SSH_PUBLIC_KEY__|${NODE_SSH_PUBLIC_KEY}|g" \
+            "$TMPL")
+          if printf '%s' "$RENDERED" | grep -q '{{'; then
+            echo "::error::unrendered template action remains"; exit 1; fi
+          if ! printf '%s' "$RENDERED" | head -1 | grep -q '^#cloud-config'; then
+            echo "::error::rendered userData must start with #cloud-config"; exit 1; fi
+          echo "rendered userData bytes: $(printf '%s' "$RENDERED" | wc -c)"
+          # The netplan config is the ONE artifact every template here must carry:
+          # without it eth1 is never configured, and the whole point of this
+          # workflow is to bring a node up on the VLAN. This used to print "MISS"
+          # and CARRY ON, so a template missing it would happily reinstall a node
+          # that could never reach the VLAN -- the exact failure class that stranded
+          # fuzeinfra-ci-runner-2 and 871c48fc. It is now a hard failure.
+          if printf '%s' "$RENDERED" | grep -qF "60-eth1-private.yaml"; then
+            echo "  OK   60-eth1-private.yaml"
+          else
+            echo "::error::rendered userData has no 60-eth1-private.yaml — the node would come up with no eth1 config. Refusing."
+            exit 1
+          fi
+
+          # The readiness sentinel is CP-SPECIFIC. Asserting it for every template
+          # printed a bogus "MISS fuzeinfra-cp-eth1-ready" on the ci-userdata run
+          # (2026-09-07) — a scary-looking line on a render that was perfectly
+          # correct. Only claim it when the source template actually declares one.
+          if grep -qE '/etc/fuzeinfra-[a-z0-9-]*-ready' "$TMPL"; then
+            MARKER=$(grep -oE '/etc/fuzeinfra-[a-z0-9-]*-ready' "$TMPL" | head -1 | sed 's#^/etc/##')
+            if printf '%s' "$RENDERED" | grep -qF "$MARKER"; then
+              echo "  OK   $MARKER"
+            else
+              echo "::error::template declares $MARKER but the render lost it"; exit 1
+            fi
+          else
+            echo "  --   (this template declares no readiness sentinel; not required)"
+          fi
+
+          # Does this template join the cluster by itself? Drives the closing
+          # message below, which used to assert "does NOT join" unconditionally.
+          if grep -qE 'get\.k3s\.io \| sh -s - (agent|server)' "$TMPL"; then
+            SELF_JOINS=yes
+          else
+            SELF_JOINS=no
+          fi
+          echo "  self-joins: $SELF_JOINS"
+          echo "self_joins=$SELF_JOINS" >> "$GITHUB_OUTPUT"
+
+          if [ "$MODE" = "dry-run" ]; then
+            echo "[dry-run] WOULD PUT reinstall imageId=$IMAGE_ID onto instance $ID. No API write performed."
+            exit 0
+          fi
+
+          BODY=$(jq -n --arg img "$IMAGE_ID" --arg ud "$RENDERED" '{imageId:$img, userData:$ud, defaultUser:"root"}')
+          RC=$(curl -sS -o /tmp/reinstall.json -w '%{http_code}' -X PUT \
+            -H "Authorization: Bearer $TOK" -H "Content-Type: application/json" \
+            -H "x-request-id: $(cat /proc/sys/kernel/random/uuid)" \
+            -d "$BODY" "https://api.contabo.com/v1/compute/instances/${ID}")
+          echo "reinstall $ID -> HTTP $RC"
+          if [ "$RC" != "200" ] && [ "$RC" != "201" ]; then
+            cat /tmp/reinstall.json
+            echo "::error::reinstall failed"
+            exit 1
+          fi
+          echo "instance $ID is reinstalling."
+          # This used to assert unconditionally that the template does not join, which
+          # was already wrong for cp-userdata-eth1-join and became actively misleading
+          # for ci-userdata: on 2026-09-07 it told the operator to "perform the server
+          # join manually" for a node that had just joined itself as an agent. A
+          # closing instruction that contradicts what the workflow did is worse than
+          # no closing instruction.
+          if [ "$SELF_JOINS" = "yes" ]; then
+            echo "This template JOINS THE CLUSTER ITSELF once eth1 is up (systemd oneshot on boot)."
+            echo "Nothing further to run. Watch for the node with:"
+            echo "  kubectl get node $NODE_NAME -o wide     # InternalIP must be 10.0.0.x, not the public address"
+            echo "If it comes back on its PUBLIC address, the vNIC did not attach and the node is off-VLAN:"
+            echo "  pods on it cannot reach 10.43.0.1 even though the node reports Ready."
+          else
+            echo "This template does NOT join k3s -- it only prepares the host."
+            echo "Perform the server join manually once eth1 is up, per"
+            echo "docs/runbooks/k3s-ha-etcd-migration.md."
+          fi
+
+      - name: Poll instance status (up to 10 min)
+        id: poll
+        if: ${{ always() && inputs.mode == 'reinstall' && steps.reinstall.outcome == 'success' }}
+        env:
+          TOK: ${{ steps.auth.outputs.token }}
+          IID: ${{ steps.resolve.outputs.instance_id }}
+        run: |
+          set -euo pipefail
+          echo "### Polling instance $IID status for up to 10 minutes"
+          deadline=$((SECONDS + 600))
+          status="unknown"
+          while [ "$SECONDS" -lt "$deadline" ]; do
+            RESP=$(curl -sS -H "Authorization: Bearer $TOK" \
+              -H "x-request-id: $(cat /proc/sys/kernel/random/uuid)" \
+              "https://api.contabo.com/v1/compute/instances/${IID}")
+            status=$(printf '%s' "$RESP" | jq -r '.data[0].status // "unknown"')
+            echo "  status=$status (elapsed ${SECONDS}s)"
+            [ "$status" = "running" ] && break
+            sleep 15
+          done
+          echo "final_status=$status" >> "$GITHUB_OUTPUT"
+          if [ "$status" != "running" ]; then
+            echo "::warning::Instance $IID did not report status=running within 10 minutes (last seen: $status)"
+          fi
+
+      # Best-effort: only meaningful for a self-joining template, and only
+      # after the instance itself is back up. Never fails the job -- a slow
+      # Ready is often just cloud-init/k3s still starting.
+      - name: Verify node Ready via cluster-query (optional, best-effort)
+        id: verify
+        if: ${{ always() && inputs.mode == 'reinstall' && steps.reinstall.outcome == 'success' && steps.reinstall.outputs.self_joins == 'yes' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          NODE: ${{ inputs.node_name }}
+        run: |
+          set -euo pipefail
+          echo "### Dispatching cluster-query.yml to check node Ready status for $NODE"
+          BEFORE=$(gh run list --workflow=cluster-query.yml --repo "$REPO" --limit 1 --json databaseId --jq '.[0].databaseId // empty')
+          gh workflow run cluster-query.yml --repo "$REPO" -f kubectl_args="get node ${NODE} -o wide"
+          RUN_ID=""
+          for i in $(seq 1 12); do
+            sleep 10
+            CANDIDATE=$(gh run list --workflow=cluster-query.yml --repo "$REPO" --limit 1 --json databaseId --jq '.[0].databaseId // empty')
+            if [ -n "$CANDIDATE" ] && [ "$CANDIDATE" != "$BEFORE" ]; then
+              RUN_ID="$CANDIDATE"
+              break
+            fi
+          done
+          if [ -z "$RUN_ID" ]; then
+            echo "::warning::Could not find the dispatched cluster-query run within 2 minutes; skipping Ready verification"
+            echo "verified=unknown" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          gh run watch "$RUN_ID" --repo "$REPO" --exit-status || true
+          LOG=$(gh run view "$RUN_ID" --repo "$REPO" --log 2>/dev/null || true)
+          if printf '%s' "$LOG" | grep -qE "^[^[:space:]]*${NODE}[[:space:]]+Ready\b"; then
+            echo "verified=true" >> "$GITHUB_OUTPUT"
+            echo "Node $NODE is Ready (cluster-query run: ${RUN_ID})."
+          else
+            echo "verified=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::Node $NODE not confirmed Ready yet (cluster-query run: ${RUN_ID}) — it may still be booting; check manually"
+          fi
+
+      - name: Comment result back on the watchdog issue
+        if: ${{ always() && inputs.issue_number != '' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE: ${{ inputs.issue_number }}
+          REPO: ${{ github.repository }}
+          IID: ${{ steps.resolve.outputs.instance_id }}
+          NODE: ${{ inputs.node_name }}
+          MODE: ${{ inputs.mode }}
+          OUTCOME: ${{ steps.reinstall.outcome }}
+          POLL_STATUS: ${{ steps.poll.outputs.final_status }}
+          VERIFIED: ${{ steps.verify.outputs.verified }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          if [ "$MODE" != "reinstall" ]; then
+            echo "mode=$MODE — nothing mutated, skipping issue comment."
+            exit 0
+          fi
+          if [ "$OUTCOME" = "success" ]; then
+            STATUS="Dispatched a Contabo reinstall for instance \`${IID:-unknown}\` (node \`${NODE:-unknown}\`). Instance status after polling: \`${POLL_STATUS:-unknown}\`."
+            case "${VERIFIED:-}" in
+              true) FOOTER="Node \`${NODE:-unknown}\` confirmed **Ready** via cluster-query. This does not close this issue automatically — close once you're satisfied." ;;
+              false) FOOTER="Node \`${NODE:-unknown}\` was **not yet Ready** at last check — it may still be booting/joining. Re-check with \`kubectl get nodes\` via cluster-query.yml before closing this issue." ;;
+              *) FOOTER="The node should re-register within a few minutes of the reinstall completing, if the template self-joins (verify with \`kubectl get nodes\` via cluster-query.yml). This does **not** close this issue automatically — confirm Ready=True and close once verified." ;;
+            esac
+          else
+            STATUS="Reinstall attempt for node \`${NODE:-unknown}\` FAILED — see the run log. This is most likely the Longhorn data-safety preflight or the Ready=True delete-guard refusing; check before retrying."
+            FOOTER="No reinstall was performed."
+          fi
+          {
+            printf '%s\n\n' "$STATUS"
+            printf 'Run: %s\n\n' "$RUN_URL"
+            printf '%s\n' "$FOOTER"
+          } > "${RUNNER_TEMP}/reinstall-comment.md"
+          gh issue comment "$ISSUE" --repo "$REPO" --body-file "${RUNNER_TEMP}/reinstall-comment.md"

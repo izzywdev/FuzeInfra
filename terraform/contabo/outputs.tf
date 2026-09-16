@@ -100,3 +100,28 @@ output "custom_hostname_fallback_origin" {
   description = "Cloudflare for SaaS fallback origin (where the edge sends custom-hostname traffic). Empty when disabled."
   value       = var.saas_custom_hostnames_enabled ? "saas-origin.${var.zone_name}" : ""
 }
+
+# ---------------------------------------------------------------------------
+# LiteLLM CI service token
+#
+# Deliberately `sensitive = true`, same as cloudflare_tunnel_id above — this
+# never belongs in a CI log or an apply summary. Extraction is a separate,
+# deliberate step run from a local terminal against this state (S3 backend,
+# see backend.tf), piped straight into scripts/provision_secrets.py's
+# environment — never typed, never printed, never committed:
+#
+#   export CF_ACCESS_CLIENT_ID="$(terraform output -raw litellm_ci_service_token_client_id)"
+#   export CF_ACCESS_CLIENT_SECRET="$(terraform output -raw litellm_ci_service_token_client_secret)"
+#   # then, from FuzeSDLC: python scripts/provision_secrets.py --owner izzywdev --apply
+# ---------------------------------------------------------------------------
+output "litellm_ci_service_token_client_id" {
+  description = "Cloudflare Access service token client_id for fuze.yml's hosted-runner LiteLLM routing. Not a secret by itself (Cloudflare docs: safe to send as the CF-Access-Client-Id header), but kept sensitive for consistency with its paired client_secret."
+  value       = local.cloudflare_enabled ? cloudflare_zero_trust_access_service_token.litellm_ci[0].client_id : ""
+  sensitive   = true
+}
+
+output "litellm_ci_service_token_client_secret" {
+  description = "Cloudflare Access service token client_secret for fuze.yml's hosted-runner LiteLLM routing. A real credential — extract via `terraform output -raw`, pipe directly into provision_secrets.py's environment, never paste it anywhere else."
+  value       = local.cloudflare_enabled ? cloudflare_zero_trust_access_service_token.litellm_ci[0].client_secret : ""
+  sensitive   = true
+}

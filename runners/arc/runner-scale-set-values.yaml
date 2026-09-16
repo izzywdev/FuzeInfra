@@ -122,10 +122,30 @@ template:
         # guaranteed available on k3s nodes; add back once runner is stable.
         # Headroom for buildkit client work + Node actions (1Gi OOMs). Compose/
         # build workloads run in the dind sidecar's cgroup, not here.
+        #
+        # REQUESTS ARE SIZED FROM MEASURED USAGE, LIMITS FROM WORST CASE.
+        # A request is a RESERVATION the scheduler subtracts from the node whether
+        # or not it is used; the limit is what the container may actually burst to.
+        # These were both 500m/1Gi, which reserved 1000m/2Gi per runner pod once
+        # the dind sidecar is counted. On a 4 vCPU / 8Gi node that caps the node at
+        # THREE runners while real usage is a fraction of that -- 33 runner pods
+        # were Pending against ~21 slots with the CI nodes reporting 87% CPU /
+        # 77% memory *requested* and near-idle actual load.
+        #
+        # Measured on prod 2026-09-07 (`kubectl top pods -n arc-runners
+        # --containers`, 10 live runners): this container peaked at 568Mi and
+        # 1784m, with a median around 30m CPU / 300Mi.
+        #
+        # So: memory request 640Mi keeps a real floor above the observed 568Mi
+        # peak, and the CPU request drops to the median-ish 250m. CPU is a
+        # compressible resource -- a build that wants more is throttled, not
+        # killed -- so a low request costs latency under contention, never
+        # correctness. The memory LIMIT is unchanged at 2Gi, so nothing here can
+        # run away.
         resources:
           requests:
-            cpu: 500m
-            memory: 1Gi
+            cpu: 250m
+            memory: 640Mi
           limits:
             cpu: "2"
             memory: 2Gi
@@ -187,10 +207,43 @@ template:
         # it can no longer consume the entire node's memory outright, which is
         # the specific OOM risk this issue flags dind as "most likely" to
         # cause.
+        #
+        # REQUEST RE-SIZED FROM MEASUREMENT 2026-09-07. The 1Gi memory request
+        # was the single worst source of false scheduling pressure in the pool:
+        # across 10 live runners this sidecar peaked at 69Mi and sat at 23-24Mi,
+        # i.e. it reserved roughly FIFTEEN TIMES the memory it ever used, and
+        # CPU-wise it sat at 2-12m against a 500m reservation. Almost all real
+        # build work shows up in the runner container's cgroup, not here.
+        #
+        # 128Mi is still ~2x the observed peak, and the LIMIT stays 4Gi so a
+        # heavy `docker build` has exactly the burst room the issue asked for --
+        # the OOM ceiling this block exists to impose is unchanged. Only the
+        # reservation moves.
+        #
+        # Net effect with the runner container's change: a runner+dind pair now
+        # reserves 300m / 768Mi instead of 1000m / 2Gi, so a 4 vCPU / 8Gi node
+        # fits ~8 pairs instead of 3. Measured peak for a pair is ~640Mi, so 8
+        # pairs is ~5.1Gi -- still inside the ~6Gi of allocatable memory left
+        # after system pods.
+        #
+        # THIS DELIBERATELY WEAKENS ONE THING #586 BOUGHT. That issue used the
+        # request as a two-in-one device: an OOM ceiling AND a concurrency
+        # throttle (~4 pairs/node, bounding the SUM across all 22 scale sets
+        # rather than each set's maxRunners). The OOM half is untouched -- it
+        # lives in the limits, which are unchanged. The throttle half is
+        # intentionally relaxed, because throttling by over-reservation is
+        # indistinguishable from a capacity shortage: the scheduler reported the
+        # CI nodes 87% full while they were nearly idle, and 33 runner pods sat
+        # Pending behind memory that nothing was using.
+        #
+        # If a hard concurrency cap is wanted back, it should be expressed as a
+        # cap -- a ResourceQuota on arc-runners, or per-set maxRunners -- not as
+        # deliberately inflated requests, so that "the pool is at its limit" and
+        # "the nodes are out of memory" stay distinguishable in kubectl output.
         resources:
           requests:
-            cpu: 500m
-            memory: 1Gi
+            cpu: 50m
+            memory: 128Mi
           limits:
             cpu: "2"
             memory: 4Gi
@@ -210,13 +263,50 @@ template:
       - name: dind-externals
         emptyDir: {}
 
-    # Pin runner pods to the dedicated CI node (tainted fuzeinfra.io/ci=true:NoSchedule).
-    nodeSelector:
-      fuzeinfra.io/pool: ci
+    # Runner pods run on the dedicated CI nodes (tainted fuzeinfra.io/ci=true:NoSchedule)
+    # OR on autoscaled elastic nodes.
+    #
+    # WHY THIS IS AFFINITY AND NOT `nodeSelector: {fuzeinfra.io/pool: ci}` ANY MORE.
+    # A nodeSelector can only express equality, so pinning to `ci` made the ci pool the
+    # ONLY place a runner could land — and the ci pool is a fixed, hand-labelled pair of
+    # nodes (k3s applies node labels only at agent registration; see rules/nodes.yml).
+    # It has no autoscaling path at all. Meanwhile the cluster-autoscaler grows the
+    # `elastic` group, whose nodes come up labelled fuzeinfra.io/pool=elastic — a pool no
+    # runner pod was permitted to select.
+    #
+    # The result, measured 2026-08-31: 40 runner pods Pending across 10 scale sets, the
+    # autoscaler logging `Skipping node group elastic - max size reached` while scaling a
+    # pool that could not have relieved the pressure even if it had grown. CI was stuck
+    # fleet-wide with no failing component — every part was healthy, the feedback loop
+    # between "runners are unschedulable" and "add capacity" simply did not exist.
+    #
+    # `In [ci, elastic]` closes that loop: unschedulable runner pods now make the
+    # autoscaler add nodes those same pods can actually be placed on. Keep `ci` first in
+    # intent — the ci nodes are dedicated and cheaper to fill — but do not encode that as
+    # a hard constraint; a soft preference would silently reintroduce the same stall the
+    # moment ci is full, which is exactly the state that produced this comment.
+    affinity:
+      nodeAffinity:
+        requiredDuringSchedulingIgnoredDuringExecution:
+          nodeSelectorTerms:
+            - matchExpressions:
+                - key: fuzeinfra.io/pool
+                  operator: In
+                  values:
+                    - ci
+                    - elastic
     tolerations:
       - key: fuzeinfra.io/ci
         operator: Exists
         effect: NoSchedule
+      # Elastic nodes carry fuzeinfra.io/elastic=true:PreferNoSchedule. That taint is
+      # soft, so a runner would land there without this — but only after the scheduler
+      # has preferred every other node, which reintroduces the delay the affinity change
+      # exists to remove. Tolerating it explicitly makes elastic a first-class runner
+      # target rather than a last resort.
+      - key: fuzeinfra.io/elastic
+        operator: Exists
+        effect: PreferNoSchedule
 
 # ---- ARC controller reference -----------------------------------------------
 controllerServiceAccount:

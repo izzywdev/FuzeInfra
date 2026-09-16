@@ -59,6 +59,20 @@ rules:
     resources:
       - poddisruptionbudgets
     verbs: ["list", "watch"]
+  # kube-state-metrics v2 collects admission webhook configurations by DEFAULT.
+  # Without these two the collectors are dead and the log fills, once per resync,
+  # forever, with:
+  #   Failed to watch *v1.ValidatingWebhookConfiguration: ... is forbidden:
+  #   User "system:serviceaccount:fuzeinfra:fuzeinfra-kube-state-metrics" cannot
+  #   list resource "validatingwebhookconfigurations" ... at the cluster scope
+  # It is not fatal -- the pod still goes Ready -- which is exactly why it went
+  # unnoticed: the only symptom is missing kube_validatingwebhookconfiguration_*
+  # / kube_mutatingwebhookconfiguration_* series plus permanent error spam.
+  - apiGroups: ["admissionregistration.k8s.io"]
+    resources:
+      - validatingwebhookconfigurations
+      - mutatingwebhookconfigurations
+    verbs: ["list", "watch"]
   - apiGroups: ["certificates.k8s.io"]
     resources:
       - certificatesigningrequests
@@ -77,6 +91,19 @@ rules:
     resources:
       - leases
     verbs: ["list", "watch"]
+  {{- if .Values.kubeStateMetrics.longhornVolumeMetrics.enabled }}
+  # Longhorn Volume CRs back the LonghornVolumeUnderReplicated and
+  # LonghornVolumeDegradedTooLong rules (rules/storage.yml). spec.numberOfReplicas
+  # exists ONLY on the CR — Longhorn's own /metrics has no replica-count metric of
+  # any kind — so the CustomResourceState collector must be able to watch them.
+  # Without this rule KSM logs a forbidden error once per resync and the
+  # longhorn_crd_* series simply never appear, which is silent: the pod still goes
+  # Ready and both rules load fine while being permanently unable to fire.
+  - apiGroups: ["longhorn.io"]
+    resources:
+      - volumes
+    verbs: ["list", "watch"]
+  {{- end }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -92,6 +119,18 @@ subjects:
   - kind: ServiceAccount
     name: fuzeinfra-kube-state-metrics
     namespace: {{ .Release.Namespace }}
+{{- if .Values.kubeStateMetrics.longhornVolumeMetrics.enabled }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: fuzeinfra-kube-state-metrics-crs
+  labels:
+    {{- include "fuzeinfra.labels" . | nindent 4 }}
+data:
+  custom-resource-state.yaml: |
+{{ .Files.Get "files/ksm-customresource-state.yaml" | indent 4 }}
+{{- end }}
 ---
 apiVersion: v1
 kind: Service
@@ -145,6 +184,12 @@ spec:
             # CiNodePoolLabelMissing rule in rules/nodes.yml can never fire.
             - --metric-labels-allowlist=nodes=[{{ join "," . }}]
             {{- end }}
+            {{- if .Values.kubeStateMetrics.longhornVolumeMetrics.enabled }}
+            # Generates longhorn_crd_volume_{replicas_desired,robustness,state}
+            # from the Longhorn Volume CRs. See files/ksm-customresource-state.yaml
+            # for why this is the only way to observe spec.numberOfReplicas.
+            - --custom-resource-state-config-file=/etc/ksm/custom-resource-state.yaml
+            {{- end }}
           ports:
             - name: http-metrics
               containerPort: 8080
@@ -164,4 +209,44 @@ spec:
             periodSeconds: 10
           resources:
             {{- toYaml .Values.kubeStateMetrics.resources | nindent 12 }}
+          {{- if .Values.kubeStateMetrics.longhornVolumeMetrics.enabled }}
+          volumeMounts:
+            - name: crs-config
+              mountPath: /etc/ksm
+              readOnly: true
+          {{- end }}
+      {{- if .Values.kubeStateMetrics.longhornVolumeMetrics.enabled }}
+      volumes:
+        - name: crs-config
+          configMap:
+            name: fuzeinfra-kube-state-metrics-crs
+      {{- end }}
+      {{- with .Values.kubeStateMetrics.nodeSelector }}
+      # PLACEMENT IS OPERATIONAL, NOT COSMETIC. kube-state-metrics is a monitoring
+      # control-plane component and must not sit on an autoscaler-managed elastic node:
+      #
+      #   1. Elastic nodes are BILLING-REAPED. The reaper releases idle ones, so the
+      #      single KSM replica gets evicted on someone else's schedule and every
+      #      kube_* series the dashboards and rules depend on gaps out with it.
+      #   2. Elastic nodes are OFF-VLAN, which makes KSM UNDEBUGGABLE. The API server
+      #      cannot reach their kubelet, so `kubectl logs` against a pod there returns
+      #      `proxy error ... while dialing <ip>:10250, code 502` and nothing else.
+      #      That is not hypothetical: it is why the current 500+ restart crash-loop
+      #      could not be root-caused from outside the cluster. Deleting the pod does
+      #      not help — the scheduler deterministically re-picked the same elastic
+      #      node four times in a row, because those nodes are the least loaded.
+      #
+      # The selector reuses the durable-node convention already used in
+      # values-contabo.yaml for postgres/mongodb/neo4j (node.longhorn.io/create-default-disk),
+      # which resolves to exactly the VLAN nodes.
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.kubeStateMetrics.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+        {{- include "fuzeinfra.durableTolerationItem" $ | nindent 8 }}
+      {{- else }}
+      {{- include "fuzeinfra.durableToleration" $ | nindent 6 }}
+      {{- end }}
 {{- end }}

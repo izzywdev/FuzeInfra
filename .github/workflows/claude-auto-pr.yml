@@ -1,3 +1,21 @@
+# fuze:fork — deliberately NOT `fuze:managed`, so governance-sync never reconciles it.
+#
+# Differs from `workflow-templates/claude-auto-pr.yml` in two coupled ways:
+#   * it opens the PR **ready-for-review**, not as a draft;
+#   * it opens it with this repo's real-user PAT (GH_TOKEN) rather than the canonical's
+#     fuze-agent App installation token.
+#
+# The PAT rationale is recorded below in this file (PR #410: 11 checks — Harden Gate,
+# Infrastructure Tests, Helm Chart Validation, kind-validate, terraform-plan-apply, ... —
+# all sat at `conclusion: action_required` because the actor was github-actions[bot]).
+#
+# HONEST STATUS, so this fork is not defended longer than it is true: the canonical has
+# SINCE grown the fuze-agent App-token identity path (App -> bot PAT -> GITHUB_TOKEN with a
+# ::warning:: on the last rung), which solves the same problem better than a PAT. This fork
+# is therefore a candidate to RETIRE rather than a permanent divergence — but retiring it
+# also flips draft/ready-for-review, which is a behaviour change that belongs in its own PR
+# with its own review, not in a provenance stamp.
+
 name: Auto-PR from claude branches
 
 # Closes the issue->PR autonomy gap: anthropics/claude-code-action (in claude.yml)

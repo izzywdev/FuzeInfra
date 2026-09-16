@@ -106,4 +106,4 @@ runcmd:
   - [ sh, -c, "netplan apply || true; sleep 3" ]
   # STAGE 1: eth1 is brought up (netplan above) but k3s joins normally —
   # flannel stays on the current backend. The flannel flip to eth1 is Stage 2.
-  - [ sh, -c, "set -a; . /etc/k3s-agent.env; set +a; curl -sfL https://get.k3s.io | sh -s - agent --node-name '{{.NodeName}}' --kubelet-arg 'provider-id=contabo://{{.NodeName}}' --node-label 'fuzeinfra.io/pool=elastic' --node-taint 'fuzeinfra.io/elastic=true:PreferNoSchedule'" ]
+  - [ sh, -c, "set -a; . /etc/k3s-agent.env; set +a; curl -sfL https://get.k3s.io | sh -s - agent --node-name '{{.NodeName}}' --kubelet-arg 'provider-id=contabo://{{.NodeName}}' --node-label 'fuzeinfra.io/pool=elastic' --node-label 'node-role=workload' --node-taint 'fuzeinfra.io/elastic=true:PreferNoSchedule'" ]

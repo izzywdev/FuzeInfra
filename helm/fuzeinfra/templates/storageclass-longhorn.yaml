@@ -19,7 +19,13 @@ metadata:
   labels:
     {{- include "fuzeinfra.labels" . | nindent 4 }}
   annotations:
-    # local-path stays the cluster default; this class is opt-in only.
+    # Stays "false" HERE on purpose. As of 2026-09-01 Longhorn IS the cluster
+    # default, but that is set by the Longhorn chart's own StorageClass via
+    # `persistence.defaultClass: true` (argocd/applications/longhorn.yaml) — the
+    # class this template renders is the umbrella chart's OPT-IN copy, and two
+    # objects both claiming default is an invalid state. If this ever renders in
+    # a cluster where the Longhorn chart is absent, revisit deliberately rather
+    # than flipping this to "true" and ending up with two defaults.
     storageclass.kubernetes.io/is-default-class: "false"
 provisioner: driver.longhorn.io
 # Never auto-delete an underlying (replicated) DB volume when a PVC is removed.

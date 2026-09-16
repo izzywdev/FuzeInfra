@@ -6,6 +6,25 @@
 # =============================================================================
 
 global:
+  # Durable-node taint enforcement (phase 1 of 2 -- see the
+  # "fuzeinfra.durableToleration" helper in templates/_helpers.tpl).
+  #
+  # The durable nodes should carry ONLY this chart and the FuzeFront platform.
+  # The only thing guarding them was node-role.kubernetes.io/control-plane with
+  # effect PreferNoSchedule, which is ADVISORY -- so 12 mendys-prod, 2 mendys-wp,
+  # 2 fuzemarket and one each of fuzesales/fuzequality/fuzeexecutive/fuzedeploy/
+  # fuzeagent pods had accumulated there. A NoSchedule taint is the only thing
+  # that makes the policy structural instead of a convention nobody enforces.
+  #
+  # enabled=true only makes every pod in THIS chart TOLERATE the taint. It does
+  # NOT create the taint, so it is a no-op until a human applies it:
+  #   kubectl taint node <node> fuzeinfra.io/durable=true:NoSchedule
+  # Apply that one node at a time; anything missing the toleration goes Pending,
+  # which is exactly the signal you want, observed deliberately.
+  durableNodeTaint:
+    enabled: false
+    key: fuzeinfra.io/durable
+    value: "true"
   # Namespace is taken from the Helm release namespace (`helm -n fuzeinfra`).
   #
   # serviceNamespace overrides ONLY the namespace segment of the in-cluster
@@ -50,6 +69,12 @@ credentials:
   neo4j:
     user: neo4j
     password: password123
+  mariadb:
+    # Root password for the shared MariaDB engine. Same model as the other
+    # engines here: a placeholder for kind/dev. Real environments override it
+    # or supply `credentials.existingSecret` / `mariadb.rootSecret` pointing at
+    # a SealedSecret. Never commit a real value.
+    rootPassword: mariadb_dev_password
   rabbitmq:
     user: admin
     password: admin123
@@ -221,6 +246,49 @@ serviceMongoDatabases:
 serviceChromaCollections: []
 
 # -----------------------------------------------------------------------------
+# Per-service MariaDB provisioning.
+#
+# The MariaDB twin of `serviceDbProvisioning` / `serviceDatabases` above. Exists
+# so consuming repos that need a MySQL-protocol store (WordPress, Laravel, and
+# anything else that cannot speak Postgres) stop shipping their OWN MariaDB
+# StatefulSet + PVC and instead get a least-privilege user + database on the
+# shared `fuzeinfra-mariadb` engine.
+#
+# Same cross-namespace secret contract as Postgres: the hook Job runs in the
+# `fuzeinfra` namespace so the MariaDB ROOT credential never leaves it, and the
+# per-service password is read by `secretKeyRef` from a Secret the consuming
+# repo seals FOR the `fuzeinfra` namespace. Only Secret NAMES + KEYS here.
+serviceMariadbProvisioning:
+  # Client image. Empty -> falls back to `mariadb.image` (which ships the
+  # `mariadb` / `mariadb-admin` clients), so the client version always matches
+  # the server.
+  image: ""
+  host: fuzeinfra-mariadb    # in-namespace DNS of the shared MariaDB Service
+  adminUser: root
+  # Where the admin (root) password comes from. Empty name/passwordKey ->
+  # `mariadb.rootSecret` -> the chart-managed `fuzeinfra-secrets`.
+  adminSecret:
+    name: ""
+    passwordKey: ""
+
+# List of MariaDB service databases to provision. Each entry gates itself.
+#   name:      logical service name (used to derive the password env var)
+#   user:      MariaDB user to ensure (convention: <svc>_svc)
+#   database:  database to ensure; the user gets ALL PRIVILEGES on it and
+#              nothing else
+#   host:      OPTIONAL grant host pattern (default "%": any pod in the cluster
+#              network; the credential, not the source IP, is the boundary)
+#   charset / collation: OPTIONAL (default utf8mb4 / utf8mb4_unicode_ci)
+#   passwordSecret.{name,key}: the per-service Secret (sealed for the
+#     `fuzeinfra` namespace by the consumer repo) holding the user password.
+#
+# HARD GATE: `enabled: true` only in the SAME change that lands the sealed
+# Secret. One missing Secret fails the single provisioning pod with
+# CreateContainerConfigError and blocks every other entry in the list.
+serviceMariadbDatabases: []
+
+
+# -----------------------------------------------------------------------------
 # Ingress (replaces the docker-compose nginx reverse proxy). Web UIs are exposed
 # at <service>.<global.domain>. Requires an ingress controller (ingress-nginx),
 # installed by the bootstrap scripts for kind and as an EKS addon path.
@@ -259,6 +327,9 @@ postgres:
     limits:   { cpu: "1",  memory: 1Gi }
 
 mongodb:
+  # Optional durable-node pin (empty by default; set on overlays with a
+  # durable Longhorn node pool). See postgres.nodeSelector.
+  nodeSelector: {}
   enabled: true
   image: mongo:7
   port: 27017
@@ -272,7 +343,38 @@ mongoExpress:
   image: mongo-express:latest
   port: 8081
 
+# Shared MariaDB engine (MySQL protocol). OFF in the base defaults and opted
+# into per environment, because it is the newest engine here and every existing
+# overlay was sized without it — see values-local.yaml / values-contabo.yaml.
+#
+# It exists so consumers needing a MySQL-protocol store (WordPress, Laravel,
+# ...) stop running their own MariaDB StatefulSet on their own PVC. Per-service
+# users/databases are provisioned declaratively via `serviceMariadbDatabases`.
+mariadb:
+  enabled: false
+  # 11.4 is the current MariaDB LTS. Pinned to a minor series (not `latest`) so
+  # an unattended pull can never move the server across a major version under a
+  # live datadir.
+  image: mariadb:11.4
+  port: 3306
+  storage: 5Gi
+  # Optional durable-node pin (empty by default; set on overlays with a durable
+  # Longhorn node pool). See postgres.nodeSelector.
+  nodeSelector: {}
+  # Where the root password is read from. Empty -> the chart-managed
+  # `fuzeinfra-secrets` (key MARIADB_ROOT_PASSWORD). Point at a SealedSecret in
+  # any real environment.
+  rootSecret:
+    name: ""
+    key: ""
+  resources:
+    requests: { cpu: 100m, memory: 256Mi }
+    limits:   { cpu: "1",  memory: 1Gi }
+
 redis:
+  # Optional durable-node pin (empty by default; set on overlays with a
+  # durable Longhorn node pool). See postgres.nodeSelector.
+  nodeSelector: {}
   enabled: true
   image: redis:7-alpine
   port: 6379
@@ -324,6 +426,9 @@ serviceNeo4jInstances: []
 #       limits: {cpu: "1", memory: 2Gi}
 
 elasticsearch:
+  # Optional durable-node pin (empty by default; set on overlays with a
+  # durable Longhorn node pool). See postgres.nodeSelector.
+  nodeSelector: {}
   enabled: true
   image: docker.elastic.co/elasticsearch/elasticsearch:8.8.0
   port: 9200
@@ -334,6 +439,9 @@ elasticsearch:
     limits:   { cpu: "1",  memory: 2Gi }
 
 chromadb:
+  # Optional durable-node pin (empty by default; set on overlays with a
+  # durable Longhorn node pool). See postgres.nodeSelector.
+  nodeSelector: {}
   enabled: true
   # 0.5.23 is the last OSS release with the built-in token auth provider used
   # below. Never use `latest`: auth behavior and client/server APIs must match.
@@ -361,6 +469,9 @@ chromadb:
 # Kafka in KRaft mode (no ZooKeeper) - fixes the ZooKeeper startup races and
 # deprecation warnings from the docker-compose ZooKeeper-based setup.
 kafka:
+  # Optional durable-node pin (empty by default; set on overlays with a
+  # durable Longhorn node pool). See postgres.nodeSelector.
+  nodeSelector: {}
   enabled: true
   image: confluentinc/cp-kafka:7.6.1
   port: 9092
@@ -471,6 +582,9 @@ kafkaUi:
     debugLogging: false
 
 rabbitmq:
+  # Optional durable-node pin (empty by default; set on overlays with a
+  # durable Longhorn node pool). See postgres.nodeSelector.
+  nodeSelector: {}
   # Source RABBITMQ_DEFAULT_PASS from a dedicated Secret instead of the
   # chart-managed fuzeinfra-secrets. Empty name keeps existing behaviour.
   # Only honoured on a FRESH broker — see templates/messaging.yaml.
@@ -487,6 +601,9 @@ rabbitmq:
 # Monitoring & logging
 # -----------------------------------------------------------------------------
 prometheus:
+  # Optional durable-node pin (empty by default; set on overlays with a
+  # durable Longhorn node pool). See postgres.nodeSelector.
+  nodeSelector: {}
   enabled: true
   image: prom/prometheus:latest
   port: 9090
@@ -601,10 +718,25 @@ grafana:
       limits:   { cpu: 100m, memory: 128Mi }
 
 alertmanager:
+  # Optional durable-node pin (empty by default; set on overlays with a
+  # durable Longhorn node pool). See postgres.nodeSelector.
+  nodeSelector: {}
   enabled: true
   image: prom/alertmanager:latest
   port: 9093
   storage: 1Gi
+  # GitHub @fuze bridge (ADDITIVE, off by default). When enabled, a read-only
+  # secret file is mounted at /etc/alertmanager/secrets/crit_bridge_token so a
+  # `webhook_configs` receiver can authenticate to the CF Worker bridge
+  # (crit-alert.<domain>) via http_config.authorization.credentials_file. The
+  # Worker translates the Alertmanager webhook into a `alertmanager-alert`
+  # repository_dispatch, and .github/workflows/alertmanager-fuze.yml opens an
+  # `@fuze` issue in the repo that OWNS the alert's namespace (per-product routing).
+  # Enable + wire receivers/routes in the overlay that has the secret (values-contabo).
+  githubBridge:
+    enabled: false
+    tokenSecretName: fuzeinfra-tunnel-secrets
+    tokenSecretKey: CRIT_BRIDGE_TOKEN
   # Alertmanager routing/notification config. Defaults preserve the previous
   # behavior: a single no-op `default` receiver (alerts group but go nowhere).
   # Operators wire notifications by overriding `receivers` and `routes`, e.g. a
@@ -645,7 +777,19 @@ loki:
   enabled: true
   image: grafana/loki:3.2.0
   port: 3100
+  # Size of the STANDALONE PVC `fuzeinfra-loki-data` (monitoring.yaml). Loki runs as
+  # a Deployment (strategy: Recreate) precisely so this value is live: a standalone
+  # PVC is expandable, unlike a StatefulSet volumeClaimTemplate, so changing this in
+  # Git and letting Argo sync is the supported way to resize Loki's disk. Growth
+  # only — the API server rejects a shrink. On a class without
+  # allowVolumeExpansion the change is rejected too, which is a visible failure
+  # rather than the previous silent no-op.
   storage: 5Gi
+  # Optional scheduling / limits passthrough. Empty by default so the rendered pod
+  # spec is unchanged unless an overlay sets them.
+  resources: {}
+  nodeSelector: {}
+  tolerations: []
   # Optional S3-compatible object store backend for Loki chunks + index.
   # When disabled (default) Loki uses on-disk filesystem storage (the PVC above).
   # When enabled, chunk+index storage moves to the configured bucket — keeping
@@ -744,16 +888,113 @@ backups:
     image: mongo:7              # ships mongodump
     host: fuzeinfra-mongodb
     port: 27017
+  # Tracks the mariadb engine gate: off wherever mariadb.enabled is false, on
+  # in the overlays that run it (see values-contabo.yaml).
+  mariadb:
+    enabled: false
+    schedule: ""
+    image: mariadb:11.4         # ships mariadb-dump
+    host: fuzeinfra-mariadb
+    port: 3306
+    user: root
   neo4j:
     enabled: true
     schedule: ""
     image: neo4j:5             # ships cypher-shell; APOC stream export (online)
     host: fuzeinfra-neo4j
     boltPort: 7687
+  # -------------------------------------------------------------------------
+  # VOLUME backups (templates/backup-volume-cronjobs.yaml)
+  # -------------------------------------------------------------------------
+  # Prometheus has no logical dump tool — its state is a file tree on a PVC — so
+  # it was not covered by the per-database CronJobs above. That is what
+  # destroyed the whole metrics history on 2026-09-07 when two durable nodes
+  # were reinstalled 25 minutes apart and every Longhorn replica of
+  # `fuzeinfra-prometheus-data` was lost mid-rebuild: there was nothing to
+  # restore from. This job copies the TSDB to the SAME S3 bucket with the SAME
+  # credential (backups.s3.existingSecret) as the dumps.
+  #
+  # Loki is deliberately NOT here: with loki.s3.enabled its chunks and index are
+  # already written straight to `fuzeinfra-loki`, and the PVC holds only working
+  # set (WAL / shipper cache / compactor dir). See the template header.
+  #
+  # Requires backups.sink="s3" — a copy on the storage it protects against is
+  # not a backup. Off by default; enabled per-overlay.
+  volumes:
+    # Separate TOP-LEVEL key prefix (a sibling of backups.s3.prefix, not nested
+    # under it) so these copies get their own, shorter lifecycle rule without
+    # overlapping the dump rule. Tens of GB per run vs a few MB per dump.
+    prefix: "volumes"
+    # Age-out for volume copies, applied as its own BUCKET LIFECYCLE rule
+    # (backup-s3-lifecycle.yaml). 0 disables that rule — which, for objects this
+    # large, means the bucket grows forever. Do not set it to 0 casually.
+    lifecycleExpireDays: 14
+    # 20Gi of small TSDB block files: aws s3 sync wants headroom and time.
+    activeDeadlineSeconds: 10800
+    resources:
+      requests: { cpu: 100m, memory: 256Mi }
+      limits:   { cpu: "1",  memory: 1Gi }
+    prometheus:
+      enabled: false
+      # Staggered clear of the 02:00–03:00 DB dump window.
+      schedule: "20 3 * * *"
+      # Snapshots via POST /api/v1/admin/tsdb/snapshot — a consistent,
+      # hard-linked copy. Enabling this ALSO makes monitoring.yaml pass
+      # `--web.enable-admin-api` to Prometheus. The flag is tied to this switch
+      # rather than being on unconditionally because the admin API also exposes
+      # delete_series to anything that can reach port 9090 in-cluster.
+      snapshotImage: curlimages/curl:8.10.1   # sh + curl + sed, ~10MB
+      host: fuzeinfra-prometheus
+      port: 9090
+      # The standalone PVC declared in templates/monitoring.yaml.
+      pvcName: fuzeinfra-prometheus-data
+      # Must match the fsGroup Prometheus runs with (monitoring.yaml: 65534), or
+      # the Job cannot read — let alone remove — the snapshot tree.
+      runAsUser: 65534
 
 promtail:
   enabled: true
   image: grafana/promtail:3.2.0
+
+tempo:
+  # Distributed-tracing backend (Grafana Tempo, single-binary/local-storage
+  # mode). Receives OTLP traces exclusively from the otel-collector below —
+  # apps never talk to Tempo directly. Also runs the metrics-generator, which
+  # derives RED service-graph + span-latency metrics from trace data and
+  # remote-writes them into Prometheus (requires
+  # `--web.enable-remote-write-receiver`, wired in templates/monitoring.yaml
+  # gated on tempo.enabled) — that's what powers the Tracing dashboard's
+  # service graph and duration panels without every app exporting its own
+  # RED metrics.
+  enabled: true
+  image: grafana/tempo:2.6.1
+  httpPort: 3200
+  otlpGrpcPort: 4317
+  otlpHttpPort: 4318
+  # How long trace blocks are kept before compaction removes them.
+  retention: 24h
+  storage: 10Gi
+  resources: {}
+  nodeSelector: {}
+  tolerations: []
+
+otelCollector:
+  # Single OTLP ingestion point for every consuming app's traces/metrics/logs
+  # — send to http://fuzeinfra-otel-collector.fuzeinfra:4317 (grpc) or :4318
+  # (http) and never wire up Tempo/Loki/Prometheus hostnames directly in app
+  # code. Fans out: traces -> Tempo, logs -> Loki, metrics -> its own
+  # Prometheus exporter (scraped like any other target). Stateless — safe to
+  # scale replicas horizontally.
+  enabled: true
+  image: otel/opentelemetry-collector-contrib:0.112.0
+  otlpGrpcPort: 4317
+  otlpHttpPort: 4318
+  metricsPort: 8889
+  healthCheckPort: 13133
+  replicas: 1
+  resources: {}
+  nodeSelector: {}
+  tolerations: []
 
 nodeExporter:
   enabled: true
@@ -767,6 +1008,41 @@ nodeExporter:
 nodeConfigurator:
   preferIPv4:
     enabled: false
+  # Blacklist Longhorn's block devices in /etc/multipath.conf and restart multipathd.
+  # multipathd claiming those devices is the root cause behind BOTH Longhorn stuck-volume
+  # signatures ("already mounted or mount point busy", and mke2fs "apparently in use by
+  # the system"); Longhorn flags it itself as Multipathd=False / MultipathdIsRunning on
+  # every node. OFF by default because it restarts a host daemon: a human enables it and
+  # verifies `multipath -t` plus the Longhorn node condition flipping to True.
+  multipathBlacklist:
+    enabled: false
+    # Staged rollout. EMPTY = every node the DaemonSet runs on. Name one or more
+    # nodes to touch only those -- prove the change on a non-control-plane node
+    # before it goes near the node running etcd. The DaemonSet stays fleet-wide
+    # regardless, so preferIPv4 is unaffected by staging this.
+    rolloutNodes: []
+  # Give etcd priority on the disk over pod I/O, via the cgroup-v2 iocost controller.
+  #
+  # Fixes the 2026-09-06 outage mode: Prometheus TSDB compaction, Loki chunk flushes
+  # and Longhorn replica traffic all share /dev/sda1 with the etcd datastore. etcd
+  # then misses its 100ms budget ("apply request took too long ... read-only range"),
+  # the apiserver's own readiness fails, and it refuses connections cluster-wide --
+  # which is what actually took prod down, not any apiserver fault.
+  #
+  # NOTE: a plain systemd `IOWeight=` does NOT work on these nodes. It writes cgroup
+  # io.weight, which is INERT under scheduler `none` with no BFQ module -- a fix that
+  # looks applied and is not. iocost (CONFIG_BLK_CGROUP_IOCOST=y, already in this
+  # kernel) makes io.weight real with no module install and no reboot. iocost is also
+  # preferred over BFQ here because the disks are non-rotational.
+  #
+  # Safe no-op on a node whose kernel lacks iocost, or that has no such device.
+  ioPriority:
+    enabled: false
+    # Block device backing the etcd datastore (/var/lib/rancher/k3s/server/db).
+    device: sda
+    # k3s.service contains etcd; kubepods.slice contains every pod. 1000:100 = 10:1.
+    k3sWeight: 1000
+    podsWeight: 100
   image: docker.io/busybox:1.36.1
 
 kubeStateMetrics:
@@ -777,8 +1053,36 @@ kubeStateMetrics:
   # fuzeinfra.io/pool backs the CiNodePoolLabelMissing rule (rules/nodes.yml):
   # k3s sets --node-label only at agent registration, so a manual relabel is
   # never reconciled by Terraform and silently strands all CI runner pods.
+  # fuzeinfra.io/vlan backs NodeQuarantinedOffVLAN and NodeMissingVLANLabel
+  # (rules/nodes.yml). It was missing here until 2026-09-07, which did not make
+  # those two rules merely silent — it broke them in OPPOSITE directions:
+  #   * NodeQuarantinedOffVLAN selects label_fuzeinfra_io_vlan="absent" directly,
+  #     so with no such dimension it matched nothing and could never fire.
+  #   * NodeMissingVLANLabel is an `unless on(node) kube_node_labels{...vlan=~
+  #     "present|absent"}` exclusion. An always-empty right-hand side excludes
+  #     nothing, so it fired for EVERY non-control-plane node forever.
+  # Their promtool tests passed throughout, because the fixtures hand-feed a
+  # label_fuzeinfra_io_vlan dimension that kube-state-metrics was never
+  # configured to emit. tests/test_alert_label_allowlist.py now cross-checks the
+  # rules against this list so a rule can no longer reference a dropped label.
   nodeLabelsAllowlist:
     - fuzeinfra.io/pool
+    - fuzeinfra.io/vlan
+  # Generate longhorn_crd_volume_* from the Longhorn Volume CRs via the
+  # CustomResourceState collector. This is what makes spec.numberOfReplicas
+  # observable AT ALL: Longhorn's own /metrics endpoint exposes no replica-count
+  # metric in any form (verified against prod 2026-09-07), so without this the
+  # LonghornVolumeUnderReplicated rule in rules/storage.yml has nothing to query
+  # — and that rule is the one that would have caught fuzeinfra-prometheus-data
+  # sitting at 1 replica for days before it was lost.
+  # Adds a ClusterRole rule for longhorn.io/volumes and mounts
+  # files/ksm-customresource-state.yaml.
+  # Default OFF: Longhorn is not part of this chart (it is a separate Argo
+  # Application) and is absent on local kind and on AWS, where the collector
+  # would log a not-found error every resync. Enabled in values-contabo.yaml,
+  # which is the overlay for the cluster that actually runs Longhorn.
+  longhornVolumeMetrics:
+    enabled: false
   resources:
     requests: { cpu: 10m, memory: 32Mi }
     limits:   { cpu: 250m, memory: 128Mi }
@@ -1051,7 +1355,10 @@ clusterAutoscaler:
     enabled: false
     schedule: "0 * * * *"
     releaseWindow: 24h
-    billingPeriod: 720h
+    # Contabo bills the whole elastic fleet calendar-aligned to this day of
+    # month (confirmed 2026-09), not per-instance CreatedDate + a fixed
+    # period — see internal/reaper.Config.RenewalDay's doc comment.
+    renewalDay: 15
     successfulJobsHistoryLimit: 3
     failedJobsHistoryLimit: 3
     # Bounds a single CronJob run; the binary's own internal context timeout
@@ -1264,3 +1571,54 @@ longhorn:
     # scoping (set to e.g. "baseline" once baseline nodes are tagged in Longhorn).
     diskSelector: ""
     nodeSelector: ""
+
+# -----------------------------------------------------------------------------
+# Self-heal loop metrics exporter (OPT-IN, default OFF).
+#
+# Three workflows open a labelled GitHub issue/PR when something breaks and a
+# cloud coding agent is expected to fix it — argo-outofsync-autofix.yml
+# (argo-autofix), grafana-crit-fix.yml (crit-autofix, Loki-sourced) and
+# alertmanager-fuze.yml (alertmanager-autofix). Whether those loops ever CLOSE
+# was only answerable by hand-running GitHub label queries; this exporter
+# persists it as Prometheus metrics plus a Loki event feed.
+#
+# Source: tools/selfheal-metrics-exporter. Dashboard:
+# helm/fuzeinfra/dashboards/selfheal-loop.json. Doc: docs/self-heal-loop-metrics.md.
+#
+# ON only in values-contabo.yaml: prod is the cluster where the loop runs, and
+# the metric is about this repo's GitHub history, so a second exporter anywhere
+# else would just double-count the same numbers.
+# -----------------------------------------------------------------------------
+selfHealMetrics:
+  enabled: false
+  image: ghcr.io/izzywdev/fuzeinfra/selfheal-metrics-exporter
+  tag: latest
+  imagePullSecrets: []
+  # Empty = inherit global.imagePullPolicy. Set Always in any overlay still on
+  # the floating `latest` tag, or a node that cached it never sees a rebuild.
+  imagePullPolicy: ""
+  port: 9109
+
+  # Repo whose autofix labels are counted.
+  githubRepo: izzywdev/FuzeInfra
+  pollIntervalSeconds: 600
+
+  # label -> the `system` label value on every metric. Data-driven on purpose:
+  # a 4th autofix workflow is an entry here, not a code change.
+  labelSystemMap:
+    argo-autofix: argocd
+    crit-autofix: loki
+    alertmanager-autofix: alertmanager
+
+  # Read-only GitHub token, referenced ONLY — never a value in this chart. Seal
+  # it as deploy/sealed-secrets/selfheal-metrics-github-token.yaml (see the
+  # .template beside it). The env ref is `optional: true`, so a cluster without
+  # the SealedSecret runs unauthenticated (60 req/h, ample at a 10-minute poll)
+  # rather than crash-looping.
+  githubTokenSecretName: selfheal-metrics-github-token
+  githubTokenSecretKey: token
+
+  # A stdlib poller hitting one API a few times per 10 minutes.
+  resources:
+    requests: { cpu: "10m", memory: "32Mi" }
+    limits:   { cpu: "100m", memory: "128Mi" }

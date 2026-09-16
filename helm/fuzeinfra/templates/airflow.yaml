@@ -127,6 +127,7 @@ metadata:
     {{- include "fuzeinfra.selectorLabels" (dict "component" "airflow-init" "root" .) | nindent 4 }}
 spec:
   restartPolicy: Never
+  {{- include "fuzeinfra.durableToleration" $ | nindent 2 }}
   containers:
     - name: airflow-init
       image: {{ .Values.airflow.image }}
@@ -392,6 +393,7 @@ spec:
         {{- if eq (include "fuzeinfra.airflowInitMode" .) "inline" }}
         {{- include "fuzeinfra.airflowWaitForDb" . | nindent 8 }}
         {{- end }}
+      {{- include "fuzeinfra.durableToleration" $ | nindent 6 }}
       containers:
         - name: webserver
           image: {{ .Values.airflow.image }}
@@ -472,6 +474,7 @@ spec:
         {{- if eq (include "fuzeinfra.airflowInitMode" .) "inline" }}
         {{- include "fuzeinfra.airflowWaitForDb" . | nindent 8 }}
         {{- end }}
+      {{- include "fuzeinfra.durableToleration" $ | nindent 6 }}
       containers:
         - name: scheduler
           image: {{ .Values.airflow.image }}
@@ -508,6 +511,7 @@ spec:
         {{- if eq (include "fuzeinfra.airflowInitMode" .) "inline" }}
         {{- include "fuzeinfra.airflowWaitForDb" . | nindent 8 }}
         {{- end }}
+      {{- include "fuzeinfra.durableToleration" $ | nindent 6 }}
       containers:
         - name: worker
           image: {{ .Values.airflow.image }}
@@ -565,6 +569,7 @@ spec:
       initContainers:
         {{- include "fuzeinfra.airflowWaitForDb" . | nindent 8 }}
       {{- end }}
+      {{- include "fuzeinfra.durableToleration" $ | nindent 6 }}
       containers:
         - name: flower
           image: {{ .Values.airflow.image }}

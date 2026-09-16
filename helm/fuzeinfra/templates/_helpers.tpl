@@ -116,3 +116,58 @@ affinity:
                 operator: In
                 values: ["{{ .Release.Name }}"]
 {{- end -}}
+
+{{/*
+Toleration for the durable-node taint.
+
+WHY. The durable nodes are meant to carry ONLY core infrastructure (this chart)
+and the FuzeFront platform. In practice they had accumulated 12 mendys-prod, 2
+mendys-wp, 2 fuzemarket and one each of fuzesales / fuzequality / fuzeexecutive /
+fuzedeploy / fuzeagent pods, because the only thing guarding them was
+
+    node-role.kubernetes.io/control-plane : PreferNoSchedule
+
+and PreferNoSchedule is ADVISORY -- the scheduler places pods there anyway under
+pressure. Per-repo nodeAffinity is opt-in, so any repo nobody has touched still
+lands wherever it likes. A NoSchedule taint is the only mechanism that makes this
+policy structural rather than a convention.
+
+TWO-PHASE ROLLOUT; this helper is phase one.
+  Phase 1 (this chart): every workload here tolerates the taint. A toleration for
+          a taint that does not exist yet is a complete NO-OP, so merging this
+          changes nothing at runtime and cannot evict anything.
+  Phase 2 (deliberate, attended): apply the taint to the durable nodes --
+              kubectl taint node <node> fuzeinfra.io/durable=true:NoSchedule
+          At that instant anything WITHOUT the toleration stops being schedulable
+          there. Do it one node at a time and verify: a workload missed in phase 1
+          surfaces here as Pending, which is why phase 2 is attended.
+
+Gated off by default (global.durableNodeTaint.enabled) so local/kind/EKS overlays,
+which have no such taint, render byte-identically.
+
+Usage in a pod spec: {{- include "fuzeinfra.durableToleration" $ | nindent 6 }}
+*/}}
+{{- define "fuzeinfra.durableToleration" -}}
+{{- if .Values.global.durableNodeTaint.enabled -}}
+tolerations:
+  - key: {{ .Values.global.durableNodeTaint.key | quote }}
+    operator: Equal
+    value: {{ .Values.global.durableNodeTaint.value | quote }}
+    effect: NoSchedule
+{{- end -}}
+{{- end -}}
+
+{{/*
+Same toleration, but as a bare LIST ITEM for pod specs that already render their
+own `tolerations:` key (kube-state-metrics, monitoring). Emitting the full block
+there would produce a duplicate mapping key and fail the render.
+Usage: {{- include "fuzeinfra.durableTolerationItem" $ | nindent 8 }}
+*/}}
+{{- define "fuzeinfra.durableTolerationItem" -}}
+{{- if .Values.global.durableNodeTaint.enabled -}}
+- key: {{ .Values.global.durableNodeTaint.key | quote }}
+  operator: Equal
+  value: {{ .Values.global.durableNodeTaint.value | quote }}
+  effect: NoSchedule
+{{- end -}}
+{{- end -}}

@@ -54,8 +54,40 @@ spec:
           # 3 replicas across DISTINCT nodes. Soft anti-affinity OFF = hard spread.
           defaultReplicaCount: 3
           replicaSoftAntiAffinity: false
-          # Small V92 disks: no thin over-provisioning; keep kubelet headroom.
-          storageOverProvisioningPercentage: 100
+          # Thin over-provisioning. Longhorn refuses a disk once the SUM OF
+          # REQUESTED replica sizes on it exceeds
+          #     (storageMaximum - storageReserved) * thisPercentage / 100
+          # and Longhorn reserves 30% of each disk by default. On the prod durable
+          # nodes that is (154.9G - 46.5G) = 108.4G of usable budget, so at 100%
+          # two of the three disks were already past the cap at 175G scheduled and
+          # reported Schedulable=False / DiskPressure.
+          #
+          # Consequence, 2026-09-06: NO volume in the cluster could place a replica
+          # anywhere. Every volume sat degraded and unable to rebuild, and
+          # fuzeinfra-postgres-0 could not attach at all -- which took DNS for
+          # fuzeinfra-postgres.fuzeinfra.svc.cluster.local with it, so Authentik
+          # crash-looped for five days ("PostgreSQL connection failed ... Name or
+          # service not known") and every admin/product login was down with it.
+          #
+          # 200% is safe here because Longhorn volumes are SPARSE: the durable
+          # nodes carry ~175G of *requested* replicas against ~111G actually
+          # written. The real guard against filling a disk is
+          # storageMinimalAvailablePercentage below, which is unchanged and still
+          # halts scheduling on genuine disk pressure.
+          #
+          # This is a ceiling, not a target. The structural fix is a third healthy
+          # durable node (mendys-worker-1 has been NotReady since 2026-09-02, so
+          # only two disks are usable and replicaSoftAntiAffinity=false means a
+          # 3-replica volume is unsatisfiable). Revisit once it is back.
+          #
+          # !! defaultSettings ONLY APPLIES ON FIRST INSTALL. Longhorn keeps live
+          # values in settings.longhorn.io CRDs and the chart does NOT overwrite
+          # them on upgrade, so changing this line alone changes NOTHING on a
+          # running cluster. It must be paired with:
+          #   kubectl -n longhorn-system patch settings.longhorn.io \
+          #     storage-over-provisioning-percentage --type=merge -p '{"value":"200"}'
+          # (already applied live on 2026-09-06; this line keeps a rebuild honest).
+          storageOverProvisioningPercentage: 200
           storageMinimalAvailablePercentage: 15
           # Do not let a node self-select all disks blindly; operator tags durable
           # nodes for replica placement (design §4.1 / O-6).
@@ -67,11 +99,67 @@ spec:
           replicaReplenishmentWaitInterval: 30
           # Guard against replicas landing on autoscaled/reaped elastic nodes.
           allowVolumeCreationWithDegradedAvailability: false
-        # Keep local-path the cluster default: do NOT create a default-marked
-        # Longhorn StorageClass. The opt-in `longhorn` SC ships from the umbrella
-        # chart (templates/storageclass-longhorn.yaml), non-default.
+          # Toleration for the SYSTEM-MANAGED components -- instance managers,
+          # engine images and the CSI plugin pods. These are created by
+          # longhorn-manager at runtime, NOT by Helm, so the `tolerations:` keys
+          # below do not reach them; this setting is the only way to tolerate a
+          # taint on their behalf. Without it the Helm-managed DaemonSets would
+          # schedule on the durable nodes while the instance-manager pods that
+          # actually serve the volumes would not -- storage still broken, just
+          # less obviously.
+          #
+          # !! SAME FIRST-INSTALL CAVEAT as storageOverProvisioningPercentage
+          # above: defaultSettings is not reapplied on upgrade. Pair this with
+          #   kubectl -n longhorn-system patch settings.longhorn.io taint-toleration \
+          #     --type=merge -p '{"value":"fuzeinfra.io/durable=true:NoSchedule"}'
+          # Longhorn additionally requires that no volume be attached when this
+          # setting changes, so apply it during the same window as the taint.
+          taintToleration: "fuzeinfra.io/durable=true:NoSchedule"
+        # LONGHORN IS NOW THE CLUSTER DEFAULT. This was `false`, with local-path
+        # left as the default — and that default was silently destroying data.
+        #
+        # WHY IT CHANGED. `local-path` provisions node-LOCAL disk and pins the PV
+        # to that node by nodeAffinity. On a cluster whose elastic nodes are
+        # created and REAPED by an autoscaler, a volume on local-path dies with
+        # its node. Measured 2026-09-01, two PVs are bound to nodes that no longer
+        # exist:
+        #
+        #   fuzekeys/fuzekeys-data            -> fuzeinfra-elastic-918c8556  (gone)
+        #   fuzeinfra/data-fuzeinfra-postgres-0 -> fuzeinfra-elastic-57543f68 (gone)
+        #
+        # The fuzekeys one is why `fuzekeys-backend` can never schedule: its PV
+        # points at a deleted machine, so no amount of capacity or node labelling
+        # helps. This is the same class as the 2026-07-24 incident in which
+        # local-path volumes were wiped by node reinstalls and Neo4j was LOST.
+        #
+        # The trap was the DEFAULT, not any one repo's carelessness: a consuming
+        # chart that does not explicitly say `storageClassName: longhorn` gets
+        # ephemeral disk silently. `global.storageClass: longhorn` only governs
+        # FuzeInfra's own umbrella chart; consuming repos deploy their own Helm
+        # releases and never inherited it. Eight PVCs across six namespaces landed
+        # on local-path this way — including a Postgres, a MariaDB, RabbitMQ and
+        # Redis.
+        #
+        # Making the SAFE class the default inverts the failure mode: forgetting
+        # to choose now yields replicated storage on durable nodes instead of
+        # disposable disk. Opting INTO local-path stays possible and is now an
+        # explicit, reviewable act.
+        #
+        # PAIRED CHANGE, REQUIRED: k3s ships local-path marked default via its
+        # `local-storage` Addon. Two default classes is an invalid state, so that
+        # annotation must be flipped to "false" as well. It is owned by the k3s
+        # addon controller (objectset.rio.cattle.io/owner-name: local-storage),
+        # not by this chart, so it cannot be expressed here.
+        #
+        # It now lives in argocd/cluster-bootstrap/local-path-not-default.yaml,
+        # applied by the `apply-cluster-config` workflow. It started life as a
+        # one-off `kubectl patch`, and that did NOT hold: k3s regenerates
+        # /var/lib/rancher/k3s/server/manifests/local-storage.yaml and re-applies
+        # it at every start, so prod was measured back on TWO defaults on
+        # 2026-09-07. Re-run that workflow after any k3s restart until the addon
+        # is skipped on the server nodes (see that file).
         persistence:
-          defaultClass: false
+          defaultClass: true
           defaultClassReplicaCount: 3
           reclaimPolicy: Retain
         # Trim footprint on the memory-constrained control-plane.
@@ -80,8 +168,39 @@ spec:
           provisionerReplicaCount: 1
           resizerReplicaCount: 1
           snapshotterReplicaCount: 1
+        # ---------------------------------------------------------------------
+        # DURABLE-NODE TAINT TOLERATION -- REQUIRED, NOT OPTIONAL.
+        #
+        # The durable nodes are being tainted `fuzeinfra.io/durable=true:NoSchedule`
+        # so application workloads stop landing on the three control-plane/etcd
+        # nodes (measured 2026-09-07: 70 and 57 pods on two of them, 20,585
+        # container restarts, load average 59, etcd losing heartbeats).
+        #
+        # Longhorn is the ONE component that must be exempt in the strongest
+        # sense: `createDefaultDiskLabeledNodes: true` means replica disks exist
+        # ONLY on nodes labelled node.longhorn.io/create-default-disk=true, and
+        # those are exactly the three durable nodes. If longhorn-manager cannot
+        # schedule there, Longhorn loses the manager on every node that holds
+        # storage -- volumes cannot attach, rebuild, or be scheduled at all.
+        # Tainting without these tolerations is a cluster-wide storage outage,
+        # delayed until the next pod restart (NoSchedule does not evict, so it
+        # would not fail at apply time -- it would fail later and look unrelated).
+        #
+        # Verified against the live cluster before writing this: NONE of
+        # longhorn-manager, argocd-application-controller, coredns or fuzefront
+        # carried any toleration beyond the default not-ready/unreachable set.
+        tolerations: &durableToleration
+          - key: fuzeinfra.io/durable
+            operator: Equal
+            value: "true"
+            effect: NoSchedule
         longhornManager:
           priorityClass: ""
+          tolerations: *durableToleration
+        longhornDriver:
+          tolerations: *durableToleration
+        longhornUI:
+          tolerations: *durableToleration
         # UI stays ClusterIP-only by default; expose via a CF Access app +
         # Traefik Ingress deliberately later (design O-2), never wide open.
         ingress:

@@ -33,7 +33,15 @@ def test_prod_uses_a_clean_synchronized_elastic_pool_identity() -> None:
 
     assert autoscaler["enabled"] is True
     assert autoscaler["scaleDownEnabled"] is False
-    assert autoscaler["nodeGroup"] == {"minSize": 0, "maxSize": 1}
+    # The contract this test exists for is SYNCHRONIZATION (nodeGroup bounds ==
+    # provider bounds), not one frozen ceiling. Hard-coding the ceiling here is
+    # what made this test stale: the ceiling was deliberately raised 1 -> 4 in
+    # values-contabo.yaml and this assertion, not the config, was the thing that
+    # was wrong. Derive the ceiling and assert the invariants that can actually
+    # regress.
+    ceiling = autoscaler["nodeGroup"]["maxSize"]
+    assert isinstance(ceiling, int) and ceiling >= 1
+    assert autoscaler["nodeGroup"] == {"minSize": 0, "maxSize": ceiling}
     assert {
         "minSize": provider["minSize"],
         "maxSize": provider["maxSize"],
@@ -76,8 +84,14 @@ def test_cutover_workflow_cannot_restore_stale_identity_or_bounds() -> None:
 
     assert f'.clusterAutoscaler.provider.elasticTag = "{tag}"' in workflow
     assert f'.clusterAutoscaler.provider.elasticNamePrefix = "{tag}"' in workflow
-    assert ".clusterAutoscaler.provider.maxSize = 1" in workflow
-    assert ".clusterAutoscaler.nodeGroup.maxSize = 1" in workflow
+    # Pin the cutover's bounds to whatever prod values currently declare. A
+    # literal here is exactly how ca-cutover kept `maxSize = 1` after the pool
+    # ceiling was raised to 4 — running it would have silently reverted the
+    # raise, which is precisely the "restore stale bounds" failure this test is
+    # named for.
+    ceiling = production_autoscaler()["nodeGroup"]["maxSize"]
+    assert f".clusterAutoscaler.provider.maxSize = {ceiling}" in workflow
+    assert f".clusterAutoscaler.nodeGroup.maxSize = {ceiling}" in workflow
     assert ".clusterAutoscaler.provider.maxSize = 5" not in workflow
     assert "PRODUCTION_PRODUCT_ID: V153" in workflow
     assert '!= "$PRODUCTION_PRODUCT_ID"' in workflow

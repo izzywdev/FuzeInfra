@@ -1,0 +1,1497 @@
+#!/usr/bin/env python3
+"""Deployment-freeze watchdog for the prod cluster.
+
+WHY THIS EXISTS
+---------------
+Between 2026-08-30 and 2026-09-01 fleet-wide deployment was frozen for 2d11h and
+NOTHING alerted. Every individual component reported "running". The chain was:
+
+  1. Loki's 5Gi PVC filled. A full Loki volume is SELF-SEALING: retention is
+     enforced by the compactor, the compactor runs inside Loki, and Loki cannot
+     start on a full disk ("mkdir /loki/tsdb-shipper-active/scratch/...: no space
+     left on device"). It crash-looped 694 times over 2d11h and could never free
+     its own space.
+  2. Argo's sync of `fuzeinfra-prod` blocks on resource health, so the
+     permanently-unhealthy StatefulSet wedged ONE sync operation in
+     phase=Running for 37 hours ("waiting for healthy state of
+     apps/StatefulSet/fuzeinfra-loki and 1 more resources").
+  3. Argo will not start a new sync while an operation is in flight, so every
+     prod change queued silently behind it — including a cluster-autoscaler
+     maxSize raise that fleet-wide CI was blocked on.
+  4. The freeze was found by hand, days later.
+
+Each detection below is one link of that chain. Thresholds live in
+governance/watchdog-thresholds.json.
+
+DESIGN RULES (do not weaken)
+----------------------------
+* READ-ONLY against the cluster, with exactly three sanctioned exceptions, all
+  named and all bounded: dispatching the existing `argo-terminate-op` workflow
+  for an op that is already past threshold; `kubectl exec -- df` as the PVC
+  fallback when Prometheus is unreachable; and the dark-node escalation ladder
+  (dispatching `contabo-instance-reboot.yml` / `ca-reinstall-controlplane.yml`,
+  never a direct kubectl mutation — see the 2026-09-16 note below). Nothing is
+  ever patched, edited or deleted BY THIS SCRIPT: prod is GitOps under Argo
+  selfHeal, and every mutation this script triggers happens inside a separate,
+  narrowly-scoped, independently-auditable workflow that holds its own
+  credential (this script itself never holds KUBE_CONFIG write access or the
+  Contabo credential).
+* NEVER read or print a Secret. FuzeInfra's job logs are PUBLIC — a read whose
+  OUTPUT is a credential leaks it (this happened on 2026-07-29). The same rule
+  tests/test_cluster_query_guard.py encodes for cluster-query is enforced here
+  in `assert_safe_kubectl`.
+* FAIL LOUDLY WHEN BLIND. If the cluster cannot be reached, or Prometheus and
+  its fallback both fail, this exits non-zero. It never reports "all clear"
+  because it could not look. A watchdog that goes green when blind is the
+  vacuous gate in its most dangerous form.
+
+Everything that decides *whether something is wrong* is a pure function over
+parsed JSON (`detect_*`, `filter_new_findings`), so the predicates are unit
+tested offline with no cluster: tests/test_deployment_watchdog.py.
+
+ADDED 2026-09-15 — dark nodes (detect_dark_nodes / KIND_DARK_NODE). A Contabo
+autoscaler-health alert investigation found `fuze-core-3` (a control-plane/etcd
+node) silently dark — Ready/MemoryPressure/DiskPressure/PIDPressure all
+`Unknown`, kubelet not posting status — for 4.5 days, still counted as an etcd
+voting member, with nothing having ever flagged it. Same silent-freeze shape as
+the incident above, so it lives in the same watchdog.
+
+UPDATED 2026-09-16 — automated escalation ladder (decide_dark_node_escalation).
+The 2026-09-15 version above filed an issue and stopped, deliberately, because
+"is a reboot safe" needs facts a human should weigh. What actually happened
+next: the manual dance of read-the-issue -> decide -> dispatch-reboot ->
+re-check -> decide-again took from first detection (2026-09-10) to actual
+resolution (2026-09-15/16) — FIVE DAYS for a node that a machine could tell was
+dark within 30 minutes. The facts that made a human's decision safe are exactly
+the facts a bounded state machine can check just as well:
+
+  - reboot is capped at `dark_node.max_reboot_attempts` (default 3), spaced by
+    `dark_node.reboot_cooldown_minutes` so a still-booting node isn't rebooted
+    on top of itself;
+  - reinstall only fires after attempts are exhausted AND the node has been
+    dark for `dark_node.escalate_after_minutes` (default 120) -- both, not
+    either;
+  - reinstall is REFUSED (not silently skipped -- the issue says why) if the
+    node is an etcd voter and fewer than
+    `dark_node.reinstall_min_other_ready_control_plane` OTHER control-plane
+    nodes are Ready (quorum safety), or if the node isn't control-plane/durable
+    at all (elastic nodes have their own autoscaler-driven lifecycle and are
+    out of scope here);
+  - the Longhorn data-safety preflight (scripts/preflight_node_teardown.py)
+    still runs INSIDE ca-reinstall-controlplane.yml regardless of who
+    dispatched it, so this script never has to duplicate that check or trust
+    its own judgement about data safety.
+
+Every step still posts to the same tracked issue, so the audit trail a human
+reviewed manually before is unchanged -- only who presses the button changed.
+See docs/runbooks/dark-node-reboot.md for the full flow and the escalation
+state machine's own tests in tests/test_deployment_watchdog.py.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import subprocess
+import sys
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Iterable, Sequence
+from urllib.parse import quote
+
+ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_CONFIG = ROOT / "governance" / "watchdog-thresholds.json"
+
+# Detection kinds. These strings are part of the dedup key, so renaming one
+# orphans every open issue filed under the old name.
+KIND_ARGO = "stuck-argo-op"
+KIND_CRASHLOOP = "chronic-crashloop"
+KIND_CREATING = "stuck-containercreating"
+KIND_PVC = "pvc-nearing-full"
+KIND_DARK_NODE = "dark-node"
+
+
+class ClusterUnreachable(RuntimeError):
+    """The cluster (or the metric source) could not be read.
+
+    Raised instead of returning an empty result set, because "no findings" and
+    "could not look" must never be the same value.
+    """
+
+
+class UnsafeCommand(RuntimeError):
+    """A kubectl invocation that would mutate state or print a credential."""
+
+
+class GitHubError(RuntimeError):
+    """The GitHub CLI failed. Also fatal — an issue that was not filed is not an alert."""
+
+
+# --------------------------------------------------------------------------
+# config + time helpers
+# --------------------------------------------------------------------------
+
+def load_config(path: str | os.PathLike[str] | None = None) -> dict:
+    return json.loads(Path(path or DEFAULT_CONFIG).read_text(encoding="utf-8"))
+
+
+def utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def parse_k8s_time(value: Any) -> datetime | None:
+    """Parse an RFC3339 kubernetes timestamp ('2026-08-30T04:11:07Z')."""
+    if not isinstance(value, str) or not value:
+        return None
+    text = value.strip()
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def age_minutes(started: datetime, now: datetime) -> float:
+    return (now - started).total_seconds() / 60.0
+
+
+def _fmt_age(minutes: float) -> str:
+    if minutes < 90:
+        return f"{minutes:.0f}m"
+    hours = minutes / 60.0
+    if hours < 48:
+        return f"{hours:.1f}h"
+    return f"{hours / 24:.1f}d"
+
+
+# --------------------------------------------------------------------------
+# findings
+# --------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class Finding:
+    kind: str
+    subject: str          # app name / namespace-qualified pod / namespace-qualified pvc
+    summary: str          # one-line human summary
+    facts: dict = field(default_factory=dict)
+
+    @property
+    def key(self) -> str:
+        return f"{self.kind}:{self.subject}"
+
+    @property
+    def marker(self) -> str:
+        """Machine-readable dedup marker embedded in the issue body."""
+        return f"<!-- watchdog-key: {self.key} -->"
+
+    def title(self, prefix: str = "[watchdog]") -> str:
+        # Deliberately STABLE: no ages, counts or ratios, which change every run
+        # and would defeat the title half of the dedup.
+        return f"{prefix} {self.kind}: {self.subject}"
+
+
+# --------------------------------------------------------------------------
+# detections — pure functions over parsed JSON
+# --------------------------------------------------------------------------
+
+def detect_stuck_argo_ops(applications: dict, config: dict, now: datetime) -> list[Finding]:
+    """Argo Applications with an operation stuck in phase=Running past threshold.
+
+    This is incident link 2: the thing that silently froze deployment. Note that
+    a Running op BELOW the threshold is explicitly not a finding — real syncs
+    take ~5 minutes and hooks legitimately run.
+    """
+    cfg = config.get("argo_stuck_op", {})
+    if not cfg.get("enabled", True):
+        return []
+    threshold = float(cfg.get("running_minutes", 45))
+    findings: list[Finding] = []
+
+    for app in applications.get("items", []) or []:
+        meta = app.get("metadata") or {}
+        name = meta.get("name") or "<unnamed>"
+        state = (app.get("status") or {}).get("operationState") or {}
+        if state.get("phase") != "Running":
+            continue
+        started = parse_k8s_time(state.get("startedAt"))
+        if started is None:
+            # Running with no parseable startedAt: cannot age it, so it is not
+            # flagged here — but it is never silently swallowed either.
+            print(
+                f"::warning::{name}: operation phase=Running with unparseable "
+                f"startedAt={state.get('startedAt')!r} — cannot age it",
+                file=sys.stderr,
+            )
+            continue
+        minutes = age_minutes(started, now)
+        if minutes <= threshold:
+            continue
+
+        operation = state.get("operation") or {}
+        revision = (operation.get("sync") or {}).get("revision") or (
+            (state.get("syncResult") or {}).get("revision")
+        )
+        findings.append(
+            Finding(
+                kind=KIND_ARGO,
+                subject=name,
+                summary=(
+                    f"Argo operation on `{name}` has been phase=Running for "
+                    f"{_fmt_age(minutes)} (threshold {threshold:.0f}m) — every "
+                    f"other sync of this app is queued behind it."
+                ),
+                facts={
+                    "application": name,
+                    "namespace": meta.get("namespace"),
+                    "phase": state.get("phase"),
+                    "startedAt": state.get("startedAt"),
+                    "running_minutes": round(minutes, 1),
+                    "threshold_minutes": threshold,
+                    # The blocking-resource line, verbatim. In the incident this
+                    # read "waiting for healthy state of
+                    # apps/StatefulSet/fuzeinfra-loki and 1 more resources".
+                    "message": state.get("message"),
+                    "revision": revision,
+                    "sync_status": ((app.get("status") or {}).get("sync") or {}).get("status"),
+                    "health_status": ((app.get("status") or {}).get("health") or {}).get("status"),
+                },
+            )
+        )
+    return findings
+
+
+def _node_condition(node: dict, cond_type: str) -> dict | None:
+    for cond in (node.get("status") or {}).get("conditions") or []:
+        if cond.get("type") == cond_type:
+            return cond
+    return None
+
+
+def _node_address(node: dict, addr_type: str) -> str | None:
+    for addr in (node.get("status") or {}).get("addresses") or []:
+        if addr.get("type") == addr_type:
+            return addr.get("address")
+    return None
+
+
+def detect_dark_nodes(nodes: dict, config: dict, now: datetime) -> list[Finding]:
+    """Nodes whose kubelet has stopped posting status (Ready condition == Unknown).
+
+    `fuze-core-3` sat in this state for 4.5 days — still labelled a
+    control-plane node and still an etcd voting member, per its own
+    `EtcdIsVoter` condition, while `Ready`/`MemoryPressure`/`DiskPressure`/
+    `PIDPressure` were all `Unknown` ("Kubelet stopped posting node status").
+    That combination is exactly what makes this dangerous silently: the node
+    keeps its etcd vote and keeps holding scheduled pods (they are never
+    evicted while the node object itself still exists) while contributing zero
+    usable capacity — the same "everything reports fine, nothing works" shape
+    as the Aug30 Loki freeze this watchdog already exists for.
+
+    Facts carried on the finding are chosen so `@fuze` (mentioned in the filed
+    issue) can decide whether a restart is safe WITHOUT re-querying the
+    cluster itself: `is_control_plane` + `is_etcd_voter` +
+    `other_ready_control_plane_nodes` are the quorum-safety check, and
+    `external_ip` is what `contabo-instance-reboot.yml` needs to resolve the
+    Contabo instanceId (nodes carry no instanceId label at bootstrap — the
+    public IP is the only reliable link). See
+    docs/runbooks/dark-node-reboot.md for the full decision + action flow.
+    """
+    cfg = config.get("dark_node", {})
+    if not cfg.get("enabled", True):
+        return []
+    threshold = float(cfg.get("unknown_minutes", 30))
+    ignore = set(cfg.get("ignore_nodes") or [])
+    items = nodes.get("items", []) or []
+
+    control_plane_ready = 0
+    for node in items:
+        labels = (node.get("metadata") or {}).get("labels") or {}
+        ready = _node_condition(node, "Ready")
+        if "node-role.kubernetes.io/control-plane" in labels and ready and ready.get("status") == "True":
+            control_plane_ready += 1
+
+    findings: list[Finding] = []
+    for node in items:
+        name = (node.get("metadata") or {}).get("name") or "<unnamed>"
+        if name in ignore:
+            continue
+        ready = _node_condition(node, "Ready")
+        if ready is None or ready.get("status") != "Unknown":
+            continue
+        since = parse_k8s_time(ready.get("lastTransitionTime")) or parse_k8s_time(
+            ready.get("lastHeartbeatTime")
+        )
+        if since is None:
+            # Unknown with no parseable transition time: cannot age it. Never
+            # silently swallowed — same convention as the unparseable-startedAt
+            # case in detect_stuck_argo_ops.
+            print(
+                f"::warning::{name}: Ready=Unknown with unparseable "
+                f"lastTransitionTime={ready.get('lastTransitionTime')!r} — cannot age it",
+                file=sys.stderr,
+            )
+            continue
+        minutes = age_minutes(since, now)
+        if minutes <= threshold:
+            continue
+
+        labels = (node.get("metadata") or {}).get("labels") or {}
+        is_control_plane = "node-role.kubernetes.io/control-plane" in labels
+        etcd_voter = _node_condition(node, "EtcdIsVoter")
+        is_etcd_voter = bool(etcd_voter and etcd_voter.get("status") == "True")
+        # control_plane_ready only counts nodes whose Ready condition is True, and
+        # this node's Ready is Unknown (that's why it's being flagged) — it was
+        # never counted in the first place, so no self-subtraction is needed here.
+        other_cp_ready = control_plane_ready
+
+        findings.append(
+            Finding(
+                kind=KIND_DARK_NODE,
+                subject=name,
+                summary=(
+                    f"Node `{name}` has had Ready=Unknown (kubelet stopped posting "
+                    f"status) for {_fmt_age(minutes)} (threshold {threshold:.0f}m)."
+                ),
+                facts={
+                    "node": name,
+                    "unknown_since": ready.get("lastTransitionTime"),
+                    "unknown_minutes": round(minutes, 1),
+                    "threshold_minutes": threshold,
+                    "internal_ip": _node_address(node, "InternalIP"),
+                    "external_ip": _node_address(node, "ExternalIP"),
+                    "is_control_plane": is_control_plane,
+                    "is_etcd_voter": is_etcd_voter,
+                    "other_ready_control_plane_nodes": other_cp_ready,
+                    "next_step": (
+                        "Decide whether a restart is safe (e.g. NOT the last Ready "
+                        "control-plane/etcd-voter node — see other_ready_control_plane_nodes "
+                        "above). If safe, dispatch contabo-instance-reboot.yml with "
+                        "node_name and external_ip set (it resolves the Contabo instanceId "
+                        "by matching ipConfig.v4.ip and calls the restart action). See "
+                        "docs/runbooks/dark-node-reboot.md."
+                    ),
+                },
+            )
+        )
+    return findings
+
+
+def _currently_unknown_node_names(nodes: dict) -> set[str]:
+    """Node names with Ready==Unknown RIGHT NOW, regardless of how long.
+
+    Used only for recovery detection: a dark-node issue closes as soon as its
+    node drops out of this set, even if it hasn't been Ready long enough to
+    clear detect_dark_nodes' own unknown_minutes threshold on the way down —
+    recovering is not something that needs a debounce the way flagging does.
+    """
+    names: set[str] = set()
+    for node in nodes.get("items", []) or []:
+        name = (node.get("metadata") or {}).get("name")
+        ready = _node_condition(node, "Ready")
+        if name and ready and ready.get("status") == "Unknown":
+            names.add(name)
+    return names
+
+
+# --------------------------------------------------------------------------
+# dark-node escalation ladder — reboot (bounded) -> reinstall (gated)
+# --------------------------------------------------------------------------
+#
+# State lives in the tracked issue itself, as a JSON blob embedded in the LATEST
+# comment that carries the marker below (not the issue body, which stays the
+# original diagnostic snapshot from when the issue was filed). Reading "the
+# latest matching comment" rather than maintaining any other store means the
+# issue thread IS the audit trail: every decision this script ever made about
+# a node is visible in-order in one place, which is exactly what a human
+# reviewing the incident afterwards needs.
+
+DARK_STATE_RE = re.compile(r"<!-- dark-node-state: (\{.*?\}) -->", re.S)
+DARK_NODE_KEY_RE = re.compile(r"<!-- watchdog-key: dark-node:(.+?) -->")
+
+DEFAULT_DARK_STATE: dict[str, Any] = {
+    "reboot_attempts": 0,
+    "last_reboot_at": None,
+    "escalated": False,
+    "escalated_at": None,
+    # Last refusal reason already reported, so a durable quorum/elastic refusal
+    # comments ONCE rather than every 15-minute run for as long as it stands.
+    "refused_reason": None,
+}
+
+
+def parse_dark_node_state(comments: Sequence[dict]) -> dict:
+    """Fold every embedded state marker in comment order; the latest wins.
+
+    Comments are assumed oldest-first (gh's default). Any comment without a
+    parseable marker is simply not a state update and is skipped — this is
+    deliberately tolerant of humans commenting on the issue too.
+    """
+    state = dict(DEFAULT_DARK_STATE)
+    for comment in comments:
+        match = DARK_STATE_RE.search(comment.get("body") or "")
+        if not match:
+            continue
+        try:
+            parsed = json.loads(match.group(1))
+        except (ValueError, TypeError):
+            continue
+        if isinstance(parsed, dict):
+            state.update(parsed)
+    return state
+
+
+def render_dark_state_marker(state: dict) -> str:
+    return f"<!-- dark-node-state: {json.dumps(state, sort_keys=True)} -->"
+
+
+def _dark_node_name_from_issue(issue: dict) -> str | None:
+    match = DARK_NODE_KEY_RE.search(issue.get("body") or "")
+    return match.group(1) if match else None
+
+
+def decide_dark_node_escalation(
+    finding: Finding, state: dict, cfg: dict, now: datetime
+) -> tuple[str, dict, str]:
+    """Pure decision for ONE still-dark node. Never mutates `state` in place.
+
+    Returns (action, new_state, message):
+      "none"           - nothing to do this cycle (cooling down between reboot
+                         attempts, waiting out escalate_after_minutes, already
+                         escalated and waiting on the reinstall to land, or a
+                         refusal that was already reported and hasn't changed)
+      "reboot"         - dispatch contabo-instance-reboot.yml
+      "reinstall"      - dispatch ca-reinstall-controlplane.yml
+      "refuse-quorum"  - attempts exhausted and dark long enough, but
+                         reinstalling would risk etcd quorum
+      "refuse-elastic" - attempts exhausted, but auto-reinstall is scoped to
+                         control-plane/durable nodes only
+
+    See docs/runbooks/dark-node-reboot.md for the full flow this drives.
+    """
+    state = dict(state)
+    if not cfg.get("enabled", True):
+        return "none", state, "dark_node detection disabled"
+    if state.get("escalated"):
+        return "none", state, "already escalated to reinstall; awaiting recovery or human follow-up"
+    if not cfg.get("auto_restart", False):
+        return "none", state, "auto_restart disabled"
+
+    facts = finding.facts
+    dark_minutes = float(facts.get("unknown_minutes", 0))
+    max_attempts = int(cfg.get("max_reboot_attempts", 3))
+    attempts = int(state.get("reboot_attempts", 0))
+
+    if attempts < max_attempts:
+        cooldown = float(cfg.get("reboot_cooldown_minutes", 30))
+        last_reboot_at = state.get("last_reboot_at")
+        if last_reboot_at:
+            last_dt = parse_k8s_time(last_reboot_at)
+            if last_dt is not None:
+                elapsed = age_minutes(last_dt, now)
+                if elapsed < cooldown:
+                    return "none", state, (
+                        f"cooling down since reboot attempt {attempts} "
+                        f"({elapsed:.0f}m of {cooldown:.0f}m)"
+                    )
+        state["reboot_attempts"] = attempts + 1
+        state["last_reboot_at"] = now.isoformat()
+        state["refused_reason"] = None
+        return "reboot", state, f"reboot attempt {attempts + 1}/{max_attempts} (dark {dark_minutes:.0f}m)"
+
+    escalate_after = float(cfg.get("escalate_after_minutes", 120))
+    if dark_minutes < escalate_after:
+        return "none", state, (
+            f"{max_attempts} reboot attempts exhausted; waiting for "
+            f"escalate_after_minutes={escalate_after:.0f} (dark {dark_minutes:.0f}m so far)"
+        )
+    if not cfg.get("auto_reinstall", False):
+        return "none", state, f"{max_attempts} reboot attempts exhausted but auto_reinstall disabled"
+
+    if not facts.get("is_control_plane"):
+        reason = "auto-reinstall is scoped to control-plane/durable nodes only (elastic nodes have their own lifecycle)"
+        if state.get("refused_reason") == reason:
+            return "none", state, reason
+        state["refused_reason"] = reason
+        return "refuse-elastic", state, reason
+
+    min_other_ready = int(cfg.get("reinstall_min_other_ready_control_plane", 2))
+    other_ready = int(facts.get("other_ready_control_plane_nodes", 0))
+    if facts.get("is_etcd_voter") and other_ready < min_other_ready:
+        reason = (
+            f"refusing auto-reinstall: only {other_ready} other ready control-plane "
+            f"node(s), need >= {min_other_ready} for etcd quorum safety"
+        )
+        if state.get("refused_reason") == reason:
+            return "none", state, reason
+        state["refused_reason"] = reason
+        return "refuse-quorum", state, reason
+
+    state["escalated"] = True
+    state["escalated_at"] = now.isoformat()
+    state["refused_reason"] = None
+    return "reinstall", state, (
+        f"{max_attempts} reboot attempts exhausted and node dark {dark_minutes:.0f}m "
+        f"(>= {escalate_after:.0f}m) — escalating to reinstall"
+    )
+
+
+def _container_statuses(pod: dict) -> list[dict]:
+    status = pod.get("status") or {}
+    return list(status.get("containerStatuses") or []) + list(
+        status.get("initContainerStatuses") or []
+    )
+
+
+def _pod_subject(pod: dict) -> str:
+    meta = pod.get("metadata") or {}
+    return f"{meta.get('namespace', 'default')}/{meta.get('name', '<unnamed>')}"
+
+
+def _pod_start(pod: dict) -> datetime | None:
+    status = pod.get("status") or {}
+    return parse_k8s_time(status.get("startTime")) or parse_k8s_time(
+        (pod.get("metadata") or {}).get("creationTimestamp")
+    )
+
+
+def detect_chronic_crashloop(pods: dict, config: dict, now: datetime) -> list[Finding]:
+    """Pods stuck in a crash loop they cannot get out of (incident link 1).
+
+    Two independent triggers, either is enough:
+      * restartCount above `restart_count` (Loki reached 694), or
+      * currently in CrashLoopBackOff, never Ready, for longer than
+        `crashloop_minutes`.
+    """
+    cfg = config.get("crashloop", {})
+    if not cfg.get("enabled", True):
+        return []
+    max_restarts = int(cfg.get("restart_count", 50))
+    max_minutes = float(cfg.get("crashloop_minutes", 60))
+    ignore = set(cfg.get("ignore_namespaces") or [])
+    findings: list[Finding] = []
+
+    for pod in pods.get("items", []) or []:
+        meta = pod.get("metadata") or {}
+        if meta.get("namespace") in ignore:
+            continue
+        for cs in _container_statuses(pod):
+            restarts = int(cs.get("restartCount") or 0)
+            waiting = (cs.get("state") or {}).get("waiting") or {}
+            reason = waiting.get("reason")
+            in_backoff = reason == "CrashLoopBackOff"
+            ready = bool(cs.get("ready"))
+
+            minutes: float | None = None
+            if in_backoff and not ready:
+                started = _pod_start(pod)
+                if started is not None:
+                    minutes = age_minutes(started, now)
+
+            by_restarts = restarts > max_restarts
+            by_duration = minutes is not None and minutes > max_minutes
+            if not (by_restarts or by_duration):
+                continue
+
+            terminated = (cs.get("lastState") or {}).get("terminated") or {}
+            triggers = []
+            if by_restarts:
+                triggers.append(f"restartCount {restarts} > {max_restarts}")
+            if by_duration:
+                triggers.append(
+                    f"CrashLoopBackOff for {_fmt_age(minutes or 0)} > {max_minutes:.0f}m"
+                )
+            findings.append(
+                Finding(
+                    kind=KIND_CRASHLOOP,
+                    subject=f"{_pod_subject(pod)}:{cs.get('name', '<container>')}",
+                    summary=(
+                        f"`{_pod_subject(pod)}` container `{cs.get('name')}` is in a "
+                        f"chronic crash loop ({'; '.join(triggers)})."
+                    ),
+                    facts={
+                        "namespace": meta.get("namespace"),
+                        "pod": meta.get("name"),
+                        "container": cs.get("name"),
+                        "restartCount": restarts,
+                        "waiting_reason": reason,
+                        "ready": ready,
+                        "crashloop_minutes": None if minutes is None else round(minutes, 1),
+                        "threshold_restarts": max_restarts,
+                        "threshold_minutes": max_minutes,
+                        "last_exit_code": terminated.get("exitCode"),
+                        "last_terminated_reason": terminated.get("reason"),
+                        "last_terminated_at": terminated.get("finishedAt"),
+                        "waiting_message": waiting.get("message"),
+                    },
+                )
+            )
+    return findings
+
+
+def detect_stuck_container_creating(pods: dict, config: dict, now: datetime) -> list[Finding]:
+    """Pods wedged in ContainerCreating — the stale-mount class.
+
+    'already mounted or mount point busy' kept Loki down for 14h AFTER the disk
+    was fixed. The controller reports the workload as present the whole time.
+    """
+    cfg = config.get("container_creating", {})
+    if not cfg.get("enabled", True):
+        return []
+    threshold = float(cfg.get("minutes", 30))
+    reasons = set(cfg.get("reasons") or ["ContainerCreating", "PodInitializing"])
+    ignore = set(cfg.get("ignore_namespaces") or [])
+    findings: list[Finding] = []
+
+    for pod in pods.get("items", []) or []:
+        meta = pod.get("metadata") or {}
+        if meta.get("namespace") in ignore:
+            continue
+        # ONE finding per pod, not per container. A pod wedged on a volume
+        # attach reports every one of its containers as waiting, so the
+        # per-container shape filed `kafka-0:kafka` and `kafka-0:init-chown-data`
+        # as two separate issues for one stuck mount (observed 2026-09-01).
+        stuck = []
+        for cs in _container_statuses(pod):
+            if cs.get("ready"):
+                continue
+            waiting = (cs.get("state") or {}).get("waiting") or {}
+            if waiting.get("reason") in reasons:
+                stuck.append((cs, waiting))
+        if not stuck:
+            continue
+        started = _pod_start(pod)
+        if started is None:
+            continue
+        minutes = age_minutes(started, now)
+        if minutes <= threshold:
+            continue
+        reason = stuck[0][1].get("reason")
+        message = next((w.get("message") for _, w in stuck if w.get("message")), None)
+        findings.append(
+            Finding(
+                kind=KIND_CREATING,
+                subject=_pod_subject(pod),
+                summary=(
+                    f"`{_pod_subject(pod)}` has been {reason} for {_fmt_age(minutes)} "
+                    f"(threshold {threshold:.0f}m) — likely a stuck volume attach."
+                ),
+                facts={
+                    "namespace": meta.get("namespace"),
+                    "pod": meta.get("name"),
+                    "containers": [cs.get("name") for cs, _ in stuck],
+                    "waiting_reason": reason,
+                    "waiting_message": message,
+                    "pending_minutes": round(minutes, 1),
+                    "threshold_minutes": threshold,
+                    "node": (pod.get("spec") or {}).get("nodeName"),
+                },
+            )
+        )
+    return findings
+
+
+def detect_pvc_pressure(usage: Sequence[dict], config: dict) -> list[Finding]:
+    """PVCs above `used_ratio`. `usage` records come from Prometheus or the df fallback.
+
+    Loki has no size-based retention, so this alarm IS the rotate-by-volume
+    mechanism: once the volume is full nothing inside the pod can free it.
+    """
+    cfg = config.get("pvc_pressure", {})
+    if not cfg.get("enabled", True):
+        return []
+    limit = float(cfg.get("used_ratio", 0.80))
+    findings: list[Finding] = []
+
+    for record in usage:
+        ratio = record.get("ratio")
+        if ratio is None:
+            continue
+        if float(ratio) <= limit:
+            continue
+        namespace = record.get("namespace") or "?"
+        claim = record.get("claim") or "?"
+        used = record.get("used_bytes")
+        capacity = record.get("capacity_bytes")
+        detail = ""
+        if used and capacity:
+            detail = f" ({used / 2**30:.2f} GiB of {capacity / 2**30:.2f} GiB)"
+        findings.append(
+            Finding(
+                kind=KIND_PVC,
+                subject=f"{namespace}/{claim}",
+                summary=(
+                    f"PVC `{namespace}/{claim}` is {float(ratio) * 100:.1f}% full"
+                    f"{detail} — above the {limit * 100:.0f}% alarm."
+                ),
+                facts={
+                    "namespace": namespace,
+                    "persistentvolumeclaim": claim,
+                    "used_ratio": round(float(ratio), 4),
+                    "threshold_ratio": limit,
+                    "used_bytes": used,
+                    "capacity_bytes": capacity,
+                    "source": record.get("source"),
+                },
+            )
+        )
+    return findings
+
+
+# --------------------------------------------------------------------------
+# dedup
+# --------------------------------------------------------------------------
+
+def prioritize(findings, priority=None):
+    """Worst-first order for filing under the per-run cap.
+
+    The stuck Argo op comes first because it is the one condition that blocks
+    EVERY other deploy; PVC pressure second because it is the only warning that
+    arrives before a volume fills (after that nothing inside the pod can free
+    it). Unknown kinds sort last but are never dropped.
+    """
+    order = list(priority or [KIND_ARGO, KIND_DARK_NODE, KIND_PVC, KIND_CREATING, KIND_CRASHLOOP])
+
+    def rank(finding):
+        return (order.index(finding.kind) if finding.kind in order else len(order), finding.key)
+
+    return sorted(findings, key=rank)
+
+
+def filter_new_findings(
+    findings: Iterable[Finding], open_issues: Iterable[dict], title_prefix: str = "[watchdog]"
+) -> tuple[list[Finding], list[tuple[Finding, dict]]]:
+    """Split findings into (new, already-filed).
+
+    Matches on the `<!-- watchdog-key: ... -->` marker in the body, with the exact
+    title as a second layer for issues whose body was edited by a human. A
+    watchdog that files 40 duplicate issues gets muted, which is the same
+    outcome as not existing.
+    """
+    issues = list(open_issues)
+    new: list[Finding] = []
+    duplicates: list[tuple[Finding, dict]] = []
+    for finding in findings:
+        title = finding.title(title_prefix)
+        match = None
+        for issue in issues:
+            body = issue.get("body") or ""
+            if finding.marker in body or (issue.get("title") or "") == title:
+                match = issue
+                break
+        if match is None:
+            new.append(finding)
+        else:
+            duplicates.append((finding, match))
+    return new, duplicates
+
+
+# --------------------------------------------------------------------------
+# issue body
+# --------------------------------------------------------------------------
+
+INCIDENT_NOTE = (
+    "This watchdog exists because of the 2026-08-30..09-01 fleet-deployment freeze: "
+    "a full Loki PVC crash-looped Loki 694 times, the permanently-unhealthy StatefulSet "
+    "wedged one Argo sync operation in `phase=Running` for 37h, and every prod change "
+    "queued silently behind it for 2d11h. Every component reported \"running\"; nothing alerted."
+)
+
+
+def build_issue_body(
+    finding: Finding, config: dict, run_url: str = "", actions: Sequence[str] = ()
+) -> str:
+    mention = (config.get("issues") or {}).get("mention", "@fuze")
+    lines = [
+        finding.marker,
+        "",
+        f"{mention} the deployment-freeze watchdog detected **{finding.kind}**.",
+        "",
+        finding.summary,
+        "",
+        "### Diagnostics (verbatim from the cluster)",
+        "",
+        "```json",
+        json.dumps(finding.facts, indent=2, sort_keys=True, default=str),
+        "```",
+        "",
+    ]
+    if actions:
+        lines += ["### Automated action taken", ""]
+        lines += [f"- {a}" for a in actions]
+        lines += [""]
+    else:
+        lines += [
+            "### Automated action taken",
+            "",
+            "- None. This watchdog is read-only against the cluster; prod is GitOps "
+            "under Argo `selfHeal`, so any fix must land in git.",
+            "",
+        ]
+    if run_url:
+        lines += [f"Watchdog run: {run_url}", ""]
+    lines += [
+        "---",
+        "",
+        INCIDENT_NOTE,
+        "",
+        "Thresholds: `governance/watchdog-thresholds.json`. Detection: "
+        "`scripts-tools/deployment_watchdog.py`. This issue is deduplicated on the "
+        "`watchdog-key` marker above — it will not be re-filed while it stays open, "
+        "so close it once the condition is actually resolved.",
+    ]
+    return "\n".join(lines)
+
+
+# --------------------------------------------------------------------------
+# cluster access — read-only, guarded
+# --------------------------------------------------------------------------
+
+# Same taxonomy tests/test_cluster_query_guard.py pins for cluster-query.yml.
+MUTATING_TOKENS = {
+    "exec", "attach", "cp", "port-forward", "proxy", "run", "delete", "apply",
+    "edit", "patch", "replace", "scale", "rollout", "cordon", "drain",
+    "annotate", "label", "set", "create", "taint", "uncordon", "debug",
+}
+
+
+def assert_safe_kubectl(args: Sequence[str]) -> None:
+    """Reject anything that mutates state or whose OUTPUT would be a credential.
+
+    FuzeInfra's job logs are PUBLIC. `kubectl get secret -o jsonpath=...` is a
+    READ that passes every mutation check and prints the credential verbatim
+    into a retained public log — that happened on 2026-07-29. Read-only is not
+    the same as safe-to-log, so the Secret check is separate from the verb
+    checks. `--raw` is allowed ONLY for the Prometheus service proxy path,
+    because `kubectl config view --raw` would print this runner's cluster-admin
+    kubeconfig.
+    """
+    for token in args:
+        low = token.lower()
+        if low in MUTATING_TOKENS:
+            raise UnsafeCommand(f"refusing mutating/exec token: {token!r}")
+        # `secret/foo`, `pods,secrets` and `secrets.v1.` each name the Secret
+        # resource while being ONE token, so normalise separators first. Do not
+        # split on '-': `litellm-secret-reader` is a NAME, not the resource.
+        for piece in re.split(r"[/,.]", low):
+            if piece in {"secret", "secrets"}:
+                raise UnsafeCommand(
+                    "refusing to read Secret objects: this job's log is public and retained"
+                )
+    raw = [a for a in args if a == "--raw" or a.startswith("--raw=")]
+    if raw:
+        if "config" in args:
+            raise UnsafeCommand("refusing `config ... --raw`: it prints the runner's kubeconfig")
+        idx = list(args).index(raw[0])
+        path = raw[0].split("=", 1)[1] if "=" in raw[0] else (
+            args[idx + 1] if idx + 1 < len(args) else ""
+        )
+        if not path.startswith("/api/v1/namespaces/"):
+            raise UnsafeCommand(f"refusing --raw path outside the service proxy: {path!r}")
+
+
+def kubectl_json(args: Sequence[str], timeout: int = 120) -> dict:
+    return json.loads(kubectl(args, timeout=timeout) or "{}")
+
+
+def kubectl(args: Sequence[str], timeout: int = 120) -> str:
+    assert_safe_kubectl(args)
+    try:
+        proc = subprocess.run(
+            ["kubectl", *args], capture_output=True, text=True, timeout=timeout
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise ClusterUnreachable(f"kubectl {' '.join(args)} failed to run: {exc}") from exc
+    if proc.returncode != 0:
+        raise ClusterUnreachable(
+            f"kubectl {' '.join(args)} exited {proc.returncode}: {proc.stderr.strip()[:500]}"
+        )
+    return proc.stdout
+
+
+_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9.-]{0,252}$")
+_PATH_RE = re.compile(r"^/[A-Za-z0-9._/-]*$")
+
+
+def kubectl_exec_df(namespace: str, pod: str, container: str, mount_path: str,
+                    timeout: int = 60) -> str:
+    """The ONLY exec this tool performs: a fixed `df` argv, validated, on a fallback path.
+
+    Not routed through assert_safe_kubectl (which refuses `exec` outright, and
+    should keep refusing it for every other caller). The safety here comes from
+    the argv being fixed and every interpolated component being validated.
+    """
+    for value in (namespace, pod, container):
+        if not _NAME_RE.match(value or ""):
+            raise UnsafeCommand(f"refusing exec with suspicious name: {value!r}")
+    if not _PATH_RE.match(mount_path or ""):
+        raise UnsafeCommand(f"refusing exec with suspicious mount path: {mount_path!r}")
+    argv = [
+        "kubectl", "-n", namespace, "exec", pod, "-c", container, "--",
+        "df", "-P", "-B1", mount_path,
+    ]
+    try:
+        proc = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise ClusterUnreachable(f"exec df on {namespace}/{pod} failed: {exc}") from exc
+    if proc.returncode != 0:
+        raise ClusterUnreachable(
+            f"exec df on {namespace}/{pod} exited {proc.returncode}: {proc.stderr.strip()[:300]}"
+        )
+    return proc.stdout
+
+
+def parse_df_output(text: str) -> tuple[int, int] | None:
+    """Parse `df -P -B1` into (used_bytes, capacity_bytes)."""
+    lines = [ln for ln in (text or "").splitlines() if ln.strip()]
+    if len(lines) < 2:
+        return None
+    parts = lines[-1].split()
+    if len(parts) < 4:
+        return None
+    try:
+        capacity = int(parts[1])
+        used = int(parts[2])
+    except ValueError:
+        return None
+    return used, capacity
+
+
+# --------------------------------------------------------------------------
+# PVC usage sources
+# --------------------------------------------------------------------------
+
+def parse_prometheus_vector(payload: dict, value_key: str = "ratio") -> list[dict]:
+    """Turn a Prometheus instant-vector response into usage records.
+
+    A non-success status, or a success with ZERO samples, is treated as blindness
+    and raises: "Prometheus answered but knows nothing about any volume" must not
+    render as "no PVC is full".
+    """
+    if not isinstance(payload, dict) or payload.get("status") != "success":
+        raise ClusterUnreachable(
+            f"prometheus query failed: status={payload.get('status') if isinstance(payload, dict) else payload!r}"
+        )
+    result = ((payload.get("data") or {}).get("result")) or []
+    if not result:
+        raise ClusterUnreachable(
+            "prometheus returned zero kubelet_volume_stats samples — cannot conclude "
+            "that no volume is filling up"
+        )
+    records = []
+    for sample in result:
+        metric = sample.get("metric") or {}
+        value = (sample.get("value") or [None, None])[1]
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            continue
+        records.append(
+            {
+                "namespace": metric.get("namespace"),
+                "claim": metric.get("persistentvolumeclaim"),
+                value_key: parsed,
+            }
+        )
+    return records
+
+
+def merge_usage(ratios: list[dict], used: list[dict], capacity: list[dict]) -> list[dict]:
+    index: dict[tuple[Any, Any], dict] = {}
+    for rec in ratios:
+        index[(rec.get("namespace"), rec.get("claim"))] = {
+            "namespace": rec.get("namespace"),
+            "claim": rec.get("claim"),
+            "ratio": rec.get("ratio"),
+            "source": "prometheus",
+        }
+    for rec in used:
+        entry = index.get((rec.get("namespace"), rec.get("claim")))
+        if entry is not None:
+            entry["used_bytes"] = rec.get("used")
+    for rec in capacity:
+        entry = index.get((rec.get("namespace"), rec.get("claim")))
+        if entry is not None:
+            entry["capacity_bytes"] = rec.get("capacity")
+    return list(index.values())
+
+
+def prometheus_query(query: str, config: dict) -> dict:
+    cfg = config.get("pvc_pressure", {})
+    namespace = cfg.get("prometheus_namespace", "fuzeinfra")
+    service = cfg.get("prometheus_service", "fuzeinfra-prometheus")
+    port = cfg.get("prometheus_port", 9090)
+    path = (
+        f"/api/v1/namespaces/{namespace}/services/{service}:{port}/proxy"
+        f"/api/v1/query?query={quote(query)}"
+    )
+    raw = kubectl(["get", "--raw", path])
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ClusterUnreachable(f"prometheus returned non-JSON: {exc}") from exc
+
+
+def pvc_usage_via_prometheus(config: dict) -> list[dict]:
+    cfg = config.get("pvc_pressure", {})
+    query = cfg.get(
+        "prometheus_query",
+        "kubelet_volume_stats_used_bytes / kubelet_volume_stats_capacity_bytes",
+    )
+    ratios = parse_prometheus_vector(prometheus_query(query, config), "ratio")
+    try:
+        used = parse_prometheus_vector(
+            prometheus_query("kubelet_volume_stats_used_bytes", config), "used"
+        )
+        capacity = parse_prometheus_vector(
+            prometheus_query("kubelet_volume_stats_capacity_bytes", config), "capacity"
+        )
+    except ClusterUnreachable:
+        # The ratio (the thing the threshold is applied to) already succeeded;
+        # the byte columns are display-only, so their absence must not turn a
+        # real detection into a failure.
+        used, capacity = [], []
+    return merge_usage(ratios, used, capacity)
+
+
+def pvc_mount_targets(pods: dict) -> list[dict]:
+    """Map each PVC to a Running pod/container/mountPath that mounts it."""
+    targets: dict[tuple[str, str], dict] = {}
+    for pod in pods.get("items", []) or []:
+        meta = pod.get("metadata") or {}
+        status = pod.get("status") or {}
+        if status.get("phase") != "Running":
+            continue
+        spec = pod.get("spec") or {}
+        volume_to_claim = {}
+        for volume in spec.get("volumes") or []:
+            claim = (volume.get("persistentVolumeClaim") or {}).get("claimName")
+            if claim:
+                volume_to_claim[volume.get("name")] = claim
+        if not volume_to_claim:
+            continue
+        for container in spec.get("containers") or []:
+            for mount in container.get("volumeMounts") or []:
+                claim = volume_to_claim.get(mount.get("name"))
+                if not claim:
+                    continue
+                key = (meta.get("namespace"), claim)
+                targets.setdefault(
+                    key,
+                    {
+                        "namespace": meta.get("namespace"),
+                        "claim": claim,
+                        "pod": meta.get("name"),
+                        "container": container.get("name"),
+                        "mount_path": mount.get("mountPath"),
+                    },
+                )
+    return list(targets.values())
+
+
+def pvc_usage_via_exec_df(pods: dict, config: dict) -> list[dict]:
+    """Fallback used ONLY when Prometheus is unreachable."""
+    targets = pvc_mount_targets(pods)
+    if not targets:
+        raise ClusterUnreachable(
+            "prometheus unreachable and no running pod mounts any PVC — no way to "
+            "measure volume usage"
+        )
+    records: list[dict] = []
+    errors: list[str] = []
+    for target in targets:
+        try:
+            out = kubectl_exec_df(
+                target["namespace"], target["pod"], target["container"], target["mount_path"]
+            )
+        except (ClusterUnreachable, UnsafeCommand) as exc:
+            errors.append(f"{target['namespace']}/{target['pod']}: {exc}")
+            continue
+        parsed = parse_df_output(out)
+        if parsed is None:
+            errors.append(f"{target['namespace']}/{target['pod']}: unparseable df output")
+            continue
+        used, capacity = parsed
+        if capacity <= 0:
+            continue
+        records.append(
+            {
+                "namespace": target["namespace"],
+                "claim": target["claim"],
+                "ratio": used / capacity,
+                "used_bytes": used,
+                "capacity_bytes": capacity,
+                "source": "kubectl-exec-df",
+            }
+        )
+    if not records:
+        raise ClusterUnreachable(
+            "prometheus unreachable and every df fallback failed: " + "; ".join(errors[:5])
+        )
+    for err in errors:
+        print(f"::warning::df fallback: {err}", file=sys.stderr)
+    return records
+
+
+def collect_pvc_usage(pods: dict, config: dict) -> tuple[list[dict], str]:
+    """Returns (usage records, source name). Raises if BOTH sources fail."""
+    try:
+        return pvc_usage_via_prometheus(config), "prometheus"
+    except ClusterUnreachable as exc:
+        prom_error = str(exc)
+        print(f"::warning::prometheus unusable ({prom_error}) — trying df fallback", file=sys.stderr)
+    if not (config.get("pvc_pressure") or {}).get("allow_exec_df_fallback", True):
+        raise ClusterUnreachable(
+            f"prometheus unusable ({prom_error}) and the df fallback is disabled in config"
+        )
+    return pvc_usage_via_exec_df(pods, config), "kubectl-exec-df"
+
+
+# --------------------------------------------------------------------------
+# GitHub side
+# --------------------------------------------------------------------------
+
+def gh(args: Sequence[str], timeout: int = 60) -> str:
+    try:
+        proc = subprocess.run(["gh", *args], capture_output=True, text=True, timeout=timeout)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise GitHubError(f"gh {' '.join(args)} failed to run: {exc}") from exc
+    if proc.returncode != 0:
+        raise GitHubError(
+            f"gh {' '.join(args)} exited {proc.returncode}: {proc.stderr.strip()[:400]}"
+        )
+    return proc.stdout
+
+
+def list_open_watchdog_issues(repo: str, label: str) -> list[dict]:
+    out = gh(
+        [
+            "issue", "list", "--repo", repo, "--state", "open", "--label", label,
+            "--limit", "100", "--json", "number,title,body,url",
+        ]
+    )
+    return json.loads(out or "[]")
+
+
+def ensure_label(repo: str, label: str, color: str) -> None:
+    try:
+        gh(["label", "create", label, "--repo", repo, "--color", color,
+            "--description", "deployment-freeze watchdog"])
+    except GitHubError:
+        # Already exists is the overwhelmingly common case and is not an error;
+        # a genuinely broken gh surfaces on the next call, which is not tolerated.
+        pass
+
+
+def create_issue(repo: str, label: str, title: str, body: str) -> str:
+    import tempfile
+
+    with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False, encoding="utf-8") as handle:
+        handle.write(body)
+        path = handle.name
+    try:
+        return gh(
+            ["issue", "create", "--repo", repo, "--label", label, "--title", title,
+             "--body-file", path]
+        ).strip()
+    finally:
+        os.unlink(path)
+
+
+def dispatch_terminate_op(repo: str, workflow: str, app: str, ref: str = "main") -> None:
+    if not _NAME_RE.match(app or ""):
+        raise UnsafeCommand(f"refusing to dispatch terminate-op for app name {app!r}")
+    gh(["workflow", "run", workflow, "--repo", repo, "--ref", ref, "-f", f"app={app}"])
+
+
+def dispatch_reboot(
+    repo: str, node_name: str, external_ip: str, reason: str, issue_number: str, ref: str = "main"
+) -> None:
+    """Dispatch contabo-instance-reboot.yml — same shape a human follows per
+    docs/runbooks/dark-node-reboot.md, just triggered by the state machine
+    instead of by hand. That workflow holds the Contabo credential and
+    comments its own result back onto `issue_number`; this script never
+    touches the credential or the outcome directly."""
+    if not _NAME_RE.match(node_name or ""):
+        raise UnsafeCommand(f"refusing to dispatch reboot for node name {node_name!r}")
+    gh([
+        "workflow", "run", "contabo-instance-reboot.yml", "--repo", repo, "--ref", ref,
+        "-f", f"node_name={node_name}", "-f", f"external_ip={external_ip}",
+        "-f", f"reason={reason}", "-f", "confirm=RESTART",
+        "-f", f"issue_number={issue_number}",
+    ])
+
+
+def dispatch_cp_reinstall(
+    repo: str, node_name: str, external_ip: str, template: str, issue_number: str, ref: str = "main"
+) -> None:
+    """Dispatch ca-reinstall-controlplane.yml with mode=reinstall.
+
+    Everything that makes this safe to call automatically lives INSIDE that
+    workflow (Longhorn data-safety preflight, the Ready=True delete-guard) —
+    this function only decides WHEN to call it, never re-implements what it
+    already enforces."""
+    if not _NAME_RE.match(node_name or ""):
+        raise UnsafeCommand(f"refusing to dispatch reinstall for node name {node_name!r}")
+    gh([
+        "workflow", "run", "ca-reinstall-controlplane.yml", "--repo", repo, "--ref", ref,
+        "-f", f"node_name={node_name}", "-f", f"external_ip={external_ip}",
+        "-f", f"template={template}", "-f", "mode=reinstall",
+        "-f", "confirm=REINSTALL-CONTROL-PLANE", "-f", f"issue_number={issue_number}",
+    ])
+
+
+def list_issue_comments(repo: str, issue_number: str) -> list[dict]:
+    out = gh(["issue", "view", str(issue_number), "--repo", repo, "--json", "comments"])
+    return json.loads(out or "{}").get("comments") or []
+
+
+def comment_issue(repo: str, issue_number: str, body: str) -> None:
+    import tempfile
+
+    with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False, encoding="utf-8") as handle:
+        handle.write(body)
+        path = handle.name
+    try:
+        gh(["issue", "comment", str(issue_number), "--repo", repo, "--body-file", path])
+    finally:
+        os.unlink(path)
+
+
+def close_issue(repo: str, issue_number: str) -> None:
+    gh(["issue", "close", str(issue_number), "--repo", repo])
+
+
+# --------------------------------------------------------------------------
+# main
+# --------------------------------------------------------------------------
+
+def collect_cluster_state(config: dict) -> tuple[dict, dict, dict]:
+    argo_ns = (config.get("argo_stuck_op") or {}).get("namespace", "argocd")
+    applications = kubectl_json(["-n", argo_ns, "get", "applications", "-o", "json"])
+    pods = kubectl_json(["get", "pods", "-A", "-o", "json"])
+    nodes = kubectl_json(["get", "nodes", "-o", "json"])
+    return applications, pods, nodes
+
+
+def write_summary(text: str) -> None:
+    path = os.environ.get("GITHUB_STEP_SUMMARY")
+    if not path:
+        return
+    with open(path, "a", encoding="utf-8") as handle:
+        handle.write(text + "\n")
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--config", default=str(DEFAULT_CONFIG))
+    parser.add_argument("--repo", default=os.environ.get("GITHUB_REPOSITORY", ""))
+    parser.add_argument("--run-url", default="")
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="detect and report, but file no issue and dispatch nothing",
+    )
+    args = parser.parse_args(argv)
+
+    config = load_config(args.config)
+    now = utcnow()
+    issues_cfg = config.get("issues") or {}
+    label = issues_cfg.get("label", "deploy-watchdog")
+    prefix = issues_cfg.get("title_prefix", "[watchdog]")
+
+    # --- look. Any failure here is fatal: blind must never render as clear. ---
+    applications, pods, nodes = collect_cluster_state(config)
+    findings: list[Finding] = []
+    findings += detect_stuck_argo_ops(applications, config, now)
+    findings += detect_dark_nodes(nodes, config, now)
+    findings += detect_chronic_crashloop(pods, config, now)
+    findings += detect_stuck_container_creating(pods, config, now)
+
+    usage, usage_source = collect_pvc_usage(pods, config)
+    findings += detect_pvc_pressure(usage, config)
+
+    lines = [
+        "## Deployment-freeze watchdog",
+        "",
+        f"- checked at: `{now.isoformat()}`",
+        f"- Argo Applications scanned: {len(applications.get('items') or [])}",
+        f"- nodes scanned: {len(nodes.get('items') or [])}",
+        f"- pods scanned: {len(pods.get('items') or [])}",
+        f"- PVC usage source: **{usage_source}** ({len(usage)} volumes)",
+        f"- findings: **{len(findings)}**",
+        "",
+    ]
+    for finding in findings:
+        print(f"DETECTED {finding.key}: {finding.summary}")
+
+    if not findings:
+        lines.append("No stuck Argo operation, chronic crash loop, stuck ContainerCreating "
+                     "or PVC above threshold.")
+        print("\n".join(lines))
+        write_summary("\n".join(lines))
+        return 0
+
+    if args.dry_run:
+        lines.append("### Dry run — no issue filed, nothing dispatched")
+        lines.append("")
+        for finding in findings:
+            lines.append(f"- `{finding.key}` — {finding.summary}")
+            lines.append("")
+            lines.append("```json")
+            lines.append(json.dumps(finding.facts, indent=2, sort_keys=True, default=str))
+            lines.append("```")
+        print("\n".join(lines))
+        write_summary("\n".join(lines))
+        return 1 if config.get("fail_on_findings", True) else 0
+
+    if not args.repo:
+        raise GitHubError("--repo (or GITHUB_REPOSITORY) is required to file issues")
+
+    open_issues = list_open_watchdog_issues(args.repo, label)
+    new, duplicates = filter_new_findings(findings, open_issues, prefix)
+    for finding, issue in duplicates:
+        lines.append(f"- `{finding.key}` — already tracked by {issue.get('url')} (not re-filed)")
+
+    # --- dark-node recovery: close any tracked issue whose node is no longer
+    # Ready=Unknown at all, regardless of what state the escalation ladder was
+    # in. This is the other half of "closes the loop" — the ladder used to
+    # leave every issue open forever even after the node came back, which is
+    # exactly the kind of manual bookkeeping this automation exists to remove.
+    dark_cfg = config.get("dark_node") or {}
+    still_unknown = _currently_unknown_node_names(nodes)
+    for issue in open_issues:
+        node_name = _dark_node_name_from_issue(issue)
+        if node_name is None or node_name in still_unknown:
+            continue
+        comment_issue(
+            args.repo, issue["number"],
+            f"✅ Node `{node_name}` is no longer reporting `Ready=Unknown` — closing.\n\n"
+            "If this recovered on its own rather than via one of this watchdog's "
+            "actions, it's worth a second look before treating the underlying cause "
+            "as resolved.",
+        )
+        close_issue(args.repo, issue["number"])
+        lines.append(f"- `dark-node:{node_name}` — node recovered, closed {issue.get('url')}")
+
+    # --- dark-node escalation: reboot (bounded) -> reinstall (gated) for every
+    # already-tracked dark node. See decide_dark_node_escalation.
+    reinstall_template = dark_cfg.get(
+        "reinstall_template_cp",
+        "cluster-autoscaler/contabo-externalgrpc/deploy/cp-userdata-eth1-join.template",
+    )
+
+    def _act_on_dark_node(finding: Finding, issue_number: int, state: dict, issue_url: str) -> None:
+        action, new_state, message = decide_dark_node_escalation(finding, state, dark_cfg, now)
+        if action == "none":
+            return
+        facts = finding.facts
+        external_ip = facts.get("external_ip") or ""
+        if action == "reboot":
+            dispatch_reboot(
+                args.repo, facts["node"], external_ip,
+                reason=f"auto-reboot ({finding.key}): {message}", issue_number=str(issue_number),
+            )
+            body = f"🔁 {message}."
+        elif action == "reinstall":
+            dispatch_cp_reinstall(
+                args.repo, facts["node"], external_ip, reinstall_template,
+                issue_number=str(issue_number),
+            )
+            body = f"🚨 {message}. Dispatched `ca-reinstall-controlplane.yml`."
+        else:  # refuse-quorum / refuse-elastic
+            body = (
+                f"⛔ {message}. Leaving this to a human — see "
+                "docs/runbooks/dark-node-reboot.md."
+            )
+        comment_issue(args.repo, issue_number, f"{body}\n\n{render_dark_state_marker(new_state)}")
+        lines.append(f"- `{finding.key}` — {action}: {message} ({issue_url})")
+
+    for finding, issue in duplicates:
+        if finding.kind != KIND_DARK_NODE:
+            continue
+        comments = list_issue_comments(args.repo, issue["number"])
+        state = parse_dark_node_state(comments)
+        _act_on_dark_node(finding, issue["number"], state, issue.get("url", ""))
+
+    # Cap issue CREATION (never detection): the first live run against prod
+    # returned 55 distinct conditions. Filing 55 issues at once is the muting
+    # failure in a different shape. Everything is still reported in the summary
+    # and the run still goes red; the overflow files on later runs.
+    max_per_run = int(issues_cfg.get("max_per_run", 10))
+    # Global ceiling on OPEN watchdog issues. max_per_run alone only spreads a
+    # backlog out over time (10 every 15 minutes files 55 within ~1.5h anyway);
+    # the ceiling makes draining, not the clock, the thing that opens a slot.
+    max_open = int(issues_cfg.get("max_open", 20))
+    slots = max(0, min(max_per_run, max_open - len(open_issues)))
+    ordered = prioritize(new, issues_cfg.get("priority"))
+    to_file, overflow = ordered[:slots], ordered[slots:]
+    if overflow:
+        lines.append(
+            f"- {len(overflow)} further condition(s) detected but NOT filed this run "
+            f"(open={len(open_issues)}, max_open={max_open}, max_per_run={max_per_run}); "
+            f"they file once open issues are closed:"
+        )
+        lines += [f"  - `{f.key}` — {f.summary}" for f in overflow]
+
+    if to_file:
+        ensure_label(args.repo, label, issues_cfg.get("label_color", "B60205"))
+
+    argo_cfg = config.get("argo_stuck_op") or {}
+    for finding in to_file:
+        actions: list[str] = []
+        if finding.kind == KIND_ARGO and argo_cfg.get("auto_terminate", True):
+            workflow = argo_cfg.get("auto_terminate_workflow", "argo-terminate-op.yml")
+            dispatch_terminate_op(
+                args.repo, workflow, finding.subject, argo_cfg.get("auto_terminate_ref", "main")
+            )
+            actions.append(
+                f"Dispatched `{workflow}` with `app={finding.subject}` — the operation had "
+                f"already been Running past the "
+                f"{argo_cfg.get('running_minutes', 45)}m threshold. Terminating a stale op is "
+                "safe and reversible: Argo re-syncs from git, which is the desired state. "
+                "Nothing else was touched."
+            )
+        url = create_issue(
+            args.repo, label, finding.title(prefix),
+            build_issue_body(finding, config, args.run_url, actions),
+        )
+        lines.append(f"- `{finding.key}` — filed {url}")
+        for action in actions:
+            lines.append(f"  - {action}")
+
+        # Evaluate the escalation ladder immediately on first filing too, so
+        # reboot attempt 1 fires within this run instead of waiting another
+        # full cycle just because the issue didn't exist a moment ago.
+        if finding.kind == KIND_DARK_NODE:
+            issue_number = url.rstrip("/").rsplit("/", 1)[-1]
+            if issue_number.isdigit():
+                _act_on_dark_node(finding, int(issue_number), dict(DEFAULT_DARK_STATE), url)
+
+    print("\n".join(lines))
+    write_summary("\n".join(lines))
+    return 1 if config.get("fail_on_findings", True) else 0
+
+
+def run(argv: Sequence[str] | None = None) -> int:
+    """Process entrypoint. Returns the exit code instead of exiting, so the
+    blind-fails-loudly path is itself unit-testable (it is the property that
+    makes this tool worth having)."""
+    try:
+        return main(argv)
+    except (ClusterUnreachable, UnsafeCommand, GitHubError) as error:
+        # FAIL LOUDLY. Never exit 0 on a path where the watchdog could not look:
+        # "all clear" and "could not check" must not look the same.
+        print(f"::error::deployment watchdog could not complete: {error}")
+        write_summary(f"## Deployment-freeze watchdog FAILED\n\n`{error}`\n")
+        return 2
+
+
+if __name__ == "__main__":
+    sys.exit(run())

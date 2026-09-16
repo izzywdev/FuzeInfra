@@ -1,0 +1,162 @@
+# Unit tests for the two Longhorn redundancy rules (rules/storage.yml), added
+# after fuzeinfra-prometheus-data was lost on 2026-09-07. Run in CI by
+# helm-validate.yml: `promtool test rules helm/fuzeinfra/rules/tests/*_test.yml`.
+#
+# Every test below is paired: a POSITIVE case reproducing the real 2026-09-07
+# condition, and a NEGATIVE CONTROL asserting the same rule stays silent on
+# healthy input. The negative controls are the point — a rule that fires on
+# everything is as useless as one that fires on nothing, and the VLAN alerts in
+# this repo shipped broken in both directions at once.
+#
+# Series names/labels match files/ksm-customresource-state.yaml exactly
+# (longhorn_crd_volume_*, labels volume/pvc/pvc_namespace + robustness|state).
+# tests/test_longhorn_alert_metrics.py enforces that correspondence so these
+# fixtures cannot drift into hand-feeding a dimension nothing emits.
+rule_files:
+  - ../storage.yml
+
+evaluation_interval: 1m
+
+tests:
+  # ===========================================================================
+  # LonghornVolumeUnderReplicated
+  # ===========================================================================
+
+  # --- POSITIVE: the exact 2026-09-07 condition ---
+  # fuzeinfra-prometheus-data, attached, spec.numberOfReplicas=1, robustness
+  # reporting HEALTHY throughout — which is why nothing else caught it.
+  - interval: 1m
+    name: attached single-replica volume fires (the 2026-09-07 condition)
+    input_series:
+      - series: 'longhorn_crd_volume_replicas_desired{volume="pvc-88752815-1e8e-47be-ac77-8ebd0d6e9113",pvc="fuzeinfra-prometheus-data",pvc_namespace="fuzeinfra"}'
+        values: '1+0x40'
+      - series: 'longhorn_crd_volume_state{volume="pvc-88752815-1e8e-47be-ac77-8ebd0d6e9113",pvc="fuzeinfra-prometheus-data",pvc_namespace="fuzeinfra",state="attached"}'
+        values: '1+0x40'
+      # Healthy the whole time. Proves the alert does not depend on robustness.
+      - series: 'longhorn_crd_volume_robustness{volume="pvc-88752815-1e8e-47be-ac77-8ebd0d6e9113",pvc="fuzeinfra-prometheus-data",pvc_namespace="fuzeinfra",robustness="healthy"}'
+        values: '1+0x40'
+    alert_rule_test:
+      # for: 15m — must be silent before the window elapses.
+      - eval_time: 10m
+        alertname: LonghornVolumeUnderReplicated
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: LonghornVolumeUnderReplicated
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              volume: pvc-88752815-1e8e-47be-ac77-8ebd0d6e9113
+              pvc: fuzeinfra-prometheus-data
+              pvc_namespace: fuzeinfra
+            exp_annotations:
+              summary: "Longhorn volume fuzeinfra-prometheus-data has only 1 replica — data loss on the next node event"
+              description: >-
+                Volume pvc-88752815-1e8e-47be-ac77-8ebd0d6e9113 (PVC fuzeinfra/fuzeinfra-prometheus-data) is attached with spec.numberOfReplicas=1. Robustness will keep reporting "healthy" — one replica out of one desired IS healthy — so this alert is the only signal that the volume cannot survive losing its node. Nodes in this cluster are reinstalled routinely; this is not a hypothetical risk. Raise the replica count in Git (prod is GitOps under selfHeal; never `kubectl patch` the live Volume): set the replica count on the StorageClass in helm/fuzeinfra/templates/storageclass-longhorn.yaml for new volumes, and for an existing volume raise spec.numberOfReplicas so Longhorn schedules the extra replicas. Then confirm the rebuild finishes — a volume left mid-rebuild is what LonghornVolumeDegradedTooLong catches.
+
+  # --- NEGATIVE CONTROL: healthy 3-replica volume, same shape ---
+  - interval: 1m
+    name: NEGATIVE CONTROL - attached 3-replica volume never fires
+    input_series:
+      - series: 'longhorn_crd_volume_replicas_desired{volume="pvc-c0e3cd44",pvc="data-fuzeinfra-kafka-0",pvc_namespace="fuzeinfra"}'
+        values: '3+0x60'
+      - series: 'longhorn_crd_volume_state{volume="pvc-c0e3cd44",pvc="data-fuzeinfra-kafka-0",pvc_namespace="fuzeinfra",state="attached"}'
+        values: '1+0x60'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: LonghornVolumeUnderReplicated
+        exp_alerts: []
+      - eval_time: 60m
+        alertname: LonghornVolumeUnderReplicated
+        exp_alerts: []
+
+  # --- NEGATIVE CONTROL: the boundary. 2 replicas is the minimum acceptable. ---
+  # Guards the `< 2` threshold against being fat-fingered to `<= 2`, which would
+  # page on data-fuzeinfra-postgres-0 (really at 2 replicas today).
+  - interval: 1m
+    name: NEGATIVE CONTROL - exactly 2 replicas is acceptable and does not fire
+    input_series:
+      - series: 'longhorn_crd_volume_replicas_desired{volume="pvc-a315e24a",pvc="data-fuzeinfra-postgres-0",pvc_namespace="fuzeinfra"}'
+        values: '2+0x60'
+      - series: 'longhorn_crd_volume_state{volume="pvc-a315e24a",pvc="data-fuzeinfra-postgres-0",pvc_namespace="fuzeinfra",state="attached"}'
+        values: '1+0x60'
+    alert_rule_test:
+      - eval_time: 60m
+        alertname: LonghornVolumeUnderReplicated
+        exp_alerts: []
+
+  # --- NEGATIVE CONTROL: the attached gate actually gates. ---
+  # data-fuzeinfra-mariadb-0 is genuinely at numberOfReplicas=1 in prod right
+  # now, but detached. It must NOT page while nothing is writing to it.
+  - interval: 1m
+    name: NEGATIVE CONTROL - detached single-replica volume does not fire
+    input_series:
+      - series: 'longhorn_crd_volume_replicas_desired{volume="pvc-b58edc54",pvc="data-fuzeinfra-mariadb-0",pvc_namespace="fuzeinfra"}'
+        values: '1+0x60'
+      - series: 'longhorn_crd_volume_state{volume="pvc-b58edc54",pvc="data-fuzeinfra-mariadb-0",pvc_namespace="fuzeinfra",state="attached"}'
+        values: '0+0x60'
+      - series: 'longhorn_crd_volume_state{volume="pvc-b58edc54",pvc="data-fuzeinfra-mariadb-0",pvc_namespace="fuzeinfra",state="detached"}'
+        values: '1+0x60'
+    alert_rule_test:
+      - eval_time: 60m
+        alertname: LonghornVolumeUnderReplicated
+        exp_alerts: []
+
+  # ===========================================================================
+  # LonghornVolumeDegradedTooLong
+  # ===========================================================================
+
+  # --- POSITIVE: a rebuild that never completes ---
+  - interval: 1m
+    name: volume degraded past 30m fires
+    input_series:
+      - series: 'longhorn_crd_volume_robustness{volume="pvc-88752815-1e8e-47be-ac77-8ebd0d6e9113",pvc="fuzeinfra-prometheus-data",pvc_namespace="fuzeinfra",robustness="degraded"}'
+        values: '1+0x90'
+    alert_rule_test:
+      - eval_time: 29m
+        alertname: LonghornVolumeDegradedTooLong
+        exp_alerts: []
+      - eval_time: 45m
+        alertname: LonghornVolumeDegradedTooLong
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              volume: pvc-88752815-1e8e-47be-ac77-8ebd0d6e9113
+              pvc: fuzeinfra-prometheus-data
+              pvc_namespace: fuzeinfra
+              robustness: degraded
+            exp_annotations:
+              summary: "Longhorn volume fuzeinfra-prometheus-data has been degraded for 30m — rebuild is not completing"
+              description: >-
+                Volume pvc-88752815-1e8e-47be-ac77-8ebd0d6e9113 (PVC fuzeinfra/fuzeinfra-prometheus-data) has been in robustness=degraded for over 30 minutes, far longer than a healthy rebuild of these volume sizes. At least one replica is missing or stuck rebuilding, so the redundancy this volume appears to have is not real and a single further node event can fault it. DO NOT reinstall, drain or delete any node until this clears — that sequence, two node events 25 minutes apart with a rebuild in flight, is exactly what destroyed fuzeinfra-prometheus-data on 2026-09-07. Check replica scheduling first (`kubectl -n longhorn-system get replicas.longhorn.io`); the usual causes are no schedulable node with free space, or a disk over its over-provisioning limit.
+
+  # --- NEGATIVE CONTROL: a NORMAL rebuild must not page. ---
+  # This is the calibration test for `for: 30m`. A 25GB rebuild completes in
+  # minutes; here the volume is degraded for 12m and then healthy. If someone
+  # lowers the window to ride out less than a real rebuild, this test fails.
+  - interval: 1m
+    name: NEGATIVE CONTROL - normal 12m rebuild does not fire
+    input_series:
+      - series: 'longhorn_crd_volume_robustness{volume="pvc-21be6a58",pvc="fuzeinfra-loki-data",pvc_namespace="fuzeinfra",robustness="degraded"}'
+        values: '1+0x11 0+0x60'
+      - series: 'longhorn_crd_volume_robustness{volume="pvc-21be6a58",pvc="fuzeinfra-loki-data",pvc_namespace="fuzeinfra",robustness="healthy"}'
+        values: '0+0x11 1+0x60'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: LonghornVolumeDegradedTooLong
+        exp_alerts: []
+      - eval_time: 60m
+        alertname: LonghornVolumeDegradedTooLong
+        exp_alerts: []
+
+  # --- NEGATIVE CONTROL: a permanently healthy volume ---
+  - interval: 1m
+    name: NEGATIVE CONTROL - healthy volume never fires
+    input_series:
+      - series: 'longhorn_crd_volume_robustness{volume="pvc-f4a65d03",pvc="data-fuzeinfra-neo4j-0",pvc_namespace="fuzeinfra",robustness="healthy"}'
+        values: '1+0x90'
+      - series: 'longhorn_crd_volume_robustness{volume="pvc-f4a65d03",pvc="data-fuzeinfra-neo4j-0",pvc_namespace="fuzeinfra",robustness="degraded"}'
+        values: '0+0x90'
+    alert_rule_test:
+      - eval_time: 60m
+        alertname: LonghornVolumeDegradedTooLong
+        exp_alerts: []

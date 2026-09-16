@@ -1,0 +1,71 @@
+name: Temporarily scale a Deployment (incident capacity relief)
+
+# One-off incident-response tool: scale a single named Deployment up or down.
+# Built for the same 2026-09 incident as recover-stuck-terminating-pods.yml --
+# losing mendys-worker-1 (a durable/control-plane node) left the two surviving
+# durable nodes at ~99% CPU requests, with no room to schedule
+# fuzeinfra-postgres-0 (needs 250m) or fuzeinfra-mariadb-0 (needs 100m) even
+# after clearing their stuck-Terminating state. Reducing a redundant replica
+# (2 -> 1) on an HA product Deployment frees exactly that CPU with minimal
+# impact -- reduced redundancy for a few minutes, not an outage of that
+# service. Scale it back up once mendys-worker-1 is healthy again or the DBs
+# are confirmed Running.
+#
+# SAFE DEFAULT: mode=show only prints current replica count -- no mutations.
+on:
+  workflow_dispatch:
+    inputs:
+      namespace:
+        description: 'Namespace holding the Deployment'
+        required: true
+        type: string
+      deployment:
+        description: 'Deployment name'
+        required: true
+        type: string
+      replicas:
+        description: 'Target replica count (for mode=scale only)'
+        required: false
+        default: '1'
+        type: string
+      mode:
+        description: 'show = print current replica count (safe, no mutations); scale = set replicas to the value above'
+        type: choice
+        options: [show, scale]
+        default: show
+        required: true
+      confirm:
+        description: 'For mode=scale ONLY: type SCALE to proceed. Ignored in show mode.'
+        default: ''
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  scale:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: azure/setup-kubectl@829323503d1be3d00ca8346e5391ca0b07a9ab0d # v5.1.0
+
+      - name: Setup kubeconfig
+        run: |
+          mkdir -p ~/.kube
+          echo "${{ secrets.KUBE_CONFIG }}" | base64 -d > ~/.kube/config
+          chmod 600 ~/.kube/config
+
+      - name: Show current state
+        run: |
+          set -euo pipefail
+          kubectl -n "${{ inputs.namespace }}" get deployment "${{ inputs.deployment }}" -o wide
+
+      - name: Scale deployment
+        if: inputs.mode == 'scale'
+        run: |
+          set -euo pipefail
+          if [ "${{ inputs.confirm }}" != "SCALE" ]; then
+            echo "::error::mode=scale requires confirm=SCALE"; exit 1
+          fi
+          kubectl -n "${{ inputs.namespace }}" scale deployment "${{ inputs.deployment }}" --replicas="${{ inputs.replicas }}"
+          sleep 3
+          kubectl -n "${{ inputs.namespace }}" get deployment "${{ inputs.deployment }}" -o wide

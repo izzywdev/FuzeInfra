@@ -12,10 +12,15 @@
 # plugins — they must live in the runner image.  See izzywdev/FuzeInfra #223,
 # #230, #231, #233, #235.
 #
-# This image also pre-warms /opt/hostedtoolcache with Python 3.10/3.11 and
+# This image also pre-warms /opt/hostedtoolcache with Python 3.10/3.11/3.12 and
 # Node 20 so `actions/setup-python` / `actions/setup-node` resolve from the
 # local cache instead of hitting api.github.com / objects.githubusercontent.com
 # from a cold pod (setup-python was timing out fetching the version manifest).
+# Each warmed Python is ALSO seeded with the harden-gate self-test deps
+# (jsonschema + pyyaml + PyNaCl) — see warm-python-toolcache.sh — because the
+# in-cluster runner pods have no PyPI egress, so a job-time `pip install` cannot
+# land and gate_manifest would drop to structural fallback (gate-identifier /
+# gate-vacuous-check red).
 #
 # It further bakes in `jq`/`curl` and Playwright's browser OS dependencies so
 # e2e/visual jobs only run `npx playwright install <browser>` (no apt/root at
@@ -66,13 +71,19 @@ RUN set -eux; \
     touch "/opt/hostedtoolcache/node/${NODE_VERSION}/x64.complete"; \
     "$dir/bin/node" --version
 
-# --- Warm hostedtoolcache: Python 3.10 + 3.11 --------------------------------
+# --- Warm hostedtoolcache: Python 3.10 + 3.11 + 3.12 (+ gate self-test deps) --
 # Uses the actions/python-versions relocatable builds (the exact artifacts
-# setup-python downloads) so the cache layout + rpath fixups are correct. The
-# multi-line jq lives in a helper script (Dockerfile RUN can't hold it inline).
+# setup-python downloads) so the cache layout + rpath fixups are correct. 3.12
+# is included because the harden-gate self-test jobs pin `python-version: 3.12`;
+# without it warmed, setup-python resolves 3.12 to a FRESH download carrying
+# none of the baked packages. warm-python-toolcache.sh ALSO seeds each warmed
+# interpreter with jsonschema + pyyaml + PyNaCl (see its header) so
+# gate_manifest's full-validation self-tests pass on the egress-restricted
+# in-cluster runner instead of dropping to structural fallback. The multi-line
+# jq lives in the helper script (Dockerfile RUN can't hold it inline).
 COPY warm-python-toolcache.sh /usr/local/bin/warm-python-toolcache.sh
 RUN chmod +x /usr/local/bin/warm-python-toolcache.sh; \
-    /usr/local/bin/warm-python-toolcache.sh 3.10 3.11
+    /usr/local/bin/warm-python-toolcache.sh 3.10 3.11 3.12
 
 # --- GitHub CLI (gh) ---------------------------------------------------------
 # Installed from GitHub's official apt repo. In workflows it authenticates via

@@ -1,3 +1,19 @@
+# fuze:fork — deliberately NOT `fuze:managed`, so governance-sync never reconciles it.
+#
+# Content-identical to `workflow-templates/design-review-notify.yml` apart from two
+# deliberate repo changes, both of which stamping would revert:
+#
+#   * MENTION CONVENTION. This file was migrated @claude -> @fuze by commit 1811ff3
+#     ("migrate @claude -> @fuze in docs, workflows, and schemas"). FuzeInfra runs BOTH
+#     handlers — claude.yml triggers on `@claude`, fuze.yml on `@fuze` — and the designer
+#     instructions in the Telegram message deliberately point at the @fuze one. The canonical
+#     still says @claude.
+#   * PIN. appleboy/telegram-action is pinned here at v1.1.1 (214f06cf...); the canonical is
+#     still on v0.1.1 (2efd2328...), so reconciling would be a downgrade.
+#
+# The right way to close this gap is to land the @fuze rename and the pin bump in the
+# FuzeSDLC canonical, then stamp. Until then the divergence is intentional, not drift.
+
 name: Design Review — Notify via Telegram
 
 # Fires when any issue is labeled `design-review`.

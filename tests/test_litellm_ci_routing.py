@@ -1,10 +1,9 @@
 """Static invariants for CI agents routed through the LiteLLM gateway.
 
-The Claude-driven workflows hold no provider key: they point `ANTHROPIC_BASE_URL` at
-`litellm.fuzeinfra.svc.cluster.local:4000` and let the gateway own routing, key custody
-and cross-provider failover. That buys provider independence, and it introduces one
-coupling worth guarding: **the model names the workflow pins must be names the gateway
-actually serves.**
+CI agents reach providers through the gateway, which owns routing, key custody and
+cross-provider failover. That buys provider independence, and it introduces one coupling
+worth guarding: **the model names CI can ask for must be names the gateway actually
+serves.**
 
 That coupling is not theoretical. The original outage ran with no pinning at all, and
 Claude Code asked for `claude-opus-5[1m]` — the extended-context marker appended to the
@@ -13,7 +12,27 @@ first call. A model rename in `helm/litellm/values.yaml` breaks CI the same way,
 neither side's tests would otherwise notice: the chart lints fine, the workflow lints
 fine, and the failure only appears at runtime.
 
-Offline: reads two files, no cluster, no network.
+WHERE THE PINNED SET NOW COMES FROM, AND WHY IT MOVED. It used to be read out of
+`a2a-maintain.yml`'s own `env:` block — `ANTHROPIC_MODEL`, `ANTHROPIC_DEFAULT_*` — because
+this repo ran a FORK of that workflow which hardcoded them alongside an in-cluster
+`ANTHROPIC_BASE_URL` and `runs-on: staging`. That fork is gone. The workflow is now the
+stamped FuzeSDLC canonical (`# fuze:managed`), which resolves its endpoint through
+`./.github/actions/llm-endpoint` and therefore holds no model pins, no gateway URL and no
+runner class of its own. All three were FuzeInfra-only — this repo hosts the gateway — and
+did not belong in a template every repo installs.
+
+So the source of truth for "which models can CI ask the gateway for" is now the VIRTUAL
+KEY's own allowlist: the `MODELS` array in `scripts/mint-litellm-ci-key.sh`. That is a
+strictly better anchor than a workflow env block ever was, because the key's ACL is the
+thing that actually rejects a dispatch — a name present in the workflow but absent from the
+ACL was always the real defect, and reading the ACL directly means this suite cannot be
+satisfied by a pin the gateway will refuse.
+
+The workflow assertions that remain are about the merged contract itself: that the
+canonical's gating has not been re-forked back into skip-green paths, and that the
+FuzeInfra-only hardcoding has not crept back in.
+
+Offline: reads a few files, no cluster, no network.
 """
 
 import json
@@ -28,12 +47,26 @@ WORKFLOW = ROOT / ".github/workflows/a2a-maintain.yml"
 GATEWAY_VALUES = ROOT / "helm/litellm/values.yaml"
 GATEWAY_PROD_VALUES = ROOT / "helm/litellm/values-contabo.yaml"
 
-# Env vars in the workflow whose value must be a model the gateway serves.
-MODEL_VARS = (
-    "ANTHROPIC_MODEL",
-    "ANTHROPIC_DEFAULT_OPUS_MODEL",
-    "ANTHROPIC_DEFAULT_SONNET_MODEL",
-    "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+# The FuzeInfra-only hardcoding the merged canonical must never reacquire. Each of these
+# was in this repo's fork and is now the gateway host's business, not a consumer template's.
+FORK_ONLY = (
+    ("ANTHROPIC_BASE_URL", "the gateway URL — ./.github/actions/llm-endpoint probes it "
+                           "generically and falls back when it is unreachable"),
+    ("litellm.fuzeinfra.svc.cluster.local", "in-cluster service DNS, true only in this repo"),
+    ("runs-on: staging", "a pinned runner class — render.py rewrites runs-on: from the "
+                         "repo's declared ci.runner and this job is not RUNNER_EXEMPT"),
+    ("helm/litellm", "chart paths that exist only in the gateway host"),
+)
+
+# Verdict paths from the fork that went GREEN while a declared A2A surface went
+# unmaintained. Deleting them is the entire point of the merge; asserted on the strings
+# the fork actually shipped rather than on a paraphrase.
+SKIP_GREEN_PATHS = (
+    ("LITELLM_CI_KEY not set", "gating on ONE secret's name, so a repo on the fallback "
+                               "vendor read as uncredentialed"),
+    ("Skip if gateway key absent", "the guard step itself"),
+    ("A2A drift is NOT being checked on this PR", "the warn-and-pass verdict"),
+    ("provider billing/budget error detected", "billing errors treated as skippable"),
 )
 
 # Body fields a non-Anthropic upstream rejects when the router falls through to it.
@@ -57,82 +90,113 @@ def _model_names() -> set[str]:
     return {m["name"] for m in _gateway_models()}
 
 
-def test_workflow_holds_no_provider_key():
-    """The point of the gateway: CI holds a gateway credential, never a provider key."""
-    raw = WORKFLOW.read_text()
-    assert "secrets.LITELLM_CI_KEY" in raw
-    assert "secrets.ANTHROPIC_API_KEY" not in raw, (
-        "the workflow is back to holding a provider key directly, which defeats the "
-        "gateway's key custody and re-couples CI to a single provider's billing"
-    )
-    assert "api.anthropic.com" not in raw, "CI must reach providers only via the gateway"
+def _workflow_live() -> str:
+    """The workflow with comment lines stripped.
 
-
-def test_scoped_key_is_preferred_over_the_admin_key():
-    """Every place the credential is read must prefer the scoped virtual key.
-
-    `LITELLM_MASTER_KEY` is the gateway ADMIN key — it can mint keys, read the proxy
-    config and see every consumer's spend. It stays as a fallback so the migration is
-    zero-downtime, but a reference that reads it FIRST (or only) silently puts CI back
-    on admin credentials.
+    Its header DOCUMENTS the removed skip paths and the un-promoted FuzeInfra-only bits by
+    name, on purpose — that history is why they are banned. The ban is on the BEHAVIOUR, so
+    every assertion below reads the executable half. A suite that forbade the explanation
+    too would be one you "fix" by deleting the explanation.
     """
-    raw = WORKFLOW.read_text()
-    for line in raw.splitlines():
-        if "secrets.LITELLM_MASTER_KEY" not in line:
-            continue
-        if line.strip().startswith("#") or "::warning::" in line:
-            continue  # prose and the nudge itself may name it
-        assert "secrets.LITELLM_CI_KEY || secrets.LITELLM_MASTER_KEY" in line, (
-            f"master key read without preferring the scoped key: {line.strip()}"
+    return "\n".join(
+        ln for ln in WORKFLOW.read_text(encoding="utf-8").splitlines()
+        if not ln.lstrip().startswith("#")
+    )
+
+
+def test_the_workflow_is_the_stamped_canonical_not_a_local_fork():
+    """A fork of this file is what produced two jobs with the SAME id `a2a-maintain`, so
+    branch protection saw one indistinguishable status-check context while both copies
+    raced to push `[skip a2a]` commits to the same PR branch. The `fuze:managed` marker is
+    what keeps governance-sync reconciling it instead of it drifting again."""
+    first = WORKFLOW.read_text(encoding="utf-8").splitlines()[0]
+    assert first.startswith("# fuze:managed template=a2a-maintain.yml"), (
+        f"a2a-maintain.yml is no longer stamped from the FuzeSDLC canonical: {first!r}. "
+        "Editing it here re-forks it; change workflow-templates/a2a-maintain.yml upstream."
+    )
+
+
+def test_no_skip_green_path_came_back():
+    """The merged contract: `a2a.enabled` undeclared -> skip (no surface exists, so
+    skipping is the truth); declared with NO usable credential -> FAIL; declared with a
+    usable credential (LiteLLM OR fallback) -> run. Nothing else may pass by not running.
+
+    Note in particular that an unreachable gateway is NOT a skip. It is a FALLBACK TRIGGER:
+    llm-endpoint degrades to a direct vendor, because recovering the cluster may itself
+    require an agent run, so the agent path must not depend on the cluster being up."""
+    live = _workflow_live()
+    for fragment, why in SKIP_GREEN_PATHS:
+        assert fragment not in live, f"skip-green path is back ({why}): {fragment!r}"
+
+
+def test_the_credential_gate_is_on_resolution_not_on_one_secrets_name():
+    live = _workflow_live()
+    assert "uses: ./.github/actions/llm-endpoint" in live, (
+        "the gate must be whether llm-endpoint resolved ANY usable credential"
+    )
+    assert "secrets.LITELLM_CI_KEY" not in live, (
+        "gating on LITELLM_CI_KEY by name is what made a repo running on a configured "
+        "fallback vendor read as uncredentialed and skip green"
+    )
+
+
+def test_no_provider_key_or_gateway_url_is_hardcoded_in_the_workflow():
+    """Key custody stays with llm-endpoint/the gateway. The workflow names secrets to PASS
+    to that action; what it must not do is address a provider directly."""
+    live = _workflow_live()
+    assert "api.anthropic.com" not in live, (
+        "the workflow reaches a provider directly instead of through llm-endpoint"
+    )
+    assert "secrets.LITELLM_MASTER_KEY" not in live, (
+        "LITELLM_MASTER_KEY is the gateway ADMIN key — it can mint keys, read the proxy "
+        "config and see every consumer's spend. CI needs none of that."
+    )
+
+
+def test_no_fuzeinfra_only_hardcoding_was_promoted_into_the_shared_template():
+    live = _workflow_live()
+    for fragment, why in FORK_ONLY:
+        assert fragment not in live, (
+            f"{fragment!r} is FuzeInfra-only ({why}) and this file is installed verbatim "
+            f"in every repo that declares an a2a surface"
         )
 
 
-def test_base_url_points_at_the_in_cluster_gateway():
-    env = _workflow()["env"]
-    assert env["ANTHROPIC_BASE_URL"] == "http://litellm.fuzeinfra.svc.cluster.local:4000"
-
-
-def test_job_runs_on_the_in_cluster_runner():
-    """A hosted runner cannot reach a ClusterIP gateway; the job must run in-cluster."""
-    job = _workflow()["jobs"]["a2a-maintain"]
-    assert job["runs-on"] == "staging", (
-        "the gateway is ClusterIP-only with a NetworkPolicy — from ubuntu-latest every "
-        "request times out. `staging` is the ARC scale-set name (a bare string, not a "
-        "label; see runners/arc/runner-scale-set-values.yaml). If the CI node loses its "
-        "fuzeinfra.io/pool=ci label, the arc-selfheal CronJob (arc-systems) will auto-"
-        "repair it within 15 min — do not switch to ubuntu-latest, let the CronJob fix it."
+def test_fork_prs_get_no_credential_and_never_start():
+    """The old guard was `head.repo.full_name == github.repository`, needed because the
+    fork ran an agent with Bash on an IN-CLUSTER runner. The canonical closes the same case
+    structurally instead: the trigger is `pull_request` (not `pull_request_target`), so a
+    fork PR is handed no secrets at all, llm-endpoint resolves nothing, and the fail-closed
+    preflight stops the job before the maintainer runs."""
+    wf = _workflow()
+    triggers = wf[True] if True in wf else wf["on"]  # PyYAML parses bare `on:` as True
+    assert "pull_request_target" not in triggers, (
+        "pull_request_target hands fork PRs this repo's secrets AND write scope; the "
+        "fail-closed preflight stops being a boundary"
     )
+    assert "pull_request" in triggers
 
 
-def test_fork_prs_cannot_run_on_the_in_cluster_runner():
-    """Fork code + an agent with Bash + a runner inside the cluster is not acceptable."""
-    guard = str(_workflow()["jobs"]["a2a-maintain"]["if"])
-    assert "head.repo.full_name == github.repository" in guard, (
-        "this job checks out the PR head and runs an agent with Bash on an in-cluster "
-        "runner; without a same-repo guard a fork PR gets execution inside the cluster"
-    )
-
-
-def test_every_pinned_model_is_served_by_the_gateway():
-    env = _workflow()["env"]
+def test_every_model_ci_may_request_is_served_by_the_gateway():
+    """The virtual key's ACL is what the gateway enforces at dispatch, so it is the set
+    that matters — see the module docstring for why this no longer reads a workflow env."""
     served = _model_names()
-    for var in MODEL_VARS:
-        assert var in env, f"{var} must be pinned; unpinned aliases resolve to IDs the gateway lacks"
-        assert env[var] in served, (
-            f"{var}={env[var]!r} is not in the gateway's model list {sorted(served)}. "
-            f"Either add it to helm/litellm/values.yaml or pin the workflow to a served name."
+    allow = _key_allowlist()
+    assert allow, "the mint script's MODELS array is empty; CI could request nothing"
+    for name in sorted(allow):
+        assert name in served, (
+            f"{name!r} is on the CI virtual key's allowlist but not in the gateway's model "
+            f"list {sorted(served)}. Either add it to helm/litellm/values.yaml or drop it "
+            f"from MODELS in scripts/mint-litellm-ci-key.sh."
         )
 
 
-def test_no_pinned_model_carries_the_extended_context_suffix():
+def test_no_allowed_model_carries_the_extended_context_suffix():
     """`claude-opus-5[1m]` is what the original failure requested. It is not a model."""
-    env = _workflow()["env"]
-    for var in MODEL_VARS:
-        assert not re.search(r"\[\d+m\]$", str(env[var])), (
-            f"{var}={env[var]!r} carries an extended-context suffix; the gateway serves "
-            f"no such name. CLAUDE_CODE_DISABLE_1M_CONTEXT should also stay set."
+    for name in sorted(_key_allowlist()):
+        assert not re.search(r"\[\d+m\]$", name), (
+            f"{name!r} carries an extended-context suffix; the gateway serves no such name."
         )
-    assert env.get("CLAUDE_CODE_DISABLE_1M_CONTEXT") == "1"
 
 
 def test_fallback_targets_drop_anthropic_only_fields():
@@ -201,21 +265,25 @@ def test_every_fallback_target_is_a_real_model():
                     assert alt in served, f"{key} target {alt!r} is not in model_list"
 
 
-def test_the_ci_model_has_a_cross_provider_fallback_chain():
-    """Provider independence is the whole objective — assert it for the model CI uses."""
-    env = _workflow()["env"]
+def test_every_anthropic_model_ci_may_request_has_a_cross_provider_fallback_chain():
+    """Provider independence is the whole objective — assert it for every model CI can
+    actually dispatch, not just one. A key allowed three Claude names of which only one has
+    a chain is single-provider on the other two, and nothing would say so."""
     fallbacks = yaml.safe_load(GATEWAY_VALUES.read_text())["routerSettings"]["fallbacks"]
-    chain = next(
-        (alts for entry in fallbacks for prim, alts in entry.items() if prim == env["ANTHROPIC_MODEL"]),
-        None,
-    )
-    assert chain, f"{env['ANTHROPIC_MODEL']} has no fallbacks; CI is still single-provider"
     by_model = {m["name"]: m["provider"].split("/", 1)[0] for m in _gateway_models()}
-    providers = {by_model[alt] for alt in chain}
-    assert len(providers) >= 2, (
-        f"fallbacks for {env['ANTHROPIC_MODEL']} only reach {providers}; a single "
-        f"alternate provider is one outage away from the same total failure"
-    )
+    anthropic_allowed = [n for n in sorted(_key_allowlist()) if by_model[n] == "anthropic"]
+    assert anthropic_allowed, "the CI key allows no Anthropic model; check MODELS"
+    for name in anthropic_allowed:
+        chain = next(
+            (alts for entry in fallbacks for prim, alts in entry.items() if prim == name),
+            None,
+        )
+        assert chain, f"{name} has no fallbacks; CI is still single-provider on it"
+        providers = {by_model[alt] for alt in chain}
+        assert len(providers) >= 2, (
+            f"fallbacks for {name} only reach {providers}; a single alternate provider is "
+            f"one outage away from the same total failure"
+        )
 
 
 def test_runner_namespace_may_reach_the_gateway_in_prod():
@@ -238,16 +306,6 @@ def _key_allowlist() -> set[str]:
     return {line.strip().strip('",') for line in body.splitlines() if line.strip().strip('",')}
 
 
-def test_key_allowlist_covers_every_model_the_workflow_pins():
-    env = _workflow()["env"]
-    allow = _key_allowlist()
-    for var in MODEL_VARS:
-        assert env[var] in allow, (
-            f"{var}={env[var]!r} is not on the virtual key's model allowlist, so the key "
-            f"would be refused for it. Add it to MODELS in scripts/mint-litellm-ci-key.sh."
-        )
-
-
 def test_key_allowlist_covers_every_fallback_hop():
     """The subtle one: a key allowed only the Claude names breaks failover.
 
@@ -255,14 +313,12 @@ def test_key_allowlist_covers_every_fallback_hop():
     normal operation and is rejected at the precise moment the router fails over —
     converting the cross-provider fallback into an outage on the one day it matters.
     """
-    env = _workflow()["env"]
     allow = _key_allowlist()
     fallbacks = yaml.safe_load(GATEWAY_VALUES.read_text())["routerSettings"]["fallbacks"]
-    pinned = {env[v] for v in MODEL_VARS}
     for entry in fallbacks:
         for primary, alts in entry.items():
-            if primary not in pinned:
-                continue  # CI never asks for it, so its hops are irrelevant here
+            if primary not in allow:
+                continue  # CI cannot ask for it, so its hops are irrelevant here
             for alt in alts:
                 assert alt in allow, (
                     f"{primary!r} falls back to {alt!r} but the virtual key does not allow "
@@ -299,10 +355,19 @@ def test_mint_script_sets_a_budget_and_a_stable_alias():
 
 
 def test_manifest_and_workflow_agree_the_check_is_non_blocking():
-    """a2a-maintain must stay off requiredChecks while it depends on cluster reachability."""
+    """a2a-maintain must stay off requiredChecks — for a different reason than it used to.
+
+    The old reason was cluster reachability: the fork could only reach a ClusterIP gateway
+    from an in-cluster runner, so requiring it blocked every merge on the gateway being up.
+    The canonical removed that dependency (llm-endpoint falls back to a direct vendor), but
+    the check is still ACTOR-GATED: claude-code-action refuses a Bot actor, and
+    governance-sync's commit-back flips the triggering actor User -> Bot on most PRs here.
+    Red then means "an agent opened this PR", not "this PR is bad"
+    (governance/required-checks.json says the same, measured on 1 of 4 PR heads).
+    """
     manifest = json.loads((ROOT / ".fuze/manifest.json").read_text())
     required = manifest["hardening"]["requiredChecks"]
     assert "a2a-maintain" not in required, (
-        "a2a-maintain now depends on in-cluster gateway reachability; making it a "
-        "required check would block every merge on the gateway being up"
+        "a2a-maintain is actor-gated — it goes red merely because the PR was opened by a "
+        "bot — so requiring it would block agent PRs on something the PR cannot fix"
     )

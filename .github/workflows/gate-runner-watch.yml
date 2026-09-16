@@ -1,0 +1,89 @@
+# fuze:fork — DELIBERATELY NOT `fuze:managed`. DO NOT STAMP THIS FILE.
+#
+# Self-test for the fleet runner-selection watcher (.github/workflows/runner-watch.yml,
+# scripts/runner_watch.py, scripts/runner_watch_fleet_preflight.py). FuzeInfra-owned, with
+# no canonical FuzeSDLC template — see runner-watch.yml's header for why the instance lives
+# here rather than in the hub that authored the script.
+#
+# WHY THIS FILE HAD TO BE ADDED AS PART OF THE PORT. FuzeInfra has NO generic runner for
+# `scripts/__tests__/**` — every suite in that directory is run by a dedicated gate
+# (gate-handoff-coverage, gate-required-checks, gate-identifier, ...). So a test file
+# copied in alongside its script runs NOWHERE: `pytest tests/` does not reach it and no
+# existing gate's pattern matches it. The 58 tests would have been dead weight in the repo,
+# green on a laptop and never executed by CI, which is indistinguishable from not having
+# ported them at all.
+#
+# WHAT IT PROTECTS. `stranded_runs()` drives `gh run cancel` against OTHER REPOS. A defect
+# there does not produce a wrong label, it DESTROYS a running build somewhere in the fleet.
+# `decide_runner()` and `hysteresis()` decide whether to rewrite every fleet repo's
+# CI_RUNNER_LABELS. None of that is exercised by any other check in this repo.
+#
+# NOT a required check, so the `paths:` filter below is safe. A path-filtered REQUIRED check
+# produces zero check runs on a PR that misses the filter and blocks it forever — the
+# incident gate-policy-integrity.yml exists to avoid repeating. If this is ever promoted to
+# required_now, drop the filter first.
+
+name: gate-runner-watch
+
+on:
+  pull_request:
+    paths:
+      - 'scripts/runner_watch.py'
+      - 'scripts/runner_watch_fleet_preflight.py'
+      - 'scripts/__tests__/test_runner_watch.py'
+      - 'scripts/gate_required_checks.py'
+      - 'governance/runner-watch.json'
+      - '.github/workflows/runner-watch.yml'
+      - '.github/workflows/gate-runner-watch.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: gate-runner-watch-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  selftest:
+    name: runner-watch decision + recovery invariants
+    # Hosted, like the watcher itself. This gate must not depend on the self-hosted pool
+    # whose failure modes the code under test exists to handle.
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with: { python-version: '3.12' }
+
+      # The WorkflowShape / RunsInThePublicRepo tests parse runner-watch.yml, and the suite
+      # raises SkipTest when pyyaml is absent. Installed explicitly rather than relied upon:
+      # a skipped shape test still reports OK, and "the watcher's runs-on is a literal" is
+      # exactly the assertion that must never quietly stop being checked.
+      - name: Install pyyaml (the shape tests parse the workflow)
+        run: python -m pip install --quiet 'pyyaml==6.0.2'
+
+      - name: Self-test
+        run: |
+          set -euo pipefail
+          python -m unittest discover -s scripts/__tests__ -p 'test_runner_watch.py' -v \
+            2>&1 | tee selftest.txt
+          # A SKIP is not a pass. unittest exits 0 on a skipped test, so a missing optional
+          # import would silently retire whole classes of assertion while the gate stayed
+          # green — the same "clean-looking no-op" failure the watcher itself refuses.
+          if grep -qiE '\bskipped\b' selftest.txt; then
+            echo "::error title=gate-runner-watch::A test was SKIPPED. This suite has no legitimately skippable test; a skip here means an assertion silently stopped running. Failing rather than reporting green on fewer tests than were written."
+            exit 1
+          fi
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "### gate-runner-watch"
+            echo
+            echo '```'
+            tail -c 20000 selftest.txt 2>/dev/null | tail -20 || echo "(no output)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

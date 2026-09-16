@@ -1,0 +1,93 @@
+# litellm-admin — on-demand introspection and repair of the LiteLLM gateway's
+# virtual keys, without a deploy.
+#
+# WHY THIS EXISTS. Answering "does the FUZE_KEY have a models restriction?" used
+# to require editing a PostSync hook, merging it, waiting for deploy-prod, then
+# waiting for an Argo sync to run the Job — ~15 minutes per question, and the
+# answer was repeatedly "the hook's image has no curl". This runs the same logic
+# against the ALREADY-RUNNING pod in about a minute, and works even when the
+# chart is failing to render (which is exactly when you most need to look).
+#
+# It complements, and does not replace, the PostSync hook in
+# helm/litellm/templates/job-sync-key-models.yaml: the hook is the durable
+# GitOps reconciliation that runs on every sync, this is the interactive probe.
+# Both share the same intent (`models: []` == all models); this one just answers
+# now. Deliberately NOT wired to repository_dispatch, unlike cluster-query:
+# `clear-key-models` MUTATES gateway state, so it stays behind workflow_dispatch,
+# which needs Actions:write on FuzeInfra.
+#
+# SECRETS. The master key is never read out of the cluster — the script runs
+# INSIDE the pod, which already has LITELLM_MASTER_KEY in its environment. Only
+# hashed-token prefixes are printed. FuzeInfra job logs are public; treat any
+# change to the printed output as a security review.
+name: litellm-admin
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: 'What to do'
+        required: true
+        type: choice
+        default: list-keys
+        options:
+          - list-keys           # aliases + model-restriction counts (read-only)
+          - list-models         # models the gateway currently serves (read-only)
+          - clear-key-models    # MUTATES: set models=[] (all models) on every key
+          - test-model          # mint a temp key, call `model`, delete it
+      model:
+        description: 'Model name for test-model (e.g. claude-opus-4-8)'
+        required: false
+        default: 'claude-opus-4-8'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: litellm-admin
+  cancel-in-progress: false
+
+jobs:
+  admin:
+    name: ${{ inputs.action }}
+    runs-on: staging
+    timeout-minutes: 120
+    environment: production
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      # Talks to the gateway over cluster DNS, NOT via `kubectl exec`.
+      #
+      # The first cut of this workflow did exec into the pod, so that the master
+      # key never had to leave the cluster. That does not work here: the API
+      # server cannot reach the kubelet on the node hosting the pod —
+      #   error dialing backend: proxy error ... dialing <node>:10250, code 502
+      # — which breaks exec, logs AND port-forward for anything scheduled there.
+      # (Worth knowing independently: it means `kubectl logs` on that node is
+      # also unavailable, so reading a PostSync hook's output can fail for
+      # reasons that have nothing to do with the hook.)
+      #
+      # Pod-to-pod traffic never touches the kubelet, so this path is unaffected.
+      # `runs-on: staging` is an ARC pod in arc-runners, which is on the
+      # gateway's networkPolicy.allowedNamespaces exactly so CI can reach it;
+      # a2a-maintain.yml has used this route for a while.
+      - name: Run admin action against the gateway
+        env:
+          ACTION: ${{ inputs.action }}
+          MODEL: ${{ inputs.model }}
+          LITELLM_BASE_URL: http://litellm.fuzeinfra.svc.cluster.local:4000
+          # Admin endpoints (/key/list, /key/update) require the master key; a
+          # scoped virtual key cannot read or modify other keys. Passed as env
+          # so it never appears on a command line, and Actions masks it in logs.
+          LITELLM_MASTER_KEY: ${{ secrets.LITELLM_MASTER_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "${LITELLM_MASTER_KEY:-}" ]; then
+            echo "::error::LITELLM_MASTER_KEY repo secret is not set — admin endpoints need it."
+            exit 1
+          fi
+          echo "Gateway: $LITELLM_BASE_URL"
+          echo
+          # Action and model are separate argv elements, never interpolated into
+          # the script body.
+          python3 scripts/litellm_admin.py "$ACTION" "$MODEL"

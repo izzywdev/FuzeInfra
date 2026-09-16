@@ -6,6 +6,7 @@ datasources:
     type: prometheus
     access: proxy
     url: http://prometheus:9090
+    uid: prometheus
     isDefault: true
     editable: true
     jsonData:
@@ -16,13 +17,57 @@ datasources:
       cacheLevel: 'High'
       disableRecordingRules: false
       incrementalQueryOverlapWindow: 10m
+      # Jump from a metric sample's exemplar (a trace_id Prometheus stored
+      # alongside it via --enable-feature=exemplar-storage) straight into the
+      # trace that produced it.
+      exemplarTraceIdDestinations:
+        - datasourceUid: tempo
+          name: trace_id
 
   # Loki data source
   - name: Loki
     type: loki
     access: proxy
     url: http://loki:3100
+    uid: loki
     isDefault: false
     editable: true
     jsonData:
       maxLines: 1000
+      # "Clicking trace_id should jump straight to Tempo" — apps must log a
+      # structured `trace_id` field (see docs/consuming-repos/OBSERVABILITY_DASHBOARDS.md).
+      derivedFields:
+        - datasourceUid: tempo
+          matcherRegex: "trace_id[=\"':\\s]+([0-9a-fA-F]+)"
+          name: TraceID
+          url: '${__value.raw}'
+          urlDisplayLabel: "View trace"
+
+  # Tempo data source (traces)
+  - name: Tempo
+    type: tempo
+    access: proxy
+    url: http://tempo:3200
+    uid: tempo
+    isDefault: false
+    editable: true
+    jsonData:
+      nodeGraph:
+        enabled: true
+      tracesToLogsV2:
+        datasourceUid: loki
+        spanStartTimeShift: '-5m'
+        spanEndTimeShift: '5m'
+        filterByTraceID: true
+        tags:
+          - key: service.name
+            value: service
+      lokiSearch:
+        datasourceUid: loki
+      tracesToMetrics:
+        datasourceUid: prometheus
+        tags:
+          - key: service.name
+            value: service
+      serviceMap:
+        datasourceUid: prometheus

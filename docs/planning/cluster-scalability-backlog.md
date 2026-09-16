@@ -46,10 +46,12 @@ works, at least one HPA driving a workload. (Node autoscaling — the CA — is 
 
 ### D — Billing-aware reaper: finish + verify live *(in progress — PR #365)*
 CA utilization scale-down disabled; a reaper CronJob releases an idle elastic node only within 24h
-of its Contabo billing renewal (`createdDate + ~30d`), because Contabo cancel = end-of-billing.
+of its Contabo billing renewal, because Contabo cancel = end-of-billing. Renewal is calendar-aligned
+to the 15th of every month for the whole fleet (confirmed 2026-09) — not `createdDate + ~30d`; that
+per-instance-anniversary approximation was wrong by up to ~15 days and risked releasing a node too
+early or missing the window and paying for an extra month (see internal/reaper's `RenewalDay`).
 **AC:** reaper deployed (Helm slice on #365), and a real idle elastic node released just before
-renewal in prod. Open uncertainty flagged on #365: confirm the Contabo `createdDate` field + the
-`billingPeriod≈720h` month approximation against a live API response.
+renewal in prod.
 
 ### E — Autoscaling observability
 No dashboard/alerts for elastic capacity. **AC:** Grafana dashboard + alert rules (elastic node

@@ -93,6 +93,7 @@ spec:
         spec:
           serviceAccountName: fuzeinfra-ca-reaper
           restartPolicy: Never
+          {{- include "fuzeinfra.durableToleration" $ | nindent 10 }}
           containers:
             - name: reaper
               image: {{ .Values.clusterAutoscaler.provider.image }}
@@ -112,8 +113,8 @@ spec:
               env:
                 - name: RELEASE_WINDOW
                   value: {{ .Values.clusterAutoscaler.reaper.releaseWindow | quote }}
-                - name: BILLING_PERIOD
-                  value: {{ .Values.clusterAutoscaler.reaper.billingPeriod | quote }}
+                - name: RENEWAL_DAY
+                  value: {{ .Values.clusterAutoscaler.reaper.renewalDay | quote }}
                 # Kept in lockstep with the provider's own elasticTag so the
                 # reaper reaps exactly the fleet the provider creates.
                 - name: ELASTIC_TAG

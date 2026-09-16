@@ -1,0 +1,191 @@
+name: contabo-instance-power-cycle
+
+# Hard power-cycle (POST .../actions/stop, wait for status=stopped, POST
+# .../actions/start) for a Contabo instance backing a k3s node whose guest OS
+# is wedged badly enough that the soft `restart` action
+# (contabo-instance-reboot.yml) has no effect — the ACPI/soft-reboot signal
+# that `restart` sends relies on the guest being at least somewhat
+# responsive, which a genuinely hung kernel is not. `stop` then `start` is a
+# real power-off/power-on, so it works even against a fully wedged guest.
+#
+# Built 2026-09-16 for fuze-core-3 (instanceId 203410214): kubelet stopped
+# posting status 2026-09-10, SSH/TCP:22 unreachable, and a `restart` dispatch
+# produced zero change after 20+ minutes (heartbeat timestamp frozen, port 22
+# still closed) — see issues #973/#986/#999.
+#
+# Same split as contabo-instance-reboot.yml and every other contabo-*.yml
+# one-off: this workflow holds the Contabo credential and does exactly one
+# narrow, auditable thing, gated by a literal CONFIRM string. It does NOT
+# replace contabo-instance-reboot.yml — try the soft restart first; reach for
+# this only when that already failed to change anything.
+#
+# Quorum / safety is the caller's responsibility to establish BEFORE
+# dispatching (same as the reboot workflow) — see
+# docs/runbooks/dark-node-reboot.md. Do not power-cycle a control-plane/etcd
+# node without confirming other control-plane/etcd nodes are Ready.
+on:
+  workflow_dispatch:
+    inputs:
+      instance_id:
+        description: 'Contabo numeric instanceId (leave empty to resolve via node_name/external_ip)'
+        required: false
+        default: ''
+      node_name:
+        description: 'k3s node name — for the audit trail and the issue comment only, not used to identify the instance'
+        required: false
+        default: ''
+      external_ip:
+        description: "Node's Contabo public IP (kubectl get node <name> -o wide) — used to resolve instance_id when it is not given directly"
+        required: false
+        default: ''
+      reason:
+        description: 'Why this is safe (e.g. "restart had no effect after 20m; other_ready_control_plane_nodes=2 — not a quorum risk")'
+        required: true
+      confirm:
+        description: 'Type POWERCYCLE to confirm'
+        required: true
+        default: ''
+      issue_number:
+        description: 'Optional: issue number to comment the result back onto'
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  power-cycle:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Interlock
+        env:
+          CONFIRM: ${{ inputs.confirm }}
+          IID: ${{ inputs.instance_id }}
+          IP: ${{ inputs.external_ip }}
+        run: |
+          set -euo pipefail
+          [ "$CONFIRM" = "POWERCYCLE" ] || { echo "::error::confirm must be the literal POWERCYCLE"; exit 1; }
+          [ -n "$IID" ] || [ -n "$IP" ] || { echo "::error::need instance_id or external_ip to identify the instance"; exit 1; }
+
+      - name: Auth
+        id: auth
+        env:
+          CID: ${{ secrets.CONTABO_CLIENT_ID }}
+          CSEC: ${{ secrets.CONTABO_CLIENT_SECRET }}
+          CUSER: ${{ secrets.CONTABO_API_USER }}
+          CPASS: ${{ secrets.CONTABO_API_PASSWORD }}
+        run: |
+          set -euo pipefail
+          TOK=$(curl -sS -X POST -H "Content-Type: application/x-www-form-urlencoded" \
+            "https://auth.contabo.com/auth/realms/contabo/protocol/openid-connect/token" \
+            --data-urlencode "client_id=${CID}" --data-urlencode "client_secret=${CSEC}" \
+            --data-urlencode "username=${CUSER}" --data-urlencode "password=${CPASS}" \
+            --data-urlencode "grant_type=password" | jq -r .access_token)
+          [ -n "$TOK" ] && [ "$TOK" != "null" ] || { echo "::error::auth failed"; exit 1; }
+          echo "::add-mask::$TOK"
+          echo "token=$TOK" >> "$GITHUB_OUTPUT"
+
+      - name: Resolve instanceId
+        id: resolve
+        env:
+          TOK: ${{ steps.auth.outputs.token }}
+          IID: ${{ inputs.instance_id }}
+          IP: ${{ inputs.external_ip }}
+        run: |
+          set -euo pipefail
+          if [ -n "$IID" ]; then
+            echo "instance_id=$IID" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          RESOLVED=""
+          page=1
+          while :; do
+            RESP=$(curl -sS -H "Authorization: Bearer $TOK" \
+              -H "x-request-id: $(cat /proc/sys/kernel/random/uuid)" \
+              "https://api.contabo.com/v1/compute/instances?size=100&page=${page}")
+            n=$(printf '%s' "$RESP" | jq '.data | length')
+            [ "$n" -gt 0 ] || break
+            RESOLVED=$(printf '%s' "$RESP" | jq -r --arg ip "$IP" \
+              '.data[] | select(.ipConfig.v4.ip == $ip) | .instanceId' | head -1)
+            [ -n "$RESOLVED" ] && break
+            page=$((page + 1))
+            [ "$page" -gt 30 ] && break
+          done
+          [ -n "$RESOLVED" ] || { echo "::error::no Contabo instance found with ipConfig.v4.ip=$IP"; exit 1; }
+          echo "instance_id=$RESOLVED" >> "$GITHUB_OUTPUT"
+
+      - name: Stop
+        id: stop
+        env:
+          TOK: ${{ steps.auth.outputs.token }}
+          IID: ${{ steps.resolve.outputs.instance_id }}
+          NODE: ${{ inputs.node_name }}
+          REASON: ${{ inputs.reason }}
+        run: |
+          set -euo pipefail
+          echo "### Stopping Contabo instance $IID (node: ${NODE:-unknown})"
+          echo "Reason: $REASON"
+          curl -sS -X POST -H "Authorization: Bearer $TOK" -H "Content-Type: application/json" \
+            -H "x-request-id: $(cat /proc/sys/kernel/random/uuid)" \
+            "https://api.contabo.com/v1/compute/instances/${IID}/actions/stop" -d '{}' | jq .
+
+      - name: Wait for status=stopped
+        id: wait_stopped
+        env:
+          TOK: ${{ steps.auth.outputs.token }}
+          IID: ${{ steps.resolve.outputs.instance_id }}
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 20); do
+            STATUS=$(curl -sS -H "Authorization: Bearer $TOK" \
+              -H "x-request-id: $(cat /proc/sys/kernel/random/uuid)" \
+              "https://api.contabo.com/v1/compute/instances/${IID}" | jq -r '.data[0].status')
+            echo "poll $i: status=$STATUS"
+            [ "$STATUS" = "stopped" ] && { echo "reached=true" >> "$GITHUB_OUTPUT"; exit 0; }
+            sleep 6
+          done
+          echo "::warning::instance did not reach status=stopped within the poll window; starting it anyway"
+          echo "reached=false" >> "$GITHUB_OUTPUT"
+
+      - name: Start
+        id: start
+        env:
+          TOK: ${{ steps.auth.outputs.token }}
+          IID: ${{ steps.resolve.outputs.instance_id }}
+          NODE: ${{ inputs.node_name }}
+        run: |
+          set -euo pipefail
+          echo "### Starting Contabo instance $IID (node: ${NODE:-unknown})"
+          curl -sS -X POST -H "Authorization: Bearer $TOK" -H "Content-Type: application/json" \
+            -H "x-request-id: $(cat /proc/sys/kernel/random/uuid)" \
+            "https://api.contabo.com/v1/compute/instances/${IID}/actions/start" -d '{}' | jq .
+
+      - name: Comment result back on the issue
+        if: ${{ always() && inputs.issue_number != '' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE: ${{ inputs.issue_number }}
+          REPO: ${{ github.repository }}
+          IID: ${{ steps.resolve.outputs.instance_id }}
+          NODE: ${{ inputs.node_name }}
+          REASON: ${{ inputs.reason }}
+          REACHED: ${{ steps.wait_stopped.outputs.reached }}
+          OUTCOME: ${{ steps.start.outcome }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          if [ "$OUTCOME" = "success" ]; then
+            STATUS="Dispatched a Contabo power-cycle (stop, then start) for instance \`${IID:-unknown}\` (node \`${NODE:-unknown}\`). Reached status=stopped before starting: ${REACHED:-unknown}."
+            FOOTER="The node should re-register within a few minutes of the VM coming back up (verify with \`kubectl get nodes\` via cluster-query.yml). This does **not** close this issue automatically — confirm Ready=True and close once verified."
+          else
+            STATUS="Power-cycle attempt for node \`${NODE:-unknown}\` FAILED — see the run log."
+            FOOTER="Check the run log for the actual error before retrying."
+          fi
+          {
+            printf '%s\n\n' "$STATUS"
+            printf 'Reason given: %s\n' "$REASON"
+            printf 'Run: %s\n\n' "$RUN_URL"
+            printf '%s\n' "$FOOTER"
+          } > "${RUNNER_TEMP}/power-cycle-comment.md"
+          gh issue comment "$ISSUE" --repo "$REPO" --body-file "${RUNNER_TEMP}/power-cycle-comment.md"

@@ -107,7 +107,13 @@ jobs:
               ;;
             list-instances)
               echo "=== all Contabo compute instances (id | name | ipv4) ==="
-              req "https://api.contabo.com/v1/compute/instances?size=200&page=1" | jq -r '.data[]? | "  \(.instanceId) | \(.displayName) | \(.ipConfig.v4.ip)"' ;;
+              RESP=$(req "https://api.contabo.com/v1/compute/instances?size=200&page=1")
+              if ! echo "$RESP" | jq -e '.data' >/dev/null 2>&1; then
+                echo "::error::list-instances got an unparsable/unexpected response body:"
+                echo "$RESP"
+                exit 1
+              fi
+              echo "$RESP" | jq -r '.data[]? | "  \(.instanceId) | \(.displayName) | \(.ipConfig.v4.ip)"' ;;
             enroll-elastics)
               # Batch: put EVERY elastic node (displayName prefix fuzeinfra-elastic)
               # onto the private network — order the add-on (idempotent) then assign.

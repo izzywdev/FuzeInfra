@@ -47,7 +47,24 @@ func (s *Server) NodeGroupIncreaseSize(ctx context.Context, req *protos.NodeGrou
 		return nil, status.Errorf(codes.Unavailable, "NodeGroupIncreaseSize: listing elastic instances by name prefix %q: %v", s.cfg.NamePrefix, err)
 	}
 
-	currentByPrefix := len(prefixInstances)
+	// The CAP counts only instances that still hold a slot. A cancelled
+	// instance keeps running and keeps matching ListByNamePrefix until the
+	// end of its paid month (Contabo has no immediate-terminate API — see
+	// internal/contabo.Client.Delete), so counting it here would make the
+	// pool unable to replace capacity it just released, for up to a month.
+	// See liveElasticInstances in size.go for the full rationale and the
+	// deliberate spend trade-off.
+	//
+	// This does NOT weaken the anti-runaway guard below: an instance only
+	// acquires a CancelDate because we explicitly cancelled it. The untagged
+	// orphan this cap exists to catch has no CancelDate and still counts.
+	//
+	// NOTE: usedNames below is deliberately built from the UNFILTERED list.
+	// Contabo keeps a cancelled instance's display name reserved until it is
+	// actually terminated and 400s on a duplicate name, so name-collision
+	// avoidance must consider cancelled instances even though the cap does
+	// not (see uniqueInstanceName).
+	currentByPrefix := len(liveElasticInstances(prefixInstances))
 	s.mu.Lock()
 	reserved := s.inFlight
 	s.mu.Unlock()
@@ -286,9 +303,28 @@ func (s *Server) NodeGroupDeleteNodes(ctx context.Context, req *protos.NodeGroup
 
 	// Validate ALL requested nodes are elastic BEFORE deleting any (fail-closed guard).
 	// Resolve the numeric ids up front so the delete loop below cannot fail this
-	// lookup after already having deleted some nodes.
+	// lookup after already having deleted some nodes. insts is carried alongside
+	// ids so the delete loop below can read RawCancelDate off the SAME lookup
+	// this validation already did, rather than re-parsing ProviderID a second time.
 	ids := make([]int64, len(req.Nodes))
+	insts := make([]contabo.Instance, len(req.Nodes))
 	for i, node := range req.Nodes {
+		// STRICT on purpose, and asymmetric with NodeGroupForNode.
+		//
+		// NodeGroupForNode tolerates a bare, scheme-less identifier because
+		// it is a read-only classification and because CA's synthetic fake
+		// node for a never-joined instance puts the scheme in Name as well
+		// as ProviderID (see elasticInstanceName in nodegroups.go). This is
+		// a DESTRUCTIVE, billable path, so it stays fail-closed: an id that
+		// is not in our "contabo://<name>" scheme is a malformed request,
+		// not something to coerce into a delete target.
+		//
+		// The strictness costs nothing for the reclaim path this PR
+		// unblocks: CA populates ProviderID on the synthetic fake node with
+		// the scheme-qualified instance Id, so it parses cleanly here. See
+		// TestNodeGroupDeleteNodes_ReclaimsUnregisteredFakeNode (reclaim
+		// works) and TestDeleteNodes_MalformedProviderIDRejected (a bare
+		// name is still refused).
 		name, err := parseContaboNodeName(node.ProviderID)
 		if err != nil {
 			return nil, status.Errorf(codes.InvalidArgument, "NodeGroupDeleteNodes: parsing ProviderID %q: %v", node.ProviderID, err)
@@ -300,10 +336,35 @@ func (s *Server) NodeGroupDeleteNodes(ctx context.Context, req *protos.NodeGroup
 		}
 
 		ids[i] = inst.ID
+		insts[i] = inst
 	}
 
 	// All nodes validated as elastic; now delete them by their resolved numeric id.
+	//
+	// IDEMPOTENT on RawCancelDate, deliberately the raw string and not the
+	// parsed CancelDate field. CA re-drives this RPC on every loop for a node
+	// it still considers unregistered/unneeded, and until this instance
+	// actually disappears from Contabo's list it keeps matching that
+	// condition -- so without a guard this calls cancel on the SAME already-
+	// cancelled instance roughly once per CA loop indefinitely (measured:
+	// every ~20-35s, for two days straight, ~1 GET/sec against Contabo just
+	// from the list call this loop also makes). Contabo's cancel is
+	// idempotent server-side in the sense that a second cancel changes
+	// nothing, but it still costs an API call and a log line every time, for
+	// no operational effect -- there is nothing further to accomplish here
+	// once RawCancelDate is already non-empty.
+	//
+	// The raw string, not CancelDate.IsZero(): that parsed field is exactly
+	// what is suspected unreliable coming back from the list endpoint (see
+	// logInstanceDiag's doc comment) -- gating a SKIP on the less-trusted
+	// signal would risk silently never cancelling an instance that
+	// genuinely needs it.
 	for i, node := range req.Nodes {
+		if insts[i].RawCancelDate != "" {
+			log.Printf("contabo: instance %d (%s) already has cancelDate %q -- skipping redundant cancel",
+				ids[i], insts[i].Name, insts[i].RawCancelDate)
+			continue
+		}
 		if err := s.cloud.Delete(ctx, ids[i]); err != nil {
 			return nil, status.Errorf(codes.Unavailable, "NodeGroupDeleteNodes: deleting node %s: %v", node.ProviderID, err)
 		}

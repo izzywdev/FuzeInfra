@@ -44,6 +44,38 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v4
+
+      # PREFLIGHT: same data-safety gate the control-plane path uses.
+      #
+      # Elastic nodes are not SUPPOSED to hold Longhorn replicas -- disks are scoped
+      # to the durable nodes -- so this normally passes trivially. It is here for the
+      # day that stops being true. "Elastic nodes hold no replicas" is an invariant
+      # maintained by node labels, and node labels have already been lost twice this
+      # year (k3s applies --node-label at REGISTRATION ONLY, so a rejoin under an
+      # existing Node object drops them). A cheap check that is trivially satisfied
+      # today is exactly the right shape for an invariant enforced by convention.
+      #
+      # Node name, not instance id: the preflight reasons about Longhorn replicas,
+      # which are keyed on the k8s node name. Skipped when it cannot be derived
+      # (multi-instance runs), since guessing the wrong node would check the wrong
+      # thing and report a false OK — worse than not running.
+      - name: Preflight — would this reinstall destroy the last copy of any volume?
+        if: ${{ inputs.mode == 'reinstall' && inputs.node_name != '' }}
+        env:
+          KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
+          NODE_NAME: ${{ inputs.node_name }}
+        run: |
+          set -euo pipefail
+          if [ -z "${KUBE_CONFIG:-}" ]; then
+            echo "::error::KUBE_CONFIG is unset, so the data-safety preflight cannot run."
+            echo "::error::Refusing rather than reinstalling blind."
+            exit 1
+          fi
+          mkdir -p ~/.kube
+          printf '%s' "$KUBE_CONFIG" | base64 -d > ~/.kube/config
+          chmod 600 ~/.kube/config
+          python3 scripts/preflight_node_teardown.py --node "$NODE_NAME"
+
       - name: Reinstall + enroll elastic instances
         env:
           CID: ${{ secrets.CONTABO_CLIENT_ID }}
@@ -54,6 +86,10 @@ jobs:
           K3S_SERVER_URL: ${{ secrets.K3S_SERVER_URL }}
           K3S_NODE_TOKEN: ${{ secrets.K3S_NODE_TOKEN }}
           NODE_SSH_PUBLIC_KEY: ${{ secrets.NODE_SSH_PUBLIC_KEY }}
+          # Needed only to clear the stale node-password secret before a reinstall
+          # (see the comment at that step). The workflow degrades to a warning if
+          # it is absent rather than failing the reinstall.
+          KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
           IDS: ${{ inputs.instance_ids }}
           MODE: ${{ inputs.mode }}
           CONFIRM: ${{ inputs.confirm }}
@@ -129,12 +165,42 @@ jobs:
             if ! printf '%s' "$RENDERED" | head -1 | grep -q '^#cloud-config'; then echo "::error::rendered userData must start with #cloud-config"; exit 1; fi
             echo "  render checks:"
             for m in "INSTALL_K3S_CHANNEL=v1.36" "ufw allow 51820/udp" "get.k3s.io" "--node-name '${NAME}'" "provider-id=contabo://${NAME}"; do
-              if printf '%s' "$RENDERED" | grep -qF "$m"; then echo "    OK   $m"; else echo "    MISS $m"; fi
+              # `--` before the pattern: two of these markers START with "--", so
+              # without it grep parses the pattern as an option bundle, exits 2, and
+              # the check prints a FALSE "MISS" for a template that rendered
+              # perfectly. Reproduced 2026-09-07 while chasing a VLAN reinstall that
+              # was not broken -- the render check was.
+              if printf '%s' "$RENDERED" | grep -qF -- "$m"; then echo "    OK   $m"; else echo "    MISS $m"; fi
             done
 
             if [ "$MODE" = "dry-run" ]; then
               echo "  [dry-run] WOULD PUT reinstall imageId=$IMAGE_ID (userData PLAIN, $(printf '%s' "$RENDERED" | wc -c) bytes) + assign tag $ELASTIC_TAG/$TAGID to $ID"
               continue
+            fi
+
+            # Drop the k3s node-password secret BEFORE wiping the host.
+            #
+            # k3s stores a per-node secret `<node>.node-password.k3s` in kube-system
+            # and checks it on every agent registration. A reinstall gives the host a
+            # brand-new random password while that secret survives in etcd, so the
+            # rejoin is refused with "Node password rejected, duplicate hostname" and
+            # the node can NEVER come back under its own name. Nothing in the reinstall
+            # path cleaned this up, which is the likely explanation for the recurring
+            # "reinstalled fine but never joined" reports -- the instance was healthy
+            # and the cluster was rejecting it.
+            #
+            # Best-effort: a missing secret is normal for a first enrolment, and if
+            # kubectl cannot reach the cluster we still want the reinstall to proceed
+            # (the operator can delete the secret by hand) rather than block on it.
+            if [ -n "${KUBE_CONFIG:-}" ]; then
+              mkdir -p ~/.kube && printf '%s' "$KUBE_CONFIG" | base64 -d > ~/.kube/config 2>/dev/null && chmod 600 ~/.kube/config
+              if kubectl --request-timeout=20s delete secret -n kube-system "${NAME}.node-password.k3s" --ignore-not-found 2>&1; then
+                echo "  node-password secret cleared for $NAME (rejoin will be accepted)"
+              else
+                echo "::warning::could not clear ${NAME}.node-password.k3s -- if the node does not rejoin, delete it by hand"
+              fi
+            else
+              echo "::warning::KUBE_CONFIG unset -- cannot clear ${NAME}.node-password.k3s; a rejoin under the same name may be refused"
             fi
 
             BODY=$(jq -n --arg img "$IMAGE_ID" --arg ud "$RENDERED" '{imageId:$img, userData:$ud, defaultUser:"root"}')

@@ -1,0 +1,38 @@
+name: contabo-probe-ip-endpoints
+on:
+  workflow_dispatch: {}
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Probe IP-management endpoints
+        env:
+          CID: ${{ secrets.CONTABO_CLIENT_ID }}
+          CSEC: ${{ secrets.CONTABO_CLIENT_SECRET }}
+          CUSER: ${{ secrets.CONTABO_API_USER }}
+          CPASS: ${{ secrets.CONTABO_API_PASSWORD }}
+        run: |
+          set -u
+          TOK=$(curl -sS -X POST -H "Content-Type: application/x-www-form-urlencoded" \
+            "https://auth.contabo.com/auth/realms/contabo/protocol/openid-connect/token" \
+            --data-urlencode "client_id=${CID}" --data-urlencode "client_secret=${CSEC}" \
+            --data-urlencode "username=${CUSER}" --data-urlencode "password=${CPASS}" \
+            --data-urlencode "grant_type=password" | jq -r .access_token)
+          for p in \
+            "/v1/ips" \
+            "/v1/compute/ips" \
+            "/v1/additional-ips" \
+            "/v1/compute/additional-ips" \
+            "/v1/floating-ips" \
+            "/v1/compute/floating-ips" \
+            "/v1/compute/instances/203383846/additional-ips" \
+            "/v1/compute/instances/203383846/ips" \
+            "/v1/compute/vips" \
+            "/v1/vips" ; do
+            code=$(curl -sS -o /tmp/body.json -w "%{http_code}" -H "Authorization: Bearer $TOK" \
+              -H "x-request-id: $(cat /proc/sys/kernel/random/uuid)" "https://api.contabo.com${p}")
+            echo "=== ${p} -> HTTP ${code}"
+            if [ "$code" = "200" ]; then head -c 600 /tmp/body.json; echo; fi
+          done

@@ -63,6 +63,7 @@ spec:
         # the SealedSecret is applied by Argo from outside this release, invisible here).
         checksum/relay-secret: {{ .Values.a2aRelay.secretRotation | default "0" | toString | sha256sum }}
     spec:
+      {{- include "fuzeinfra.durableToleration" $ | nindent 6 }}
       containers:
         - name: a2a-relay
           image: {{ .Values.a2aRelay.image | default "python:3.12-slim" }}

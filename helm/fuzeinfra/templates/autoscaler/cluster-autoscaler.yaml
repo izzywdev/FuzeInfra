@@ -197,6 +197,7 @@ spec:
     spec:
       serviceAccountName: fuzeinfra-cluster-autoscaler
       priorityClassName: system-cluster-critical
+      {{- include "fuzeinfra.durableToleration" $ | nindent 6 }}
       containers:
         - name: cluster-autoscaler
           image: {{ .Values.clusterAutoscaler.image }}

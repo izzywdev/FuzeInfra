@@ -1,0 +1,87 @@
+{
+  "$doc": "Thresholds for scripts-tools/deployment_watchdog.py (.github/workflows/deployment-watchdog.yml). Written after the 2026-08-30..09-01 fleet-deployment freeze, in which every individual component reported 'running' while prod deployment was frozen for 2d11h and nothing alerted. Each detection below is one link of that incident chain, so tuning a threshold to 0/false is a decision to stop watching that link — say why in the PR.",
+
+  "argo_stuck_op": {
+    "$doc": "INCIDENT LINK 2 — the highest-value signal. Argo's sync of fuzeinfra-prod blocks on resource health, so one permanently-unhealthy StatefulSet wedged a single sync operation in phase=Running for 37 hours ('waiting for healthy state of apps/StatefulSet/fuzeinfra-loki and 1 more resources'). Argo will not start a new sync while an operation is in flight, so EVERY prod change queued silently behind it — including the cluster-autoscaler maxSize raise that fleet-wide CI was blocked on. Nothing in the fleet watched for this.",
+    "enabled": true,
+    "running_minutes": 45,
+    "$running_minutes": "A healthy fuzeinfra-prod sync measures ~5 minutes end to end (see CLAUDE.md, 'Wait for ArgoCD syncs to land' uses SYNC_WAIT_TIMEOUT=300s per app). 45 is ~9x that: long enough that a slow-but-progressing sync, a hook still running, or a rollout mid-flight is never flagged, short enough that a wedged operation is caught the same hour instead of two days later.",
+    "namespace": "argocd",
+    "auto_terminate": true,
+    "$auto_terminate": "Dispatches the existing .github/workflows/argo-terminate-op.yml (input: app). Terminating a stale op is safe and reversible — Argo simply re-syncs from git, which is the desired state anyway — so this is the one sanctioned WRITE the watchdog may make. It fires only after running_minutes has already elapsed, and the issue it files says it fired. Nothing else is ever auto-patched or auto-deleted.",
+    "auto_terminate_workflow": "argo-terminate-op.yml",
+    "auto_terminate_ref": "main"
+  },
+
+  "crashloop": {
+    "$doc": "INCIDENT LINK 1 — fuzeinfra-loki crash-looped 694 times over 2d11h ('mkdir /loki/tsdb-shipper-active/scratch/...: no space left on device') and could never recover on its own: retention is enforced by the compactor, the compactor runs inside Loki, and Loki cannot start on a full disk. A self-sealing crash loop never resolves, so a restart count that keeps climbing is the signal.",
+    "enabled": true,
+    "restart_count": 50,
+    "$restart_count": "Loki was at 694. A rollout, an OOM burst or a dependency flap produces single or low-double-digit restarts; 50 with no recovery is chronic by construction.",
+    "crashloop_minutes": 60,
+    "$crashloop_minutes": "Age of a pod that is currently in CrashLoopBackOff and has never become Ready. Approximate on purpose: kubernetes exposes the last termination time, not 'time since the loop started', and the pod-age approximation is only consulted while the container IS in CrashLoopBackOff and was never Ready, so a pod that ran fine for a week and broke a minute ago is not flagged by it.",
+    "ignore_namespaces": []
+  },
+
+  "dark_node": {
+    "$doc": "Added 2026-09-15 after a Contabo-autoscaler-alert investigation found fuze-core-3 (control-plane/etcd) with Ready/MemoryPressure/DiskPressure/PIDPressure all Unknown for 4.5 days ('Kubelet stopped posting node status') and nothing had ever flagged it. It still held its etcd vote and its scheduled pods the whole time while contributing zero usable capacity. UPDATED 2026-09-16: the manual hand-to-@fuze flow this shipped with took FIVE DAYS end to end for that exact node (detected 09-10, resolved 09-15/16) — the facts a human needs to decide are the same facts a bounded state machine can check, so it is now an automated ladder: reboot (bounded, spaced out) then reinstall (gated on time + quorum + node class), see decide_dark_node_escalation in scripts-tools/deployment_watchdog.py. Runbook: docs/runbooks/dark-node-reboot.md.",
+    "enabled": true,
+    "unknown_minutes": 30,
+    "$unknown_minutes": "A kubelet restart, a brief network blip to the API server, or a node reboot already in progress legitimately reports Unknown for a few minutes. 30 is long enough to skip that noise, short enough that a genuinely dark node (the incident was 4.5 DAYS) is caught the same run-cycle instead of by accident.",
+    "ignore_nodes": [],
+    "auto_restart": true,
+    "$auto_restart": "Was deliberately false through 2026-09-15 ('there is no code path that would honor true') because rebooting a node is not obviously safe/reversible the way terminating a stale Argo op is. Flipped to true on 2026-09-16 once the decision was made BOUNDED rather than unconditional: at most max_reboot_attempts, each spaced reboot_cooldown_minutes apart, dispatched through the same contabo-instance-reboot.yml a human would have run by hand, which comments its own result back onto the tracked issue either way.",
+    "max_reboot_attempts": 3,
+    "$max_reboot_attempts": "A node that doesn't recover after 3 reboots has a problem a reboot doesn't fix (hardware, a wedged disk, a Contabo host issue) — repeating it forever just delays the reinstall that actually helps.",
+    "reboot_cooldown_minutes": 30,
+    "$reboot_cooldown_minutes": "Matches the cooldown scripts/preflight_node_teardown.py already uses for the analogous 'is a previous action still settling' question. A Contabo restart plus k3s/kubelet coming back up can take several minutes; 30 gives real headroom before concluding attempt N failed and trying attempt N+1.",
+    "escalate_after_minutes": 120,
+    "$escalate_after_minutes": "Reinstall requires BOTH max_reboot_attempts exhausted AND at least this much total dark time — not either alone — so a node whose 3 reboots happen to burn through quickly (e.g. cooldown races) still gets a full 2h of a machine actually being unreachable before its disk is wiped. 2h is long enough that a slow-but-genuine recovery isn't preempted, short enough that this is still hours, not days.",
+    "auto_reinstall": true,
+    "$auto_reinstall": "Gated behind auto_restart's attempts being exhausted, escalate_after_minutes elapsed, AND (for control-plane/etcd nodes) the quorum check below. The two things that made a bare 'yes' unsafe on 2026-09-07 — Longhorn data loss and etcd quorum — are enforced INSIDE ca-reinstall-controlplane.yml itself (preflight_node_teardown.py; the reinstall_min_other_ready_control_plane check below is belt-and-suspenders before the dispatch even happens), not trusted to this flag alone.",
+    "reinstall_min_other_ready_control_plane": 2,
+    "$reinstall_min_other_ready_control_plane": "Refuses auto-reinstall of an etcd-voter node unless at least this many OTHER control-plane nodes are currently Ready — the exact quorum-safety check the dark-node issue already surfaced for a human (other_ready_control_plane_nodes) is now also a hard gate on the automated path. Non-voter control-plane/durable nodes skip this check entirely (no quorum to protect).",
+    "reinstall_template_cp": "cluster-autoscaler/contabo-externalgrpc/deploy/cp-userdata-eth1-join.template",
+    "$reinstall_template_cp": "The SELF-JOINING control-plane template, deliberately not cp-userdata-eth1.template (which stops at 'prepared, not joined' and expects a human to run the k3s server join by hand). An unattended ladder cannot leave a half-finished node waiting on a human step it never asked for.",
+    "reinstall_workflow": "ca-reinstall-controlplane.yml",
+    "$reinstall_workflow": "Elastic nodes are explicitly OUT OF SCOPE for this ladder (decide_dark_node_escalation returns refuse-elastic) — they already have autoscaler-driven replacement via ca-salvage-enroll.yml / the reaper, and ca-reinstall-controlplane.yml itself refuses any node in the elastic name prefix."
+  },
+
+  "container_creating": {
+    "$doc": "Catches the stale-mount class ('already mounted or mount point busy') that kept Loki down for a further 14h AFTER the full disk was fixed. The pod exists, the Deployment/StatefulSet exists, everything reports 'running' at the controller level — and the pod never starts.",
+    "enabled": true,
+    "minutes": 30,
+    "$minutes": "Image pulls of multi-GB images on a cold node legitimately take minutes; a volume attach that has not completed in 30 is stuck, not slow.",
+    "reasons": ["ContainerCreating", "PodInitializing"],
+    "ignore_namespaces": []
+  },
+
+  "pvc_pressure": {
+    "$doc": "THE ROTATE-BY-VOLUME REQUIREMENT. Loki has no size-based retention — retention is time-based and compactor-enforced — so once the volume fills there is no in-process mechanism that can free it. An alarm BEFORE it fills is the only mechanism there is. Source of truth is Prometheus (kubelet_volume_stats_*); the kubectl-exec-df fallback exists only so a Prometheus outage does not silently turn this detection off.",
+    "enabled": true,
+    "used_ratio": 0.80,
+    "prometheus_namespace": "fuzeinfra",
+    "prometheus_service": "fuzeinfra-prometheus",
+    "prometheus_port": 9090,
+    "prometheus_query": "kubelet_volume_stats_used_bytes / kubelet_volume_stats_capacity_bytes",
+    "allow_exec_df_fallback": true,
+    "$allow_exec_df_fallback": "`kubectl exec <pod> -- df` is read-only in effect but is still an exec; it is restricted to a fixed argv (df -P -B1 <mountPath>) with validated names, is used ONLY when Prometheus is unreachable, and the run says which source it used. If both sources fail the watchdog FAILS — it never reports all-clear while blind."
+  },
+
+  "issues": {
+    "$doc": "One issue per distinct condition, deduplicated on the '<!-- watchdog-key: ... -->' marker in the body (and on the exact title as a second layer). A watchdog that files 40 duplicate issues gets muted, which is the same outcome as not existing.",
+    "label": "deploy-watchdog",
+    "label_color": "B60205",
+    "mention": "@fuze",
+    "title_prefix": "[watchdog]",
+    "max_per_run": 10,
+    "max_open": 20,
+    "$max_open": "Hard ceiling on how many watchdog issues may be OPEN at once, across all runs. max_per_run alone only spreads a backlog out: at 10 per run every 15 minutes, the 55 conditions the first live run found would all be filed within ~1.5h anyway (measured 2026-09-01 — two live runs filed 20). The ceiling makes the backlog drain-driven instead of time-driven: nothing new is filed until something is closed, so the tracker stays a list someone can actually work. Detection is still never capped — everything appears in the run summary and the run still goes red.",
+    "$max_per_run": "Ceiling on issues FILED per run — every finding is always reported in the run summary and the run still goes red, only the issue creation is rate-limited. Measured need: the first live dry-run against prod (2026-09-01) returned 55 distinct conditions, most of them long-standing consumer-namespace crash loops. Filing 55 issues at once produces exactly the muting this file's dedup section exists to prevent. Findings above the cap are filed on subsequent runs as earlier ones are closed, which ramps in worst-first instead of dumping.",
+    "priority": ["stuck-argo-op", "dark-node", "pvc-nearing-full", "stuck-containercreating", "chronic-crashloop"],
+    "$priority": "Filing order under the cap. The stuck Argo op is first because it is the one condition that blocks EVERY other deploy — it froze the fleet for 2d11h — and PVC pressure is second because it is the only warning that arrives before a volume fills."
+  },
+
+  "fail_on_findings": true,
+  "$fail_on_findings": "The run goes red when something is detected, so the freeze is visible in the Actions list even to someone who does not read issues. Separate from the blind-failure path: an unreachable cluster / unusable Prometheus+fallback always exits non-zero, because a watchdog that goes green when blind is worse than no watchdog."
+}

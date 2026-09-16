@@ -134,6 +134,22 @@ resource "cloudflare_record" "vanity" {
   ttl      = 1
 }
 
+# DNS: fuzefront.com apex → tunnel CNAME (public marketing/product website).
+# The vanity for_each above handles subdomains (app, plan, fuzehub); the apex
+# needs its own resource because name = "@" cannot be expressed in that loop.
+# Traffic reaches Traefik via the tunnel catch-all ingress_rule, then the
+# fuzefront-website Ingress (host: fuzefront.com) in the FuzeFront Helm chart.
+resource "cloudflare_record" "website_apex" {
+  count           = local.cloudflare_enabled ? 1 : 0
+  zone_id         = var.cloudflare_zone_id
+  name            = "@"
+  value           = cloudflare_zero_trust_tunnel_cloudflared.fuzeinfra[0].cname
+  type            = "CNAME"
+  proxied         = true
+  ttl             = 1
+  allow_overwrite = true
+}
+
 # ---------------------------------------------------------------------------
 # Multi-tenant portal DNS + TLS (FuzeFront EPIC-16)
 #
@@ -840,6 +856,10 @@ locals {
     cloudflare_zero_trust_access_application.handoff_mcp[*].id,
     cloudflare_zero_trust_access_application.a2a_relay[*].id,
     cloudflare_zero_trust_access_application.a2a_gateway[*].id,
+    # Scoped to litellm.<prod>, which IS in local.launcher_hosts (the "litellm"
+    # tile) — without this entry the reconciler would treat it as an unowned
+    # duplicate of the wildcard admin_services coverage and delete it.
+    cloudflare_zero_trust_access_application.litellm_service[*].id,
     # Path-scoped, launcher-invisible, but it lives on authentik.<prod> which IS
     # in local.launcher_hosts (the `authentik` tile) — so without this entry the
     # reconciler would treat it as a deletion candidate and silently re-break the
@@ -1056,6 +1076,116 @@ resource "cloudflare_zero_trust_access_policy" "a2a_gateway_bypass" {
 
   include {
     everyone = true
+  }
+}
+
+# ---------------------------------------------------------------------------
+# LiteLLM CI service token (fuze.yml's hosted-runner LLM routing)
+#
+# UNLIKE handoff_mcp/a2a_relay/a2a_gateway above, this is NOT a bypass app.
+# Those three are FuzeInfra's own components with no real human-facing UI, so
+# removing Cloudflare Access entirely and trusting the app's own bearer token
+# is a fair trade. LiteLLM is different: it has a real admin console at
+# litellm.<prod>/ui (helm/litellm, see the launcher_services comment above),
+# LiteLLM's own auth there is only a master key, and its SSO is an enterprise
+# feature it does not have — meaning the Cloudflare Access wall in front of it
+# is the ONLY identity layer that console gets. A bypass app would remove that
+# entirely, for every caller, human or not. So this carves out a
+# litellm.<prod>-scoped Access application (more specific than the
+# *.prod wildcard `admin_services` covers it under today, so Cloudflare
+# prefers this one for that exact host) that keeps the SAME Google + email-OTP
+# human policies `admin_services` already has, and ADDS a third policy that
+# lets a service token in alongside them — human access to /ui is unchanged,
+# and a CI job presenting the token's client id/secret as
+# CF-Access-Client-Id/CF-Access-Client-Secret headers now also gets through.
+#
+# THE TRAP: this application's domain is inside local.launcher_hosts (the
+# "litellm" launcher tile), so it MUST be added to
+# local.terraform_owned_access_app_ids below (see that local's own comment) or
+# the duplicate-tile reconciler will treat it as an unowned duplicate and
+# delete it on the next apply.
+resource "cloudflare_zero_trust_access_application" "litellm_service" {
+  count            = local.cloudflare_enabled ? 1 : 0
+  account_id       = var.cloudflare_account_id
+  name             = "LiteLLM gateway (human console + CI service token)"
+  domain           = "litellm.${local.prod_domain}"
+  type             = "self_hosted"
+  session_duration = var.access_session_duration
+
+  app_launcher_visible = false
+}
+
+resource "cloudflare_zero_trust_access_policy" "litellm_service_google" {
+  count          = local.google_idp_enabled ? 1 : 0
+  account_id     = var.cloudflare_account_id
+  application_id = cloudflare_zero_trust_access_application.litellm_service[0].id
+  name           = "Admin via Google"
+  precedence     = 1
+  decision       = "allow"
+
+  include {
+    login_method = [cloudflare_zero_trust_access_identity_provider.google[0].id]
+  }
+
+  require {
+    email = var.allowed_admin_emails
+  }
+}
+
+resource "cloudflare_zero_trust_access_policy" "litellm_service_email_otp" {
+  count          = local.cloudflare_enabled ? 1 : 0
+  account_id     = var.cloudflare_account_id
+  application_id = cloudflare_zero_trust_access_application.litellm_service[0].id
+  name           = "Admin email allowlist (OTP) — break-glass"
+  precedence     = 2
+  decision       = "allow"
+
+  include {
+    email = var.allowed_admin_emails
+  }
+}
+
+# The CI credential itself. `terraform apply` mints this against the
+# Cloudflare API; the client_secret is returned exactly once by that API call
+# and is captured only in Terraform state (see backend.tf's S3 backend) —
+# it is never in this file, never in a PR diff, and never seen by whatever
+# applies this (see docs/runbooks — extraction is a deliberate, separate,
+# human/local-terminal step via `terraform output`, same reasoning as every
+# other secret this repo hands to `scripts/provision_secrets.py` rather than
+# ever typing a value into a PR, a chat, or a commit).
+#
+# REQUIRED TOKEN SCOPE — this resource needs the CLOUDFLARE_API_TOKEN to carry
+# the **Account → Access: Service Tokens → Edit** permission group. It is a
+# SEPARATE group from "Access: Apps and Policies", so the token can create the
+# Access application + policies below and still fail HERE at apply with an empty
+# `error creating access service token:  (1010)` — the plan cannot catch it,
+# because Cloudflare only checks the permission on write. The permission group
+# was granted on the CD token (2026-09-14), so this resource applies on the
+# next merge; if it 1010s again, re-check the token still carries the group.
+# See docs/TERRAFORM_CD.md → "CLOUDFLARE_API_TOKEN scope".
+#
+# 2026-09-16 drift check: a live CF-Access curl against litellm.prod.fuzefront.com
+# using this token's current terraform-output values returned HTTP 302 (rejected),
+# even though `terraform state list` shows this resource and the policy below both
+# already exist. Triggering this plan to refresh against live Cloudflare state and
+# confirm whether either resource has actually drifted since the 2026-09-14 token
+# permission fix, or whether they're in sync and the gap is elsewhere.
+resource "cloudflare_zero_trust_access_service_token" "litellm_ci" {
+  count      = local.cloudflare_enabled ? 1 : 0
+  account_id = var.cloudflare_account_id
+  name       = "fuze.yml LLM routing (hosted-runner CI)"
+}
+
+resource "cloudflare_zero_trust_access_policy" "litellm_service_ci_token" {
+  count          = local.cloudflare_enabled ? 1 : 0
+  account_id     = var.cloudflare_account_id
+  application_id = cloudflare_zero_trust_access_application.litellm_service[0].id
+  name           = "CI service token (fuze.yml LLM routing)"
+  precedence     = 3
+  decision       = "allow"
+
+  include {
+    service_token = [cloudflare_zero_trust_access_service_token.litellm_ci[0].id]
   }
 }
 

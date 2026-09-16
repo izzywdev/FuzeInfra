@@ -6,6 +6,23 @@ metadata:
 spec:
   valuesContent: |-
     replicaCount: 2
+    # Tolerate the durable-node taint (fuzeinfra.io/durable=true:NoSchedule).
+    #
+    # CoreDNS already tolerates node-role.kubernetes.io/control-plane, which is
+    # what lets it run on these three nodes today -- but the durable taint is a
+    # SEPARATE key and that existing toleration does not cover it (verified on
+    # the live pod 2026-09-07).
+    #
+    # Without this, cluster DNS loses the three most stable nodes as placement
+    # candidates and ends up entirely on autoscaled elastic nodes, which the
+    # reaper releases on billing boundaries. Cluster DNS following the
+    # autoscaler around is not a trade worth making, and the anti-affinity below
+    # cannot spread across failure domains if only one pool remains eligible.
+    tolerations:
+      - key: fuzeinfra.io/durable
+        operator: Equal
+        value: "true"
+        effect: NoSchedule
     affinity:
       podAntiAffinity:
         preferredDuringSchedulingIgnoredDuringExecution:

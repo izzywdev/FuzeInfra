@@ -101,6 +101,34 @@ services:
       timeout: 5s
       retries: 5
 
+  # MariaDB (MySQL protocol) - shared engine for WordPress/Laravel-class
+  # consumers. Compose half of the dual-delivery model; the Helm half is
+  # helm/fuzeinfra/templates/databases.yaml (mariadb.enabled).
+  mariadb:
+    image: mariadb:11.4
+    container_name: fuzeinfra-mariadb
+    environment:
+      MARIADB_ROOT_PASSWORD: ${MARIADB_ROOT_PASSWORD}
+      # Root must be reachable from other containers on the FuzeInfra network
+      # (provisioning/admin tooling); the image otherwise binds root to localhost.
+      MARIADB_ROOT_HOST: '%'
+      MARIADB_AUTO_UPGRADE: '1'
+    ports:
+      - "${MARIADB_PORT:-3306}:3306"
+    volumes:
+      - mariadb_data:/var/lib/mysql
+      # Per-consumer databases/users are declared here as idempotent SQL, the
+      # local mirror of the `serviceMariadbDatabases` Helm values.
+      - ./docker/mariadb/init:/docker-entrypoint-initdb.d:ro
+    networks:
+      - FuzeInfra
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
   # Neo4j
   neo4j:
     image: neo4j:5
@@ -330,6 +358,11 @@ services:
       - '--web.console.templates=/etc/prometheus/consoles'
       - '--web.enable-lifecycle'
       - '--web.enable-admin-api'
+      # Required for Tempo's metrics-generator to remote_write RED metrics here,
+      # and for exemplars — the trace_id attached to a metric sample that Grafana
+      # uses to jump from a latency spike straight into the trace that caused it.
+      - '--web.enable-remote-write-receiver'
+      - '--enable-feature=exemplar-storage'
     ports:
       - "9090:9090"
     volumes:
@@ -417,6 +450,53 @@ services:
       - /var/lib/docker/containers:/var/lib/docker/containers:ro
     command: -config.file=/etc/promtail/config.yml
     depends_on:
+      - loki
+    networks:
+      - FuzeInfra
+    restart: unless-stopped
+
+  # ================================
+  # TRACING STACK
+  # ================================
+
+  # Tempo — distributed tracing backend (single-binary/local-storage mode).
+  # Receives OTLP traces exclusively from otel-collector below; apps never
+  # talk to Tempo directly.
+  tempo:
+    image: grafana/tempo:2.6.1
+    container_name: fuzeinfra-tempo
+    command: -config.file=/etc/tempo/tempo.yaml
+    ports:
+      - "3200:3200"   # http (query)
+      - "4317:4317"   # OTLP grpc (only otel-collector should use this)
+      - "4318:4318"   # OTLP http
+    volumes:
+      - ./monitoring-shared/tempo-config.yml:/etc/tempo/tempo.yaml
+      - tempo_data:/var/tempo
+    depends_on:
+      - prometheus
+    networks:
+      - FuzeInfra
+    restart: unless-stopped
+
+  # otel-collector — single OTLP ingestion point for every project's
+  # traces/metrics/logs. Send to http://otel-collector:4317 (grpc) or :4318
+  # (http); it fans out to Tempo (traces), Loki (logs) and its own Prometheus
+  # exporter (metrics). See docs/consuming-repos/OBSERVABILITY_DASHBOARDS.md.
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.112.0
+    container_name: fuzeinfra-otel-collector
+    command: --config=/etc/otel-collector/otel-collector-config.yaml
+    ports:
+      - "4319:4317"   # OTLP grpc (host-side; container keeps 4317 to avoid colliding with tempo's)
+      - "4320:4318"   # OTLP http
+      - "8888:8888"   # collector self-metrics
+      - "8889:8889"   # exported OTLP metrics (prometheus exporter)
+      - "13133:13133" # health check
+    volumes:
+      - ./monitoring-shared/otel-collector-config.yml:/etc/otel-collector/otel-collector-config.yaml
+    depends_on:
+      - tempo
       - loki
     networks:
       - FuzeInfra
@@ -608,6 +688,8 @@ volumes:
     name: fuzeinfra_mongodb_data
   redis_data:
     name: fuzeinfra_redis_data
+  mariadb_data:
+    name: fuzeinfra_mariadb_data
   neo4j_data:
     name: fuzeinfra_neo4j_data
   neo4j_logs:
@@ -632,7 +714,9 @@ volumes:
     name: fuzeinfra_alertmanager_data
   loki_data:
     name: fuzeinfra_loki_data
-  
+  tempo_data:
+    name: fuzeinfra_tempo_data
+
   # Shared Nginx volumes
   nginx_logs:
     name: fuzeinfra_shared_nginx_logs

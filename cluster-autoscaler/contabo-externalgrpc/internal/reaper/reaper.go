@@ -67,10 +67,18 @@ type Config struct {
 	// renewal the reaper will consider releasing it (if idle). Outside this
 	// window, the instance is always kept, regardless of idle status.
 	ReleaseWindow time.Duration
-	// BillingPeriod is the length of Contabo's monthly billing cycle, used
-	// to project the next renewal as CreatedDate + BillingPeriod. It's an
-	// approximation of a real monthly calendar anchor, hence configurable.
-	BillingPeriod time.Duration
+	// RenewalDay is the calendar day of the month (1-31) on which Contabo
+	// renews billing for EVERY elastic instance — confirmed 2026-09 to be
+	// calendar-aligned to the 15th for the whole fleet, not offset from each
+	// instance's own CreatedDate. The next renewal is therefore projected
+	// from the current time (see nextRenewal), never from
+	// CreatedDate + a fixed period: that per-instance-anniversary
+	// approximation was wrong by up to ~15 days depending on where
+	// CreatedDate fell relative to the 15th, which could make the reaper
+	// release a node too early (forfeiting already-paid time) or miss the
+	// real cancellation window entirely (paying for an unwanted extra
+	// month).
+	RenewalDay int
 	// ElasticTag is the Contabo tag identifying elastic (autoscaled)
 	// instances (see internal/contabo.Client.ListByTag).
 	ElasticTag string
@@ -81,11 +89,11 @@ type Config struct {
 }
 
 // DefaultConfig returns the documented defaults (RELEASE_WINDOW=24h,
-// BILLING_PERIOD=720h/~30d, ELASTIC_TAG=fuzeinfra-elastic).
+// RENEWAL_DAY=15, ELASTIC_TAG=fuzeinfra-elastic).
 func DefaultConfig() Config {
 	return Config{
 		ReleaseWindow:   24 * time.Hour,
-		BillingPeriod:   720 * time.Hour,
+		RenewalDay:      15,
 		ElasticTag:      "fuzeinfra-elastic",
 		EvictionTimeout: 60 * time.Second,
 	}
@@ -125,17 +133,37 @@ func (d Decision) String() string {
 	return "keep"
 }
 
-// decideByRenewal is the pure billing half of the decision: given an
-// instance's CreatedDate and the current time, is it even within the
-// release window of its next monthly renewal? It does NOT know about idle
-// status — that requires a live pod listing and is layered on top by
-// Decide/Run. A zero CreatedDate (unparsable/absent on the API response)
-// always means DecisionKeep — the reaper must never guess a billing anchor.
-func decideByRenewal(createdDate, now time.Time, releaseWindow, billingPeriod time.Duration) (Decision, string) {
-	if createdDate.IsZero() {
-		return DecisionKeep, "unknown createdDate (unparsable/absent) — skipping billing-period decision for safety"
+// nextRenewal returns the next occurrence of the calendar renewal day
+// (renewalDay, normally the 15th) at or after t. Contabo bills every elastic
+// instance on the SAME calendar day each month — the fleet is billing-cycle
+// aligned, not offset per instance — so this projection is a pure function
+// of the current time and never needs an instance's CreatedDate. If t has
+// already reached this month's renewal instant (00:00:00 on renewalDay),
+// the projection rolls forward to next month's renewal, since that cycle's
+// charge has already landed (or is about to) and the next thing worth
+// projecting is the following one.
+func nextRenewal(t time.Time, renewalDay int) time.Time {
+	renewal := time.Date(t.Year(), t.Month(), renewalDay, 0, 0, 0, 0, t.Location())
+	if !renewal.After(t) {
+		renewal = renewal.AddDate(0, 1, 0)
 	}
-	renewal := createdDate.Add(billingPeriod)
+	return renewal
+}
+
+// decideByRenewal is the pure billing half of the decision: given the
+// current time, is now within the release window of the next calendar
+// billing renewal? It does NOT know about idle status — that requires a
+// live pod listing and is layered on top by Decide/Run. A zero CreatedDate
+// (unparsable/absent on the API response) always means DecisionKeep — the
+// reaper must never guess a billing anchor — but note CreatedDate plays no
+// further part in the projection itself: see nextRenewal's doc comment for
+// why the renewal date depends only on now, not on when the instance
+// happened to be created.
+func decideByRenewal(createdDate, now time.Time, releaseWindow time.Duration, renewalDay int) (Decision, string) {
+	if createdDate.IsZero() {
+		return DecisionKeep, "unknown createdDate (unparsable/absent) — skipping billing-calendar decision for safety"
+	}
+	renewal := nextRenewal(now, renewalDay)
 	windowStart := renewal.Add(-releaseWindow)
 	if now.Before(windowStart) {
 		return DecisionKeep, fmt.Sprintf("not yet within release window (renewal=%s, window opens=%s)", renewal.Format(time.RFC3339), windowStart.Format(time.RFC3339))
@@ -145,10 +173,10 @@ func decideByRenewal(createdDate, now time.Time, releaseWindow, billingPeriod ti
 
 // Decide is the full pure decision function: given an instance's
 // CreatedDate, its CancelDate (zero if not yet cancelled), the current time,
-// the configured windows, and whether its matching node is currently idle,
-// decide keep vs release. It performs no I/O — tests exercise every branch
-// by passing `now` and `idle` explicitly (see reaper_test.go), independent
-// of any fake clock/API wiring.
+// the configured release window and calendar renewal day, and whether its
+// matching node is currently idle, decide keep vs release. It performs no
+// I/O — tests exercise every branch by passing `now` and `idle` explicitly
+// (see reaper_test.go), independent of any fake clock/API wiring.
 //
 // A non-zero cancelDate always means DecisionKeep: Contabo has already
 // scheduled the instance's real termination for that date (cancellation is
@@ -156,14 +184,13 @@ func decideByRenewal(createdDate, now time.Time, releaseWindow, billingPeriod ti
 // Delete doc comment), the instance remains fully usable until then, and it
 // must NEVER be re-cancelled (a second cancel is redundant at best and an
 // unnecessary API call/risk at worst). This takes priority over the
-// createdDate+billingPeriod renewal projection entirely — an
-// already-cancelled instance has a real termination date, so there is
-// nothing left to project.
-func Decide(createdDate, cancelDate, now time.Time, releaseWindow, billingPeriod time.Duration, idle bool) (Decision, string) {
+// calendar renewal projection entirely — an already-cancelled instance has
+// a real termination date, so there is nothing left to project.
+func Decide(createdDate, cancelDate, now time.Time, releaseWindow time.Duration, renewalDay int, idle bool) (Decision, string) {
 	if !cancelDate.IsZero() {
 		return DecisionKeep, fmt.Sprintf("already cancelled, terminates at %s — not re-cancelling", cancelDate.Format(time.RFC3339))
 	}
-	d, reason := decideByRenewal(createdDate, now, releaseWindow, billingPeriod)
+	d, reason := decideByRenewal(createdDate, now, releaseWindow, renewalDay)
 	if d != DecisionRelease {
 		return d, reason
 	}
@@ -207,7 +234,7 @@ func (r *Reaper) Run(ctx context.Context) (Summary, error) {
 			continue
 		}
 
-		d, reason := decideByRenewal(inst.CreatedDate, now, r.Cfg.ReleaseWindow, r.Cfg.BillingPeriod)
+		d, reason := decideByRenewal(inst.CreatedDate, now, r.Cfg.ReleaseWindow, r.Cfg.RenewalDay)
 		if d != DecisionRelease {
 			log.Printf("reaper: keeping instance %d (%s): %s", inst.ID, inst.Name, reason)
 			summary.Kept++

@@ -1,0 +1,137 @@
+# Activate the A2A bridge in the Fuze and DevOps cloud environments by creating
+# a Claude Code Remote session in each and running the respective setup.sh.
+#
+# The setup scripts install /opt/fuze/a2a-bridge/{start.sh,wss_bridge.py,a2a_mcp.py,
+# a2a_mcp_launch.sh} and wire a user-level SessionStart hook so every subsequent
+# session in that environment starts the bridge automatically.
+#
+# API: POST https://api.claude.ai/code/api/v0/sessions
+# Auth: Bearer CLAUDE_CODE_OAUTH_TOKEN (claude.ai account OAuth token, not an API key)
+#
+# HANDSHAKE — background-task requests sent to a session must include the standard
+# A2A envelope so the receiver can verify sender identity before acting:
+#
+#   [A2A from=<sender_session_id> corr=<uuid> reply_to=<sender_session_id> cap=<cap>] body
+#
+# The envelope is parsed by capability_delegation.py; a receiving session MUST reject
+# any bare instruction that lacks it.  Legitimate senders register themselves via
+# a2a_set_peer before delegating, so the receiver can check `from=` against its peer
+# list.  See agent-templates/orchestration/CAPABILITY_DELEGATION_RUNBOOK.md for the
+# full caller/callee protocol.
+
+name: Activate A2A bridge
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Which environment(s) to activate'
+        required: false
+        default: 'both'
+        type: choice
+        options:
+          - both
+          - fuze
+          - devops
+
+permissions:
+  contents: read
+
+jobs:
+  activate:
+    name: Activate A2A bridge
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+        with:
+          fetch-depth: 1
+
+      # ---- Fuze environment (env_01UZZzk9Ysn14vdet3FPn4JP) ----------------
+      - name: Create session — fuze env
+        id: fuze
+        if: inputs.environment == 'both' || inputs.environment == 'fuze'
+        env:
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          ENV_ID: env_01UZZzk9Ysn14vdet3FPn4JP
+          SETUP_SH: agent-templates/environments/desktop/fuze.setup.sh
+        run: |
+          set -euo pipefail
+          PROMPT=$(printf 'Run the following environment setup script to install and activate the A2A bridge.\nThe script is idempotent — re-running it is safe.\n\n```bash\n%s\n```' "$(cat "$SETUP_SH")")
+          PAYLOAD=$(jq -n \
+            --arg env    "$ENV_ID" \
+            --arg prompt "$PROMPT" \
+            --arg title  "A2A bridge activation — fuze env ($(date -u +%Y-%m-%dT%H:%MZ))" \
+            '{
+              environment_id: $env,
+              prompt: $prompt,
+              title: $title,
+              permission_mode: "bypassPermissions"
+            }')
+          RESP=$(curl -fsSL -X POST "https://api.claude.ai/code/api/v0/sessions" \
+            -H "Authorization: Bearer $CLAUDE_CODE_OAUTH_TOKEN" \
+            -H "Content-Type: application/json" \
+            --data-raw "$PAYLOAD")
+          SESSION_ID=$(printf '%s' "$RESP" | jq -r '.id // .session_id // empty')
+          if [ -z "$SESSION_ID" ]; then
+            echo "::error::Session creation failed for fuze env. Response: $RESP"
+            exit 1
+          fi
+          echo "session_id=$SESSION_ID" >> "$GITHUB_OUTPUT"
+          echo "fuze session created: $SESSION_ID"
+          {
+            echo "### Fuze environment"
+            echo "Session: \`$SESSION_ID\`"
+            echo "Environment: \`$ENV_ID\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # ---- DevOps environment (env_01JEXaaX5iGBRgsMV77t67Ad) ---------------
+      - name: Create session — devops env
+        id: devops
+        if: inputs.environment == 'both' || inputs.environment == 'devops'
+        env:
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          ENV_ID: env_01JEXaaX5iGBRgsMV77t67Ad
+          SETUP_SH: agent-templates/environments/desktop/devops.setup.sh
+        run: |
+          set -euo pipefail
+          PROMPT=$(printf 'Run the following environment setup script to install and activate the A2A bridge.\nThe script is idempotent — re-running it is safe.\n\n```bash\n%s\n```' "$(cat "$SETUP_SH")")
+          PAYLOAD=$(jq -n \
+            --arg env    "$ENV_ID" \
+            --arg prompt "$PROMPT" \
+            --arg title  "A2A bridge activation — devops env ($(date -u +%Y-%m-%dT%H:%MZ))" \
+            '{
+              environment_id: $env,
+              prompt: $prompt,
+              title: $title,
+              permission_mode: "bypassPermissions"
+            }')
+          RESP=$(curl -fsSL -X POST "https://api.claude.ai/code/api/v0/sessions" \
+            -H "Authorization: Bearer $CLAUDE_CODE_OAUTH_TOKEN" \
+            -H "Content-Type: application/json" \
+            --data-raw "$PAYLOAD")
+          SESSION_ID=$(printf '%s' "$RESP" | jq -r '.id // .session_id // empty')
+          if [ -z "$SESSION_ID" ]; then
+            echo "::error::Session creation failed for devops env. Response: $RESP"
+            exit 1
+          fi
+          echo "session_id=$SESSION_ID" >> "$GITHUB_OUTPUT"
+          echo "devops session created: $SESSION_ID"
+          {
+            echo "### DevOps environment"
+            echo "Session: \`$SESSION_ID\`"
+            echo "Environment: \`$ENV_ID\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Summary
+        if: always()
+        env:
+          FUZE_SESSION:  ${{ steps.fuze.outputs.session_id }}
+          DEVOPS_SESSION: ${{ steps.devops.outputs.session_id }}
+        run: |
+          echo "## A2A bridge activation" >> "$GITHUB_STEP_SUMMARY"
+          echo "Trigger: ${{ github.actor }} @ $(date -u +%Y-%m-%dT%H:%MZ)" >> "$GITHUB_STEP_SUMMARY"
+          [ -n "${FUZE_SESSION:-}"  ] && echo "fuze session:  $FUZE_SESSION"
+          [ -n "${DEVOPS_SESSION:-}" ] && echo "devops session: $DEVOPS_SESSION"
