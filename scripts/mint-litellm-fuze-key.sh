@@ -58,9 +58,13 @@ done
 # REJECTED at the exact moment the router fails over — turning the cross-
 # provider fallback into an outage on the one day it matters.
 #
-# Derived from .github/workflows/fuze.yml (the pinned aliases) plus
-# helm/litellm/values.yaml `routerSettings.fallbacks` (their hops).
-# tests/test_litellm_fuze_routing.py fails if the two drift apart.
+# THIS is the source of truth, not .github/workflows/fuze.yml. The canonical
+# `@fuze` entrypoint (installed fleet-wide) holds no model pins of its own —
+# it resolves the gateway through ./.github/actions/fuze-code-action, which
+# lets the caller ask for whatever it likes; this allowlist is what the
+# gateway actually enforces at dispatch. Cross-checked against
+# helm/litellm/values.yaml (`models` + `routerSettings.fallbacks`) by
+# tests/test_litellm_fuze_routing.py, which fails if the two drift apart.
 # ─────────────────────────────────────────────────────────────────────────────
 MODELS='[
   "claude-opus-5",

@@ -4,6 +4,32 @@ Mirrors test_litellm_ci_routing.py, but targets fuze.yml and
 scripts/mint-litellm-fuze-key.sh instead of a2a-maintain.yml and
 mint-litellm-ci-key.sh.
 
+WHY THIS FILE CHANGED SHAPE, AND WHY IT ISN'T A REVERT. This suite used to read
+`ANTHROPIC_BASE_URL` / `ANTHROPIC_MODEL` / `ANTHROPIC_DEFAULT_*` /
+`CLAUDE_CODE_DISABLE_*` out of `jobs.fuze.env` and required `runs-on: staging`.
+That was true of the FuzeInfra-only fork of this file (#560, 2026-08-19). PR #836
+(2026-09-02) replaced that fork with the stamped FuzeSDLC canonical — the SAME
+migration test_litellm_ci_routing.py already documents for a2a-maintain.yml — and
+this suite was never updated to match, so it failed on every push since. The
+canonical `fuze.yml` is the UNPRIVILEGED baseline installed in every onboarded
+repo: it holds no env block, no model pins, and runs on `ubuntu-latest` on
+purpose (pinning it to a self-hosted pool that exists only in this repo would
+queue forever in the other 21). It resolves the gateway through
+`./.github/actions/fuze-code-action` -> `./.github/actions/llm-endpoint`, which
+probes generically and falls back to a direct vendor key.
+
+The old fork's shape (in-cluster env pins, `runs-on: staging`) didn't disappear —
+it lives on, by design, in the two workflows that genuinely run in-cluster and
+are deliberately `# fuze:fork` (never reconciled from the canonical):
+`governance-nightly.yml` and `nightly-integration.yml`. Neither of those is the
+`@fuze` mention handler this suite is about.
+
+So, like test_litellm_ci_routing.py, the source of truth for "which models the
+@fuze handler may ask the gateway for" is now the fuze-handler VIRTUAL KEY's own
+allowlist: the `MODELS` array in scripts/mint-litellm-fuze-key.sh. Reading the
+ACL directly means this suite cannot be satisfied by a pin the gateway will
+refuse.
+
 Offline: reads local files only, no cluster, no network.
 """
 
@@ -17,13 +43,6 @@ ROOT = Path(__file__).parents[1]
 WORKFLOW = ROOT / ".github/workflows/fuze.yml"
 GATEWAY_VALUES = ROOT / "helm/litellm/values.yaml"
 GATEWAY_PROD_VALUES = ROOT / "helm/litellm/values-contabo.yaml"
-
-MODEL_VARS = (
-    "ANTHROPIC_MODEL",
-    "ANTHROPIC_DEFAULT_OPUS_MODEL",
-    "ANTHROPIC_DEFAULT_SONNET_MODEL",
-    "ANTHROPIC_DEFAULT_HAIKU_MODEL",
-)
 
 
 def _workflow() -> dict:
@@ -48,94 +67,127 @@ def _key_allowlist() -> set[str]:
     return {line.strip().strip('",') for line in body.splitlines() if line.strip().strip('",')}
 
 
-# ── Workflow holds no provider key ──────────────────────────────────────────
+# ── Canonical, not a re-fork ────────────────────────────────────────────────
 
-def test_workflow_holds_no_provider_key():
-    """The fuze handler must hold only a gateway credential, never a provider key."""
-    raw = WORKFLOW.read_text()
-    assert "secrets.LITELLM_FUZE_KEY" in raw
-    assert "secrets.ANTHROPIC_API_KEY" not in raw, (
-        "fuze.yml is back to holding a provider key directly, which defeats the "
-        "gateway's key custody and re-couples CI to a single provider's billing"
+def test_the_workflow_is_the_stamped_canonical_not_a_local_fork():
+    """A fork of this file is exactly what produced the stale-pin drift this suite
+    hit: the fork's env/runner shape was baked in, the canonical moved on, and
+    nothing reconciled it. The `fuze:managed` marker is what keeps governance-sync
+    reconciling it instead of it drifting again."""
+    first = WORKFLOW.read_text(encoding="utf-8").splitlines()[0]
+    assert first.startswith("# fuze:managed template=fuze.yml"), (
+        f"fuze.yml is no longer stamped from the FuzeSDLC canonical: {first!r}. "
+        "Editing it here re-forks it; change the upstream template instead."
     )
+
+
+# ── Workflow holds no provider admin key, no direct provider call ──────────
+
+def test_workflow_never_calls_a_provider_directly_or_holds_the_admin_key():
+    """The handler must reach providers only via fuze-code-action (which resolves
+    the gateway through ./llm-endpoint), and must never hold the gateway's own
+    admin key. Holding `secrets.ANTHROPIC_API_KEY` is fine and intentional here —
+    it is the documented direct-vendor FALLBACK for when the gateway probe fails,
+    forwarded to llm-endpoint rather than used to call a provider inline."""
+    raw = WORKFLOW.read_text()
+    assert "uses: ./.github/actions/fuze-code-action" in raw
+    assert "secrets.LITELLM_FUZE_KEY" in raw
     assert "api.anthropic.com" not in raw, (
-        "fuze.yml must reach providers only via the LiteLLM gateway"
+        "fuze.yml must reach providers only via fuze-code-action/llm-endpoint, "
+        "never call a provider endpoint directly"
+    )
+    assert "secrets.LITELLM_MASTER_KEY" not in raw, (
+        "LITELLM_MASTER_KEY is the gateway ADMIN key — it can mint keys, read the "
+        "proxy config and see every consumer's spend. The @fuze handler needs none "
+        "of that; it should hold only the scoped LITELLM_FUZE_KEY."
     )
 
 
 # ── Gateway addressing ───────────────────────────────────────────────────────
 
-def test_base_url_points_at_the_in_cluster_gateway():
-    env = _workflow()["jobs"]["fuze"]["env"]
-    assert env["ANTHROPIC_BASE_URL"] == "http://litellm.fuzeinfra.svc.cluster.local:4000"
+def test_gateway_base_url_is_configurable_not_hardcoded_standalone():
+    """fuze.yml is installed on a hosted runner in every onboarded repo, so the
+    in-cluster DNS name can only ever be a DEFAULT, never the sole literal — a
+    verbatim in-cluster URL would fail DNS everywhere but FuzeInfra. It must stay
+    overridable via `vars.FUZE_LITELLM_BASE_URL`, falling back to the in-cluster
+    host (harmless elsewhere because llm-endpoint falls back to a vendor key when
+    the probe fails).
 
-
-def test_job_runs_on_the_in_cluster_runner():
-    """Hosted runners cannot reach a ClusterIP gateway."""
-    job = _workflow()["jobs"]["fuze"]
-    assert job["runs-on"] == "staging", (
-        "the LiteLLM gateway is ClusterIP-only — from ubuntu-latest every request "
-        "times out; `staging` is the in-cluster ARC runner"
+    Asserted as an exact match on the resolved GHA expression (rather than a
+    substring scan of the whole file) so this isn't shaped like a URL-substring
+    sanitization check on untrusted input — it's an equality check on one known
+    workflow field.
+    """
+    fuze_step = next(
+        s for s in _workflow()["jobs"]["fuze"]["steps"]
+        if s.get("uses") == "./.github/actions/fuze-code-action"
+    )
+    base_url_expr = fuze_step["with"]["litellm-base-url"]
+    assert base_url_expr == (
+        "${{ vars.FUZE_LITELLM_BASE_URL || 'http://litellm.fuzeinfra.svc.cluster.local:4000' }}"
+    ), (
+        "litellm-base-url must stay overridable via vars.FUZE_LITELLM_BASE_URL, "
+        f"defaulting to the in-cluster gateway when unset. Got: {base_url_expr!r}"
     )
 
 
-# ── Model pinning ────────────────────────────────────────────────────────────
+# ── Runner class ─────────────────────────────────────────────────────────────
 
-def test_every_pinned_model_is_served_by_the_gateway():
-    env = _workflow()["jobs"]["fuze"]["env"]
+def test_job_runs_on_the_unprivileged_hosted_runner():
+    """`fuze.yml` is the baseline `@fuze` entrypoint installed fleet-wide; the
+    cluster-capable variant that must run on `staging` lives in fuze-cluster.yml,
+    opt-in per-repo. Pinning THIS file to a self-hosted pool that exists only in
+    FuzeInfra would queue forever in every other onboarded repo
+    (governance/ci-runners.md) and would hand a privileged runner label to repos
+    that never asked for it."""
+    job = _workflow()["jobs"]["fuze"]
+    assert job["runs-on"] == "ubuntu-latest"
+
+
+# ── Key allowlist reflects what the gateway actually serves ────────────────
+
+def test_every_model_the_fuze_key_may_request_is_served_by_the_gateway():
+    """The virtual key's ACL is what the gateway enforces at dispatch, so it is
+    the set that matters — see the module docstring for why this no longer reads
+    a workflow env block."""
     served = _model_names()
-    for var in MODEL_VARS:
-        assert var in env, f"{var} must be pinned in fuze.yml env"
-        assert env[var] in served, (
-            f"{var}={env[var]!r} is not in the gateway's model list {sorted(served)}. "
-            f"Either add it to helm/litellm/values.yaml or pin to a served name."
-        )
-
-
-def test_no_pinned_model_carries_the_extended_context_suffix():
-    env = _workflow()["jobs"]["fuze"]["env"]
-    for var in MODEL_VARS:
-        assert not re.search(r"\[\d+m\]$", str(env[var])), (
-            f"{var}={env[var]!r} carries an extended-context suffix; the gateway "
-            f"serves no such name. CLAUDE_CODE_DISABLE_1M_CONTEXT must stay set."
-        )
-    assert env.get("CLAUDE_CODE_DISABLE_1M_CONTEXT") == "1"
-
-
-def test_experimental_betas_disabled():
-    """Non-Anthropic upstreams reject Anthropic-only beta capability fields."""
-    env = _workflow()["jobs"]["fuze"]["env"]
-    assert env.get("CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS") == "1"
-    assert env.get("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC") == "1"
-
-
-# ── Key allowlist ────────────────────────────────────────────────────────────
-
-def test_key_allowlist_covers_every_model_the_workflow_pins():
-    env = _workflow()["jobs"]["fuze"]["env"]
     allow = _key_allowlist()
-    for var in MODEL_VARS:
-        assert env[var] in allow, (
-            f"{var}={env[var]!r} is not on the fuze-handler virtual key's model "
-            f"allowlist, so the key would be refused for it. Add it to MODELS in "
+    assert allow, "the mint script's MODELS array is empty; @fuze could request nothing"
+    for name in sorted(allow):
+        assert name in served, (
+            f"{name!r} is on the fuze-handler virtual key's allowlist but not in the "
+            f"gateway's model list {sorted(served)}. Either add it to "
+            f"helm/litellm/values.yaml or drop it from MODELS in "
             f"scripts/mint-litellm-fuze-key.sh."
         )
 
 
+def test_no_allowed_model_carries_the_extended_context_suffix():
+    """`claude-opus-5[1m]` is what the original outage requested. It is not a model."""
+    for name in sorted(_key_allowlist()):
+        assert not re.search(r"\[\d+m\]$", name), (
+            f"{name!r} carries an extended-context suffix; the gateway serves no such name."
+        )
+
+
 def test_key_allowlist_covers_every_fallback_hop():
-    """A key allowed only the Claude names breaks failover — the subtle invariant."""
-    env = _workflow()["jobs"]["fuze"]["env"]
+    """A key allowed only the Claude names breaks failover — the subtle invariant.
+
+    `models` is enforced on the model actually dispatched, so such a key passes in
+    normal operation and is rejected at the exact moment the router fails over —
+    converting the cross-provider fallback into an outage on the one day it matters.
+    """
     allow = _key_allowlist()
     fallbacks = yaml.safe_load(GATEWAY_VALUES.read_text())["routerSettings"]["fallbacks"]
-    pinned = {env[v] for v in MODEL_VARS}
     for entry in fallbacks:
         for primary, alts in entry.items():
-            if primary not in pinned:
-                continue
+            if primary not in allow:
+                continue  # @fuze cannot ask for it, so its hops are irrelevant here
             for alt in alts:
                 assert alt in allow, (
                     f"{primary!r} falls back to {alt!r} but the fuze-handler key "
-                    f"does not allow {alt!r} — failover would be rejected by the key's ACL"
+                    f"does not allow {alt!r} — failover would be rejected by the "
+                    f"key's own ACL"
                 )
 
 
