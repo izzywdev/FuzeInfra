@@ -296,6 +296,12 @@ jobs:
           fetch-depth: 0
           token: ${{ steps.identity.outputs.token }}
 
+      - name: Restore trusted local actions from default branch
+        if: steps.keys.outputs.present == 'true' && steps.pr.outputs.found == 'true'
+        run: |
+          git fetch origin main --depth=1
+          git checkout origin/main -- .github/actions/
+
       - name: Configure git identity
         if: steps.keys.outputs.present == 'true' && steps.pr.outputs.found == 'true'
         run: |
@@ -462,6 +468,10 @@ jobs:
           TRIGGERS_CI: ${{ steps.identity.outputs.triggers_ci }}
         run: |
           set -uo pipefail
+          # Restore action files to their committed PR state so the trusted-main overlay
+          # introduced by the "Restore trusted local actions" step is not accidentally
+          # committed to the PR branch.
+          git checkout HEAD -- .github/actions/ 2>/dev/null || true
           if git diff --quiet && git diff --cached --quiet; then
             gh pr comment "$PR_NUMBER" --body "🤖 fuze-code-review auto-fix loop (round ${NEXT_ROUND}/${MAX_ROUNDS}): the reviewer flagged issues but auto-fix produced no code changes. A human is needed."
             echo "::notice::auto-fix produced no changes — nothing to push."
