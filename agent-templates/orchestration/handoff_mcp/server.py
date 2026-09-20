@@ -196,7 +196,11 @@ def memory_read(path: str) -> str:
 
 def _vault_id_by_name(name):
     path = os.path.join(STATE, "vault-ids.json")
-    ids = json.load(open(path, encoding="utf-8")) if os.path.exists(path) else {}
+    if os.path.exists(path):
+        with open(path, encoding="utf-8") as f:
+            ids = json.load(f)
+    else:
+        ids = {}
     return ids.get(name)
 
 
