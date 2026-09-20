@@ -985,12 +985,19 @@ def main(argv: Sequence[str] | None = None) -> int:
     return 1 if config.get("fail_on_findings", True) else 0
 
 
-if __name__ == "__main__":
+def run(argv: Sequence[str] | None = None) -> int:
+    """Process entrypoint. Returns the exit code instead of exiting, so the
+    blind-fails-loudly path is itself unit-testable (it is the property that
+    makes this tool worth having)."""
     try:
-        sys.exit(main())
+        return main(argv)
     except (ClusterUnreachable, UnsafeCommand, GitHubError) as error:
         # FAIL LOUDLY. Never exit 0 on a path where the watchdog could not look:
         # "all clear" and "could not check" must not look the same.
         print(f"::error::deployment watchdog could not complete: {error}")
         write_summary(f"## Deployment-freeze watchdog FAILED\n\n`{error}`\n")
-        sys.exit(2)
+        return 2
+
+
+if __name__ == "__main__":
+    sys.exit(run())

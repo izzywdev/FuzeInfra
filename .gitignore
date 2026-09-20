@@ -187,3 +187,19 @@ dev-overrides/
 # password written for the operator to file in a password manager). They are
 # NOT sealed and must never be committed. Delete after storing.
 *.local.txt
+
+# --- session scratch: local-only clones, venvs and scratch output ---
+# All of these were created in a working session inside this worktree and are
+# large enough that a stray `git add -A` would commit hundreds of MB. The four
+# repo names are anchored with a leading slash so they only ignore top-level
+# scratch clones here, never a legitimately-named directory deeper in the tree.
+.audit-clones/
+.tmp-venvs/
+/FuzePicker/
+/FuzePlan/
+/FuzeSales/
+/MendysRobotics/
+after_bypass.txt
+err.txt
+imgs.txt
+lhr.json
