@@ -535,8 +535,9 @@ apiVip:
     key: "KEEPALIVED_AUTH_PASS"
   contabo:
     secretName: "contabo-api-credentials"
-    reassignPath: ""       # <- set to the CONFIRMED write endpoint before enabling
-    reassignMethod: ""
+    # /v1/vips/{ip}/{resourceType}/{instanceId} — confirm this literal via
+    # GET /v1/vips/{ip} once the IP is owned (contabo-check-failover-ip.yml).
+    resourceType: "instances"
   nodes:
     # fuze-core-1 (primary) — instanceId confirmed via the probe workflow.
     - name: vmi3383846

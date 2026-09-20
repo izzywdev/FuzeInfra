@@ -108,17 +108,19 @@ data:
   notify.sh: |
     #!/usr/bin/env bash
     # keepalived state-transition hook. On MASTER, reassign the Contabo additional
-    # IP (the VIP) to THIS node's instance via the Contabo API so the provider
+    # IP (the VIP) to THIS node's instance via the Contabo VIP API so the provider
     # routes it here; keepalived has already bound it locally via virtual_ipaddress.
     #
-    # ┌──────────────────────────────────────────────────────────────────────────┐
-    # │ VERIFY BEFORE ENABLING. The Contabo additional-IP REASSIGNMENT write      │
-    # │ endpoint is NOT yet confirmed in this repo (the read side is probed by    │
-    # │ .github/workflows/contabo-check-failover-ip.yml). CONTABO_REASSIGN_METHOD │
-    # │ / CONTABO_REASSIGN_PATH below are configurable precisely so the confirmed │
-    # │ endpoint is set once, not guessed. Until it is confirmed, apiVip stays    │
-    # │ gated off. See docs/runbooks/api-floating-vip.md → Preconditions.         │
-    # └──────────────────────────────────────────────────────────────────────────┘
+    # ENDPOINT (Contabo VIPApi — verified against the api.contabo.com VIP tag):
+    #   assign   POST   /v1/vips/{ip}/{resourceType}/{resourceId}   (no body)
+    #   unassign DELETE /v1/vips/{ip}/{resourceType}/{resourceId}   (no body)
+    #   read     GET    /v1/vips/{ip}   -> .data[0].assignments[].resourceId
+    # A VIP has ONE holder. At a MASTER transition the old holder is usually dead
+    # and this node only knows its OWN instanceId, so we READ the current holder,
+    # UNASSIGN it, then ASSIGN to self — robust whether or not a bare POST re-homes
+    # an already-assigned IP (the single-POST semantic is unverified; this path
+    # does not depend on it). CONTABO_RESOURCE_TYPE (default "instances") is the one
+    # path literal to confirm once via GET /v1/vips/{ip} — see the runbook.
     set -uo pipefail
     STATE="${1:-}"
     log() { echo "[api-vip notify] $(date -u +%FT%TZ) $*"; }
@@ -127,9 +129,10 @@ data:
     : "${CONTABO_INSTANCE_ID:?}" "${API_VIP_ADDRESS:?}"
     : "${CONTABO_CLIENT_ID:?}" "${CONTABO_CLIENT_SECRET:?}"
     : "${CONTABO_API_USER:?}" "${CONTABO_API_PASSWORD:?}"
-    REASSIGN_METHOD="${CONTABO_REASSIGN_METHOD:-POST}"
-    # {instanceId} and {vip} are substituted below.
-    REASSIGN_PATH="${CONTABO_REASSIGN_PATH:-/v1/compute/instances/{instanceId}/secondary-ips/{vip}}"
+    RTYPE="${CONTABO_RESOURCE_TYPE:-instances}"
+    API="https://api.contabo.com"
+    VIPBASE="$API/v1/vips/${API_VIP_ADDRESS}"
+    rid() { cat /proc/sys/kernel/random/uuid; }
 
     TOK=$(curl -sS -X POST -H "Content-Type: application/x-www-form-urlencoded" \
       "https://auth.contabo.com/auth/realms/contabo/protocol/openid-connect/token" \
@@ -140,18 +143,32 @@ data:
       --data-urlencode "grant_type=password" | jq -r .access_token)
     [ -n "$TOK" ] && [ "$TOK" != "null" ] || { log "ERROR: could not obtain Contabo token"; exit 1; }
 
-    PATH_FILLED=$(printf '%s' "$REASSIGN_PATH" | sed -e "s|{instanceId}|${CONTABO_INSTANCE_ID}|g" -e "s|{vip}|${API_VIP_ADDRESS}|g")
-    CODE=$(curl -sS -o /tmp/reassign.out -w '%{http_code}' -X "$REASSIGN_METHOD" \
-      -H "Authorization: Bearer $TOK" \
-      -H "x-request-id: $(cat /proc/sys/kernel/random/uuid)" \
+    # 1. Who holds the VIP now?
+    CUR=$(curl -sS -H "Authorization: Bearer $TOK" -H "x-request-id: $(rid)" "$VIPBASE" \
+           | jq -r '.data[0].assignments[]?.resourceId' 2>/dev/null | head -1)
+
+    # 2. If someone else holds it, unassign them first (skip if that node is gone —
+    #    a 4xx here is fine, the assign below is what matters).
+    if [ -n "$CUR" ] && [ "$CUR" != "null" ] && [ "$CUR" != "$CONTABO_INSTANCE_ID" ]; then
+      DC=$(curl -sS -o /tmp/vip.out -w '%{http_code}' -X DELETE \
+        -H "Authorization: Bearer $TOK" -H "x-request-id: $(rid)" \
+        "$VIPBASE/$RTYPE/$CUR")
+      log "unassign $API_VIP_ADDRESS from $CUR -> HTTP $DC"
+    elif [ "$CUR" = "$CONTABO_INSTANCE_ID" ]; then
+      log "$API_VIP_ADDRESS already assigned to $CONTABO_INSTANCE_ID; nothing to do"; exit 0
+    fi
+
+    # 3. Assign to self.
+    CODE=$(curl -sS -o /tmp/vip.out -w '%{http_code}' -X POST \
+      -H "Authorization: Bearer $TOK" -H "x-request-id: $(rid)" \
       -H "Content-Type: application/json" \
-      "https://api.contabo.com${PATH_FILLED}")
+      "$VIPBASE/$RTYPE/$CONTABO_INSTANCE_ID")
     if [ "$CODE" -ge 200 ] && [ "$CODE" -lt 300 ]; then
-      log "reassigned $API_VIP_ADDRESS -> instance $CONTABO_INSTANCE_ID (HTTP $CODE)"
+      log "assigned $API_VIP_ADDRESS -> instance $CONTABO_INSTANCE_ID (HTTP $CODE)"
     else
       # Do NOT exit non-zero: keepalived has already bound the VIP locally, and a
       # provider-side reassignment failure should page a human, not flap MASTER.
-      log "WARN: Contabo reassignment returned HTTP $CODE: $(cat /tmp/reassign.out)"
+      log "WARN: Contabo assign returned HTTP $CODE: $(cat /tmp/vip.out)"
     fi
     exit 0
 ---
@@ -261,13 +278,9 @@ spec:
             - name: CONTABO_API_PASSWORD
               valueFrom:
                 secretKeyRef: {name: {{ $vip.contabo.secretName | quote }}, key: {{ $vip.contabo.keys.apiPassword | quote }}}
-            {{- if $vip.contabo.reassignPath }}
-            - name: CONTABO_REASSIGN_PATH
-              value: {{ $vip.contabo.reassignPath | quote }}
-            {{- end }}
-            {{- if $vip.contabo.reassignMethod }}
-            - name: CONTABO_REASSIGN_METHOD
-              value: {{ $vip.contabo.reassignMethod | quote }}
+            {{- if $vip.contabo.resourceType }}
+            - name: CONTABO_RESOURCE_TYPE
+              value: {{ $vip.contabo.resourceType | quote }}
             {{- end }}
           volumeMounts:
             - name: cfg

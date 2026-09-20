@@ -1,26 +1,120 @@
 name: contabo-check-failover-ip
+# Confirms the Contabo VIP (additional/floating IP) API surface that the API
+# floating-VIP HA design depends on (docs/runbooks/api-floating-vip.md).
+#
+# READ mode (default): lists /v1/vips and prints each VIP's assignments so the
+# exact resourceType literal is captured in the (public) job log, plus the
+# primary ipConfig of the reference instance. No mutation.
+#
+# WRITE mode (do_write=yes + test_ip + target_instance_id): proves the failover
+# reassignment for real, as a SAFE ROUND-TRIP — records the current holder,
+# reassigns the IP to the target, confirms it moved, then restores it to the
+# original holder. Only run this once you OWN the test IP (the API only assigns
+# what you already bought in the panel Add-on Manager) and can tolerate it moving
+# for a few seconds. Never point it at an IP that is actively serving traffic.
+#
+# The job log is PUBLIC: this workflow never prints the OAuth token or any secret.
 on:
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      test_ip:
+        description: "Additional/VIP IP to inspect (READ) or move+restore (WRITE). Empty = list all VIPs only."
+        required: false
+        default: ""
+      reference_instance_id:
+        description: "Instance id to dump ipConfig for (READ). Default 203383846 (vmi3383846)."
+        required: false
+        default: "203383846"
+      resource_type:
+        description: "VIP-API resource type literal in /v1/vips/{ip}/{resourceType}/{id}."
+        required: false
+        default: "instances"
+      target_instance_id:
+        description: "WRITE only: instance id to temporarily reassign test_ip to."
+        required: false
+        default: ""
+      do_write:
+        description: "Set to 'yes' to perform the reassignment round-trip (assign to target, then restore)."
+        required: false
+        default: "no"
 permissions:
   contents: read
 jobs:
   check:
     runs-on: ubuntu-latest
+    env:
+      CID: ${{ secrets.CONTABO_CLIENT_ID }}
+      CSEC: ${{ secrets.CONTABO_CLIENT_SECRET }}
+      CUSER: ${{ secrets.CONTABO_API_USER }}
+      CPASS: ${{ secrets.CONTABO_API_PASSWORD }}
+      TEST_IP: ${{ github.event.inputs.test_ip }}
+      REF_ID: ${{ github.event.inputs.reference_instance_id }}
+      RTYPE: ${{ github.event.inputs.resource_type }}
+      TARGET_ID: ${{ github.event.inputs.target_instance_id }}
+      DO_WRITE: ${{ github.event.inputs.do_write }}
     steps:
-      - name: Check for failover/secondary IP support
-        env:
-          CID: ${{ secrets.CONTABO_CLIENT_ID }}
-          CSEC: ${{ secrets.CONTABO_CLIENT_SECRET }}
-          CUSER: ${{ secrets.CONTABO_API_USER }}
-          CPASS: ${{ secrets.CONTABO_API_PASSWORD }}
+      - name: Probe Contabo VIP API (read; optional write round-trip)
         run: |
           set -euo pipefail
+          api="https://api.contabo.com"
+          rid() { cat /proc/sys/kernel/random/uuid; }
+          # Token is never printed. All api calls carry a UUID x-request-id.
           TOK=$(curl -sS -X POST -H "Content-Type: application/x-www-form-urlencoded" \
             "https://auth.contabo.com/auth/realms/contabo/protocol/openid-connect/token" \
             --data-urlencode "client_id=${CID}" --data-urlencode "client_secret=${CSEC}" \
             --data-urlencode "username=${CUSER}" --data-urlencode "password=${CPASS}" \
             --data-urlencode "grant_type=password" | jq -r .access_token)
-          echo "=== /v1/compute/secondary-ips (if it exists) ==="
-          curl -sS -o /dev/null -w "HTTP %{http_code}\n" -H "Authorization: Bearer $TOK" -H "x-request-id: $(cat /proc/sys/kernel/random/uuid)" "https://api.contabo.com/v1/compute/secondary-ips"
-          echo "=== instance IP config for vmi3383846 (203383846) ==="
-          curl -sS -H "Authorization: Bearer $TOK" -H "x-request-id: $(cat /proc/sys/kernel/random/uuid)" "https://api.contabo.com/v1/compute/instances/203383846" | jq '.data[0].ipConfig'
+          [ -n "$TOK" ] && [ "$TOK" != "null" ] || { echo "ERROR: no token"; exit 1; }
+          auth=(-H "Authorization: Bearer $TOK")
+
+          echo "=== GET /v1/vips (all additional IPs owned) ==="
+          # 200 with data:[] == authorized, zero additional IPs owned (not an error).
+          curl -sS "${auth[@]}" -H "x-request-id: $(rid)" "$api/v1/vips?page=1&size=100" \
+            | jq '{pagination:._pagination, vips:[.data[]? | {ip, resourceType:(.assignments[]?.resourceType), holders:[.assignments[]?.resourceId]}]}'
+
+          echo "=== GET /v1/compute/instances/$REF_ID ipConfig (primary IP only) ==="
+          curl -sS "${auth[@]}" -H "x-request-id: $(rid)" "$api/v1/compute/instances/$REF_ID" | jq '.data[0].ipConfig'
+
+          if [ -n "${TEST_IP}" ]; then
+            echo "=== GET /v1/vips/$TEST_IP (assignments reveal the resourceType literal) ==="
+            curl -sS "${auth[@]}" -H "x-request-id: $(rid)" "$api/v1/vips/$TEST_IP" | jq '.data[0]'
+          fi
+
+          if [ "${DO_WRITE}" != "yes" ]; then
+            echo "=== WRITE test skipped (do_write != yes) ==="
+            exit 0
+          fi
+          if [ -z "${TEST_IP}" ] || [ -z "${TARGET_ID}" ]; then
+            echo "ERROR: do_write=yes requires both test_ip and target_instance_id"; exit 1
+          fi
+
+          vipbase="$api/v1/vips/$TEST_IP"
+          echo "=== WRITE round-trip for $TEST_IP (resourceType=$RTYPE) ==="
+          ORIG=$(curl -sS "${auth[@]}" -H "x-request-id: $(rid)" "$vipbase" \
+                  | jq -r '.data[0].assignments[]?.resourceId' | head -1)
+          echo "original holder: ${ORIG:-<none>}"
+          if [ "$ORIG" = "$TARGET_ID" ]; then
+            echo "ERROR: test_ip is already on target_instance_id; pick a different target so the move is observable"; exit 1
+          fi
+
+          echo "--- assign $TEST_IP -> $TARGET_ID ---"
+          curl -sS -o /tmp/a.out -w 'assign HTTP %{http_code}\n' -X POST "${auth[@]}" \
+            -H "x-request-id: $(rid)" -H "Content-Type: application/json" \
+            "$vipbase/$RTYPE/$TARGET_ID"; cat /tmp/a.out; echo
+          sleep 5
+          NOW=$(curl -sS "${auth[@]}" -H "x-request-id: $(rid)" "$vipbase" \
+                 | jq -r '.data[0].assignments[]?.resourceId' | head -1)
+          echo "holder after assign: ${NOW:-<none>}  (expected $TARGET_ID)"
+
+          echo "--- RESTORE: unassign from $TARGET_ID, reassign to ${ORIG:-<none>} ---"
+          curl -sS -o /dev/null -w 'unassign HTTP %{http_code}\n' -X DELETE "${auth[@]}" \
+            -H "x-request-id: $(rid)" "$vipbase/$RTYPE/$TARGET_ID"
+          if [ -n "$ORIG" ] && [ "$ORIG" != "null" ]; then
+            curl -sS -o /dev/null -w 'reassign-original HTTP %{http_code}\n' -X POST "${auth[@]}" \
+              -H "x-request-id: $(rid)" -H "Content-Type: application/json" \
+              "$vipbase/$RTYPE/$ORIG"
+          fi
+          FINAL=$(curl -sS "${auth[@]}" -H "x-request-id: $(rid)" "$vipbase" \
+                   | jq -r '.data[0].assignments[]?.resourceId' | head -1)
+          echo "holder after restore: ${FINAL:-<none>}  (expected ${ORIG:-<none>})"
+          echo "=== round-trip done ==="

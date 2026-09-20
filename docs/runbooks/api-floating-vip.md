@@ -84,12 +84,23 @@ should not do on its own:
    **not** auto-order via Terraform — a bare Contabo apply must not silently buy an
    IP, and it would collide with the add-on **1501** drift caution in
    `modules/contabo-k3s-node/main.tf`.
-2. **Confirm the additional-IP REASSIGNMENT write endpoint.** This is the one
-   unproven Contabo primitive. Extend `contabo-check-failover-ip.yml` to exercise
-   the reassignment against a spare IP (or confirm from Contabo API docs/support),
-   then set `apiVip.contabo.reassignPath` / `reassignMethod` to the verified value.
-   Until confirmed, keep the feature off — failover would bind the VIP locally but
-   the provider would not route it.
+2. **Confirm the additional-IP REASSIGNMENT write path.** The endpoint is the
+   Contabo **VIP API** (`/v1/vips`, verified against the api.contabo.com VIP tag) —
+   NOT `secondary-ips`, which does not exist:
+   - read: `GET /v1/vips/{ip}` → `.data[0].assignments[].resourceId`/`.resourceType`
+   - assign: `POST /v1/vips/{ip}/{resourceType}/{instanceId}` (no body)
+   - unassign: `DELETE /v1/vips/{ip}/{resourceType}/{instanceId}` (no body)
+
+   Two things stay unverified and MUST be confirmed on real hardware before
+   enabling (`contabo-check-failover-ip.yml` now does both — see its inputs):
+   - the `resourceType` literal (`instances` expected) — read it back from
+     `GET /v1/vips/{ip}` after one panel assignment, set `apiVip.contabo.resourceType`;
+   - that a failover reassignment actually moves the IP provider-side (run the
+     probe's write round-trip: assign to a test instance, then back). `notify.sh`
+     already does read→unassign(old)→assign(self), so it does not depend on the
+     unverified "single POST re-homes an assigned IP" semantic. Until the
+     round-trip is proven green, keep the feature off — failover would bind the VIP
+     locally but the provider might not route it.
 3. **Fill the two missing `instanceId`s** in `values-contabo.yaml` (only
    `vmi3383846` = `203383846` is known). Get them from
    `GET /v1/compute/instances` (match by display name).

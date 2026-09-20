@@ -1050,11 +1050,11 @@ apiVip:
       clientSecret: "CONTABO_CLIENT_SECRET"
       apiUser: "CONTABO_API_USER"
       apiPassword: "CONTABO_API_PASSWORD"
-    # The additional-IP reassignment WRITE endpoint. Left empty until confirmed
-    # (see the runbook); the notify script's built-in default is used meanwhile,
-    # but the feature stays gated off until this is set to a verified value.
-    reassignPath: ""
-    reassignMethod: ""
+    # Contabo VIP-API resource-type literal in the assign/unassign path
+    # /v1/vips/{ip}/{resourceType}/{instanceId}. "instances" is expected; confirm
+    # once via GET /v1/vips/{ip} (assignments[].resourceType echoes the exact
+    # literal) before enabling — see the runbook.
+    resourceType: "instances"
   # apiserver liveness the VRRP health-check curls on loopback.
   healthCheck:
     port: 6443
