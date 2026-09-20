@@ -894,8 +894,35 @@ clusterAutoscaler:
     releaseWindow: 24h
     renewalDay: 15
 overprovisioning:
-  # Enabled together with clusterAutoscaler during the gated Task 18 cutover.
-  enabled: true
+  # DISABLED 2026-09-20, together with clusterAutoscaler (see its block above).
+  # Re-enable ONLY when the autoscaler is re-enabled; these two are a pair.
+  #
+  # This balloon pod exists for exactly one purpose: to sit Pending and force
+  # the elastic pool to scale up before real workloads go unschedulable. Its
+  # podAntiAffinity pins it to nodes labelled fuzeinfra.io/pool=elastic
+  # (templates/autoscaler/overprovisioning.yaml), so with the elastic pool
+  # disabled it can NEVER be scheduled and can never report Healthy. Left
+  # enabled it is not merely useless — it is actively harmful, for a reason
+  # that cost this cluster five days of deploys:
+  #
+  # ARGO DEADLOCK. A sync of fuzeinfra-prod waits on resource health, and this
+  # Deployment can never become healthy while the elastic pool is full or
+  # absent. On 2026-09-15T22:06:01Z a sync operation entered
+  #     phase: Running
+  #     message: waiting for healthy state of apps/Deployment/fuzeinfra-overprovisioning
+  # and was STILL Running five days later. Argo does not start a new operation
+  # while one is in flight, so NOTHING reached fuzeinfra-prod in that window —
+  # every commit to main silently did not deploy, and deploy-prod failed at
+  # "Wait for ArgoCD syncs to land" without anyone reading why. That is how the
+  # autoscaler incident (three paid, stranded Contabo instances) also became a
+  # cluster-wide deploy freeze: the wedged elastic pool starved the balloon
+  # pod, and the starved balloon pod wedged Argo.
+  #
+  # The self-reinforcing part, and why this had to change in the same breath as
+  # disabling the autoscaler: the fix that frees the pool cannot be applied
+  # while the pool is wedged, because applying it requires the very sync this
+  # pod is blocking.
+  enabled: false
   replicas: 1
 # Per-service Postgres provisioning (issue #153) — PROD.
 #
