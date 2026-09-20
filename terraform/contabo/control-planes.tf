@@ -63,10 +63,19 @@ locals {
     }
   }
 
+  # Extra tls-san entries for the floating API VIP (api-floating-vip.tf). Added to
+  # EVERY control plane's cert so kubectl validates when the VIP has floated to any
+  # of them, whether the kubeconfig addresses the raw IP or the DNS name. Empty
+  # (no lines) until var.api_vip_address is set, so the gated apply stays a no-op.
+  api_vip_tls_san = var.api_vip_address == "" ? [] : [
+    "  - ${var.api_vip_address}",
+    "  - ${var.api_vip_hostname_label}.${local.prod_domain}",
+  ]
+
   # Rendered per node. Kept byte-identical in shape to what is live now, so the
   # first gated apply is a no-op beyond formatting.
   cp_config = {
-    for k, v in local.control_planes : k => join("\n", [
+    for k, v in local.control_planes : k => join("\n", concat([
       "server: ${v.server_url}",
       "token: __TOKEN__",
       "flannel-backend: wireguard-native",
@@ -74,13 +83,14 @@ locals {
       "tls-san:",
       "  - ${v.public_ip}",
       "  - ${v.private_ip}",
+      ], local.api_vip_tls_san, [
       "node-taint:",
       "  - \"node-role.kubernetes.io/control-plane=:PreferNoSchedule\"",
       "flannel-iface: ${var.private_iface}",
       "node-external-ip: ${v.public_ip}",
       # The line whose absence broke API access for every elastic node.
       "advertise-address: ${v.private_ip}",
-    ])
+    ]))
   }
 }
 

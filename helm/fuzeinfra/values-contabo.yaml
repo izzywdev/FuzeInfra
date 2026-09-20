@@ -509,6 +509,52 @@ airflow:
   workerResources:
     requests: {cpu: 500m, memory: 512Mi}
     limits: {cpu: "2", memory: 1536Mi}
+# ---------------------------------------------------------------------------
+# API floating-VIP HA (prod). See values.yaml for the full contract and
+# docs/runbooks/api-floating-vip.md for the mechanism + preconditions.
+#
+# STILL GATED OFF. Flip enabled -> true ONLY after the runbook's preconditions
+# are met: (1) the Contabo additional IP is ordered and its address set below;
+# (2) the two missing instanceIds are filled; (3) the reassignment WRITE endpoint
+# is confirmed and set in contabo.reassignPath; (4) the contabo-api-credentials
+# SealedSecret exists in the fuzeinfra namespace; (5) 6443 is open on all three
+# durable CPs' public interface. Enabling with any of these missing is a no-op at
+# best (helm `fail` on empty address) or a non-converging VRRP at worst.
+#
+# PRIORITY ORDER MUST MATCH scripts/label-durable-nodes.sh: the monitoring node
+# (fuzeinfra.io/role=monitoring = vmi3396106 / fuze-core-2) is LAST.
+apiVip:
+  enabled: false
+  address: ""              # <- the ordered Contabo additional IP, e.g. "203.0.113.10"
+  interface: "eth0"        # public NIC (confirm on the nodes; may be ens/eth)
+  vrrp:
+    interface: "eth1"      # private VLAN NIC (10.0.0.0/22)
+    routerId: 51
+  authPassSecret:
+    name: "contabo-api-credentials"
+    key: "KEEPALIVED_AUTH_PASS"
+  contabo:
+    secretName: "contabo-api-credentials"
+    # /v1/vips/{ip}/{resourceType}/{instanceId} — confirm this literal via
+    # GET /v1/vips/{ip} once the IP is owned (contabo-check-failover-ip.yml).
+    resourceType: "instances"
+  nodes:
+    # fuze-core-1 (primary) — instanceId confirmed via the probe workflow.
+    - name: vmi3383846
+      priority: 200
+      peerIp: "10.0.0.6"
+      instanceId: "203383846"
+    # fuze-core-3 — TODO: fill instanceId from the Contabo API/panel before enabling.
+    - name: mendys-worker-1
+      priority: 150
+      peerIp: "10.0.0.3"
+      instanceId: "REPLACE_WITH_CONTABO_INSTANCE_ID"
+    # fuze-core-2 (monitoring) — LOWEST priority. TODO: fill instanceId.
+    - name: vmi3396106
+      priority: 100
+      peerIp: "10.0.0.2"
+      instanceId: "REPLACE_WITH_CONTABO_INSTANCE_ID"
+
 # Cloudflare tunnel: all traffic enters via the named tunnel; no host-level
 # ports 80/443 need to be open.  The tunnel token lives in fuzeinfra-secrets
 # (key: CLOUDFLARE_TUNNEL_TOKEN) which is patched by terraform/cloudflare or
