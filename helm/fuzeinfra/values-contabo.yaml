@@ -669,7 +669,68 @@ dnsmasq:
 # product/image/k3s URL, pool identity, and canonical userDataTemplateB64 in one
 # reviewed change; never patch either autoscaler Deployment in the live cluster.
 clusterAutoscaler:
-  enabled: true
+  # DISABLED 2026-09-20 — INCIDENT GATE, NOT A POLICY CHANGE. Re-enable only
+  # together with the pending-payment fixes described at the bottom of this
+  # comment; flipping this back alone re-arms the exact loop that caused it.
+  #
+  # WHAT HAPPENED. On 2026-09-15 CA ordered three elastic instances — ONE AT A
+  # TIME, 95 and 133 minutes apart (203580244 03:01Z, 203580327 04:36Z,
+  # 203580478 06:49Z), not one Delta=3 call. Each order stalled in Contabo
+  # `pending_payment`. At maxNodeProvisionTime (90m) CA declared each one
+  # longUnregistered, stopped counting it as incoming capacity, and ordered
+  # another — a ratchet that only stopped when NodeGroupTargetSize hit
+  # maxSize=4. maxSize was the sole financial circuit breaker; at maxSize=10
+  # this would have ordered nine.
+  #
+  # Payment cleared 2026-09-18 14:02Z. All three reached `running` — and were
+  # CANCELLED 18/39/49 SECONDS LATER (cancelDate 2026-10-14), on the first CA
+  # loop after they became cancellable. Not by the billing-aware reaper, which
+  # behaved correctly throughout: by upstream CA's removeOldUnregisteredNodes
+  # -> NodeGroupDeleteNodes -> Contabo cancel. That path has NO billing
+  # awareness. We built one billing-aware release path and left a second,
+  # unguarded one beside it.
+  #
+  # WHY THEY NEVER JOINED (verified 2026-09-20, not inferred): the cloud-init
+  # userData was never applied to any of the three. The break-glass key from
+  # the `users:` block authenticates on elastic node c056a22a and is REJECTED
+  # on all three stranded nodes. No /etc/k3s-agent.env, no join unit, so no
+  # join was ever attempted — which is also why the template's "quarantine,
+  # don't abort" policy never engaged: that policy lives inside the cloud-init
+  # that never ran. An order parked in pending_payment does not carry its
+  # userData into the VM Contabo eventually builds. Remediation is a reinstall
+  # (ca-salvage-enroll), which re-delivers userData.
+  #
+  # WHY DISABLED RATHER THAN PATCHED. Contabo exposes no cancellation-reversal
+  # for compute (verified against the live OpenAPI spec 2026-09-20: only
+  # /v1/domains/{domain}/revoke-cancellation exists; the instance path offers
+  # POST /cancel and nothing else). Revocation is panel-only and MANUAL. The
+  # provider's idempotency guard (internal/provider/scale.go, "already has
+  # cancelDate ... skipping redundant cancel") is keyed on a non-empty
+  # RawCancelDate, so the instant a human revokes in the panel that guard
+  # opens and the next CA loop re-cancels within ~35s. The operator cannot
+  # safely click revoke while any of this stack is running, and this is the
+  # only values-only kill switch — it avoids the provider :latest rollout race
+  # documented under provider.imageRollout below.
+  #
+  # COST OF LEAVING IT OFF: none that is not already lost. The pool was wedged
+  # at "max size reached" with 3 of 4 slots held by instances that will never
+  # serve, so no scale-up was reachable anyway. The reaper stops too (it is
+  # gated on this key), which is acceptable well inside the 2026-10-15 renewal.
+  #
+  # RE-ENABLE CHECKLIST — all three, or the ratchet returns:
+  #   1. Report pending_payment instances with Status.ErrorInfo set. Upstream
+  #      expectedToRegister() (clusterstate.go) exempts an instance from the
+  #      unregistered set ONLY for InstanceDeleting or ErrorInfo != nil;
+  #      mapping pending_payment to instanceCreating alone does NOT help, as
+  #      removeOldUnregisteredNodes gates purely on elapsed time.
+  #   2. NodeGroupIncreaseSize must refuse to order while any prefix instance
+  #      is pending_payment — an outstanding unpaid order IS the capacity CA
+  #      is asking for. (CA's own backoff is time-bounded and will not hold.)
+  #   3. NodeGroupDeleteNodes must never cancel a paid, running instance that
+  #      has no k8s Node. Cancelling an UNPAID order is free and fine; the
+  #      expensive state is paid-and-never-joined, and that one needs an
+  #      enrollment path, which no component has today.
+  enabled: false
   # Keep the upstream CA and the external provider on the exact same bounds.
   # Desired size is provider-discovered (the count of instances carrying the
   # clean pool tag below), so this overlay deliberately starts at 0 and lets

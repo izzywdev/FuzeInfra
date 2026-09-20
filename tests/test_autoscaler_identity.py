@@ -31,7 +31,19 @@ def test_prod_uses_a_clean_synchronized_elastic_pool_identity() -> None:
     autoscaler = production_autoscaler()
     provider = autoscaler["provider"]
 
-    assert autoscaler["enabled"] is True
+    # PINNED TO False ON PURPOSE (2026-09-20 incident gate). The autoscaler is
+    # disabled in prod because upstream CA's removeOldUnregisteredNodes cancels
+    # paid Contabo instances with no billing awareness, and because the operator
+    # cannot safely revoke a cancellation in the Contabo panel while any part of
+    # this stack is running (the provider's redundant-cancel guard is keyed on a
+    # non-empty RawCancelDate, so a revoke re-arms the cancel within ~35s).
+    #
+    # This assertion is a tripwire, not a preference: flipping it back to True
+    # must be a deliberate edit, made together with the re-enable checklist in
+    # values-contabo.yaml (pending_payment -> ErrorInfo so CA's
+    # expectedToRegister() exempts it, an ordering guard while an unpaid order
+    # is outstanding, and a refusal to cancel paid-but-never-joined instances).
+    assert autoscaler["enabled"] is False
     assert autoscaler["scaleDownEnabled"] is False
     # The contract this test exists for is SYNCHRONIZATION (nodeGroup bounds ==
     # provider bounds), not one frozen ceiling. Hard-coding the ceiling here is
