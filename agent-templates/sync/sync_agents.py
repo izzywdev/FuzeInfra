@@ -28,8 +28,7 @@ _COMPARE = ("model", "system", "description", "tools", "mcp_servers", "skills", 
 def _load_env_ids():
     if not os.path.exists(ENV_STATE):
         raise SystemExit("Run sync_environments.py first (environment-ids.json missing).")
-    with open(ENV_STATE, encoding="utf-8") as f:
-        return json.load(f)
+    return json.load(open(ENV_STATE, encoding="utf-8"))
 
 
 def _norm_model(m):
@@ -116,8 +115,7 @@ def _env_name(env_basename):
     if not env_basename:
         return None
     path = os.path.join(TEMPLATES_ROOT, "environments", f"{env_basename}.json")
-    with open(path, encoding="utf-8") as f:
-        return json.load(f)["name"]
+    return json.load(open(path, encoding="utf-8"))["name"]
 
 
 if __name__ == "__main__":
