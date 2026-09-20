@@ -115,8 +115,7 @@ def _env_name(env_basename):
     if not env_basename:
         return None
     path = os.path.join(TEMPLATES_ROOT, "environments", f"{env_basename}.json")
-    with open(path, encoding="utf-8") as f:
-        return json.load(f)["name"]
+    return json.load(open(path, encoding="utf-8"))["name"]
 
 
 if __name__ == "__main__":
