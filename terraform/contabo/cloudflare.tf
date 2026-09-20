@@ -85,6 +85,20 @@ resource "cloudflare_zero_trust_tunnel_cloudflared_config" "fuzeinfra" {
       hostname = "argocd.${local.prod_domain}"
       service  = "http://argocd-server.argocd:80"
     }
+    # BREAK-GLASS k3s API route (var.api_breakglass_enabled). A raw-TCP tunnel to
+    # the IN-CLUSTER apiserver ClusterIP (kubernetes.default.svc:443), which is
+    # itself HA — kube-proxy load-balances it across all healthy apiservers, so
+    # this survives the loss of any one control plane WITHOUT the floating VIP.
+    # It is reached with a client-side `cloudflared access tcp` + the Access
+    # service token below (Zero Trust, NOT Spectrum). MUST come before the
+    # catch-all (first match wins; the catch-all has no hostname). See the runbook.
+    dynamic "ingress_rule" {
+      for_each = var.api_breakglass_enabled ? [1] : []
+      content {
+        hostname = "k8s-api.${local.prod_domain}"
+        service  = "tcp://kubernetes.default.svc.cluster.local:443"
+      }
+    }
     # Generic catch-all: every other hostname �� Traefik, which host-routes by
     # Ingress. This is domain-agnostic: any product on its own domain (its own
     # apex/subdomains) just CNAMEs that host to THIS tunnel and declares a Traefik
@@ -856,6 +870,9 @@ locals {
     cloudflare_zero_trust_access_application.handoff_mcp[*].id,
     cloudflare_zero_trust_access_application.a2a_relay[*].id,
     cloudflare_zero_trust_access_application.a2a_gateway[*].id,
+    # k8s-api.<prod> is NOT a launcher host, so the reconciler already never
+    # targets it; listed here anyway per this local's own do-not-touch contract.
+    cloudflare_zero_trust_access_application.k8s_api_breakglass[*].id,
     # Scoped to litellm.<prod>, which IS in local.launcher_hosts (the "litellm"
     # tile) — without this entry the reconciler would treat it as an unowned
     # duplicate of the wildcard admin_services coverage and delete it.
@@ -1233,6 +1250,87 @@ resource "cloudflare_zero_trust_access_policy" "litellm_service_ci_token" {
 
   include {
     service_token = [cloudflare_zero_trust_access_service_token.litellm_ci[0].id]
+  }
+}
+
+# ---------------------------------------------------------------------------
+# BREAK-GLASS k3s API endpoint over the Cloudflare Tunnel.
+#
+# The SECOND, independent external path to the API, for when the Contabo floating
+# VIP or the Contabo network itself is the fault (the VIP is the primary path —
+# api-floating-vip.tf + helm/fuzeinfra/templates/api-vip-keepalived.yaml). The
+# tunnel ingress rule (tcp:// to the in-cluster apiserver ClusterIP) is added in
+# cloudflare_zero_trust_tunnel_cloudflared_config above, gated on the same var.
+#
+# Reached with a client-side `cloudflared access tcp` presenting the service token
+# below as CF-Access-Client-Id / CF-Access-Client-Secret — this is a Cloudflare
+# Zero Trust flow on the SAME free tier as the admin-UI email-OTP wall, NOT
+# Spectrum (Spectrum is only needed for a raw public TCP listener with no
+# client-side cloudflared). kubectl still does its own TLS/mTLS to the apiserver
+# through the local proxy, end to end. See docs/runbooks/api-floating-vip.md.
+#
+# GATED OFF (var.api_breakglass_enabled). Like handoff_mcp/a2a_*, flipping the var
+# is only effective when terraform-plan-apply's apply job runs — this file is under
+# terraform/**, so a PR editing it triggers the apply. Verify at the edge after:
+#   cloudflared access tcp --hostname k8s-api.<domain> --url 127.0.0.1:6443 &
+#   kubectl --server https://127.0.0.1:6443 get --raw /livez
+# ---------------------------------------------------------------------------
+variable "api_breakglass_enabled" {
+  description = "Expose the k3s API over the CF tunnel (tcp://) behind an Access service token, as a break-glass path independent of the floating VIP."
+  type        = bool
+  default     = false
+}
+
+resource "cloudflare_zero_trust_access_application" "k8s_api_breakglass" {
+  count                = local.cloudflare_enabled && var.api_breakglass_enabled ? 1 : 0
+  account_id           = var.cloudflare_account_id
+  name                 = "k3s API (break-glass, service-token + admin)"
+  domain               = "k8s-api.${local.prod_domain}"
+  type                 = "self_hosted"
+  session_duration     = var.access_session_duration
+  app_launcher_visible = false
+}
+
+# The machine credential used by `cloudflared access tcp`. client_secret is
+# returned once by the Cloudflare API and captured only in Terraform state; it is
+# never in this file, a PR diff, or seen by whatever applies this. Provision it to
+# GitHub Actions / operator kubeconfigs out of band via `terraform output -raw`,
+# exactly like litellm_ci above. Needs the Account → Access: Service Tokens → Edit
+# permission group on CLOUDFLARE_API_TOKEN (granted 2026-09-14).
+resource "cloudflare_zero_trust_access_service_token" "k8s_api_breakglass" {
+  count      = local.cloudflare_enabled && var.api_breakglass_enabled ? 1 : 0
+  account_id = var.cloudflare_account_id
+  name       = "k3s API break-glass (cloudflared access tcp)"
+}
+
+# MUST be non_identity ("Service Auth"), not allow — an `allow` decision demands a
+# human IdP login on top and 302s a token-only request to the login page. This is
+# the exact trap that cost four pointless litellm_ci token rotations (see that
+# resource). This is the primary break-glass path (machine kubectl).
+resource "cloudflare_zero_trust_access_policy" "k8s_api_breakglass_service_token" {
+  count          = local.cloudflare_enabled && var.api_breakglass_enabled ? 1 : 0
+  account_id     = var.cloudflare_account_id
+  application_id = cloudflare_zero_trust_access_application.k8s_api_breakglass[0].id
+  name           = "Service token (cloudflared access tcp)"
+  precedence     = 1
+  decision       = "non_identity"
+
+  include {
+    service_token = [cloudflare_zero_trust_access_service_token.k8s_api_breakglass[0].id]
+  }
+}
+
+# Human break-glass (email OTP) — cluster-independent, like admin_email_otp.
+resource "cloudflare_zero_trust_access_policy" "k8s_api_breakglass_email_otp" {
+  count          = local.cloudflare_enabled && var.api_breakglass_enabled ? 1 : 0
+  account_id     = var.cloudflare_account_id
+  application_id = cloudflare_zero_trust_access_application.k8s_api_breakglass[0].id
+  name           = "Admin email allowlist (OTP) — break-glass"
+  precedence     = 2
+  decision       = "allow"
+
+  include {
+    email = var.allowed_admin_emails
   }
 }
 

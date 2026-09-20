@@ -71,8 +71,12 @@ fi
 # Monitoring cannot simply leave the durable pool -- Longhorn disks exist ONLY on
 # durable nodes, so an elastic node can never attach these volumes.
 #
-# This MUST stay consistent with the keepalived VRRP priorities once the API
-# floating VIP lands: this node gets the lowest priority.
+# This MUST stay consistent with the keepalived VRRP priorities for the API
+# floating VIP: this node gets the LOWEST priority. That mechanism now exists —
+# helm/fuzeinfra/templates/api-vip-keepalived.yaml, configured by the
+# `apiVip.nodes` priority table in values-contabo.yaml (monitoring node last),
+# documented in docs/runbooks/api-floating-vip.md. If the monitoring node moves,
+# update that table's priorities to keep this node last.
 MONITORING_LABEL="fuzeinfra.io/role=monitoring"
 # Resolved rather than hardcoded, for the same reason as DURABLE_NODES: this node
 # is mid-rename (vmi3396106 -> fuze-core-2). Order of preference:
