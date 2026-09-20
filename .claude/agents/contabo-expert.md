@@ -28,7 +28,7 @@ inferred. If you find yourself about to try one of these, stop.
 
 | You want… | It does not exist. Do this instead. |
 |---|---|
-| Reverse a cancellation | **Customer Control Panel → Revoke cancellation**, before `cancelDate`. §2 |
+| Reverse a cancellation **via the API** | **It is still recoverable — do not report it as lost.** Panel-only: Control Panel → Revoke cancellation, any time before `cancelDate`. Escalate to the operator. §2 |
 | Hard-delete / terminate an instance now | Only `POST …/cancel`, effective at end of billing period. §1, §2 |
 | List or remove add-ons via API | No Add-ons API at all. Panel → Add-on Manager. §3 |
 | Look up what an add-on id means | No catalogue endpoint. Support ticket. §3 |
@@ -136,6 +136,54 @@ Terraform provider's `resourceInstanceDelete` all call **CancelInstance**
 instead. Deletion == cancellation. Do not look for a hard-terminate endpoint;
 none is documented and none exists.
 
+### `pending_payment`: a create can return 200 and build NOTHING for days
+
+**`POST /v1/compute/instances` returning 200 does not mean a machine exists.**
+If the account has no payment on file for the order, the instance is created in
+status **`pending_payment`** — a billing record with an `instanceId` and a
+`displayName`, but no VM, no `name` (`vmi…`), no `ipConfig`, no vHost. It stays
+that way indefinitely, until a human pays. Observed live: **3 days**
+(2026-09-15 → 2026-09-18).
+
+It is fully visible the whole time: it is returned by
+`GET /v1/compute/instances`, it matches display-name prefix filters, and it
+counts against anything counting instances. Only `status` distinguishes it.
+
+The real build happens at payment-clearing time, and the audit trail shows the
+whole transition in about 60 seconds:
+
+```text
+CREATED  2026-09-15T03:01Z  status=pending_payment   (instanceId + displayName only)
+UPDATED  2026-09-18T14:03Z  status=transferring      (name=vmi…, vHostId, ipConfig assigned)
+UPDATED  2026-09-18T14:03Z  status=installing
+UPDATED  2026-09-18T14:03Z  status=running
+```
+
+**THE EXPENSIVE PART: `userData` supplied at create does NOT survive to the
+VM that is eventually built.** Verified 2026-09-20 on three instances ordered
+this way: the break-glass SSH key from the cloud-init `users:` block was
+absent on all three (key offered, `Permission denied (publickey)`) while
+authenticating fine on a sibling node created normally from the same template.
+No `/etc/k3s-agent.env`, no join unit — cloud-init never ran, so the nodes
+never attempted to join the cluster and any in-cloud-init failure policy
+(quarantine, retry-on-boot) never engaged either. They booted blank.
+
+Consequences for any automation that orders instances:
+
+- **Do not treat `pending_payment` as a failed provision.** It is an
+  outstanding order that will still arrive. Retrying "because it never came
+  up" stacks a second paid order on the first; the cluster-autoscaler ratchet
+  of 2026-09-15 ordered three this way, one per provisioning timeout, and was
+  stopped only by its own `maxSize`.
+- **Do not cancel it once it goes `running`.** Cancelling while still
+  `pending_payment` is free — it voids an unpaid order. Once paid, the money
+  is committed to the end of the period and `cancel` cannot give it back.
+- **Remediate with a reinstall, not a re-order.** `PUT /v1/compute/instances/
+  {instanceId}` re-delivers `userData`, which is exactly what the blank
+  machine is missing (see §6). The instance is otherwise healthy and paid for.
+- Alert on any instance sitting in `pending_payment` — nothing else will tell
+  you, and the clock is a billing clock.
+
 ---
 
 ## 2. Cancellation — semantics, and the reversal question
@@ -167,23 +215,67 @@ Consequences that bite:
 - Cancelling permanently destroys the instance's snapshots and backups at the
   termination date; that part is not reversible.
 
-### CONFIRMED DEAD END: cancellation CANNOT be reversed via the API
+### DEAD END *for compute, via the API only* — the PANEL CAN reverse it
 
-**This is the live question this agent exists to answer. The answer is no.**
+**Never compress this section to "a cancelled instance cannot be recovered."**
+It can. The API cannot do it; a human in the Customer Control Panel can, right
+up until `cancelDate`. On 2026-09-20 a session skimmed this heading, reported
+three cancelled-but-still-paid instances as unrecoverable, and proposed
+reinstalling them instead of simply asking the operator to click one button.
+The distinction is the whole point of this section — lead with it.
 
-- The Instances API surface (create/retrieve/list/patch/reinstall/upgrade/
-  cancel + the six actions) contains **no** un-cancel, revoke, reactivate or
-  restore operation. Nothing in the OpenAPI spec accepts a "revoke
-  cancellation" intent, and no generated SDK exposes one.
+- The **Instances** API surface (create/retrieve/list/patch/reinstall/upgrade/
+  cancel + the six actions) contains no un-cancel, revoke, reactivate or
+  restore operation, and no generated SDK exposes one.
+  `/v1/compute/instances/{instanceId}/cancel` accepts **POST only** — no
+  `DELETE`, no sibling revoke path. Re-`POST`ing it toggles nothing off; it is
+  not an idempotent switch you can flip back.
+- **Contabo DOES build this feature — just not for compute.**
+  `POST /v1/domains/{domain}/revoke-cancellation` exists and is summarised
+  "Revoke cancellation for a specific domain". So this is a gap in coverage,
+  not an architectural impossibility, and it is therefore worth **re-checking
+  against the live spec** rather than treating as permanent. Verified absent
+  for compute on 2026-09-20 (spec v1.0.0, 101 paths).
 - There is **no Billing/Orders API at all** — the API can *spend* money
   (`create`, `upgrade`) and *stop* spending it (`cancel`), but it cannot
   manage the subscription lifecycle in either direction beyond that.
-- Guessed paths that were probed live and **all 404**:
-  `/uncancel`, `/cancel/revoke`, `/revoke-cancellation`, `/reactivate`
-  (see `.github/workflows/contabo-probe-uncancel.yml` — a read-only discovery
-  workflow kept precisely so this is never re-guessed).
-- Re-`POST`ing `/cancel` does not toggle anything off; it is not an idempotent
-  switch you can flip back.
+
+**How to re-verify — enumerate the spec, do not guess paths.** The older
+evidence here was four guessed paths that all 404'd
+(`.github/workflows/contabo-probe-uncancel.yml`), which is weak: a `GET`
+against a `POST`-only route 404s whether or not the route exists. Pull the
+published spec and enumerate instead:
+
+There is **no standalone spec URL to curl** — `/openapi.json`, `/swagger.json`,
+`/spec.json` and friends all 403. The Redoc page inlines the whole spec as
+`const __redoc_state = {...}` in a ~723 KB `<script>`, which is also why the
+page's "Download" button yields a `blob:` URL. Extract it from the HTML (no
+auth needed; verified working 2026-09-20):
+
+```bash
+curl -sS https://api.contabo.com/ | python -c "
+import sys, json, re
+h = sys.stdin.read()
+i = h.index('const __redoc_state = ')
+spec = json.JSONDecoder().raw_decode(h, i + len('const __redoc_state = '))[0]['spec']['data']
+print('spec version:', spec['info']['version'], '| total paths:', len(spec['paths']))
+for p in sorted(spec['paths']):
+    if re.search('cancel|revoke|reactivat|restore', p):
+        print(' ', p, '->', ','.join(sorted(spec['paths'][p])).upper())
+"
+```
+
+Expected output as of 2026-09-20 (spec 1.0.0, 101 paths):
+
+```text
+  /v1/compute/instances/{instanceId}/cancel     -> POST     <- no revoke sibling
+  /v1/domains/{domain}/cancel                   -> POST
+  /v1/domains/{domain}/revoke-cancellation      -> POST     <- domains ONLY
+  /v1/object-storages/{objectStorageId}/cancel  -> PATCH
+```
+
+If a `compute` revoke path ever appears there, this dead end is over and the
+escalation below can be automated.
 
 **The only supported reversal is the Customer Control Panel**, per
 <https://help.contabo.com/en/support/solutions/articles/103000396731-how-can-i-revoke-a-cancellation-of-my-product->:
@@ -533,4 +625,6 @@ In-repo, live-verified (each written after a real API call):
 - `modules/contabo-k3s-node/main.tf` · add-on id 1477 confirmed 2026-09-03;
   1501 observed live and unexplained.
 - `.github/workflows/contabo-probe-uncancel.yml` · the four guessed
-  cancellation-reversal paths, all 404.
+  cancellation-reversal paths, all 404. **Weak evidence, superseded** — a `GET`
+  against a `POST`-only route 404s whether or not the route exists. Use the
+  spec enumeration in §2 instead; it is authoritative and reproducible.
