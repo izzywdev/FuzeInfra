@@ -88,6 +88,21 @@ MAPPING = {
              "The A2A delivery gateway (agent-templates/orchestration/a2a_gateway). a2a_send POSTs "
              "here; it runs `claude -p --cloud` to WAKE + deliver to an idle peer. Non-secret."),
         ],
+        # Secrets are added by hand in the claude.ai dialog's Environment variables field —
+        # this generator NEVER emits a value for these (see render_env's NAME-ONLY warning). The
+        # names live here anyway so a `render.py` re-run + re-paste has something to remind
+        # whoever pastes not to blow away the manually-added values that are already live.
+        "secrets": [
+            ("FUZEINFRA_DISPATCH_TOKEN",
+             "GitHub PAT, `workflow` scope on izzywdev/fuzeinfra — lets a DevOps-env session "
+             "trigger cluster-query.yml via repository_dispatch instead of only workflow_dispatch."),
+            ("CONTABO_CLIENT_ID", "Contabo API OAuth2 client id (node/VLAN provisioning)."),
+            ("CONTABO_CLIENT_SECRET", "Contabo API OAuth2 client secret."),
+            ("CONTABO_API_USER", "Contabo API password-grant user."),
+            ("CONTABO_API_PASSWORD", "Contabo API password-grant password."),
+            ("KUBECONFIG_B64", "Base64 kubeconfig. Read-only cluster access still goes through "
+             "cluster-query.yml — see README's boundary note before using this directly."),
+        ],
         "extras": ["helm"],
         "needs_kubectl": True,
         "report": ["yamllint", "check-jsonschema", "kubectl"],
@@ -238,9 +253,11 @@ def render_setup(basename, spec, doc):
 
     if spec.get("needs_kubectl"):
         # Serial (uses dpkg). kubectl isn't in the base image; install from the k8s
-        # community apt repo (pkgs.k8s.io is in the Trusted default allowlist). Read-only
-        # cluster access still goes through cluster-query.yml — kubectl alone can't reach
-        # the tunnel-only prod API — but it's here for parsing/other read use.
+        # community apt repo. pkgs.k8s.io is NOT covered by the Trusted defaults (the
+        # sandbox proxy 403s it otherwise) — it must be in this env's own
+        # networking.allowed_hosts. Read-only cluster access still goes through
+        # cluster-query.yml — kubectl alone can't reach the tunnel-only prod API —
+        # but it's here for parsing/other read use.
         L += [
             'echo "[setup] kubectl"',
             "install -d -m 0755 /etc/apt/keyrings",
@@ -364,6 +381,16 @@ def render_env(basename, spec, doc):
     ]
     for key, val, why in spec["env"]:
         L += [f"# {why}", f"{key}={val}", ""]
+
+    if spec.get("secrets"):
+        L += [
+            "# --- Secrets, added by hand in this dialog — NOT generated here, NOT overwritten ---",
+            "# by this script. If you re-paste this file after a `render.py` run, re-add these",
+            "# values by hand afterward or you will wipe them out:",
+        ]
+        for key, why in spec["secrets"]:
+            L += [f"#   {key} — {why}"]
+        L += [""]
     return "\n".join(L)
 
 

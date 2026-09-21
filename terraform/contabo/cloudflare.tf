@@ -85,6 +85,20 @@ resource "cloudflare_zero_trust_tunnel_cloudflared_config" "fuzeinfra" {
       hostname = "argocd.${local.prod_domain}"
       service  = "http://argocd-server.argocd:80"
     }
+    # BREAK-GLASS k3s API route (var.api_breakglass_enabled). A raw-TCP tunnel to
+    # the IN-CLUSTER apiserver ClusterIP (kubernetes.default.svc:443), which is
+    # itself HA — kube-proxy load-balances it across all healthy apiservers, so
+    # this survives the loss of any one control plane WITHOUT the floating VIP.
+    # It is reached with a client-side `cloudflared access tcp` + the Access
+    # service token below (Zero Trust, NOT Spectrum). MUST come before the
+    # catch-all (first match wins; the catch-all has no hostname). See the runbook.
+    dynamic "ingress_rule" {
+      for_each = var.api_breakglass_enabled ? [1] : []
+      content {
+        hostname = "k8s-api.${local.prod_domain}"
+        service  = "tcp://kubernetes.default.svc.cluster.local:443"
+      }
+    }
     # Generic catch-all: every other hostname �� Traefik, which host-routes by
     # Ingress. This is domain-agnostic: any product on its own domain (its own
     # apex/subdomains) just CNAMEs that host to THIS tunnel and declares a Traefik
@@ -856,6 +870,9 @@ locals {
     cloudflare_zero_trust_access_application.handoff_mcp[*].id,
     cloudflare_zero_trust_access_application.a2a_relay[*].id,
     cloudflare_zero_trust_access_application.a2a_gateway[*].id,
+    # k8s-api.<prod> is NOT a launcher host, so the reconciler already never
+    # targets it; listed here anyway per this local's own do-not-touch contract.
+    cloudflare_zero_trust_access_application.k8s_api_breakglass[*].id,
     # Scoped to litellm.<prod>, which IS in local.launcher_hosts (the "litellm"
     # tile) — without this entry the reconciler would treat it as an unowned
     # duplicate of the wildcard admin_services coverage and delete it.
@@ -1153,10 +1170,56 @@ resource "cloudflare_zero_trust_access_policy" "litellm_service_email_otp" {
 # human/local-terminal step via `terraform output`, same reasoning as every
 # other secret this repo hands to `scripts/provision_secrets.py` rather than
 # ever typing a value into a PR, a chat, or a commit).
+#
+# REQUIRED TOKEN SCOPE — this resource needs the CLOUDFLARE_API_TOKEN to carry
+# the **Account → Access: Service Tokens → Edit** permission group. It is a
+# SEPARATE group from "Access: Apps and Policies", so the token can create the
+# Access application + policies below and still fail HERE at apply with an empty
+# `error creating access service token:  (1010)` — the plan cannot catch it,
+# because Cloudflare only checks the permission on write. The permission group
+# was granted on the CD token (2026-09-14), so this resource applies on the
+# next merge; if it 1010s again, re-check the token still carries the group.
+# See docs/TERRAFORM_CD.md → "CLOUDFLARE_API_TOKEN scope".
+#
+# THE SECRET IS NOT WHAT BREAKS HERE — the POLICY ACTION is. Read the `decision`
+# comment on litellm_service_ci_token below before touching anything in this
+# pair. A token whose secret is perfectly valid still 302s to the IdP login page
+# if its policy action is `allow` instead of `non_identity`, and the dashboard's
+# "Last Seen: Not Seen Yet" on this token is the SYMPTOM of the policy never
+# admitting it — not evidence of a bad secret.
+#
+# 2026-09-16: that "Not Seen Yet" was misread as a stale secret, and four applies
+# (#1030 taint-replace, #1032/#1034/#1037 rotations) were burned chasing it. The
+# rotation recorded below did eventually succeed and is harmless, but it fixed
+# nothing: the 302 persisted identically afterwards, from both a laptop and a CI
+# runner, with a provably fresh secret. If this endpoint 302s, check the policy
+# `decision` FIRST — a service token's client_secret is write-once, so terraform
+# genuinely cannot validate it, which makes "bad secret" a seductive and very
+# expensive wrong answer.
+#
+# Rotation mechanics, kept only so the attributes below are legible (each was a
+# separate failed apply before the constraint was known): Cloudflare refuses to
+# DELETE a token still referenced by a policy (12139 — rotate, don't replace);
+# `client_secret_version` may only be incremented if
+# `previous_client_secret_expires_at` is also set (12130); and it may only be
+# incremented BY ONE from the current live value (12130). Both attributes are
+# optional+computed, so they can be dropped from config without a diff once this
+# rotation has settled — leaving them pinned risks a future apply trying to
+# re-drive a rotation Cloudflare will not legally repeat.
+#
+# Rotation keeps the resource id/client_id untouched, so the paired Access
+# policy's `service_token = [...]` reference (by id) needs no change. When this
+# token IS legitimately rotated, re-provision the new values to GitHub secrets
+# via `terraform output -raw ... | gh secret set ...` — note that
+# FuzeSDLC's provision-secrets.yml only FILLS MISSING secrets, it never
+# overwrites an existing one, so a rotated value must be pushed to each
+# consuming repo directly.
 resource "cloudflare_zero_trust_access_service_token" "litellm_ci" {
-  count      = local.cloudflare_enabled ? 1 : 0
-  account_id = var.cloudflare_account_id
-  name       = "fuze.yml LLM routing (hosted-runner CI)"
+  count                             = local.cloudflare_enabled ? 1 : 0
+  account_id                        = var.cloudflare_account_id
+  name                              = "fuze.yml LLM routing (hosted-runner CI)"
+  client_secret_version             = 2
+  previous_client_secret_expires_at = "2026-09-16T08:00:00Z"
 }
 
 resource "cloudflare_zero_trust_access_policy" "litellm_service_ci_token" {
@@ -1165,10 +1228,109 @@ resource "cloudflare_zero_trust_access_policy" "litellm_service_ci_token" {
   application_id = cloudflare_zero_trust_access_application.litellm_service[0].id
   name           = "CI service token (fuze.yml LLM routing)"
   precedence     = 3
-  decision       = "allow"
+
+  # MUST be `non_identity` ("Service Auth" in the dashboard), NOT `allow`.
+  # `allow` is an IDENTITY decision: it requires a human IdP login on top of
+  # whatever `include` matches, so a request carrying only CF-Access-Client-Id
+  # / CF-Access-Client-Secret is redirected (302) to the Access login page
+  # instead of being admitted — exactly what this app did from 2026-09-14 until
+  # 2026-09-16. Cloudflare states it plainly: "Make sure to set the policy
+  # action to Service Auth; otherwise, Access will prompt for an identity
+  # provider login."
+  # (developers.cloudflare.com/cloudflare-one/identity/service-tokens/)
+  #
+  # The failure is SILENT everywhere it would normally be caught: `include`
+  # still references the right token id, the app/aud/domain still match, plan
+  # reports "No changes", and the redirect's own JWT just says
+  # service_token_status:false / auth_status:NONE — which reads like a bad
+  # credential, and is why this was misdiagnosed as a stale secret and "fixed"
+  # with four pointless token rotations. `non_identity` is the only difference
+  # that mattered.
+  decision = "non_identity"
 
   include {
     service_token = [cloudflare_zero_trust_access_service_token.litellm_ci[0].id]
+  }
+}
+
+# ---------------------------------------------------------------------------
+# BREAK-GLASS k3s API endpoint over the Cloudflare Tunnel.
+#
+# The SECOND, independent external path to the API, for when the Contabo floating
+# VIP or the Contabo network itself is the fault (the VIP is the primary path —
+# api-floating-vip.tf + helm/fuzeinfra/templates/api-vip-keepalived.yaml). The
+# tunnel ingress rule (tcp:// to the in-cluster apiserver ClusterIP) is added in
+# cloudflare_zero_trust_tunnel_cloudflared_config above, gated on the same var.
+#
+# Reached with a client-side `cloudflared access tcp` presenting the service token
+# below as CF-Access-Client-Id / CF-Access-Client-Secret — this is a Cloudflare
+# Zero Trust flow on the SAME free tier as the admin-UI email-OTP wall, NOT
+# Spectrum (Spectrum is only needed for a raw public TCP listener with no
+# client-side cloudflared). kubectl still does its own TLS/mTLS to the apiserver
+# through the local proxy, end to end. See docs/runbooks/api-floating-vip.md.
+#
+# GATED OFF (var.api_breakglass_enabled). Like handoff_mcp/a2a_*, flipping the var
+# is only effective when terraform-plan-apply's apply job runs — this file is under
+# terraform/**, so a PR editing it triggers the apply. Verify at the edge after:
+#   cloudflared access tcp --hostname k8s-api.<domain> --url 127.0.0.1:6443 &
+#   kubectl --server https://127.0.0.1:6443 get --raw /livez
+# ---------------------------------------------------------------------------
+variable "api_breakglass_enabled" {
+  description = "Expose the k3s API over the CF tunnel (tcp://) behind an Access service token, as a break-glass path independent of the floating VIP."
+  type        = bool
+  default     = false
+}
+
+resource "cloudflare_zero_trust_access_application" "k8s_api_breakglass" {
+  count                = local.cloudflare_enabled && var.api_breakglass_enabled ? 1 : 0
+  account_id           = var.cloudflare_account_id
+  name                 = "k3s API (break-glass, service-token + admin)"
+  domain               = "k8s-api.${local.prod_domain}"
+  type                 = "self_hosted"
+  session_duration     = var.access_session_duration
+  app_launcher_visible = false
+}
+
+# The machine credential used by `cloudflared access tcp`. client_secret is
+# returned once by the Cloudflare API and captured only in Terraform state; it is
+# never in this file, a PR diff, or seen by whatever applies this. Provision it to
+# GitHub Actions / operator kubeconfigs out of band via `terraform output -raw`,
+# exactly like litellm_ci above. Needs the Account → Access: Service Tokens → Edit
+# permission group on CLOUDFLARE_API_TOKEN (granted 2026-09-14).
+resource "cloudflare_zero_trust_access_service_token" "k8s_api_breakglass" {
+  count      = local.cloudflare_enabled && var.api_breakglass_enabled ? 1 : 0
+  account_id = var.cloudflare_account_id
+  name       = "k3s API break-glass (cloudflared access tcp)"
+}
+
+# MUST be non_identity ("Service Auth"), not allow — an `allow` decision demands a
+# human IdP login on top and 302s a token-only request to the login page. This is
+# the exact trap that cost four pointless litellm_ci token rotations (see that
+# resource). This is the primary break-glass path (machine kubectl).
+resource "cloudflare_zero_trust_access_policy" "k8s_api_breakglass_service_token" {
+  count          = local.cloudflare_enabled && var.api_breakglass_enabled ? 1 : 0
+  account_id     = var.cloudflare_account_id
+  application_id = cloudflare_zero_trust_access_application.k8s_api_breakglass[0].id
+  name           = "Service token (cloudflared access tcp)"
+  precedence     = 1
+  decision       = "non_identity"
+
+  include {
+    service_token = [cloudflare_zero_trust_access_service_token.k8s_api_breakglass[0].id]
+  }
+}
+
+# Human break-glass (email OTP) — cluster-independent, like admin_email_otp.
+resource "cloudflare_zero_trust_access_policy" "k8s_api_breakglass_email_otp" {
+  count          = local.cloudflare_enabled && var.api_breakglass_enabled ? 1 : 0
+  account_id     = var.cloudflare_account_id
+  application_id = cloudflare_zero_trust_access_application.k8s_api_breakglass[0].id
+  name           = "Admin email allowlist (OTP) — break-glass"
+  precedence     = 2
+  decision       = "allow"
+
+  include {
+    email = var.allowed_admin_emails
   }
 }
 

@@ -123,3 +123,10 @@ customHostnameApi:
       port: 80
       paths: ["/", "/api", "/socket.io"]
       ingressClass: nginx
+
+# Self-heal loop metrics — OFF on kind. It reports on this repo's GitHub autofix
+# history, which is a property of the prod loop, not of a developer's cluster;
+# running it here would poll GitHub from every laptop for numbers nobody reads.
+# Base chart default is already false; stated so the overlay stays self-documenting.
+selfHealMetrics:
+  enabled: false

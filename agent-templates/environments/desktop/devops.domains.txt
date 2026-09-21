@@ -11,3 +11,5 @@ get.helm.sh
 github.com
 *.fuzefront.com
 *.cloudflare.com
+pkgs.k8s.io
+prod-cdn.packages.k8s.io

@@ -617,6 +617,8 @@ spec:
               - configMap:
                   name: fuzeinfra-grafana-dashboard-logs-explorer
               - configMap:
+                  name: fuzeinfra-grafana-dashboard-selfheal-loop
+              - configMap:
                   name: fuzeinfra-grafana-dashboard-observability-stack
               - configMap:
                   name: fuzeinfra-grafana-dashboard-tracing
@@ -836,7 +838,15 @@ spec:
         {{- include "fuzeinfra.selectorLabels" (dict "component" "promtail" "root" $) | nindent 8 }}
     spec:
       serviceAccountName: fuzeinfra-monitoring
-      {{- include "fuzeinfra.durableToleration" $ | nindent 6 }}
+      # Promtail is a per-node log-collection agent, not chart workload: it must
+      # run on EVERY node regardless of what else that node is dedicated to.
+      # durableToleration alone only covers the "durable" taint, so the CI
+      # runner nodes (tainted fuzeinfra.io/ci:NoSchedule) and any future
+      # differently-tainted node silently lost log collection. `operator:
+      # Exists` with no key/effect matches every taint, which is the standard
+      # shape for a host-level DaemonSet (see node-exporter below).
+      tolerations:
+        - operator: Exists
       containers:
         - name: promtail
           image: {{ .Values.promtail.image }}
@@ -910,7 +920,15 @@ spec:
     spec:
       hostNetwork: true
       hostPID: true
-      {{- include "fuzeinfra.durableToleration" $ | nindent 6 }}
+      # Same reasoning as promtail's toleration above: node-exporter must run on
+      # every node to produce node_cpu_seconds_total/node_memory_* for ALL of
+      # them. durableToleration only covers the "durable" taint, so the
+      # fuzeinfra.io/ci:NoSchedule CI runner nodes never got a node-exporter
+      # pod and silently dropped out of every CPU/Mem panel keyed on
+      # node_exporter metrics (no time series existed for those instances at
+      # all, not just "no data"). `operator: Exists` tolerates any taint.
+      tolerations:
+        - operator: Exists
       containers:
         - name: node-exporter
           image: {{ .Values.nodeExporter.image }}

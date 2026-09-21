@@ -1,0 +1,237 @@
+{
+  "annotations": {"list": []},
+  "editable": true,
+  "graphTooltip": 1,
+  "id": null,
+  "panels": [
+    {
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "description": "Autofix loops closed by a merged agent-authored PR, all systems.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "thresholds"},
+          "thresholds": {"mode": "absolute", "steps": [{"color": "text", "value": null}, {"color": "green", "value": 1}]},
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 4, "w": 5, "x": 0, "y": 0},
+      "id": 1,
+      "options": {"colorMode": "background", "graphMode": "none", "reduceOptions": {"calcs": ["lastNotNull"]}},
+      "title": "Loops Resolved (all time)",
+      "type": "stat",
+      "targets": [{"datasource": {"type": "prometheus", "uid": "${datasource}"}, "expr": "sum(fuzeinfra_selfheal_loop_resolved_total) or vector(0)", "instant": true, "legendFormat": ""}]
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "description": "Autofix issues/PRs still open — loops that have not closed yet.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "thresholds"},
+          "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "yellow", "value": 1}, {"color": "red", "value": 5}]},
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 4, "w": 5, "x": 5, "y": 0},
+      "id": 2,
+      "options": {"colorMode": "background", "graphMode": "none", "reduceOptions": {"calcs": ["lastNotNull"]}},
+      "title": "Currently Open",
+      "type": "stat",
+      "targets": [{"datasource": {"type": "prometheus", "uid": "${datasource}"}, "expr": "sum(fuzeinfra_selfheal_loop_open_total) or vector(0)", "instant": true, "legendFormat": ""}]
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "description": "Issues closed without a merged PR resolving them — the loop did NOT self-close.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "thresholds"},
+          "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "yellow", "value": 1}]},
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 4, "w": 5, "x": 10, "y": 0},
+      "id": 3,
+      "options": {"colorMode": "background", "graphMode": "none", "reduceOptions": {"calcs": ["lastNotNull"]}},
+      "title": "Manual Closes",
+      "type": "stat",
+      "targets": [{"datasource": {"type": "prometheus", "uid": "${datasource}"}, "expr": "sum(fuzeinfra_selfheal_loop_manual_close_total) or vector(0)", "instant": true, "legendFormat": ""}]
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "description": "Age of the last fully successful GitHub poll. The exporter polls every 10m by default, so anything past ~30m means it is stuck and every count on this dashboard is stale.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "thresholds"},
+          "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "yellow", "value": 1800}, {"color": "red", "value": 3600}]},
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 4, "w": 5, "x": 15, "y": 0},
+      "id": 4,
+      "options": {"colorMode": "background", "graphMode": "none", "reduceOptions": {"calcs": ["lastNotNull"]}},
+      "title": "Last Poll Age",
+      "type": "stat",
+      "targets": [{"datasource": {"type": "prometheus", "uid": "${datasource}"}, "expr": "time() - fuzeinfra_selfheal_loop_last_scrape_success_timestamp_seconds", "instant": true, "legendFormat": ""}]
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "description": "Poll cycles abandoned in the last hour (GitHub rate limit or network).",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "thresholds"},
+          "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "yellow", "value": 1}, {"color": "red", "value": 6}]},
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 4, "w": 4, "x": 20, "y": 0},
+      "id": 5,
+      "options": {"colorMode": "background", "graphMode": "none", "reduceOptions": {"calcs": ["lastNotNull"]}},
+      "title": "Scrape Errors (1h)",
+      "type": "stat",
+      "targets": [{"datasource": {"type": "prometheus", "uid": "${datasource}"}, "expr": "sum(increase(fuzeinfra_selfheal_loop_scrape_errors_total[1h])) or vector(0)", "instant": true, "legendFormat": ""}]
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "description": "Which alert source actually produces closed loops.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "thresholds"},
+          "thresholds": {"mode": "absolute", "steps": [{"color": "text", "value": null}, {"color": "green", "value": 1}]},
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 8, "w": 8, "x": 0, "y": 4},
+      "id": 6,
+      "options": {
+        "displayMode": "gradient",
+        "orientation": "horizontal",
+        "reduceOptions": {"calcs": ["lastNotNull"]},
+        "showUnfilled": true
+      },
+      "title": "Resolved by System",
+      "type": "bargauge",
+      "targets": [{"datasource": {"type": "prometheus", "uid": "${datasource}"}, "expr": "fuzeinfra_selfheal_loop_resolved_total", "instant": true, "legendFormat": "{{ system }}"}]
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "description": "Full outcome breakdown per system. Opened = every labelled issue/PR ever; Resolved = closed by a merged agent PR; Manual = closed without one.",
+      "fieldConfig": {
+        "defaults": {"unit": "short"},
+        "overrides": [
+          {"matcher": {"id": "byName", "options": "System"}, "properties": [{"id": "custom.width", "value": 180}]},
+          {"matcher": {"id": "byName", "options": "Resolved"}, "properties": [{"id": "custom.cellOptions", "value": {"type": "color-background"}}, {"id": "thresholds", "value": {"mode": "absolute", "steps": [{"color": "text", "value": null}, {"color": "green", "value": 1}]}}]},
+          {"matcher": {"id": "byName", "options": "Open"}, "properties": [{"id": "custom.cellOptions", "value": {"type": "color-background"}}, {"id": "thresholds", "value": {"mode": "absolute", "steps": [{"color": "text", "value": null}, {"color": "yellow", "value": 1}]}}]},
+          {"matcher": {"id": "byName", "options": "Manual Close"}, "properties": [{"id": "custom.cellOptions", "value": {"type": "color-background"}}, {"id": "thresholds", "value": {"mode": "absolute", "steps": [{"color": "text", "value": null}, {"color": "orange", "value": 1}]}}]}
+        ]
+      },
+      "gridPos": {"h": 8, "w": 16, "x": 8, "y": 4},
+      "id": 7,
+      "options": {"sortBy": [{"displayName": "Opened", "desc": true}]},
+      "title": "Loop Outcomes by System",
+      "type": "table",
+      "targets": [
+        {"datasource": {"type": "prometheus", "uid": "${datasource}"}, "expr": "fuzeinfra_selfheal_loop_opened_total", "instant": true, "legendFormat": "", "format": "table", "refId": "A"},
+        {"datasource": {"type": "prometheus", "uid": "${datasource}"}, "expr": "fuzeinfra_selfheal_loop_resolved_total", "instant": true, "legendFormat": "", "format": "table", "refId": "B"},
+        {"datasource": {"type": "prometheus", "uid": "${datasource}"}, "expr": "fuzeinfra_selfheal_loop_open_total", "instant": true, "legendFormat": "", "format": "table", "refId": "C"},
+        {"datasource": {"type": "prometheus", "uid": "${datasource}"}, "expr": "fuzeinfra_selfheal_loop_manual_close_total", "instant": true, "legendFormat": "", "format": "table", "refId": "D"}
+      ],
+      "transformations": [
+        {"id": "merge", "options": {}},
+        {"id": "organize", "options": {"renameByName": {"system": "System", "Value #A": "Opened", "Value #B": "Resolved", "Value #C": "Open", "Value #D": "Manual Close"}, "excludeByName": {"Time": true, "__name__": true, "job": true, "instance": true}}}
+      ]
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "description": "Time from the autofix item being opened to the resolving PR merging. Quantiles are taken over the RAW cumulative buckets (no rate()): the exporter recomputes the whole histogram from GitHub each poll, so the buckets are an all-time distribution, not a per-scrape delta.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {"fillOpacity": 8, "lineWidth": 2, "spanNulls": true},
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 12},
+      "id": 8,
+      "options": {
+        "legend": {"calcs": ["lastNotNull", "max"], "displayMode": "table", "placement": "bottom"},
+        "tooltip": {"mode": "multi"}
+      },
+      "title": "Self-Heal Resolution Latency by System",
+      "type": "timeseries",
+      "targets": [
+        {"datasource": {"type": "prometheus", "uid": "${datasource}"}, "expr": "histogram_quantile(0.5, sum by (system, le) (fuzeinfra_selfheal_loop_resolution_seconds_bucket))", "legendFormat": "{{ system }} p50"},
+        {"datasource": {"type": "prometheus", "uid": "${datasource}"}, "expr": "histogram_quantile(0.95, sum by (system, le) (fuzeinfra_selfheal_loop_resolution_seconds_bucket))", "legendFormat": "{{ system }} p95"},
+        {"datasource": {"type": "prometheus", "uid": "${datasource}"}, "expr": "sum by (system) (fuzeinfra_selfheal_loop_resolution_seconds_sum) / clamp_min(sum by (system) (fuzeinfra_selfheal_loop_resolution_seconds_count), 1)", "legendFormat": "{{ system }} mean"}
+      ]
+    },
+    {
+      "datasource": {"type": "loki", "uid": "${loki_datasource}"},
+      "description": "One line per newly observed resolution, emitted by the exporter and shipped by Promtail. The stream label is the pod's app.kubernetes.io/name.",
+      "fieldConfig": {"defaults": {}, "overrides": []},
+      "gridPos": {"h": 10, "w": 24, "x": 0, "y": 20},
+      "id": 9,
+      "options": {
+        "dedupStrategy": "none",
+        "enableLogDetails": true,
+        "prettifyLogMessage": true,
+        "showCommonLabels": false,
+        "showLabels": false,
+        "showTime": true,
+        "sortOrder": "Descending",
+        "wrapLogMessage": true
+      },
+      "title": "Recently Self-Healed",
+      "type": "logs",
+      "targets": [
+        {
+          "datasource": {"type": "loki", "uid": "${loki_datasource}"},
+          "expr": "{app=\"selfheal-metrics\"} | json | event=\"selfheal_resolved\"",
+          "legendFormat": ""
+        }
+      ]
+    }
+  ],
+  "refresh": "5m",
+  "schemaVersion": 39,
+  "tags": ["selfheal", "automation", "fuzeinfra"],
+  "templating": {
+    "list": [
+      {
+        "current": {},
+        "hide": 0,
+        "includeAll": false,
+        "label": "Datasource",
+        "multi": false,
+        "name": "datasource",
+        "options": [],
+        "query": "prometheus",
+        "refresh": 1,
+        "type": "datasource"
+      },
+      {
+        "current": {},
+        "hide": 0,
+        "includeAll": false,
+        "label": "Loki",
+        "multi": false,
+        "name": "loki_datasource",
+        "options": [],
+        "query": "loki",
+        "refresh": 1,
+        "type": "datasource"
+      }
+    ]
+  },
+  "time": {"from": "now-30d", "to": "now"},
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "Self-Heal Loop",
+  "uid": "fuzeinfra-selfheal-loop",
+  "version": 1
+}

@@ -25,11 +25,17 @@ governance/watchdog-thresholds.json.
 
 DESIGN RULES (do not weaken)
 ----------------------------
-* READ-ONLY against the cluster, with exactly two sanctioned exceptions, both
-  named and both bounded: dispatching the existing `argo-terminate-op` workflow
-  for an op that is already past threshold, and `kubectl exec -- df` as the PVC
-  fallback when Prometheus is unreachable. Nothing is ever patched, edited or
-  deleted: prod is GitOps under Argo selfHeal.
+* READ-ONLY against the cluster, with exactly three sanctioned exceptions, all
+  named and all bounded: dispatching the existing `argo-terminate-op` workflow
+  for an op that is already past threshold; `kubectl exec -- df` as the PVC
+  fallback when Prometheus is unreachable; and the dark-node escalation ladder
+  (dispatching `contabo-instance-reboot.yml` / `ca-reinstall-controlplane.yml`,
+  never a direct kubectl mutation — see the 2026-09-16 note below). Nothing is
+  ever patched, edited or deleted BY THIS SCRIPT: prod is GitOps under Argo
+  selfHeal, and every mutation this script triggers happens inside a separate,
+  narrowly-scoped, independently-auditable workflow that holds its own
+  credential (this script itself never holds KUBE_CONFIG write access or the
+  Contabo credential).
 * NEVER read or print a Secret. FuzeInfra's job logs are PUBLIC — a read whose
   OUTPUT is a credential leaks it (this happened on 2026-07-29). The same rule
   tests/test_cluster_query_guard.py encodes for cluster-query is enforced here
@@ -42,6 +48,44 @@ DESIGN RULES (do not weaken)
 Everything that decides *whether something is wrong* is a pure function over
 parsed JSON (`detect_*`, `filter_new_findings`), so the predicates are unit
 tested offline with no cluster: tests/test_deployment_watchdog.py.
+
+ADDED 2026-09-15 — dark nodes (detect_dark_nodes / KIND_DARK_NODE). A Contabo
+autoscaler-health alert investigation found `fuze-core-3` (a control-plane/etcd
+node) silently dark — Ready/MemoryPressure/DiskPressure/PIDPressure all
+`Unknown`, kubelet not posting status — for 4.5 days, still counted as an etcd
+voting member, with nothing having ever flagged it. Same silent-freeze shape as
+the incident above, so it lives in the same watchdog.
+
+UPDATED 2026-09-16 — automated escalation ladder (decide_dark_node_escalation).
+The 2026-09-15 version above filed an issue and stopped, deliberately, because
+"is a reboot safe" needs facts a human should weigh. What actually happened
+next: the manual dance of read-the-issue -> decide -> dispatch-reboot ->
+re-check -> decide-again took from first detection (2026-09-10) to actual
+resolution (2026-09-15/16) — FIVE DAYS for a node that a machine could tell was
+dark within 30 minutes. The facts that made a human's decision safe are exactly
+the facts a bounded state machine can check just as well:
+
+  - reboot is capped at `dark_node.max_reboot_attempts` (default 3), spaced by
+    `dark_node.reboot_cooldown_minutes` so a still-booting node isn't rebooted
+    on top of itself;
+  - reinstall only fires after attempts are exhausted AND the node has been
+    dark for `dark_node.escalate_after_minutes` (default 120) -- both, not
+    either;
+  - reinstall is REFUSED (not silently skipped -- the issue says why) if the
+    node is an etcd voter and fewer than
+    `dark_node.reinstall_min_other_ready_control_plane` OTHER control-plane
+    nodes are Ready (quorum safety), or if the node isn't control-plane/durable
+    at all (elastic nodes have their own autoscaler-driven lifecycle and are
+    out of scope here);
+  - the Longhorn data-safety preflight (scripts/preflight_node_teardown.py)
+    still runs INSIDE ca-reinstall-controlplane.yml regardless of who
+    dispatched it, so this script never has to duplicate that check or trust
+    its own judgement about data safety.
+
+Every step still posts to the same tracked issue, so the audit trail a human
+reviewed manually before is unchanged -- only who presses the button changed.
+See docs/runbooks/dark-node-reboot.md for the full flow and the escalation
+state machine's own tests in tests/test_deployment_watchdog.py.
 """
 
 from __future__ import annotations
@@ -67,6 +111,7 @@ KIND_ARGO = "stuck-argo-op"
 KIND_CRASHLOOP = "chronic-crashloop"
 KIND_CREATING = "stuck-containercreating"
 KIND_PVC = "pvc-nearing-full"
+KIND_DARK_NODE = "dark-node"
 
 
 class ClusterUnreachable(RuntimeError):
@@ -220,6 +265,281 @@ def detect_stuck_argo_ops(applications: dict, config: dict, now: datetime) -> li
             )
         )
     return findings
+
+
+def _node_condition(node: dict, cond_type: str) -> dict | None:
+    for cond in (node.get("status") or {}).get("conditions") or []:
+        if cond.get("type") == cond_type:
+            return cond
+    return None
+
+
+def _node_address(node: dict, addr_type: str) -> str | None:
+    for addr in (node.get("status") or {}).get("addresses") or []:
+        if addr.get("type") == addr_type:
+            return addr.get("address")
+    return None
+
+
+def detect_dark_nodes(nodes: dict, config: dict, now: datetime) -> list[Finding]:
+    """Nodes whose kubelet has stopped posting status (Ready condition == Unknown).
+
+    `fuze-core-3` sat in this state for 4.5 days — still labelled a
+    control-plane node and still an etcd voting member, per its own
+    `EtcdIsVoter` condition, while `Ready`/`MemoryPressure`/`DiskPressure`/
+    `PIDPressure` were all `Unknown` ("Kubelet stopped posting node status").
+    That combination is exactly what makes this dangerous silently: the node
+    keeps its etcd vote and keeps holding scheduled pods (they are never
+    evicted while the node object itself still exists) while contributing zero
+    usable capacity — the same "everything reports fine, nothing works" shape
+    as the Aug30 Loki freeze this watchdog already exists for.
+
+    Facts carried on the finding are chosen so `@fuze` (mentioned in the filed
+    issue) can decide whether a restart is safe WITHOUT re-querying the
+    cluster itself: `is_control_plane` + `is_etcd_voter` +
+    `other_ready_control_plane_nodes` are the quorum-safety check, and
+    `external_ip` is what `contabo-instance-reboot.yml` needs to resolve the
+    Contabo instanceId (nodes carry no instanceId label at bootstrap — the
+    public IP is the only reliable link). See
+    docs/runbooks/dark-node-reboot.md for the full decision + action flow.
+    """
+    cfg = config.get("dark_node", {})
+    if not cfg.get("enabled", True):
+        return []
+    threshold = float(cfg.get("unknown_minutes", 30))
+    ignore = set(cfg.get("ignore_nodes") or [])
+    items = nodes.get("items", []) or []
+
+    control_plane_ready = 0
+    for node in items:
+        labels = (node.get("metadata") or {}).get("labels") or {}
+        ready = _node_condition(node, "Ready")
+        if "node-role.kubernetes.io/control-plane" in labels and ready and ready.get("status") == "True":
+            control_plane_ready += 1
+
+    findings: list[Finding] = []
+    for node in items:
+        name = (node.get("metadata") or {}).get("name") or "<unnamed>"
+        if name in ignore:
+            continue
+        ready = _node_condition(node, "Ready")
+        if ready is None or ready.get("status") != "Unknown":
+            continue
+        since = parse_k8s_time(ready.get("lastTransitionTime")) or parse_k8s_time(
+            ready.get("lastHeartbeatTime")
+        )
+        if since is None:
+            # Unknown with no parseable transition time: cannot age it. Never
+            # silently swallowed — same convention as the unparseable-startedAt
+            # case in detect_stuck_argo_ops.
+            print(
+                f"::warning::{name}: Ready=Unknown with unparseable "
+                f"lastTransitionTime={ready.get('lastTransitionTime')!r} — cannot age it",
+                file=sys.stderr,
+            )
+            continue
+        minutes = age_minutes(since, now)
+        if minutes <= threshold:
+            continue
+
+        labels = (node.get("metadata") or {}).get("labels") or {}
+        is_control_plane = "node-role.kubernetes.io/control-plane" in labels
+        etcd_voter = _node_condition(node, "EtcdIsVoter")
+        is_etcd_voter = bool(etcd_voter and etcd_voter.get("status") == "True")
+        # control_plane_ready only counts nodes whose Ready condition is True, and
+        # this node's Ready is Unknown (that's why it's being flagged) — it was
+        # never counted in the first place, so no self-subtraction is needed here.
+        other_cp_ready = control_plane_ready
+
+        findings.append(
+            Finding(
+                kind=KIND_DARK_NODE,
+                subject=name,
+                summary=(
+                    f"Node `{name}` has had Ready=Unknown (kubelet stopped posting "
+                    f"status) for {_fmt_age(minutes)} (threshold {threshold:.0f}m)."
+                ),
+                facts={
+                    "node": name,
+                    "unknown_since": ready.get("lastTransitionTime"),
+                    "unknown_minutes": round(minutes, 1),
+                    "threshold_minutes": threshold,
+                    "internal_ip": _node_address(node, "InternalIP"),
+                    "external_ip": _node_address(node, "ExternalIP"),
+                    "is_control_plane": is_control_plane,
+                    "is_etcd_voter": is_etcd_voter,
+                    "other_ready_control_plane_nodes": other_cp_ready,
+                    "next_step": (
+                        "Decide whether a restart is safe (e.g. NOT the last Ready "
+                        "control-plane/etcd-voter node — see other_ready_control_plane_nodes "
+                        "above). If safe, dispatch contabo-instance-reboot.yml with "
+                        "node_name and external_ip set (it resolves the Contabo instanceId "
+                        "by matching ipConfig.v4.ip and calls the restart action). See "
+                        "docs/runbooks/dark-node-reboot.md."
+                    ),
+                },
+            )
+        )
+    return findings
+
+
+def _currently_unknown_node_names(nodes: dict) -> set[str]:
+    """Node names with Ready==Unknown RIGHT NOW, regardless of how long.
+
+    Used only for recovery detection: a dark-node issue closes as soon as its
+    node drops out of this set, even if it hasn't been Ready long enough to
+    clear detect_dark_nodes' own unknown_minutes threshold on the way down —
+    recovering is not something that needs a debounce the way flagging does.
+    """
+    names: set[str] = set()
+    for node in nodes.get("items", []) or []:
+        name = (node.get("metadata") or {}).get("name")
+        ready = _node_condition(node, "Ready")
+        if name and ready and ready.get("status") == "Unknown":
+            names.add(name)
+    return names
+
+
+# --------------------------------------------------------------------------
+# dark-node escalation ladder — reboot (bounded) -> reinstall (gated)
+# --------------------------------------------------------------------------
+#
+# State lives in the tracked issue itself, as a JSON blob embedded in the LATEST
+# comment that carries the marker below (not the issue body, which stays the
+# original diagnostic snapshot from when the issue was filed). Reading "the
+# latest matching comment" rather than maintaining any other store means the
+# issue thread IS the audit trail: every decision this script ever made about
+# a node is visible in-order in one place, which is exactly what a human
+# reviewing the incident afterwards needs.
+
+DARK_STATE_RE = re.compile(r"<!-- dark-node-state: (\{.*?\}) -->", re.S)
+DARK_NODE_KEY_RE = re.compile(r"<!-- watchdog-key: dark-node:(.+?) -->")
+
+DEFAULT_DARK_STATE: dict[str, Any] = {
+    "reboot_attempts": 0,
+    "last_reboot_at": None,
+    "escalated": False,
+    "escalated_at": None,
+    # Last refusal reason already reported, so a durable quorum/elastic refusal
+    # comments ONCE rather than every 15-minute run for as long as it stands.
+    "refused_reason": None,
+}
+
+
+def parse_dark_node_state(comments: Sequence[dict]) -> dict:
+    """Fold every embedded state marker in comment order; the latest wins.
+
+    Comments are assumed oldest-first (gh's default). Any comment without a
+    parseable marker is simply not a state update and is skipped — this is
+    deliberately tolerant of humans commenting on the issue too.
+    """
+    state = dict(DEFAULT_DARK_STATE)
+    for comment in comments:
+        match = DARK_STATE_RE.search(comment.get("body") or "")
+        if not match:
+            continue
+        try:
+            parsed = json.loads(match.group(1))
+        except (ValueError, TypeError):
+            continue
+        if isinstance(parsed, dict):
+            state.update(parsed)
+    return state
+
+
+def render_dark_state_marker(state: dict) -> str:
+    return f"<!-- dark-node-state: {json.dumps(state, sort_keys=True)} -->"
+
+
+def _dark_node_name_from_issue(issue: dict) -> str | None:
+    match = DARK_NODE_KEY_RE.search(issue.get("body") or "")
+    return match.group(1) if match else None
+
+
+def decide_dark_node_escalation(
+    finding: Finding, state: dict, cfg: dict, now: datetime
+) -> tuple[str, dict, str]:
+    """Pure decision for ONE still-dark node. Never mutates `state` in place.
+
+    Returns (action, new_state, message):
+      "none"           - nothing to do this cycle (cooling down between reboot
+                         attempts, waiting out escalate_after_minutes, already
+                         escalated and waiting on the reinstall to land, or a
+                         refusal that was already reported and hasn't changed)
+      "reboot"         - dispatch contabo-instance-reboot.yml
+      "reinstall"      - dispatch ca-reinstall-controlplane.yml
+      "refuse-quorum"  - attempts exhausted and dark long enough, but
+                         reinstalling would risk etcd quorum
+      "refuse-elastic" - attempts exhausted, but auto-reinstall is scoped to
+                         control-plane/durable nodes only
+
+    See docs/runbooks/dark-node-reboot.md for the full flow this drives.
+    """
+    state = dict(state)
+    if not cfg.get("enabled", True):
+        return "none", state, "dark_node detection disabled"
+    if state.get("escalated"):
+        return "none", state, "already escalated to reinstall; awaiting recovery or human follow-up"
+    if not cfg.get("auto_restart", False):
+        return "none", state, "auto_restart disabled"
+
+    facts = finding.facts
+    dark_minutes = float(facts.get("unknown_minutes", 0))
+    max_attempts = int(cfg.get("max_reboot_attempts", 3))
+    attempts = int(state.get("reboot_attempts", 0))
+
+    if attempts < max_attempts:
+        cooldown = float(cfg.get("reboot_cooldown_minutes", 30))
+        last_reboot_at = state.get("last_reboot_at")
+        if last_reboot_at:
+            last_dt = parse_k8s_time(last_reboot_at)
+            if last_dt is not None:
+                elapsed = age_minutes(last_dt, now)
+                if elapsed < cooldown:
+                    return "none", state, (
+                        f"cooling down since reboot attempt {attempts} "
+                        f"({elapsed:.0f}m of {cooldown:.0f}m)"
+                    )
+        state["reboot_attempts"] = attempts + 1
+        state["last_reboot_at"] = now.isoformat()
+        state["refused_reason"] = None
+        return "reboot", state, f"reboot attempt {attempts + 1}/{max_attempts} (dark {dark_minutes:.0f}m)"
+
+    escalate_after = float(cfg.get("escalate_after_minutes", 120))
+    if dark_minutes < escalate_after:
+        return "none", state, (
+            f"{max_attempts} reboot attempts exhausted; waiting for "
+            f"escalate_after_minutes={escalate_after:.0f} (dark {dark_minutes:.0f}m so far)"
+        )
+    if not cfg.get("auto_reinstall", False):
+        return "none", state, f"{max_attempts} reboot attempts exhausted but auto_reinstall disabled"
+
+    if not facts.get("is_control_plane"):
+        reason = "auto-reinstall is scoped to control-plane/durable nodes only (elastic nodes have their own lifecycle)"
+        if state.get("refused_reason") == reason:
+            return "none", state, reason
+        state["refused_reason"] = reason
+        return "refuse-elastic", state, reason
+
+    min_other_ready = int(cfg.get("reinstall_min_other_ready_control_plane", 2))
+    other_ready = int(facts.get("other_ready_control_plane_nodes", 0))
+    if facts.get("is_etcd_voter") and other_ready < min_other_ready:
+        reason = (
+            f"refusing auto-reinstall: only {other_ready} other ready control-plane "
+            f"node(s), need >= {min_other_ready} for etcd quorum safety"
+        )
+        if state.get("refused_reason") == reason:
+            return "none", state, reason
+        state["refused_reason"] = reason
+        return "refuse-quorum", state, reason
+
+    state["escalated"] = True
+    state["escalated_at"] = now.isoformat()
+    state["refused_reason"] = None
+    return "reinstall", state, (
+        f"{max_attempts} reboot attempts exhausted and node dark {dark_minutes:.0f}m "
+        f"(>= {escalate_after:.0f}m) — escalating to reinstall"
+    )
 
 
 def _container_statuses(pod: dict) -> list[dict]:
@@ -436,7 +756,7 @@ def prioritize(findings, priority=None):
     arrives before a volume fills (after that nothing inside the pod can free
     it). Unknown kinds sort last but are never dropped.
     """
-    order = list(priority or [KIND_ARGO, KIND_PVC, KIND_CREATING, KIND_CRASHLOOP])
+    order = list(priority or [KIND_ARGO, KIND_DARK_NODE, KIND_PVC, KIND_CREATING, KIND_CRASHLOOP])
 
     def rank(finding):
         return (order.index(finding.kind) if finding.kind in order else len(order), finding.key)
@@ -890,15 +1210,74 @@ def dispatch_terminate_op(repo: str, workflow: str, app: str, ref: str = "main")
     gh(["workflow", "run", workflow, "--repo", repo, "--ref", ref, "-f", f"app={app}"])
 
 
+def dispatch_reboot(
+    repo: str, node_name: str, external_ip: str, reason: str, issue_number: str, ref: str = "main"
+) -> None:
+    """Dispatch contabo-instance-reboot.yml — same shape a human follows per
+    docs/runbooks/dark-node-reboot.md, just triggered by the state machine
+    instead of by hand. That workflow holds the Contabo credential and
+    comments its own result back onto `issue_number`; this script never
+    touches the credential or the outcome directly."""
+    if not _NAME_RE.match(node_name or ""):
+        raise UnsafeCommand(f"refusing to dispatch reboot for node name {node_name!r}")
+    gh([
+        "workflow", "run", "contabo-instance-reboot.yml", "--repo", repo, "--ref", ref,
+        "-f", f"node_name={node_name}", "-f", f"external_ip={external_ip}",
+        "-f", f"reason={reason}", "-f", "confirm=RESTART",
+        "-f", f"issue_number={issue_number}",
+    ])
+
+
+def dispatch_cp_reinstall(
+    repo: str, node_name: str, external_ip: str, template: str, issue_number: str, ref: str = "main"
+) -> None:
+    """Dispatch ca-reinstall-controlplane.yml with mode=reinstall.
+
+    Everything that makes this safe to call automatically lives INSIDE that
+    workflow (Longhorn data-safety preflight, the Ready=True delete-guard) —
+    this function only decides WHEN to call it, never re-implements what it
+    already enforces."""
+    if not _NAME_RE.match(node_name or ""):
+        raise UnsafeCommand(f"refusing to dispatch reinstall for node name {node_name!r}")
+    gh([
+        "workflow", "run", "ca-reinstall-controlplane.yml", "--repo", repo, "--ref", ref,
+        "-f", f"node_name={node_name}", "-f", f"external_ip={external_ip}",
+        "-f", f"template={template}", "-f", "mode=reinstall",
+        "-f", "confirm=REINSTALL-CONTROL-PLANE", "-f", f"issue_number={issue_number}",
+    ])
+
+
+def list_issue_comments(repo: str, issue_number: str) -> list[dict]:
+    out = gh(["issue", "view", str(issue_number), "--repo", repo, "--json", "comments"])
+    return json.loads(out or "{}").get("comments") or []
+
+
+def comment_issue(repo: str, issue_number: str, body: str) -> None:
+    import tempfile
+
+    with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False, encoding="utf-8") as handle:
+        handle.write(body)
+        path = handle.name
+    try:
+        gh(["issue", "comment", str(issue_number), "--repo", repo, "--body-file", path])
+    finally:
+        os.unlink(path)
+
+
+def close_issue(repo: str, issue_number: str) -> None:
+    gh(["issue", "close", str(issue_number), "--repo", repo])
+
+
 # --------------------------------------------------------------------------
 # main
 # --------------------------------------------------------------------------
 
-def collect_cluster_state(config: dict) -> tuple[dict, dict]:
+def collect_cluster_state(config: dict) -> tuple[dict, dict, dict]:
     argo_ns = (config.get("argo_stuck_op") or {}).get("namespace", "argocd")
     applications = kubectl_json(["-n", argo_ns, "get", "applications", "-o", "json"])
     pods = kubectl_json(["get", "pods", "-A", "-o", "json"])
-    return applications, pods
+    nodes = kubectl_json(["get", "nodes", "-o", "json"])
+    return applications, pods, nodes
 
 
 def write_summary(text: str) -> None:
@@ -928,9 +1307,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     prefix = issues_cfg.get("title_prefix", "[watchdog]")
 
     # --- look. Any failure here is fatal: blind must never render as clear. ---
-    applications, pods = collect_cluster_state(config)
+    applications, pods, nodes = collect_cluster_state(config)
     findings: list[Finding] = []
     findings += detect_stuck_argo_ops(applications, config, now)
+    findings += detect_dark_nodes(nodes, config, now)
     findings += detect_chronic_crashloop(pods, config, now)
     findings += detect_stuck_container_creating(pods, config, now)
 
@@ -942,6 +1322,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "",
         f"- checked at: `{now.isoformat()}`",
         f"- Argo Applications scanned: {len(applications.get('items') or [])}",
+        f"- nodes scanned: {len(nodes.get('items') or [])}",
         f"- pods scanned: {len(pods.get('items') or [])}",
         f"- PVC usage source: **{usage_source}** ({len(usage)} volumes)",
         f"- findings: **{len(findings)}**",
@@ -977,6 +1358,67 @@ def main(argv: Sequence[str] | None = None) -> int:
     new, duplicates = filter_new_findings(findings, open_issues, prefix)
     for finding, issue in duplicates:
         lines.append(f"- `{finding.key}` — already tracked by {issue.get('url')} (not re-filed)")
+
+    # --- dark-node recovery: close any tracked issue whose node is no longer
+    # Ready=Unknown at all, regardless of what state the escalation ladder was
+    # in. This is the other half of "closes the loop" — the ladder used to
+    # leave every issue open forever even after the node came back, which is
+    # exactly the kind of manual bookkeeping this automation exists to remove.
+    dark_cfg = config.get("dark_node") or {}
+    still_unknown = _currently_unknown_node_names(nodes)
+    for issue in open_issues:
+        node_name = _dark_node_name_from_issue(issue)
+        if node_name is None or node_name in still_unknown:
+            continue
+        comment_issue(
+            args.repo, issue["number"],
+            f"✅ Node `{node_name}` is no longer reporting `Ready=Unknown` — closing.\n\n"
+            "If this recovered on its own rather than via one of this watchdog's "
+            "actions, it's worth a second look before treating the underlying cause "
+            "as resolved.",
+        )
+        close_issue(args.repo, issue["number"])
+        lines.append(f"- `dark-node:{node_name}` — node recovered, closed {issue.get('url')}")
+
+    # --- dark-node escalation: reboot (bounded) -> reinstall (gated) for every
+    # already-tracked dark node. See decide_dark_node_escalation.
+    reinstall_template = dark_cfg.get(
+        "reinstall_template_cp",
+        "cluster-autoscaler/contabo-externalgrpc/deploy/cp-userdata-eth1-join.template",
+    )
+
+    def _act_on_dark_node(finding: Finding, issue_number: int, state: dict, issue_url: str) -> None:
+        action, new_state, message = decide_dark_node_escalation(finding, state, dark_cfg, now)
+        if action == "none":
+            return
+        facts = finding.facts
+        external_ip = facts.get("external_ip") or ""
+        if action == "reboot":
+            dispatch_reboot(
+                args.repo, facts["node"], external_ip,
+                reason=f"auto-reboot ({finding.key}): {message}", issue_number=str(issue_number),
+            )
+            body = f"🔁 {message}."
+        elif action == "reinstall":
+            dispatch_cp_reinstall(
+                args.repo, facts["node"], external_ip, reinstall_template,
+                issue_number=str(issue_number),
+            )
+            body = f"🚨 {message}. Dispatched `ca-reinstall-controlplane.yml`."
+        else:  # refuse-quorum / refuse-elastic
+            body = (
+                f"⛔ {message}. Leaving this to a human — see "
+                "docs/runbooks/dark-node-reboot.md."
+            )
+        comment_issue(args.repo, issue_number, f"{body}\n\n{render_dark_state_marker(new_state)}")
+        lines.append(f"- `{finding.key}` — {action}: {message} ({issue_url})")
+
+    for finding, issue in duplicates:
+        if finding.kind != KIND_DARK_NODE:
+            continue
+        comments = list_issue_comments(args.repo, issue["number"])
+        state = parse_dark_node_state(comments)
+        _act_on_dark_node(finding, issue["number"], state, issue.get("url", ""))
 
     # Cap issue CREATION (never detection): the first live run against prod
     # returned 55 distinct conditions. Filing 55 issues at once is the muting
@@ -1023,6 +1465,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         lines.append(f"- `{finding.key}` — filed {url}")
         for action in actions:
             lines.append(f"  - {action}")
+
+        # Evaluate the escalation ladder immediately on first filing too, so
+        # reboot attempt 1 fires within this run instead of waiting another
+        # full cycle just because the issue didn't exist a moment ago.
+        if finding.kind == KIND_DARK_NODE:
+            issue_number = url.rstrip("/").rsplit("/", 1)[-1]
+            if issue_number.isdigit():
+                _act_on_dark_node(finding, int(issue_number), dict(DEFAULT_DARK_STATE), url)
 
     print("\n".join(lines))
     write_summary("\n".join(lines))

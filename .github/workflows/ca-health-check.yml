@@ -40,6 +40,27 @@ jobs:
           LOG_FILE=$(mktemp)
           trap 'rm -f "$LOG_FILE"' EXIT
 
+          # INTENTIONALLY-DISABLED IS NOT UNHEALTHY. This check runs every 15
+          # minutes; when clusterAutoscaler.enabled is false in
+          # values-contabo.yaml the Deployment is absent by design, and without
+          # this guard every single run fails with "Could not read
+          # cluster-autoscaler logs" — 96 red runs a day reporting a condition
+          # that a reviewed commit deliberately created. Distinguish "the
+          # Deployment does not exist" (skip) from "it exists but its logs are
+          # unreadable" (a real failure, handled below).
+          if ! kubectl -n "$NAMESPACE" get deploy/fuzeinfra-cluster-autoscaler \
+              >/dev/null 2>&1; then
+            echo "::notice::cluster-autoscaler Deployment is absent — skipping (disabled in values-contabo.yaml, see its re-enable checklist)."
+            {
+              echo '### Contabo autoscaler health: SKIPPED'
+              echo
+              echo 'The cluster-autoscaler Deployment is not present. It is disabled in'
+              echo 'helm/fuzeinfra/values-contabo.yaml; re-enabling it is a reviewed change'
+              echo 'that must land the pending_payment fixes listed there.'
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
           if ! kubectl -n "$NAMESPACE" logs deploy/fuzeinfra-cluster-autoscaler \
               --since=20m --tail=5000 >"$LOG_FILE" 2>&1; then
             echo "reason=Could not read cluster-autoscaler logs" >> "$GITHUB_OUTPUT"
