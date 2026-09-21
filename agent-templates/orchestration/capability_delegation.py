@@ -284,7 +284,7 @@ def verify_echo(echo_env: Optional[Envelope], expected_nonce: str) -> bool:
     return (
         echo_env.cap == CHALLENGE_ECHO_CAP
         and echo_env.corr == expected_nonce
-        and echo_env.body.strip() == expected_nonce
+        and (echo_env.body or "").strip() == expected_nonce
     )
 
 

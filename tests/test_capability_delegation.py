@@ -185,6 +185,12 @@ def test_verify_echo_none_fails():
     assert cd.verify_echo(None, "any-nonce") is False
 
 
+def test_verify_echo_none_body_fails():
+    # A non-None envelope with body=None must return False, not raise AttributeError.
+    env = cd.Envelope(frm="session_B", cap=cd.CHALLENGE_ECHO_CAP, body=None, corr="some-nonce")
+    assert cd.verify_echo(env, "some-nonce") is False
+
+
 def test_echo_preserves_reply_to():
     line, nonce = cd.make_challenge("session_A")
     ping_env = cd.parse_envelope(line)
