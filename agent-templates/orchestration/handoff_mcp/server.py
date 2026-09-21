@@ -65,7 +65,10 @@ def _vault_ids():
 
 def _memory_ids():
     path = os.path.join(STATE, "memory-ids.json")
-    return json.load(open(path, encoding="utf-8")) if os.path.exists(path) else {}
+    if not os.path.exists(path):
+        return {}
+    with open(path, encoding="utf-8") as f:
+        return json.load(f)
 
 
 def _memory_resources():
