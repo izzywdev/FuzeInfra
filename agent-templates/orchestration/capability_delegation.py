@@ -15,6 +15,16 @@ Envelope (every delegated turn starts with this line — ``CAPABILITY_DELEGATION
 
     [A2A from=<sender session_id> corr=<uuid> reply_to=<sender session_id> cap=<capability>] <body>
 
+Challenge handshake (proves a peer is who they claim before registering via a2a_set_peer):
+
+    Caller  → make_challenge(my_session_id)  → sends envelope to peer (cap=ping, body=nonce)
+    Callee  → echo_challenge(env, my_id)     → replies with cap=ping.echo, body=nonce, corr=nonce
+    Caller  → verify_echo(echo_env, nonce)   → True only when cap+corr+body all match
+
+    ping/ping.echo bypass authorize() intentionally: they happen BEFORE peer registration,
+    proving identity, not after it. A callee MUST respond to any well-formed ping with an echo
+    and MUST NOT act on any other cap from an unregistered sender.
+
 CLI (for eyeballing / scripting; the logic is the importable functions):
 
     python capability_delegation.py envelope  --from session_A --cap kubectl.read --body "get pods -n fuzeinfra"
@@ -22,6 +32,7 @@ CLI (for eyeballing / scripting; the logic is the importable functions):
     python capability_delegation.py registry  [--cap kubectl.read]
     python capability_delegation.py authorize --from session_A --cap kubectl.read \
         --provides-to session_A --allow-cap kubectl.read
+    python capability_delegation.py challenge --from session_A
 """
 
 from __future__ import annotations
@@ -212,6 +223,71 @@ def authorize(
     return Decision(True, f"sender allowed and capability {envelope.cap!r} is honored")
 
 
+# --------------------------------------------------------------------------------------
+# Challenge handshake — proves peer identity before a2a_set_peer registration.
+#
+# Use this BEFORE registering an unknown peer, not as a substitute for authorize().
+# The three-step flow:
+#   1. caller:   line, nonce = make_challenge(my_session_id)
+#                → send `line` as the peer's next turn
+#   2. callee:   echo = echo_challenge(parse_envelope(incoming), my_session_id)
+#                → send `echo` back to the caller (reply_to address from the envelope)
+#   3. caller:   ok = verify_echo(parse_envelope(echo_line), nonce)
+#                → True ⟹ peer proved it controls that session; call a2a_set_peer
+# --------------------------------------------------------------------------------------
+
+CHALLENGE_CAP = "ping"
+CHALLENGE_ECHO_CAP = "ping.echo"
+
+
+def make_challenge(sender_session_id: str) -> tuple[str, str]:
+    """Build a ping challenge envelope. Returns (envelope_line, nonce).
+
+    Send `envelope_line` to the peer as its next turn.  When the peer replies, pass the
+    reply text to ``parse_envelope`` then ``verify_echo(..., nonce)``.
+    """
+    nonce = str(uuid.uuid4())
+    line = build_envelope(frm=sender_session_id, cap=CHALLENGE_CAP, body=nonce, corr=nonce)
+    return line, nonce
+
+
+def echo_challenge(ping_env: Optional[Envelope], responder_session_id: str) -> Optional[str]:
+    """If ``ping_env`` is a ping challenge, build and return the echo reply envelope.
+
+    Returns None if ``ping_env`` is None or its cap is not ``ping`` — so a callee can
+    call this unconditionally and only send a reply when it returns a non-None string.
+    The echo carries the original nonce as both ``corr`` and ``body`` so the caller can
+    verify either field.
+    """
+    if ping_env is None or ping_env.cap != CHALLENGE_CAP:
+        return None
+    return build_envelope(
+        frm=responder_session_id,
+        cap=CHALLENGE_ECHO_CAP,
+        body=ping_env.corr,
+        corr=ping_env.corr,
+        reply_to=ping_env.reply_to,
+    )
+
+
+def verify_echo(echo_env: Optional[Envelope], expected_nonce: str) -> bool:
+    """Verify a ping echo from a peer. Returns True only when all three hold:
+
+      - ``echo_env.cap == "ping.echo"``
+      - ``echo_env.corr == expected_nonce``  (the UUID we generated)
+      - ``echo_env.body.strip() == expected_nonce``  (the peer echoed the nonce in the body)
+
+    A False result means the peer is not who it claims — do NOT call a2a_set_peer.
+    """
+    if echo_env is None:
+        return False
+    return (
+        echo_env.cap == CHALLENGE_ECHO_CAP
+        and echo_env.corr == expected_nonce
+        and (echo_env.body or "").strip() == expected_nonce
+    )
+
+
 def select_path(caller_is_local: bool) -> dict:
     """Which transport a caller uses, keyed on where the CALLER runs (§2b).
 
@@ -262,6 +338,9 @@ def _main(argv: Optional[list[str]] = None) -> int:
     pa.add_argument("--provides-to", nargs="*", default=[])
     pa.add_argument("--allow-cap", dest="allow_caps", nargs="*", default=[])
 
+    pc = sub.add_parser("challenge", help="build a ping challenge envelope (step 1 of handshake)")
+    pc.add_argument("--from", dest="frm", required=True, help="your session_id")
+
     args = p.parse_args(argv)
 
     if args.cmd == "envelope":
@@ -292,6 +371,11 @@ def _main(argv: Optional[list[str]] = None) -> int:
         d = authorize(env, provides_to=args.provides_to, allowed_caps=args.allow_caps)
         print(json.dumps({"allowed": d.allowed, "reason": d.reason}, indent=2))
         return 0 if d.allowed else 2
+
+    if args.cmd == "challenge":
+        line, nonce = make_challenge(args.frm)
+        print(json.dumps({"envelope": line, "nonce": nonce}, indent=2))
+        return 0
 
     return 1
 

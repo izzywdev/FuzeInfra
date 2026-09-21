@@ -140,6 +140,66 @@ def test_capability_environment_lookup():
     assert cd.capability_environment("gitops.edit") == "cloud-devops"
 
 
+# --- challenge handshake -------------------------------------------------------------
+
+def test_challenge_round_trip():
+    line, nonce = cd.make_challenge("session_A")
+    ping_env = cd.parse_envelope(line)
+    assert ping_env is not None
+    assert ping_env.cap == cd.CHALLENGE_CAP
+    assert ping_env.corr == nonce
+    assert ping_env.body.strip() == nonce
+
+    echo_line = cd.echo_challenge(ping_env, "session_B")
+    assert echo_line is not None
+    echo_env = cd.parse_envelope(echo_line)
+    assert echo_env is not None
+    assert cd.verify_echo(echo_env, nonce) is True
+
+
+def test_challenge_tampered_nonce_fails():
+    _, nonce = cd.make_challenge("session_A")
+    tampered = cd.Envelope(frm="session_B", cap=cd.CHALLENGE_ECHO_CAP,
+                           body="wrong-nonce", corr="wrong-nonce")
+    assert cd.verify_echo(tampered, nonce) is False
+
+
+def test_challenge_tampered_body_fails():
+    _, nonce = cd.make_challenge("session_A")
+    # corr matches but body doesn't
+    env = cd.Envelope(frm="session_B", cap=cd.CHALLENGE_ECHO_CAP,
+                      body="wrong-body", corr=nonce)
+    assert cd.verify_echo(env, nonce) is False
+
+
+def test_echo_wrong_cap_ignored():
+    non_ping = cd.Envelope(frm="session_A", cap="kubectl.read", body="")
+    assert cd.echo_challenge(non_ping, "session_B") is None
+
+
+def test_echo_none_env_ignored():
+    assert cd.echo_challenge(None, "session_B") is None
+
+
+def test_verify_echo_none_fails():
+    assert cd.verify_echo(None, "any-nonce") is False
+
+
+def test_verify_echo_none_body_fails():
+    # A non-None envelope with body=None must return False, not raise AttributeError.
+    env = cd.Envelope(frm="session_B", cap=cd.CHALLENGE_ECHO_CAP, body=None, corr="some-nonce")
+    assert cd.verify_echo(env, "some-nonce") is False
+
+
+def test_echo_preserves_reply_to():
+    line, nonce = cd.make_challenge("session_A")
+    ping_env = cd.parse_envelope(line)
+    echo_line = cd.echo_challenge(ping_env, "session_B")
+    echo_env = cd.parse_envelope(echo_line)
+    # callee's echo should be addressed back to the original sender
+    assert echo_env.reply_to == "session_A"
+
+
 # --- path selection ------------------------------------------------------------------
 
 def test_local_caller_uses_subscription_path_no_agent_id():
