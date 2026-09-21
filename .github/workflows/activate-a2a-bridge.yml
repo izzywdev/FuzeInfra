@@ -33,6 +33,14 @@ on:
           - both
           - fuze
           - devops
+      dry_run:
+        description: 'Print what would be created without actually creating sessions'
+        type: boolean
+        default: false
+
+  # Also triggerable via repository_dispatch so another workflow / session can fire it.
+  repository_dispatch:
+    types: [activate-a2a-bridge]
 
 permissions:
   contents: read
@@ -52,13 +60,25 @@ jobs:
       # ---- Fuze environment (env_01UZZzk9Ysn14vdet3FPn4JP) ----------------
       - name: Create session — fuze env
         id: fuze
-        if: inputs.environment == 'both' || inputs.environment == 'fuze'
+        if: >-
+          (github.event_name == 'workflow_dispatch' &&
+           (inputs.environment == 'both' || inputs.environment == 'fuze')) ||
+          (github.event_name == 'repository_dispatch' &&
+           (github.event.client_payload.environment == 'both' ||
+            github.event.client_payload.environment == 'fuze' ||
+            github.event.client_payload.environment == ''))
         env:
           CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           ENV_ID: env_01UZZzk9Ysn14vdet3FPn4JP
           SETUP_SH: agent-templates/environments/desktop/fuze.setup.sh
+          DRY_RUN: ${{ inputs.dry_run || github.event.client_payload.dry_run || 'false' }}
         run: |
           set -euo pipefail
+          if [ "$DRY_RUN" = "true" ]; then
+            echo "[DRY RUN] Would create session in fuze env ($ENV_ID)"
+            echo "  Setup script: $SETUP_SH ($(wc -l < "$SETUP_SH") lines)"
+            exit 0
+          fi
           PROMPT=$(printf 'Run the following environment setup script to install and activate the A2A bridge.\nThe script is idempotent — re-running it is safe.\n\n```bash\n%s\n```' "$(cat "$SETUP_SH")")
           PAYLOAD=$(jq -n \
             --arg env    "$ENV_ID" \
@@ -90,13 +110,25 @@ jobs:
       # ---- DevOps environment (env_01JEXaaX5iGBRgsMV77t67Ad) ---------------
       - name: Create session — devops env
         id: devops
-        if: inputs.environment == 'both' || inputs.environment == 'devops'
+        if: >-
+          (github.event_name == 'workflow_dispatch' &&
+           (inputs.environment == 'both' || inputs.environment == 'devops')) ||
+          (github.event_name == 'repository_dispatch' &&
+           (github.event.client_payload.environment == 'both' ||
+            github.event.client_payload.environment == 'devops' ||
+            github.event.client_payload.environment == ''))
         env:
           CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           ENV_ID: env_01JEXaaX5iGBRgsMV77t67Ad
           SETUP_SH: agent-templates/environments/desktop/devops.setup.sh
+          DRY_RUN: ${{ inputs.dry_run || github.event.client_payload.dry_run || 'false' }}
         run: |
           set -euo pipefail
+          if [ "$DRY_RUN" = "true" ]; then
+            echo "[DRY RUN] Would create session in devops env ($ENV_ID)"
+            echo "  Setup script: $SETUP_SH ($(wc -l < "$SETUP_SH") lines)"
+            exit 0
+          fi
           PROMPT=$(printf 'Run the following environment setup script to install and activate the A2A bridge.\nThe script is idempotent — re-running it is safe.\n\n```bash\n%s\n```' "$(cat "$SETUP_SH")")
           PAYLOAD=$(jq -n \
             --arg env    "$ENV_ID" \
@@ -128,10 +160,10 @@ jobs:
       - name: Summary
         if: always()
         env:
-          FUZE_SESSION:  ${{ steps.fuze.outputs.session_id }}
+          FUZE_SESSION:   ${{ steps.fuze.outputs.session_id }}
           DEVOPS_SESSION: ${{ steps.devops.outputs.session_id }}
         run: |
           echo "## A2A bridge activation" >> "$GITHUB_STEP_SUMMARY"
           echo "Trigger: ${{ github.actor }} @ $(date -u +%Y-%m-%dT%H:%MZ)" >> "$GITHUB_STEP_SUMMARY"
-          [ -n "${FUZE_SESSION:-}"  ] && echo "fuze session:  $FUZE_SESSION"
+          [ -n "${FUZE_SESSION:-}"   ] && echo "fuze session:   $FUZE_SESSION"
           [ -n "${DEVOPS_SESSION:-}" ] && echo "devops session: $DEVOPS_SESSION"
