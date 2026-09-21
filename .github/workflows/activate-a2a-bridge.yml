@@ -1,0 +1,213 @@
+name: Activate A2A Bridge in Environments
+
+# Creates a one-shot CCR session in each target environment whose startup prompt
+# runs the A2A bridge activation inline — equivalent to running the env Setup script
+# on an already-provisioned environment without going through the UI.
+#
+# Two paths, tried in order per environment:
+#   1. /opt/fuze/a2a-bridge/start.sh already exists (env was built with the current
+#      fuze.setup.sh / devops.setup.sh) → set FUZE_A2A_BRIDGE=1 and invoke it.
+#   2. Files missing (old env snapshot) → clone FuzeInfra, copy the bridge files,
+#      then invoke start.sh.
+#
+# The bridge is guarded by FUZE_A2A_BRIDGE=1 and CLAUDE_CODE_REMOTE=true (both set
+# in the session prompt / env). start.sh is idempotent — a second invocation is a
+# no-op if bridge.pid is already live.
+#
+# Authentication: ANTHROPIC_API_KEY (or FUZE_LITELLM_KEY routed through LiteLLM)
+# is used to call the CCR session-create endpoint. The key must belong to the
+# account that owns the target environments.
+#
+# Secrets required:
+#   CCR_API_TOKEN  — Claude Code Remote API token (same key used by the CCR MCP
+#                    server; usually identical to ANTHROPIC_API_KEY but scoped to
+#                    claude.ai session management). If unset, falls back to
+#                    ANTHROPIC_API_KEY.
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Print what would be created without actually creating sessions'
+        type: boolean
+        default: false
+      environments:
+        description: 'Which environments to activate (comma-separated env_ IDs; default: both)'
+        type: string
+        default: 'env_01UZZzk9Ysn14vdet3FPn4JP,env_01JEXaaX5iGBRgsMV77t67Ad'
+
+  # Also triggerable via repository_dispatch so another workflow / session can fire it.
+  repository_dispatch:
+    types: [activate-a2a-bridge]
+
+permissions:
+  contents: read
+
+jobs:
+  activate:
+    name: Activate A2A bridge
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ── Read the setup scripts so we can embed them into the session prompt ──
+      - name: Read setup scripts
+        id: scripts
+        run: |
+          # Export as base64 to survive multi-line env var passage.
+          FUZE_B64=$(base64 -w0 agent-templates/environments/desktop/fuze.setup.sh)
+          DEVOPS_B64=$(base64 -w0 agent-templates/environments/desktop/devops.setup.sh)
+          START_B64=$(base64 -w0 agent-templates/environments/desktop/a2a-bridge/start.sh)
+          echo "fuze_b64=$FUZE_B64"    >> "$GITHUB_OUTPUT"
+          echo "devops_b64=$DEVOPS_B64" >> "$GITHUB_OUTPUT"
+          echo "start_b64=$START_B64"  >> "$GITHUB_OUTPUT"
+
+      # ── Create sessions via the CCR REST API ──────────────────────────────────
+      # The session's startup prompt does the real work: it installs the bridge
+      # files if missing, then runs start.sh with FUZE_A2A_BRIDGE=1.
+      - name: Activate bridge sessions
+        env:
+          CCR_API_TOKEN: ${{ secrets.CCR_API_TOKEN || secrets.ANTHROPIC_API_KEY }}
+          TARGET_ENVS: ${{ github.event.inputs.environments || github.event.client_payload.environments || 'env_01UZZzk9Ysn14vdet3FPn4JP,env_01JEXaaX5iGBRgsMV77t67Ad' }}
+          DRY_RUN: ${{ github.event.inputs.dry_run || 'false' }}
+          FUZE_SETUP_B64: ${{ steps.scripts.outputs.fuze_b64 }}
+          DEVOPS_SETUP_B64: ${{ steps.scripts.outputs.devops_b64 }}
+          START_SH_B64: ${{ steps.scripts.outputs.start_b64 }}
+          REPO_URL: https://github.com/${{ github.repository }}.git
+          REPO_REF: ${{ github.sha }}
+        run: |
+          python3 - <<'PYEOF'
+          import base64, json, os, sys, urllib.request
+
+          token    = os.environ["CCR_API_TOKEN"]
+          envs     = [e.strip() for e in os.environ["TARGET_ENVS"].split(",") if e.strip()]
+          dry_run  = os.environ.get("DRY_RUN", "false").lower() == "true"
+          repo_url = os.environ["REPO_URL"]
+          repo_ref = os.environ["REPO_REF"]
+
+          # Decode the bridge start.sh for embedding in the prompt.
+          start_sh = base64.b64decode(os.environ["START_SH_B64"]).decode()
+
+          # Map env_id -> human label + which setup script to reference.
+          ENV_META = {
+              "env_01UZZzk9Ysn14vdet3FPn4JP": ("Fuze",   "fuze.setup.sh"),
+              "env_01JEXaaX5iGBRgsMV77t67Ad": ("DevOps", "devops.setup.sh"),
+          }
+
+          # CCR session-create endpoint.
+          # The Claude Code Remote MCP server wraps this REST API.
+          CCR_BASE = "https://api.claude.ai/api/claude_code/remote"
+
+          def build_prompt(env_id: str) -> str:
+              label, setup_file = ENV_META.get(env_id, (env_id, "fuze.setup.sh"))
+              return f"""# A2A Bridge Activation — {label} environment
+
+          This session was created automatically by the `activate-a2a-bridge` GitHub Actions workflow
+          to activate the A2A cross-session communication bridge without manual UI interaction.
+
+          ## Your task
+
+          Run the following steps in order using the Bash tool:
+
+          ### Step 1 — Check if bridge files are already installed
+          ```bash
+          ls /opt/fuze/a2a-bridge/start.sh 2>/dev/null && echo "BRIDGE_EXISTS" || echo "BRIDGE_MISSING"
+          ```
+
+          ### Step 2a — If BRIDGE_EXISTS: activate the bridge
+          ```bash
+          export FUZE_A2A_BRIDGE=1
+          export CLAUDE_CODE_REMOTE=true
+          bash /opt/fuze/a2a-bridge/start.sh
+          ```
+
+          ### Step 2b — If BRIDGE_MISSING: install then activate
+          Clone the repo and copy the bridge files:
+          ```bash
+          git clone --depth 1 {repo_url} /tmp/fuzeinfra-bridge-src || true
+          install -d -m 0755 /opt/fuze/a2a-bridge
+          install -m 0755 /tmp/fuzeinfra-bridge-src/agent-templates/environments/desktop/a2a-bridge/start.sh \\
+                           /opt/fuze/a2a-bridge/start.sh
+          install -m 0644 /tmp/fuzeinfra-bridge-src/agent-templates/environments/desktop/a2a-bridge/wss_bridge.py \\
+                           /opt/fuze/a2a-bridge/wss_bridge.py
+          install -m 0644 /tmp/fuzeinfra-bridge-src/agent-templates/environments/desktop/a2a-bridge/a2a_mcp.py \\
+                           /opt/fuze/a2a-bridge/a2a_mcp.py
+          install -m 0755 /tmp/fuzeinfra-bridge-src/agent-templates/environments/desktop/a2a-bridge/a2a_mcp_launch.sh \\
+                           /opt/fuze/a2a-bridge/a2a_mcp_launch.sh
+
+          # Install bridge dependencies if missing
+          pip install --quiet --no-input websockets 'mcp>=1.9,<2' || \\
+            pip install --quiet --no-input --break-system-packages websockets 'mcp>=1.9,<2' || true
+
+          export FUZE_A2A_BRIDGE=1
+          export CLAUDE_CODE_REMOTE=true
+          bash /opt/fuze/a2a-bridge/start.sh
+          ```
+
+          ### Step 3 — Report status
+          ```bash
+          sleep 2
+          cat /tmp/a2a-bridge/status.json 2>/dev/null || echo '{{"status":"no status.json yet"}}'
+          echo "Session ID: ${{CLAUDE_CODE_REMOTE_SESSION_ID:-unknown}}"
+          echo "Relay PID: $(cat /tmp/a2a-bridge/bridge.pid 2>/dev/null || echo 'none')"
+          ```
+
+          Report the session ID, relay connection status, and whether the bridge started successfully.
+          This is a one-time activation — the session can exit after reporting.
+          """
+
+          results = []
+          for env_id in envs:
+              label = ENV_META.get(env_id, (env_id,))[0]
+              prompt = build_prompt(env_id)
+
+              if dry_run:
+                  print(f"[DRY RUN] Would create session in {label} ({env_id})")
+                  print(f"  Prompt length: {len(prompt)} chars")
+                  results.append({"env_id": env_id, "label": label, "dry_run": True})
+                  continue
+
+              body = json.dumps({
+                  "environment_id": env_id,
+                  "title": f"A2A Bridge Activation — {label}",
+                  "prompt": prompt,
+                  "tags": ["a2a-bridge-activation", f"env-{label.lower()}"],
+              }).encode()
+
+              req = urllib.request.Request(
+                  f"{CCR_BASE}/sessions",
+                  data=body,
+                  method="POST",
+                  headers={
+                      "Content-Type":  "application/json",
+                      "x-api-key":     token,
+                      "anthropic-version": "2023-06-01",
+                  },
+              )
+
+              try:
+                  with urllib.request.urlopen(req, timeout=30) as r:
+                      resp = json.loads(r.read())
+                  sid = resp.get("session_id") or resp.get("id") or str(resp)
+                  print(f"[OK] {label} ({env_id}) → session {sid}")
+                  results.append({"env_id": env_id, "label": label, "session_id": sid})
+              except urllib.error.HTTPError as e:
+                  body_text = e.read().decode("utf-8", "replace")
+                  print(f"[ERROR] {label} ({env_id}): HTTP {e.code} — {body_text}", file=sys.stderr)
+                  results.append({"env_id": env_id, "label": label, "error": f"HTTP {e.code}: {body_text}"})
+              except Exception as exc:
+                  print(f"[ERROR] {label} ({env_id}): {exc}", file=sys.stderr)
+                  results.append({"env_id": env_id, "label": label, "error": str(exc)})
+
+          print("\n--- Summary ---")
+          for r in results:
+              status = "OK" if "session_id" in r else ("DRY_RUN" if r.get("dry_run") else "FAILED")
+              detail = r.get("session_id", r.get("error", ""))
+              print(f"  {status:8s}  {r['label']:10s}  {r['env_id']}  {detail}")
+
+          failed = [r for r in results if "error" in r]
+          if failed:
+              sys.exit(1)
+          PYEOF
