@@ -1399,31 +1399,17 @@ resource "cloudflare_record" "mendys_wp" {
   allow_overwrite = true
 }
 
-# CF Access: gate live.mendysrobotics.com behind email-OTP.
-# The management portal requires authentication; marketplace and wp are public.
-resource "cloudflare_zero_trust_access_application" "mendys_live" {
-  count            = local.mendysrobotics_enabled ? 1 : 0
-  account_id       = var.cloudflare_account_id
-  name             = "MendysRobotics Live (management portal)"
-  domain           = "live.mendysrobotics.com"
-  type             = "self_hosted"
-  session_duration = var.access_session_duration
-
-  app_launcher_visible = true
-}
-
-resource "cloudflare_zero_trust_access_policy" "mendys_live_otp" {
-  count          = local.mendysrobotics_enabled ? 1 : 0
-  account_id     = var.cloudflare_account_id
-  application_id = cloudflare_zero_trust_access_application.mendys_live[0].id
-  name           = "Admin email allowlist (OTP)"
-  precedence     = 1
-  decision       = "allow"
-
-  include {
-    email = var.allowed_admin_emails
-  }
-}
+# REMOVED (deliberate, do not re-add): CF Access app gating live.mendysrobotics.com.
+#
+# The management portal authenticates at the APPLICATION level — brokered SSO
+# through the wrapped Security API (fuzefront-security) against the dedicated
+# Mendys Authentik instance — exactly like marketplace.mendysrobotics.com,
+# which has never been behind Access. The email-OTP Access app that used to
+# live here stacked a second, unrelated login wall in front of that flow and
+# 302'd every request (including /api/*) to fuzefront.cloudflareaccess.com, so
+# no traffic ever reached the Mendys stack: prod sign-in was fully down
+# (issue #1115 / Jira MR-37). All three mendysrobotics.com subdomains are
+# app-auth-only by design; none of them may carry an Access app.
 
 # ---------------------------------------------------------------------------
 # fuzeinfra-tunnel-secrets — Terraform-owned Secret (ArgoCD never touches it)
