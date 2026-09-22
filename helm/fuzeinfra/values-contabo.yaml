@@ -1260,7 +1260,18 @@ nodeConfigurator:
   # than all of sd*, and roll out to ONE non-control-plane node first.
   multipathBlacklist:
     enabled: true
-    # STAGE TWO: + vmi3396106.
+    # STAGE TWO: + fuze-core-2 (the node formerly named vmi3396106).
+    #
+    # NODE RENAME FIX (FuzeInfra#821). The durable nodes were renamed after this
+    # staging was written: vmi3383846 -> fuze-core-1, vmi3396106 -> fuze-core-2,
+    # mendys-worker-1 -> fuze-core-3 (confirmed via `kubectl get nodes -o wide`:
+    # fuze-core-1 = 10.0.0.6 / external 161.97.118.134, fuze-core-2 = 10.0.0.2 /
+    # role=monitoring, fuze-core-3 = 10.0.0.3). The init container matches
+    # spec.nodeName against this list, so the stale entry `vmi3396106` matched NO
+    # live node and stage two silently never applied -- fuze-core-2 kept logging
+    # "not in multipath rollout set; skipping", leaving the mkfs/mount blacklist
+    # that #821 depends on off the one node that hosts monitoring PVCs. This entry
+    # now names the node by its current name so the intended stage two runs.
     #
     # Stage one (fuzeinfra-ci-runner-1) applied cleanly and is still applied --
     # its configurator logs "multipath.conf written / multipathd restarted" while
@@ -1273,13 +1284,13 @@ nodeConfigurator:
     # volume. It proved the rollout gate works and the restart is survivable --
     # nothing about iSCSI device claiming.
     #
-    # ORDER CHANGED from the original plan (mendys-worker-1 next). mendys-worker-1
-    # is ALSO Ready=False, so it cannot demonstrate an attach either. Of the four
-    # Longhorn nodes only vmi3383846 and vmi3396106 are Ready=True and host
-    # replicas, and vmi3383846 is the apiserver endpoint (161.97.118.134) -- so it
-    # stays LAST. That makes vmi3396106 the only node that can verify the change.
+    # Of the Longhorn durable nodes, fuze-core-2 (ex-vmi3396106) is Ready=True,
+    # hosts replicas, is NOT the apiserver endpoint (that is fuze-core-1 /
+    # 161.97.118.134, which stays LAST), and carries role=monitoring so it holds
+    # the Prometheus/Loki/Tempo PVCs -- exactly the volumes the mkfs/mount bug hit.
+    # That makes fuze-core-2 the node that both needs the fix and can verify it.
     #
-    # Accepted risk: vmi3396106 is a control-plane/etcd member (3 members, quorum
+    # Accepted risk: fuze-core-2 is a control-plane/etcd member (3 members, quorum
     # 2, can lose 1). The blacklist excludes only vendor IET / product
     # VIRTUAL-DISK -- Longhorn's own iSCSI devices. The host root disk is
     # QEMU/QEMUHARDDISK and is untouched, and restarting multipathd does not
@@ -1290,10 +1301,11 @@ nodeConfigurator:
     # being up; it never inspects multipath.conf. Verify by observing a volume
     # attach + format cleanly, not by that condition.
     #
-    # Widen to mendys-worker-1, then vmi3383846 LAST, only after that.
+    # Widen to fuze-core-3, then fuze-core-1 (apiserver endpoint) LAST, only after
+    # that.
     rolloutNodes:
       - fuzeinfra-ci-runner-1
-      - vmi3396106
+      - fuze-core-2
   # ENABLED. Gives etcd a 10:1 disk share over all pod I/O, via the cgroup-v2
   # iocost controller. Direct fix for the 2026-09-06 outage: pod I/O (Prometheus
   # TSDB compaction, Loki chunk flushes, Longhorn replica traffic) starved etcd on
