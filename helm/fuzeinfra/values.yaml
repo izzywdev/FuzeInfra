@@ -855,6 +855,16 @@ backups:
   resources:
     requests: { cpu: 100m, memory: 128Mi }
     limits:   { cpu: 500m, memory: 512Mi }
+  # Floor on the dump artifact's size (bytes) before it is handed to the
+  # upload container. A failed pg_dumpall/mongodump/mariadb-dump/APOC export
+  # still lets `gzip -c` exit 0 on empty stdin and write a ~20-byte header, so
+  # this is the backstop that catches it even with `pipefail` on (#1051). Not
+  # proof of a good dump, just a sane-looking one; `gzip -t` (always run,
+  # not configurable) additionally catches truncation. 1024 is comfortably
+  # below any real dump and well above a bare gzip header. Override per-DB by
+  # setting `minBytes` under that DB (e.g. `backups.mariadb.minBytes`) for a
+  # database that is legitimately near-empty.
+  minDumpBytes: 1024
   # S3 destination for all dumps.
   s3:
     # Full URL incl. scheme, e.g. https://eu2.contabostorage.com
