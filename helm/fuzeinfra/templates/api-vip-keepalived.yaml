@@ -111,16 +111,17 @@ data:
     # IP (the VIP) to THIS node's instance via the Contabo VIP API so the provider
     # routes it here; keepalived has already bound it locally via virtual_ipaddress.
     #
-    # ENDPOINT (Contabo VIPApi — verified against the api.contabo.com VIP tag):
-    #   assign   POST   /v1/vips/{ip}/{resourceType}/{resourceId}   (no body)
-    #   unassign DELETE /v1/vips/{ip}/{resourceType}/{resourceId}   (no body)
-    #   read     GET    /v1/vips/{ip}   -> .data[0].assignments[].resourceId
-    # A VIP has ONE holder. At a MASTER transition the old holder is usually dead
-    # and this node only knows its OWN instanceId, so we READ the current holder,
-    # UNASSIGN it, then ASSIGN to self — robust whether or not a bare POST re-homes
-    # an already-assigned IP (the single-POST semantic is unverified; this path
-    # does not depend on it). CONTABO_RESOURCE_TYPE (default "instances") is the one
-    # path literal to confirm once via GET /v1/vips/{ip} — see the runbook.
+    # ENDPOINT (Contabo VIPApi — VERIFIED live 2026-09-22 by a green reassignment
+    # round-trip on 13.140.184.164, run 35718868309):
+    #   read     GET    /v1/vips/{ip}                      -> .data[0].resourceId (holder)
+    #   unassign DELETE /v1/vips/{ip}/instances/{resourceId}          (200; no body)
+    #   assign   POST   /v1/vips/{ip}/instances/{resourceId}  -d '{}' (201)
+    # PLURAL "instances" in the PATH (the API rejects "instance" with 400 "must be
+    # one of: instances, bare-metal, null") even though the VIP object's returned
+    # resourceType FIELD is singular "instance". The assign POST MUST carry a body
+    # or it 400s "Body cannot be empty ... application/json".
+    # A VIP has ONE holder, so at a MASTER transition we READ the current holder,
+    # UNASSIGN it, then ASSIGN to self. CONTABO_RESOURCE_TYPE defaults to "instances".
     set -uo pipefail
     STATE="${1:-}"
     log() { echo "[api-vip notify] $(date -u +%FT%TZ) $*"; }
@@ -145,7 +146,7 @@ data:
 
     # 1. Who holds the VIP now?
     CUR=$(curl -sS -H "Authorization: Bearer $TOK" -H "x-request-id: $(rid)" "$VIPBASE" \
-           | jq -r '.data[0].assignments[]?.resourceId' 2>/dev/null | head -1)
+           | jq -r '.data[0].resourceId // empty' 2>/dev/null)
 
     # 2. If someone else holds it, unassign them first (skip if that node is gone —
     #    a 4xx here is fine, the assign below is what matters).
@@ -161,7 +162,7 @@ data:
     # 3. Assign to self.
     CODE=$(curl -sS -o /tmp/vip.out -w '%{http_code}' -X POST \
       -H "Authorization: Bearer $TOK" -H "x-request-id: $(rid)" \
-      -H "Content-Type: application/json" \
+      -H "Content-Type: application/json" -d '{}' \
       "$VIPBASE/$RTYPE/$CONTABO_INSTANCE_ID")
     if [ "$CODE" -ge 200 ] && [ "$CODE" -lt 300 ]; then
       log "assigned $API_VIP_ADDRESS -> instance $CONTABO_INSTANCE_ID (HTTP $CODE)"
