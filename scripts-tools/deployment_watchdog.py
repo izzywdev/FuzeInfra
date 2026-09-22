@@ -415,6 +415,9 @@ def _currently_unknown_node_names(nodes: dict) -> set[str]:
 DARK_STATE_RE = re.compile(r"<!-- dark-node-state: (\{.*?\}) -->", re.S)
 DARK_NODE_KEY_RE = re.compile(r"<!-- watchdog-key: dark-node:(.+?) -->")
 ARGO_KEY_RE = re.compile(r"<!-- watchdog-key: stuck-argo-op:(.+?) -->")
+# The current-instance marker embedded in build_issue_body / update comments
+# for the two pod-churn-prone kinds (stuck-containercreating, chronic-crashloop).
+INSTANCE_MARKER_RE = re.compile(r"<!-- watchdog-instance: (.+?) -->")
 
 
 def argo_terminated_marker(app: str, started_at: str | None) -> str:
@@ -462,6 +465,45 @@ def close_resolved_argo_issues(
         close_issue(repo, issue["number"])
         lines.append(f"- `stuck-argo-op:{app}` — no longer stuck, closed {issue.get('url')}")
     return still_open, lines
+
+
+def close_resolved_findings(
+    repo: str, open_issues: list[dict], kind: str, active_keys: set[str]
+) -> tuple[list[dict], list[str]]:
+    """Bounded lifecycle for a churn-prone kind (stuck-containercreating,
+    chronic-crashloop): close a tracked issue once its dedupe key is no longer
+    among THIS run's findings. Generalizes close_resolved_argo_issues.
+
+    Without this, a resolved pod's issue stays open forever, and the workload's
+    NEXT distinct occurrence (a fresh pod, same stable subject per
+    _stable_workload_name) silently deduplicates against a stale, already-fixed
+    incident instead of getting tracked as the new problem it is.
+    """
+    key_re = re.compile(r"<!-- watchdog-key: (" + re.escape(kind) + r":.+?) -->")
+    still_open: list[dict] = []
+    lines: list[str] = []
+    for issue in open_issues:
+        match = key_re.search(issue.get("body") or "")
+        if match is None or match.group(1) in active_keys:
+            still_open.append(issue)
+            continue
+        key = match.group(1)
+        comment_issue(
+            repo, issue["number"],
+            f"✅ `{key}` is no longer detected — closing so the next occurrence "
+            "of this workload's condition files (or updates) a fresh incident "
+            "instead of deduplicating against this resolved one.",
+        )
+        close_issue(repo, issue["number"])
+        lines.append(f"- `{key}` — no longer detected, closed {issue.get('url')}")
+    return still_open, lines
+
+
+def latest_instance_marker(text: str) -> str | None:
+    """Most recent `<!-- watchdog-instance: ... -->` value in body+comments text."""
+    matches = INSTANCE_MARKER_RE.findall(text or "")
+    return matches[-1] if matches else None
+
 
 DEFAULT_DARK_STATE: dict[str, Any] = {
     "reboot_attempts": 0,
@@ -602,6 +644,52 @@ def _pod_subject(pod: dict) -> str:
     return f"{meta.get('namespace', 'default')}/{meta.get('name', '<unnamed>')}"
 
 
+# A ReplicaSet-owned pod name is `<deployment>-<rs-hash>-<pod-suffix>` and a
+# CronJob-owned pod name is `<cronjob>-<epoch>-<pod-suffix>` (e.g.
+# `fuzeinfra-backup-mongodb-29820980-8mcg8`). Both suffixes change on every
+# new pod instance, so using the raw pod name as a dedupe-key subject files a
+# brand new [watchdog] issue every time a churning workload's pod is replaced
+# (observed as issues #1062-#1081, dozens of near-duplicate
+# `stuck-containercreating` snapshots of the same underlying workload).
+_POD_TEMPLATE_HASH_RE = re.compile(r"-[a-z0-9]{5,10}$")  # ReplicaSet/Job pod suffix
+_EPOCH_JOB_SUFFIX_RE = re.compile(r"-\d{6,11}$")  # CronJob-generated Job suffix
+
+
+def _stable_workload_name(pod: dict) -> str:
+    """A dedupe-safe name for the workload/controller behind this pod.
+
+    Stable across pod-instance churn: prefers `ownerReferences` (authoritative
+    — a ReplicaSet's owning Deployment, a Job's owning CronJob, or a
+    StatefulSet/DaemonSet's already-stable name), falling back to
+    suffix-stripping the pod name itself when no usable owner is present.
+    """
+    meta = pod.get("metadata") or {}
+    name = meta.get("name") or "<unnamed>"
+    for owner in meta.get("ownerReferences") or []:
+        kind = owner.get("kind")
+        oname = owner.get("name")
+        if not oname:
+            continue
+        if kind == "ReplicaSet":
+            # Deployment name = ReplicaSet name minus its pod-template hash.
+            return _POD_TEMPLATE_HASH_RE.sub("", oname) or oname
+        if kind == "Job":
+            # CronJob name = Job name minus its epoch-timestamp suffix.
+            return _EPOCH_JOB_SUFFIX_RE.sub("", oname) or oname
+        if kind in ("StatefulSet", "DaemonSet"):
+            # Pod ordinals (`name-0`) / per-node names are already stable.
+            return oname
+    stripped = _POD_TEMPLATE_HASH_RE.sub("", name)
+    stripped = _EPOCH_JOB_SUFFIX_RE.sub("", stripped)
+    return stripped or name
+
+
+def _stable_pod_subject(pod: dict) -> str:
+    """Dedupe-key subject: namespace + stable workload name (no pod-hash churn)."""
+    meta = pod.get("metadata") or {}
+    return f"{meta.get('namespace', 'default')}/{_stable_workload_name(pod)}"
+
+
 def _pod_start(pod: dict) -> datetime | None:
     status = pod.get("status") or {}
     return parse_k8s_time(status.get("startTime")) or parse_k8s_time(
@@ -658,7 +746,7 @@ def detect_chronic_crashloop(pods: dict, config: dict, now: datetime) -> list[Fi
             findings.append(
                 Finding(
                     kind=KIND_CRASHLOOP,
-                    subject=f"{_pod_subject(pod)}:{cs.get('name', '<container>')}",
+                    subject=f"{_stable_pod_subject(pod)}:{cs.get('name', '<container>')}",
                     summary=(
                         f"`{_pod_subject(pod)}` container `{cs.get('name')}` is in a "
                         f"chronic crash loop ({'; '.join(triggers)})."
@@ -725,7 +813,7 @@ def detect_stuck_container_creating(pods: dict, config: dict, now: datetime) -> 
         findings.append(
             Finding(
                 kind=KIND_CREATING,
-                subject=_pod_subject(pod),
+                subject=_stable_pod_subject(pod),
                 summary=(
                     f"`{_pod_subject(pod)}` has been {reason} for {_fmt_age(minutes)} "
                     f"(threshold {threshold:.0f}m) — likely a stuck volume attach."
@@ -856,8 +944,15 @@ def build_issue_body(
     finding: Finding, config: dict, run_url: str = "", actions: Sequence[str] = ()
 ) -> str:
     mention = (config.get("issues") or {}).get("mention", "@fuze")
-    lines = [
-        finding.marker,
+    lines = [finding.marker]
+    pod_name = finding.facts.get("pod")
+    if finding.kind in (KIND_CREATING, KIND_CRASHLOOP) and pod_name:
+        # The dedupe key is the stable WORKLOAD name; this marker records the
+        # specific pod instance currently backing it, so a later run can tell
+        # "same instance, no-op" from "condition recurred on a fresh pod,
+        # comment with the update" without re-fetching the cluster.
+        lines.append(f"<!-- watchdog-instance: {pod_name} -->")
+    lines += [
         "",
         f"{mention} the deployment-freeze watchdog detected **{finding.kind}**.",
         "",
@@ -1386,10 +1481,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         # early return used to skip all issue handling, which is how #776 sat
         # open for 20 days after its incident and swallowed the next one.
         if args.repo and not args.dry_run:
-            _, closed = close_resolved_argo_issues(
-                args.repo, list_open_watchdog_issues(args.repo, label), set(), applications
-            )
+            open_now = list_open_watchdog_issues(args.repo, label)
+            open_now, closed = close_resolved_argo_issues(args.repo, open_now, set(), applications)
             lines += closed
+            for churn_kind in (KIND_CREATING, KIND_CRASHLOOP):
+                open_now, closed = close_resolved_findings(args.repo, open_now, churn_kind, set())
+                lines += closed
         print("\n".join(lines))
         write_summary("\n".join(lines))
         return 0
@@ -1416,9 +1513,42 @@ def main(argv: Sequence[str] | None = None) -> int:
         args.repo, open_issues, stuck_apps, applications
     )
     lines += closed_lines
+    # Bounded lifecycle for the two pod-churn-prone kinds: close a tracked issue
+    # once its stable-workload key is no longer among this run's findings, so
+    # the workload's next distinct occurrence doesn't dedupe against a stale,
+    # already-resolved incident (the "reuse forever" failure mode).
+    for churn_kind in (KIND_CREATING, KIND_CRASHLOOP):
+        active_keys = {f.key for f in findings if f.kind == churn_kind}
+        open_issues, closed = close_resolved_findings(args.repo, open_issues, churn_kind, active_keys)
+        lines += closed
     new, duplicates = filter_new_findings(findings, open_issues, prefix)
     for finding, issue in duplicates:
         lines.append(f"- `{finding.key}` — already tracked by {issue.get('url')} (not re-filed)")
+
+    # Duplicate of a churn-prone kind: the tracked issue is still open (same
+    # workload, still stuck), but the SPECIFIC pod instance may have rolled —
+    # comment with the fresh instance so the thread stays useful, but only when
+    # the instance actually changed (true no-op otherwise, not a 15-minute
+    # comment spam loop).
+    for finding, issue in duplicates:
+        if finding.kind not in (KIND_CREATING, KIND_CRASHLOOP):
+            continue
+        pod_name = finding.facts.get("pod")
+        if not pod_name:
+            continue
+        comments = list_issue_comments(args.repo, issue["number"])
+        seen_text = (issue.get("body") or "") + "\n".join(c.get("body") or "" for c in comments)
+        if latest_instance_marker(seen_text) == pod_name:
+            continue  # same instance already reflected on this issue
+        comment_issue(
+            args.repo, issue["number"],
+            "🔁 Still occurring on a new pod instance:\n\n"
+            "```json\n"
+            f"{json.dumps(finding.facts, indent=2, sort_keys=True, default=str)}\n"
+            "```\n\n"
+            f"<!-- watchdog-instance: {pod_name} -->",
+        )
+        lines.append(f"- `{finding.key}` — updated {issue.get('url')} (instance `{pod_name}`)")
 
     # --- stuck Argo op that is ALREADY tracked: still act on it. ---
     # Auto-terminate used to run only for NEWLY filed findings, so an Argo wedge
