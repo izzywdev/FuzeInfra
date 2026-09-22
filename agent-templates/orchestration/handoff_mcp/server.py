@@ -55,12 +55,16 @@ def _roles():
     path = os.path.join(STATE, "agent-ids.json")
     if not os.path.exists(path):
         raise RuntimeError("agent-ids.json missing — run sync_agents.py first")
-    return json.load(open(path, encoding="utf-8"))
+    with open(path, encoding="utf-8") as f:
+        return json.load(f)
 
 
 def _vault_ids():
     path = os.path.join(STATE, "vault-ids.json")
-    return list(json.load(open(path, encoding="utf-8")).values()) if os.path.exists(path) else []
+    if not os.path.exists(path):
+        return []
+    with open(path, encoding="utf-8") as f:
+        return list(json.load(f).values())
 
 
 def _memory_ids():
