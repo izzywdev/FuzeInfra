@@ -1269,10 +1269,13 @@ resource "cloudflare_zero_trust_access_policy" "litellm_service_ci_token" {
 # client-side cloudflared). kubectl still does its own TLS/mTLS to the apiserver
 # through the local proxy, end to end. See docs/runbooks/api-floating-vip.md.
 #
-# GATED OFF (var.api_breakglass_enabled). Like handoff_mcp/a2a_*, flipping the var
-# is only effective when terraform-plan-apply's apply job runs — this file is under
-# terraform/**, so a PR editing it triggers the apply. Verify at the edge after:
-#   cloudflared access tcp --hostname k8s-api.<domain> --url 127.0.0.1:6443 &
+# ENABLED 2026-09-22 via TF_VAR_api_breakglass_enabled=true in
+# terraform-plan-apply.yml. Like handoff_mcp/a2a_*, the flip is only effective when
+# the apply job runs — this file is under terraform/**, so a PR editing it triggers
+# the apply. Verify at the edge after (needs the service token, extracted once via
+# `terraform output -raw` — never committed):
+#   cloudflared access tcp --hostname k8s-api.<domain> --url 127.0.0.1:6443 \
+#     --service-token-id "$CF_ID" --service-token-secret "$CF_SECRET" &
 #   kubectl --server https://127.0.0.1:6443 get --raw /livez
 # ---------------------------------------------------------------------------
 variable "api_breakglass_enabled" {
