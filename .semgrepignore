@@ -17,3 +17,12 @@
 # manifests only. Detection is unchanged everywhere else in the repo, which is
 # where a real leak would actually land.
 deploy/sealed-secrets/
+
+# fuzeinfra-keepalived image. keepalived manages network interfaces via netlink
+# (adds/removes the VIP, sends VRRP) and its DaemonSet runs privileged with
+# NET_ADMIN, so it MUST run as root — dockerfile.security.missing-user cannot be
+# satisfied without breaking it (unlike the app Dockerfiles, which correctly use a
+# non-root USER). Inline `nosemgrep` is not honored by this Semgrep setup, so the
+# suppression is path-scoped here. The file is a 15-line apk-install; no other
+# rule surface is meaningfully lost. See docs/runbooks/api-floating-vip.md.
+images/keepalived/Dockerfile

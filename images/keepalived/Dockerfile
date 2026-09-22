@@ -25,6 +25,6 @@ RUN apk add --no-cache \
 # Intentionally NO non-root USER: keepalived manages network interfaces (adds/
 # removes the VIP, sends VRRP) via netlink and MUST run as root, and the DaemonSet
 # runs privileged with NET_ADMIN. A non-root USER would break it — the root
-# requirement is intrinsic here, not an oversight.
-# nosemgrep: dockerfile.security.missing-user.missing-user
+# requirement is intrinsic here, not an oversight (Semgrep's missing-user rule is
+# suppressed for this file in .semgrepignore).
 CMD ["keepalived", "--version"]
