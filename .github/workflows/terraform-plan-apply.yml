@@ -125,7 +125,7 @@ env:
   # apply CD never sets), so CD never touches them. Addresses must match
   # apiVip.vips[].address in helm/fuzeinfra/values-contabo.yaml.
   TF_VAR_api_vip_enabled: "true"
-  TF_VAR_api_vip_addresses: '["13.140.184.164","13.140.185.42"]'
+  TF_VAR_api_vip_addresses: '["13.140.184.164","13.140.185.42","13.140.185.205"]'
   # mendysrobotics.com zone ID — gates all mendys DNS + Access resources.
   # Default empty string disables those resources; set the secret to enable.
   TF_VAR_mendysrobotics_zone_id: ${{ secrets.MENDYSROBOTICS_ZONE_ID }}
