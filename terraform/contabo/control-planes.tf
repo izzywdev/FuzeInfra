@@ -63,14 +63,14 @@ locals {
     }
   }
 
-  # Extra tls-san entries for the floating API VIP (api-floating-vip.tf). Added to
-  # EVERY control plane's cert so kubectl validates when the VIP has floated to any
-  # of them, whether the kubeconfig addresses the raw IP or the DNS name. Empty
-  # (no lines) until var.api_vip_address is set, so the gated apply stays a no-op.
-  api_vip_tls_san = var.api_vip_address == "" ? [] : [
-    "  - ${var.api_vip_address}",
-    "  - ${var.api_vip_hostname_label}.${local.prod_domain}",
-  ]
+  # Extra tls-san entries for the active-active API VIPs (api-floating-vip.tf). ALL
+  # VIPs go on EVERY control plane's cert, because on failover any node may serve
+  # any VIP — so kubectl must validate whichever VIP it hits on whichever node.
+  # Empty until var.api_vip_addresses is set, so the gated apply stays a no-op.
+  api_vip_tls_san = length(var.api_vip_addresses) == 0 ? [] : concat(
+    [for a in var.api_vip_addresses : "  - ${a}"],
+    ["  - ${var.api_vip_hostname_label}.${local.prod_domain}"],
+  )
 
   # Rendered per node. Kept byte-identical in shape to what is live now, so the
   # first gated apply is a no-op beyond formatting.

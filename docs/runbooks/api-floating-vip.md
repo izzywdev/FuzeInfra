@@ -16,21 +16,25 @@ private VLAN IPs (`control-planes.tf`, `advertise-address`). **Only the external
 endpoint is the SPOF**, so a private-VLAN-only VIP would fix nothing that is not
 already fixed. The design here fixes the *external* path.
 
-## Design (hybrid — decided 2026-09-20)
+## Design (evolved 2026-09-22 to ACTIVE-ACTIVE; hybrid with a tunnel break-glass)
 
 Two independent external paths:
 
-1. **Primary — Contabo floating VIP + keepalived** (drop-in, no client change).
-   A Contabo **additional IP** is a floating public VIP. `keepalived`
-   (`helm/fuzeinfra/templates/api-vip-keepalived.yaml`) runs unicast on the 3
-   durable control planes; VRRP elects a MASTER **over the private VLAN**
-   (10.0.0.0/22 — Contabo public IPs are not a shared L2 segment, so multicast
-   VRRP would never converge). On promotion, `notify_master` calls the **Contabo
-   API to reassign the additional IP** to that node's instance, and keepalived
-   binds it locally on the public NIC (`virtual_ipaddress`). External clients keep
-   a normal kubeconfig pointed at `VIP:6443` — **nothing changes on the client
-   side**, which is the whole point (CD, workstation, and consumer
-   `cluster-query.yml` are untouched).
+1. **Primary — ACTIVE-ACTIVE per-node VIPs + round-robin DNS + keepalived.**
+   Each durable control plane owns **its own** Contabo additional IP (core-1
+   `13.140.184.164`, core-2 `13.140.185.42`, core-3 TBD) and serves the API on it;
+   `api.<domain>` round-robins A records across all the VIPs so external kubectl /
+   CD / consumers **load-balance across every live node**. `keepalived`
+   (`helm/fuzeinfra/templates/api-vip-keepalived.yaml`) runs unicast on the durable
+   control planes over the **private VLAN** (public IPs are not a shared L2 segment)
+   with **one `vrrp_instance` per VIP**: the owning node is MASTER for its VIP
+   (`basePriority` + `ownVipBoost`), the rest BACKUP. If a node dies, the
+   highest-priority survivor adopts its VIP — `notify_master` reassigns that IP via
+   the Contabo VIP API (verified) and binds it locally — so the round-robin record
+   never resolves to a dead node. HA (failover) + LB (round-robin), using every IP.
+   Clients keep a normal kubeconfig; nothing changes on the client side.
+   (This superseded the original single-floating-VIP design once the owner chose
+   per-node IPs — a single floating VIP would have used only one of them.)
 
 2. **Break-glass — Cloudflare Tunnel TCP route** (survives a Contabo IP/network
    fault). A `tcp://kubernetes.default.svc:443` tunnel ingress rule
@@ -92,31 +96,32 @@ should not do on its own:
      forbidden here (`scripts/preflight_node_teardown.py`, "never wipe a node").
    So order it in the **Contabo Customer Control Panel → Add-on Manager**
    (~€3.50/mo, 1 per VPS) on a fuze-core node. There is no GitOps lever for this.
-2. **Confirm the additional-IP REASSIGNMENT write path.** The endpoint is the
-   Contabo **VIP API** (`/v1/vips`, verified against the api.contabo.com VIP tag) —
-   NOT `secondary-ips`, which does not exist:
-   - read: `GET /v1/vips/{ip}` → `.data[0].assignments[].resourceId`/`.resourceType`
-   - assign: `POST /v1/vips/{ip}/{resourceType}/{instanceId}` (no body)
-   - unassign: `DELETE /v1/vips/{ip}/{resourceType}/{instanceId}` (no body)
-
-   Two things stay unverified and MUST be confirmed on real hardware before
-   enabling (`contabo-check-failover-ip.yml` now does both — see its inputs):
-   - the `resourceType` literal (`instances` expected) — read it back from
-     `GET /v1/vips/{ip}` after one panel assignment, set `apiVip.contabo.resourceType`;
-   - that a failover reassignment actually moves the IP provider-side (run the
-     probe's write round-trip: assign to a test instance, then back). `notify.sh`
-     already does read→unassign(old)→assign(self), so it does not depend on the
-     unverified "single POST re-homes an assigned IP" semantic. Until the
-     round-trip is proven green, keep the feature off — failover would bind the VIP
-     locally but the provider might not route it.
-3. **Instance ids — DONE.** All three `apiVip.nodes[].instanceId` are filled and
-   confirmed from `GET /v1/compute/instances`: fuze-core-1 (vmi3383846) 203383846,
-   fuze-core-3 (mendys-worker-1) 203410214, fuze-core-2 (vmi3396106) 203396106.
-   Re-confirm the k8s node NAMES against `kubectl get nodes` at enable time (the
-   values key on k8s node name, which `control-planes.tf` still records as vmi*/
-   mendys-worker-1 — the fuze-core-N names are Contabo display names).
-4. **Seal `contabo-api-credentials`** into the `fuzeinfra` namespace — see
-   `deploy/sealed-secrets/contabo-api-credentials.yaml.template`.
+2. **Reassignment write path — DONE (verified live 2026-09-22, run 35718868309).**
+   Contabo **VIP API** (`/v1/vips`), confirmed by a green round-trip on
+   `13.140.184.164` (core-1↔core-2):
+   - read: `GET /v1/vips/{ip}` → `.data[0].resourceId` (holder, TOP-LEVEL field)
+   - unassign: `DELETE /v1/vips/{ip}/instances/{id}` → 200
+   - assign: `POST /v1/vips/{ip}/instances/{id}` **with `-d '{}'`** → 201
+   - PATH `resourceType` is **plural `instances`** (the API rejects `instance`;
+     the returned *field* is singular — different from the path). `notify.sh` does
+     read→unassign(old)→assign(self) and is fixed to match.
+3. **Instance ids + IPs — DONE.** `apiVip.nodes[].instanceId`: fuze-core-1
+   (vmi3383846) 203383846, fuze-core-3 (mendys-worker-1) 203410214, fuze-core-2
+   (vmi3396106) 203396106. `apiVip.vips[]`: core-1 `13.140.184.164`, core-2
+   `13.140.185.42` (core-3's IP TBD — owner buys after the 2-node setup verifies).
+   Re-confirm k8s node NAMES vs `kubectl get nodes` at enable time.
+4. **Seal `contabo-api-credentials` — via the workflow.** Run
+   `.github/workflows/seal-contabo-api-credentials.yml` (`gh workflow run
+   seal-contabo-api-credentials.yml`): it reads the Contabo creds already in repo
+   secrets, adds a fresh `KEEPALIVED_AUTH_PASS`, seals OFFLINE, and opens a PR with
+   the ciphertext — no plaintext leaves the runner. Merge before enabling; Argo
+   syncs it into the `contabo-api-credentials` Secret the DaemonSet reads.
+   (`deploy/sealed-secrets/contabo-api-credentials.yaml.template` documents the
+   manual equivalent.)
+4b. **A keepalived image with `bash`+`curl`+`jq`.** `apiVip.keepalived.image` must
+   point at an image that has all of them — the config renderer and `notify.sh`
+   need them, and a stock keepalived image does not. Build a small one or add the
+   tools; set the value before enabling.
 5. **Open `6443` on all 3 durable CPs' public interface — codified, operator-applied.**
    Only the primary has it today. `terraform/contabo/api-vip-firewall.tf` adds the
    `ufw allow 6443/tcp` rule to all three, but it is double-gated on

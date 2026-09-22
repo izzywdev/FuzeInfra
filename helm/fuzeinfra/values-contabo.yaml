@@ -510,52 +510,65 @@ airflow:
     requests: {cpu: 500m, memory: 512Mi}
     limits: {cpu: "2", memory: 1536Mi}
 # ---------------------------------------------------------------------------
-# API floating-VIP HA (prod). See values.yaml for the full contract and
-# docs/runbooks/api-floating-vip.md for the mechanism + preconditions.
+# API ACTIVE-ACTIVE VIP HA + load balancing (prod). See values.yaml for the
+# contract and docs/runbooks/api-floating-vip.md for mechanism + preconditions.
 #
-# STILL GATED OFF. Flip enabled -> true ONLY after the runbook's preconditions
-# are met: (1) the Contabo additional IP is ordered and its address set below;
-# (2) the two missing instanceIds are filled; (3) the reassignment WRITE endpoint
-# is confirmed and set in contabo.reassignPath; (4) the contabo-api-credentials
-# SealedSecret exists in the fuzeinfra namespace; (5) 6443 is open on all three
-# durable CPs' public interface. Enabling with any of these missing is a no-op at
-# best (helm `fail` on empty address) or a non-converging VRRP at worst.
+# STILL GATED OFF. Flip enabled -> true ONLY after: (1) each core node's additional
+# IP is ordered (panel) and listed under vips below with its owning node; (2) the
+# contabo-api-credentials SealedSecret exists in the fuzeinfra namespace; (3) 6443
+# is open on all durable CPs' public interface + the VIPs are in every apiserver's
+# tls-san (terraform/contabo, workstation apply); (4) apiVip.keepalived.image is an
+# image that actually contains keepalived + bash + curl + jq.
 #
-# PRIORITY ORDER MUST MATCH scripts/label-durable-nodes.sh: the monitoring node
-# (fuzeinfra.io/role=monitoring = vmi3396106 / fuze-core-2) is LAST.
+# VERIFIED live 2026-09-22 (probe run 35718868309): reassignment works via
+# POST/DELETE /v1/vips/{ip}/instances/{id} (plural, POST body -d '{}').
+#
+# PRIORITY: basePriority keeps the monitoring node (fuzeinfra.io/role=monitoring =
+# vmi3396106 / fuze-core-2) LOWEST, so it is LAST to adopt a peer's VIP.
 apiVip:
   enabled: false
-  address: ""              # <- the ordered Contabo additional IP, e.g. "203.0.113.10"
-  interface: "eth0"        # public NIC (confirm on the nodes; may be ens/eth)
+  interface: "eth0"        # public NIC each node binds its own VIP on
   vrrp:
-    interface: "eth1"      # private VLAN NIC (10.0.0.0/22)
-    routerId: 51
+    interface: "eth1"      # private VLAN NIC (10.0.0.0/22) for VRRP adverts
+    ownVipBoost: 100
   authPassSecret:
     name: "contabo-api-credentials"
     key: "KEEPALIVED_AUTH_PASS"
+  keepalived:
+    # Must contain keepalived + bash + curl + jq (see values.yaml note).
+    image: "ghcr.io/izzywdev/fuzeinfra-keepalived:latest"
   contabo:
     secretName: "contabo-api-credentials"
-    # /v1/vips/{ip}/{resourceType}/{instanceId} — confirm this literal via
-    # GET /v1/vips/{ip} once the IP is owned (contabo-check-failover-ip.yml).
-    resourceType: "instances"
+    resourceType: "instances"   # VERIFIED plural path literal
+  dns:
+    enabled: true               # api.prod.fuzefront.com round-robin across the VIPs
+    hostnameLabel: "api"
+  # One per additional IP (confirmed live: core-1 -> .164, core-2 -> .42).
+  vips:
+    - address: "13.140.184.164"
+      primaryNode: vmi3383846     # fuze-core-1
+      routerId: 51
+    - address: "13.140.185.42"
+      primaryNode: vmi3396106     # fuze-core-2 (monitoring — holds its OWN vip)
+      routerId: 52
+    # core-3 (mendys-worker-1) — add after the owner buys its IP:
+    # - address: "<core-3 additional IP>"
+    #   primaryNode: mendys-worker-1
+    #   routerId: 53
+  # basePriority: monitoring node LOWEST (last to adopt a peer's VIP).
   nodes:
-    # fuze-core-1 (primary) — instanceId confirmed via the probe workflow.
-    - name: vmi3383846
-      priority: 200
+    - name: vmi3383846            # fuze-core-1
       peerIp: "10.0.0.6"
       instanceId: "203383846"
-    # fuze-core-3 (k8s node mendys-worker-1). instanceId confirmed via the probe's
-    # instance listing (run 35689294699): displayName fuze-core-3 -> 203410214.
-    - name: mendys-worker-1
-      priority: 150
+      basePriority: 150
+    - name: mendys-worker-1       # fuze-core-3
       peerIp: "10.0.0.3"
       instanceId: "203410214"
-    # fuze-core-2 (monitoring, k8s node vmi3396106) — LOWEST priority.
-    # instanceId confirmed via the same probe: displayName fuze-core-2 -> 203396106.
-    - name: vmi3396106
-      priority: 100
+      basePriority: 140
+    - name: vmi3396106            # fuze-core-2 (monitoring)
       peerIp: "10.0.0.2"
       instanceId: "203396106"
+      basePriority: 100
 
 # Cloudflare tunnel: all traffic enters via the named tunnel; no host-level
 # ports 80/443 need to be open.  The tunnel token lives in fuzeinfra-secrets

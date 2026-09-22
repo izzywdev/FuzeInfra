@@ -1016,43 +1016,43 @@ nodeExporter:
 # Uses docker.io/busybox (not GHCR) so the DaemonSet itself is not affected
 # by GHCR pull failures on nodes that haven't been patched yet.
 # ---------------------------------------------------------------------------
-# API floating-VIP high availability (helm/fuzeinfra/templates/api-vip-keepalived.yaml,
-# docs/runbooks/api-floating-vip.md).
+# API ACTIVE-ACTIVE VIP high availability + load balancing
+# (helm/fuzeinfra/templates/api-vip-keepalived.yaml, docs/runbooks/api-floating-vip.md).
 #
-# Unicast keepalived on the durable control planes elects a MASTER over the
-# PRIVATE VLAN; on promotion, notify_master reassigns a Contabo "additional IP"
-# (the floating VIP) to that node via the Contabo API, and keepalived binds it
-# locally on the public interface. External kubectl/CD/consumers keep a normal
-# kubeconfig pointed at VIP:6443 with no client change.
+# Each durable control plane owns its OWN Contabo additional IP (a VIP) and answers
+# the API on it; api.<domain> round-robins across all VIPs (Terraform) so external
+# kubectl/CD/consumers load-balance across all live nodes. keepalived runs one
+# vrrp_instance PER VIP: the owning node is MASTER (basePriority + ownVipBoost), the
+# rest BACKUP. If a node dies the highest-priority survivor adopts its VIP —
+# notify_master reassigns that IP via the Contabo VIP API and binds it locally — so
+# the round-robin record never points at a dead node. HA + LB, using every IP.
 #
-# GATED OFF by default and EMPTY here (base values). All prod specifics — the
-# VIP address, the per-node instance ids / VLAN peer IPs / priorities, and the
-# reassignment endpoint once confirmed — live in values-contabo.yaml, so this
-# base file renders nothing. See the runbook's Preconditions before enabling
-# (the Contabo additional-IP reassignment WRITE path must be confirmed first;
-# the read side is probed by .github/workflows/contabo-check-failover-ip.yml).
+# GATED OFF by default and EMPTY here (base values). All prod specifics — the VIP
+# addresses, per-node instance ids / VLAN peer IPs / base priorities — live in
+# values-contabo.yaml. See the runbook's Preconditions before enabling.
 apiVip:
   enabled: false
-  # The Contabo additional IP used as the floating VIP, e.g. "203.0.113.10".
-  address: ""
-  # Public interface the VIP is bound on when this node is MASTER.
+  # Public interface each node binds its own VIP on.
   interface: "eth0"
   vrrp:
     # Private-VLAN interface VRRP adverts travel on (unicast, never the public net).
     interface: "eth1"
-    routerId: 51
+    # Priority the OWNING node adds for its own VIP so it wins MASTER when up.
+    ownVipBoost: 100
   # VRRP shared secret. Prefer authPassSecret; authPass is a plaintext fallback.
   authPass: ""
   authPassSecret:
     name: ""
     key: "KEEPALIVED_AUTH_PASS"
   keepalived:
-    image: "osixia/keepalived:2.0.20"
+    # IMPORTANT: the image MUST contain keepalived + bash + curl + jq — both the
+    # config renderer and notify.sh (Contabo reassignment at failover) need them.
+    # A stock keepalived image does NOT; build a small one or add curl/jq. See the
+    # runbook's Preconditions.
+    image: "ghcr.io/izzywdev/fuzeinfra-keepalived:latest"
     imagePullPolicy: IfNotPresent
-  # Contabo API credentials for notify_master's reassignment. A SealedSecret in
-  # the fuzeinfra namespace (deploy/sealed-secrets/contabo-api-credentials.yaml,
-  # sealed from the same creds the autoscaler holds — cross-namespace secrets are
-  # not readable, so keepalived gets its own copy).
+  # Contabo API credentials for the failover reassignment. A SealedSecret in the
+  # fuzeinfra namespace (deploy/sealed-secrets/contabo-api-credentials.yaml).
   contabo:
     secretName: "contabo-api-credentials"
     keys:
@@ -1060,21 +1060,28 @@ apiVip:
       clientSecret: "CONTABO_CLIENT_SECRET"
       apiUser: "CONTABO_API_USER"
       apiPassword: "CONTABO_API_PASSWORD"
-    # Contabo VIP-API resource-type literal in the assign/unassign path
-    # /v1/vips/{ip}/{resourceType}/{instanceId}. "instances" is expected; confirm
-    # once via GET /v1/vips/{ip} (assignments[].resourceType echoes the exact
-    # literal) before enabling — see the runbook.
+    # VIP-API path literal: /v1/vips/{ip}/{resourceType}/{instanceId}. VERIFIED
+    # 2026-09-22: it is the PLURAL "instances" (the API rejects "instance").
     resourceType: "instances"
-  # apiserver liveness the VRRP health-check curls on loopback.
+  # apiserver liveness the per-VIP VRRP health-check curls on loopback.
   healthCheck:
     port: 6443
     path: "/livez"
-  # Per-node table. Priorities MUST keep the monitoring node last, consistent with
-  # scripts/label-durable-nodes.sh. Empty here; populated in values-contabo.yaml.
-  #   - name: <k8s node name>
-  #     priority: <higher wins; monitoring node lowest>
-  #     peerIp: <this node's private VLAN IP>
+  # api.<domain> round-robin A records across the VIPs (Terraform api-floating-vip.tf).
+  dns:
+    enabled: false
+    hostnameLabel: "api"
+  # One entry per additional IP: which node primarily holds it + a unique VRRP id.
+  #   - address: "<additional IP>"
+  #     primaryNode: "<k8s node name that owns it>"
+  #     routerId: <unique 1-255 per VIP>
+  vips: []
+  # One entry per core node. basePriority MUST keep the monitoring node LOWEST
+  # (last to adopt a peer's VIP), consistent with scripts/label-durable-nodes.sh.
+  #   - name: "<k8s node name>"
+  #     peerIp: "<private VLAN IP>"
   #     instanceId: "<Contabo numeric instance id>"
+  #     basePriority: <higher = adopts peers' VIPs sooner; monitoring lowest>
   nodes: []
 
 nodeConfigurator:
