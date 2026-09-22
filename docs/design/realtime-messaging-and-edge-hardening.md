@@ -135,7 +135,7 @@ From the same run — `<none>` in the READY column means zero ready replicas:
 | `fuzehub` | `fuzehub-frontend-mfe` | 0/2 | |
 | `fuzebi` | `fuzebi` | 0/2 | |
 
-Out of scope for this design, but recorded here because it is evidence for §7.4:
+Out of scope for this design, but recorded here because it is the evidence for S7 (§5):
 nothing alerts on "a publicly advertised host has no ready backend."
 
 ### 2.8 What already exists that this design absorbs
@@ -355,31 +355,222 @@ S4 stops it being recreated.
 
 ## 6. Migration sequence
 
-Each step is independently shippable and leaves the system better than it found it.
+Each step is independently shippable and leaves the system better than it found
+it. Step ids (`M1`…`M10`) are referenced by the acceptance criteria in §7.
 
-1. **S2 — default-deny NetworkPolicy.** No new services. Largest risk reduction per
-   line changed. Ship in audit mode first if the CNI supports it.
-2. **S6 — Traefik to 2 replicas + PDB.** One `HelmChartConfig` edit. Removes the
-   ingress SPOF before anything depends on long-lived connections through it.
-3. **S3 + S4 — de-expose the datastore hostnames and add the collision check.**
-4. **Device registry in FuzeFront** (§4.4). Needed regardless of transport, so it
-   is not blocked on any Centrifugo decision. Delegated to FuzeFront via `@fuze`.
-5. **FuzeFront auth proxy + own-JWKS token issuance** (§4.3 a/b/c), then **S5**.
-   Gates Centrifugo, which must validate FuzeFront tokens, not Authentik's.
-6. **`fuzeedge` namespace + Centrifugo** (§4.1, §4.5), Redis engine, Kafka consumer.
-7. **Migrate `a2a-relay` onto Centrifugo and delete it** (S1). This is the proof
-   case: a real WebSocket workload that is currently a `replicas: 1` SPOF with total
-   session loss on restart becomes HA as a side effect.
-8. **Node pool for `fuzeedge`** (§4.5 step 3), with the durable toleration removed.
-9. Migrate `mendys-realtime`, `fuzefront-chat-service`,
-   `fuzefront-notification-service` (§2.8) onto the shared tier.
+- **M1 — S2, default-deny NetworkPolicy.** No new services. Largest risk reduction
+  per line changed. Ship policies for one namespace at a time, `fuzeinfra` last.
+- **M2 — S6, Traefik to 2 replicas + PDB.** One `HelmChartConfig` edit. Removes
+  the ingress SPOF before anything depends on long-lived connections through it.
+- **M3 — S3 + S4, de-expose the datastore hostnames and add the collision check.**
+  Do them together: S3 removes the exposure that exists, S4 stops it being
+  recreated through the consumer auto-PR path.
+- **M4 — S7, alert on a public host with zero ready backends.** Independent of
+  everything else; §2.7 is the standing evidence that nothing watches this today.
+- **M5 — device registry in FuzeFront** (§4.4). Needed regardless of transport, so
+  it is not blocked on any Centrifugo decision. Delegated to FuzeFront via `@fuze`.
+- **M6 — FuzeFront auth proxy + own-JWKS token issuance** (§4.3 a/b/c), then **S5**.
+  Gates M7: Centrifugo must validate FuzeFront tokens, not Authentik's.
+- **M7 — `fuzeedge` namespace + Centrifugo** (§4.1, §4.5), Redis engine, Kafka
+  consumer.
+- **M8 — migrate `a2a-relay` onto Centrifugo and delete it** (S1). The proof case:
+  a real WebSocket workload that is currently a `replicas: 1` SPOF with total
+  session loss on restart becomes HA as a side effect.
+- **M9 — node pool for `fuzeedge`** (§4.5 step 3), with the durable toleration
+  removed.
+- **M10 — migrate `mendys-realtime`, `fuzefront-chat-service`,
+  `fuzefront-notification-service`** (§2.8) onto the shared tier.
 
-Steps 1–3 are pure hardening and need no decision from step 4 onward. They should
-not wait.
+M1–M4 are pure hardening and need no decision from M5 onward. They should not wait.
 
 ---
 
-## 7. Open questions
+## 7. Acceptance criteria
+
+Each criterion is written to be **falsifiable** and names how it is proven. Two
+rules apply throughout, because they are the ones most often skipped:
+
+- **A guard that has never failed is not a guard.** Every check added here is
+  accepted only after it has been shown rejecting a crafted bad input, not merely
+  passing on today's good input.
+- **Prod is read-only from any session** (CLAUDE.md). Where a criterion needs
+  in-cluster execution rather than a read, it is proven by a short-lived probe
+  workload shipped through Git and read back with `kubectl logs` via
+  `cluster-query.yml` — never by an interactive `exec`.
+
+### M1 — default-deny NetworkPolicy
+
+- **AC1.1** A default-deny ingress **and** egress `NetworkPolicy` exists in
+  `fuzeinfra` and `fuzeedge`, rendered by the chart, not hand-applied.
+  *Proof:* `cluster-query` → `-n fuzeinfra get networkpolicy` and
+  `-n fuzeedge get networkpolicy`; the manifests are in `helm/fuzeinfra/templates/`.
+- **AC1.2** Enforcement is demonstrated, not assumed. A probe pod without an allow
+  rule cannot open TCP to `postgres:5432`; a probe pod with one can.
+  *Proof:* a probe Job shipped via Git that attempts both connects and logs the
+  outcome; read with `cluster-query` → `-n <ns> logs job/<probe>`. **This is the
+  criterion that fails loudly if NP enforcement is off** (§8 O2).
+- **AC1.3** No regression in existing cross-service traffic: Grafana still queries
+  Prometheus, Loki and Tempo; Airflow still reaches Postgres; every consumer app
+  still reaches its datastore.
+  *Proof:* dashboards render; `python scripts-tools/run_tests.py` passes; no new
+  `CrashLoopBackOff` or readiness regressions in `get pods -A`.
+- **AC1.4** Rollback is a single `git revert` that Argo syncs, with no manual
+  cluster step.
+
+### M2 — Traefik HA
+
+- **AC2.1** `-n kube-system get deploy traefik` shows **2/2 ready**.
+- **AC2.2** A PDB with `minAvailable: 1` exists for it.
+- **AC2.3** The two pods are on different nodes.
+  *Proof:* `-n kube-system get pods -o wide`.
+- **AC2.4** A rolling restart of Traefik produces **zero 5xx** at the edge.
+  *Proof:* an external request loop against a public host across the restart
+  window, run from outside the cluster (CI or a workstation) — `cluster-query`'s
+  single `curl_url` probe is not sufficient for this one and must not be
+  substituted for it.
+- **AC2.5** The replica count is declarative and survives a k3s restart — it lives
+  in `argocd/cluster-bootstrap/traefik-clusterip.yaml`, not in a live edit.
+
+### M3 — de-expose datastores + collision guard
+
+- **AC3.1** `elasticsearch`, `chromadb`, `neo4j` and `neo4j-bolt` no longer appear
+  as hosts on any Ingress.
+  *Proof:* `-n fuzeinfra get ingress -o yaml` contains none of them; a `curl_url`
+  probe against each host returns a Traefik 404 / no-route, **not** a datastore
+  response body.
+- **AC3.2** Operators keep a documented access path (port-forward runbook) and it
+  is committed under `docs/`. De-exposing without a replacement path is not
+  accepted — it just gets reverted under pressure later.
+- **AC3.3** The `consumers.tfvars` collision check **rejects a crafted colliding
+  entry** (e.g. a consumer declaring the label `elasticsearch`) and fails that PR.
+  Passing on the current file is not evidence.
+- **AC3.4** An offline unit test covers the collision logic, in the style of
+  `tests/test_cluster_query_guard.py`, and runs in `test-infrastructure`.
+
+### M4 — zero-ready-backend alerting
+
+- **AC4.1** A Prometheus rule fires when a deployment behind a `bypass` host has
+  zero ready replicas, and routes to Alertmanager.
+- **AC4.2** The rule is validated against the **live** §2.7 condition: it fires for
+  `fuzekeys-backend` and `fuzepicker-backend` in their current state, or against a
+  replayed series if they have recovered by then. A rule that has never fired on a
+  real outage is not accepted.
+- **AC4.3** The host→deployment mapping is derived from `public_app_hosts`, not
+  hand-maintained, so a new consumer host is covered without a follow-up edit.
+
+### M5 — device registry + `maxDevices`
+
+- **AC5.1** `devices` and `identity_links` tables exist via an ordered, idempotent
+  migration; users are keyed on a FuzeFront UUID, never the IdP `sub`.
+- **AC5.2** With `maxDevices = N`, the (N+1)th device is refused **at token
+  issuance** with a distinct, documented error code, and the client is offered
+  eviction.
+- **AC5.3** Evicting a device revokes its refresh token; its next refresh fails.
+- **AC5.4** **The negative test that proves the design decision:** a backgrounded
+  mobile app holding **no** socket still counts toward the cap. If this passes
+  while the device has no live connection, enforcement is genuinely at issuance.
+- **AC5.5** The connection tier can read the registry through a documented API and
+  has **no write path** to it.
+  *Proof:* the credential it holds is read-only; a write attempt is rejected.
+
+### M6 — auth proxy + FuzeFront-issued tokens
+
+- **AC6.1** A complete login flow contains **zero** references to the IdP hostname.
+  *Proof:* the full redirect chain / HAR of a real login, inspected for any
+  `authentik.` host. This is the criterion; a code review is not.
+- **AC6.2** FuzeFront publishes its own JWKS at a stable URL and its tokens carry
+  `iss` = FuzeFront.
+- **AC6.3** No service outside FuzeFront holds an IdP issuer or JWKS URL.
+  *Proof:* a grep across the family repos returns no hits outside FuzeFront.
+- **AC6.4** **The vendor-independence test, and the only real proof of C3:** in
+  kind/local, repoint the proxy at a throwaway Keycloak, complete a login, and show
+  the diff required is confined to FuzeFront. Until this runs, C3 is an intention,
+  not a property.
+- **AC6.5** `cloudflare_zero_trust_access_application.authentik_oidc_endpoints` and
+  its bypass policy are deleted from terraform, and
+  `https://<authentik_host>/application/o/...` returns the CF Access interstitial
+  rather than an OIDC response. **Ordering is load-bearing:** this criterion is
+  only evaluated after AC6.1–AC6.4 pass, because deleting it earlier breaks login.
+
+### M7 — Centrifugo
+
+- **AC7.1** Running in `fuzeedge`, **≥2 replicas**, Redis engine, PDB
+  `minAvailable: 1`, no `replicas: 1` anywhere in the tier.
+- **AC7.2** A token **not** signed by FuzeFront is refused; one that is, is
+  accepted. Both directions tested.
+- **AC7.3** **Scale-out:** two clients connected to *different* pods both receive a
+  message published once. This is what proves the backplane, and it is impossible
+  to pass accidentally at one replica.
+- **AC7.4** **Recovery:** kill the pod holding a client's connection mid-stream.
+  The client reconnects and receives every message published during the gap,
+  **exactly once and in order**. Losing one, or delivering one twice, fails.
+- **AC7.5** **Rollout:** a rolling restart with ≥100 live connections ends with all
+  of them reconnected, zero message loss, and reconnects **spread across the
+  backoff window** rather than arriving as one spike.
+- **AC7.6** **Multi-device:** the same user on two devices — both receive the
+  event, and the originating device does not receive a duplicate.
+- **AC7.7** **Kafka path:** an event published to the existing topic reaches a
+  connected client, with no publisher-side change beyond what already exists.
+- **AC7.8** No sticky-session configuration exists anywhere on the path — no
+  Traefik sticky service, no `sessionAffinity`, long-polling disabled. If anything
+  only works with affinity on, §4.2 has not actually been implemented.
+
+### M8 — retire `a2a-relay`
+
+- **AC8.1** The `a2a-relay` Deployment and its ConfigMap are gone from the chart
+  and from the cluster.
+- **AC8.2** An **unauthenticated** WSS connect to the replacement is refused. The
+  open-by-default v0 posture is gone.
+- **AC8.3** A2A peer messaging still works end to end across two sessions.
+- **AC8.4** Killing a pod in the new tier no longer loses peer sessions — peers
+  reconnect and resume. This is the regression that `PEERS = {}` guaranteed.
+- **AC8.5** Nothing in the replacement path `pip install`s at container start.
+
+### M9 — edge node pool
+
+- **AC9.1** `-n fuzeedge get pods -o wide` shows every pod on an edge-labelled node.
+- **AC9.2** Edge workloads no longer carry the durable toleration.
+- **AC9.3** No stateful workload is scheduled onto an edge node.
+
+### M10 — migrate the existing realtime services
+
+- **AC10.1** `mendys-realtime`, `fuzefront-chat-service` and
+  `fuzefront-notification-service` run against the shared tier at **≥2 replicas**.
+- **AC10.2** No in-memory connection registry survives anywhere.
+  *Proof:* a grep for the process-local-map pattern across the migrated services
+  returns nothing.
+
+### Overall exit criteria
+
+The programme is done when all of the following hold simultaneously:
+
+1. Every criterion above passes, with M1–M4 verifiable independently of M5–M10.
+2. No pod in `fuzeinfra` or `fuzeedge` can reach a datastore it has no explicit
+   allow rule for.
+3. No internet-reachable host serves a datastore API or an unauthenticated
+   WebSocket.
+4. No service outside FuzeFront knows the IdP exists.
+5. Killing any single pod in the connection tier loses no messages for any client.
+6. `docs/consuming-repos/` documents how a consumer connects a client and publishes
+   an event, and the doc's examples actually run (`doc-validity`).
+
+### Non-acceptance — stop and re-plan if
+
+- **AC1.2 fails**, i.e. NetworkPolicy is not enforced. The §4.5 ordering depends on
+  it; without enforcement, M1 is theatre and the namespace/node-pool steps inherit a
+  false sense of isolation.
+- **AC7.4 or AC7.5 fails** after reasonable tuning. If the adopted tier cannot
+  survive a pod restart without losing messages, it has not solved the problem that
+  motivated replacing `a2a-relay`, and build-vs-adopt is reopened rather than
+  papered over with client-side retries.
+- **AC6.4 fails.** If swapping the IdP still requires changes outside FuzeFront,
+  the abstraction is not real and M6 is not done, whatever the proxy looks like.
+- Any step needs a manual `kubectl` mutation to hold its state. That contradicts
+  the GitOps invariant and means the change is not actually declarative.
+
+---
+
+## 8. Open questions
 
 - **O1** Does Authentik provide a native per-user concurrent-session cap? Affects
   how much of §4.4's eviction mechanics FuzeFront builds. Does not change the
@@ -402,7 +593,7 @@ not wait.
 
 ---
 
-## 8. Appendix — verification
+## 9. Appendix — verification
 
 Claims in §2 were verified against prod rather than inferred:
 
