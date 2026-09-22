@@ -128,9 +128,13 @@ resource "null_resource" "control_plane_config" {
       "grep -vE \"^[[:space:]]*'\" \"$U\" > \"$U.new\" && mv \"$U.new\" \"$U\"",
       "systemctl daemon-reload",
       "systemctl restart k3s",
-      "sleep 30",
+      # POLL for readiness — a full config rewrite can take well over a fixed 30s
+      # to reach 'active', and `systemctl is-active` returns exit 3 for
+      # 'activating', which under set -e aborts AFTER the node is already fine.
+      "for i in $(seq 1 40); do systemctl is-active --quiet k3s && break; sleep 5; done",
       "systemctl is-active k3s",
-      # Fail loudly rather than move on to the next control plane.
+      # Then wait for the apiserver's own /healthz, retried while it warms up.
+      "for i in $(seq 1 30); do k3s kubectl get --raw /healthz >/dev/null 2>&1 && break; sleep 3; done",
       "k3s kubectl get --raw /healthz",
     ]
   }
