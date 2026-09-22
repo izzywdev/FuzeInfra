@@ -414,6 +414,54 @@ def _currently_unknown_node_names(nodes: dict) -> set[str]:
 
 DARK_STATE_RE = re.compile(r"<!-- dark-node-state: (\{.*?\}) -->", re.S)
 DARK_NODE_KEY_RE = re.compile(r"<!-- watchdog-key: dark-node:(.+?) -->")
+ARGO_KEY_RE = re.compile(r"<!-- watchdog-key: stuck-argo-op:(.+?) -->")
+
+
+def argo_terminated_marker(app: str, started_at: str | None) -> str:
+    """Records WHICH OPERATION a terminate was dispatched for.
+
+    Keyed on the op's startedAt, not just the app. A terminate that fails leaves
+    the same op Running, and must not be re-dispatched every 15 minutes. But a
+    NEW op that wedges later (new startedAt) must be terminated again even while
+    the app's issue is still open — the 2026-09-15 freeze was exactly that case:
+    deduplicated against the previous incident's never-closed issue (#776) and
+    therefore never acted on, for five days.
+    """
+    return f"<!-- argo-terminated: {app}@{started_at} -->"
+
+
+def close_resolved_argo_issues(
+    repo: str, open_issues: list[dict], stuck_apps: set[str], applications: dict
+) -> tuple[list[dict], list[str]]:
+    """Close tracked stuck-argo-op issues whose app is no longer stuck.
+
+    Without this, an Argo issue stayed open forever after its incident resolved,
+    and the NEXT wedge of the same app deduplicated against it and was silently
+    swallowed (see argo_terminated_marker). Returns (still_open, summary_lines).
+
+    Only trusts "no longer stuck" when the cluster actually returned an
+    Application list — an empty/malformed response must never read as
+    "everything recovered" and mass-close real incidents.
+    """
+    if not isinstance(applications.get("items"), list):
+        return list(open_issues), []
+    still_open: list[dict] = []
+    lines: list[str] = []
+    for issue in open_issues:
+        match = ARGO_KEY_RE.search(issue.get("body") or "")
+        if match is None or match.group(1) in stuck_apps:
+            still_open.append(issue)
+            continue
+        app = match.group(1)
+        comment_issue(
+            repo, issue["number"],
+            f"✅ `{app}` no longer has an Argo operation stuck in `phase=Running` — "
+            "closing so the next wedge of this app files and acts as a fresh "
+            "incident instead of deduplicating against this one.",
+        )
+        close_issue(repo, issue["number"])
+        lines.append(f"- `stuck-argo-op:{app}` — no longer stuck, closed {issue.get('url')}")
+    return still_open, lines
 
 DEFAULT_DARK_STATE: dict[str, Any] = {
     "reboot_attempts": 0,
@@ -1334,6 +1382,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     if not findings:
         lines.append("No stuck Argo operation, chronic crash loop, stuck ContainerCreating "
                      "or PVC above threshold.")
+        # A clean run is precisely when a resolved Argo issue must close: this
+        # early return used to skip all issue handling, which is how #776 sat
+        # open for 20 days after its incident and swallowed the next one.
+        if args.repo and not args.dry_run:
+            _, closed = close_resolved_argo_issues(
+                args.repo, list_open_watchdog_issues(args.repo, label), set(), applications
+            )
+            lines += closed
         print("\n".join(lines))
         write_summary("\n".join(lines))
         return 0
@@ -1355,9 +1411,47 @@ def main(argv: Sequence[str] | None = None) -> int:
         raise GitHubError("--repo (or GITHUB_REPOSITORY) is required to file issues")
 
     open_issues = list_open_watchdog_issues(args.repo, label)
+    stuck_apps = {f.subject for f in findings if f.kind == KIND_ARGO}
+    open_issues, closed_lines = close_resolved_argo_issues(
+        args.repo, open_issues, stuck_apps, applications
+    )
+    lines += closed_lines
     new, duplicates = filter_new_findings(findings, open_issues, prefix)
     for finding, issue in duplicates:
         lines.append(f"- `{finding.key}` — already tracked by {issue.get('url')} (not re-filed)")
+
+    # --- stuck Argo op that is ALREADY tracked: still act on it. ---
+    # Auto-terminate used to run only for NEWLY filed findings, so an Argo wedge
+    # whose issue was already open was detected every 15 minutes and never
+    # terminated — observed 2026-09-15..20, 42 consecutive runs, while every
+    # prod deploy was frozen. Bounded by argo_terminated_marker: one terminate
+    # per distinct operation, never a re-dispatch loop against the same op.
+    argo_cfg_dup = config.get("argo_stuck_op") or {}
+    if argo_cfg_dup.get("auto_terminate", True):
+        workflow = argo_cfg_dup.get("auto_terminate_workflow", "argo-terminate-op.yml")
+        for finding, issue in duplicates:
+            if finding.kind != KIND_ARGO:
+                continue
+            marker = argo_terminated_marker(finding.subject, finding.facts.get("startedAt"))
+            if marker in (issue.get("body") or ""):
+                continue  # the issue was filed by the run that terminated this op
+            comments = list_issue_comments(args.repo, issue["number"])
+            if any(marker in (c.get("body") or "") for c in comments):
+                continue  # already terminated this exact operation once
+            dispatch_terminate_op(
+                args.repo, workflow, finding.subject,
+                argo_cfg_dup.get("auto_terminate_ref", "main"),
+            )
+            comment_issue(
+                args.repo, issue["number"],
+                f"🔁 Still wedged: {finding.summary}\n\n"
+                f"Dispatched `{workflow}` with `app={finding.subject}` for this operation "
+                f"(startedAt `{finding.facts.get('startedAt')}`). Blocking resource: "
+                f"`{finding.facts.get('message')}`. If it re-wedges on the same resource, "
+                "that resource can never become healthy — terminating again will not help; "
+                "fix or remove it in git.\n\n" + marker,
+            )
+            lines.append(f"- `{finding.key}` — already tracked; dispatched `{workflow}` ({issue.get('url')})")
 
     # --- dark-node recovery: close any tracked issue whose node is no longer
     # Ready=Unknown at all, regardless of what state the escalation ladder was
@@ -1429,9 +1523,18 @@ def main(argv: Sequence[str] | None = None) -> int:
     # backlog out over time (10 every 15 minutes files 55 within ~1.5h anyway);
     # the ceiling makes draining, not the clock, the thing that opens a slot.
     max_open = int(issues_cfg.get("max_open", 20))
-    slots = max(0, min(max_per_run, max_open - len(open_issues)))
     ordered = prioritize(new, issues_cfg.get("priority"))
-    to_file, overflow = ordered[:slots], ordered[slots:]
+    # A stuck Argo op is EXEMPT from the open-issue ceiling (still bounded by
+    # max_per_run). The ceiling exists to stop noise from muting the watchdog;
+    # applied to the one condition that freezes every prod deploy, it did the
+    # opposite: with 20 stuck-backup-pod issues open, slots == 0, so a fresh
+    # wedge would file nothing and — since terminate rides on filing — act on
+    # nothing. Prioritising Argo first could never help when there are no slots.
+    argo_new = [f for f in ordered if f.kind == KIND_ARGO][:max_per_run]
+    rest = [f for f in ordered if f.kind != KIND_ARGO]
+    rest_slots = max(0, min(max_per_run - len(argo_new), max_open - len(open_issues)))
+    to_file = argo_new + rest[:rest_slots]
+    overflow = [f for f in ordered if f not in to_file]
     if overflow:
         lines.append(
             f"- {len(overflow)} further condition(s) detected but NOT filed this run "
@@ -1456,7 +1559,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 f"already been Running past the "
                 f"{argo_cfg.get('running_minutes', 45)}m threshold. Terminating a stale op is "
                 "safe and reversible: Argo re-syncs from git, which is the desired state. "
-                "Nothing else was touched."
+                "Nothing else was touched.\n\n"
+                + argo_terminated_marker(finding.subject, finding.facts.get("startedAt"))
             )
         url = create_issue(
             args.repo, label, finding.title(prefix),
