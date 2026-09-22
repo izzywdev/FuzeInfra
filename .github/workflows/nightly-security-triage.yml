@@ -180,6 +180,46 @@ jobs:
             html_url: (.html_url // "")
           }]' alerts.json > norm.json
 
+          # --- Managed-path filter (issue #1001) ------------------------------------
+          # FuzeSDLC's governance-sync reconciles these paths back to the canonical on
+          # EVERY PR (FRAMEWORK_DIRS under agent-templates/ = schema, roles/_base, sync,
+          # providers; plus the vendored .github/actions, .claude/skills, .claude/agents
+          # dirs; plus two pinned single files). A fix committed here to any of them is
+          # reverted in the SAME PR before merge — see PR #1000: the autofix commit and
+          # the governance-sync revert net to a zero-line diff, yet the run reported
+          # `fix-PR-opened` (a false-positive success signal). Drop those alerts BEFORE
+          # they ever reach the triage matrix, so a consumer-repo PR is never opened for
+          # one; the real fix belongs upstream in FuzeSDLC.
+          MANAGED_PREFIXES='[
+            "agent-templates/schema/",
+            "agent-templates/roles/_base/",
+            "agent-templates/sync/",
+            "agent-templates/providers/",
+            ".github/actions/",
+            ".claude/skills/",
+            ".claude/agents/"
+          ]'
+          MANAGED_EXACT='[
+            ".fuze/repo-manifest.schema.json",
+            "governance/federation-contract-policy.json"
+          ]'
+
+          jq -c --argjson prefixes "$MANAGED_PREFIXES" --argjson exact "$MANAGED_EXACT" '
+            def is_managed:
+              (.path as $p | ($exact | index($p)) != null)
+              or (.path as $p | $prefixes | any(. as $pre | $p | startswith($pre)));
+            [.[] | select(is_managed)]
+          ' norm.json > managed.json
+          jq -c --argjson prefixes "$MANAGED_PREFIXES" --argjson exact "$MANAGED_EXACT" '
+            def is_managed:
+              (.path as $p | ($exact | index($p)) != null)
+              or (.path as $p | $prefixes | any(. as $pre | $p | startswith($pre)));
+            [.[] | select(is_managed | not)]
+          ' norm.json > norm.unmanaged.json
+          mv norm.unmanaged.json norm.json
+          MANAGED_COUNT=$(jq 'length' managed.json)
+          # --- End managed-path filter -----------------------------------------------
+
           # Partition into skipped (branch already exists) / actionable (capped) / deferred
           # (over the cap this run). Idempotency key is the deterministic branch name.
           actionable='[]'
@@ -211,11 +251,20 @@ jobs:
             echo ""
             echo "- Repository: \`${REPO}\`"
             echo "- Open code-scanning alerts: **${TOTAL}**"
+            echo "- FuzeSDLC-managed (dropped, fix upstream — not counted below): **${MANAGED_COUNT}**"
             echo "- Actionable this run (cap ${MAX}): **${count}**"
             echo "- Dry run: \`${DRY_RUN}\`"
             [ -n "$skipped" ] && echo "- Skipped (fix branch already exists): ${skipped}"
             [ -n "$deferred" ] && echo "- Deferred (over cap, will be picked up next run): ${deferred}"
             echo ""
+            if [ "$MANAGED_COUNT" -gt 0 ]; then
+              echo "### Upstream (FuzeSDLC-managed — fix in canonical, not here)"
+              echo ""
+              echo "governance-sync reconciles these paths back to the FuzeSDLC canonical on every PR, so an autofix PR opened here would be reverted to a zero-line diff (see issue #1001). File/land the fix upstream in FuzeSDLC instead — no consumer-repo PR is opened for these:"
+              echo ""
+              jq -r '.[] | "- #\(.number) `\(.rule_id)` — \(.path):\(.start_line) — \(.html_url)"' managed.json
+              echo ""
+            fi
             if [ "$count" -gt 0 ]; then
               if [ "$DRY_RUN" = "true" ]; then
                 echo "**Dry run** — the following alerts WOULD be triaged (no branch/LLM/PR):"
@@ -373,6 +422,7 @@ jobs:
           ALERT_NUMBER: ${{ matrix.alert.number }}
           RULE_ID: ${{ matrix.alert.rule_id }}
           BRANCH: ${{ steps.branch.outputs.name }}
+          BASE: ${{ github.event.repository.default_branch }}
           FCA_OUTCOME: ${{ steps.fca.outcome }}
           FCA_MODE: ${{ steps.fca.outputs.mode }}
           FCA_CONCLUSION: ${{ steps.fca.outputs.conclusion }}
@@ -386,9 +436,28 @@ jobs:
             PR_URL=$(gh pr list --repo "${{ github.repository }}" --head "$BRANCH" --state open --json url --jq '.[0].url' 2>/dev/null || true)
           fi
 
+          # A PR existing is NOT proof the fix survived: `chore(governance): reconcile
+          # managed files` can land on the SAME branch and revert the autofix commit
+          # before this step ever runs (issue #1001 / PR #1000 — a genuinely empty net
+          # diff still reported `fix-PR-opened`). Diff the pushed branch against base
+          # for real before believing a PR means a fix.
+          DIFF_EMPTY=""
+          if [ -n "$PR_URL" ]; then
+            git fetch origin "$BRANCH" >/dev/null 2>&1 || true
+            git fetch origin "$BASE" >/dev/null 2>&1 || true
+            if git diff --stat "origin/${BASE}...origin/${BRANCH}" 2>/dev/null | grep -q .; then
+              DIFF_EMPTY=false
+            else
+              DIFF_EMPTY=true
+            fi
+          fi
+
           if [ "${FCA_OUTCOME:-}" = "failure" ] || [ "${FCA_CONCLUSION:-}" = "failure" ]; then
             STATUS="FAILED"
             DETAIL="fuze-code-action failed (outcome=${FCA_OUTCOME:-?}, conclusion=${FCA_CONCLUSION:-?}) — see the step log. Not masked."
+          elif [ -n "$PR_URL" ] && [ "$DIFF_EMPTY" = "true" ]; then
+            STATUS="fix-reverted-by-governance-sync"
+            DETAIL="[$PR_URL]($PR_URL) — branch \`${BRANCH}\` is identical to \`${BASE}\` (net diff is empty), almost certainly because a governance-sync commit reconciled the edited file(s) back to the FuzeSDLC canonical on the same branch. This is NOT a fix; do not treat it as one."
           elif [ -n "$PR_URL" ]; then
             STATUS="fix-PR-opened"
             DETAIL="[$PR_URL]($PR_URL)"
@@ -404,3 +473,9 @@ jobs:
             echo ""
           } >> "$GITHUB_STEP_SUMMARY"
           echo "::notice title=nightly-security-triage::alert #${ALERT_NUMBER} ${RULE_ID}: ${STATUS}"
+
+          # Fail this matrix cell closed — a reverted-to-no-op PR must not read as success.
+          if [ "$STATUS" = "fix-reverted-by-governance-sync" ]; then
+            echo "::error title=nightly-security-triage::alert #${ALERT_NUMBER} ${RULE_ID}: PR ${PR_URL} was opened but governance-sync reverted the fix to a zero-line diff on the same branch. Failing this matrix cell instead of reporting fix-PR-opened. If the file is FuzeSDLC-managed, the enumerate-phase filter should have skipped this alert — check for a new/moved managed path."
+            exit 1
+          fi
