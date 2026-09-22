@@ -526,7 +526,7 @@ airflow:
 # PRIORITY: basePriority keeps the monitoring node (fuzeinfra.io/role=monitoring =
 # vmi3396106 / fuze-core-2) LOWEST, so it is LAST to adopt a peer's VIP.
 apiVip:
-  enabled: false
+  enabled: true
   interface: "eth0"        # public NIC each node binds its own VIP on
   vrrp:
     interface: "eth1"      # private VLAN NIC (10.0.0.0/22) for VRRP adverts
