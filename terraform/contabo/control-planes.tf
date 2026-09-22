@@ -39,26 +39,35 @@
 # ---------------------------------------------------------------------------
 
 locals {
-  # node_name must match the Kubernetes node name, which is NOT always the
-  # hostname (194.163.136.242 is host vmi3410214 but node mendys-worker-1).
+  # node_name MUST match the existing Kubernetes node name, which is NOT the
+  # Contabo hostname. The cluster nodes have long been named fuze-core-{1,2,3}
+  # (fuze-core-1 15d, fuze-core-2 15d, fuze-core-3 6d as of 2026-09-22); the
+  # Contabo host behind each is only its SSH target. An earlier version of this
+  # file set node_name to the HOSTNAME (vmi3383846 / mendys-worker-1 / vmi3396106);
+  # applying it made each kubelet re-register under the hostname, spawning a
+  # DUPLICATE control-plane,etcd Node object and knocking the real fuze-core-N
+  # object NotReady (etcd membership itself was unaffected — it keys on the
+  # on-disk member id, not node-name). node_name is pinned to fuze-core-N here so
+  # a gated re-apply re-adopts the correct Node objects. The map key is the
+  # Contabo host / SSH id; node_name is the k8s node name.
   control_planes = {
     vmi3383846 = {
       public_ip  = "161.97.118.134"
       private_ip = "10.0.0.6"
-      node_name  = "vmi3383846"
+      node_name  = "fuze-core-1"
       # The primary; joins the cluster via another member.
       server_url = "https://194.163.136.242:6443"
     }
     mendys-worker-1 = {
       public_ip  = "194.163.136.242"
       private_ip = "10.0.0.3"
-      node_name  = "mendys-worker-1"
+      node_name  = "fuze-core-3"
       server_url = "https://161.97.118.134:6443"
     }
     vmi3396106 = {
       public_ip  = "95.111.238.66"
       private_ip = "10.0.0.2"
-      node_name  = "vmi3396106"
+      node_name  = "fuze-core-2"
       server_url = "https://161.97.118.134:6443"
     }
   }
@@ -128,13 +137,14 @@ resource "null_resource" "control_plane_config" {
       "grep -vE \"^[[:space:]]*'\" \"$U\" > \"$U.new\" && mv \"$U.new\" \"$U\"",
       "systemctl daemon-reload",
       "systemctl restart k3s",
-      # POLL for readiness — a full config rewrite can take well over a fixed 30s
-      # to reach 'active', and `systemctl is-active` returns exit 3 for
-      # 'activating', which under set -e aborts AFTER the node is already fine.
-      "for i in $(seq 1 40); do systemctl is-active --quiet k3s && break; sleep 5; done",
+      # Poll instead of a fixed sleep: k3s can take >30s to become active on a
+      # slower node, and a fixed `sleep 30; is-active` then fails spuriously
+      # ('activating' → exit 3) even though the node comes up fine seconds later.
+      "i=0; while [ $i -lt 48 ]; do systemctl is-active --quiet k3s && break; i=$((i+1)); sleep 5; done",
       "systemctl is-active k3s",
-      # Then wait for the apiserver's own /healthz, retried while it warms up.
-      "for i in $(seq 1 30); do k3s kubectl get --raw /healthz >/dev/null 2>&1 && break; sleep 3; done",
+      # Fail loudly rather than move on to the next control plane. Retry the
+      # healthz read too — the apiserver lags k3s becoming active by a few s.
+      "i=0; while [ $i -lt 30 ]; do k3s kubectl get --raw /healthz 2>/dev/null | grep -q '^ok$' && break; i=$((i+1)); sleep 4; done",
       "k3s kubectl get --raw /healthz",
     ]
   }
