@@ -544,16 +544,18 @@ apiVip:
       priority: 200
       peerIp: "10.0.0.6"
       instanceId: "203383846"
-    # fuze-core-3 — TODO: fill instanceId from the Contabo API/panel before enabling.
+    # fuze-core-3 (k8s node mendys-worker-1). instanceId confirmed via the probe's
+    # instance listing (run 35689294699): displayName fuze-core-3 -> 203410214.
     - name: mendys-worker-1
       priority: 150
       peerIp: "10.0.0.3"
-      instanceId: "REPLACE_WITH_CONTABO_INSTANCE_ID"
-    # fuze-core-2 (monitoring) — LOWEST priority. TODO: fill instanceId.
+      instanceId: "203410214"
+    # fuze-core-2 (monitoring, k8s node vmi3396106) — LOWEST priority.
+    # instanceId confirmed via the same probe: displayName fuze-core-2 -> 203396106.
     - name: vmi3396106
       priority: 100
       peerIp: "10.0.0.2"
-      instanceId: "REPLACE_WITH_CONTABO_INSTANCE_ID"
+      instanceId: "203396106"
 
 # Cloudflare tunnel: all traffic enters via the named tunnel; no host-level
 # ports 80/443 need to be open.  The tunnel token lives in fuzeinfra-secrets

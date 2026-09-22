@@ -79,11 +79,19 @@ Everything ships **gated off**. Do **not** flip the gate until all of these hold
 each is a real purchase, secret, or host change that a GitOps CI apply cannot and
 should not do on its own:
 
-1. **Order the Contabo additional IP** (panel or API) and set
-   `apiVip.address` (+ `terraform api_vip_address`) to the assigned value. Do
-   **not** auto-order via Terraform — a bare Contabo apply must not silently buy an
-   IP, and it would collide with the add-on **1501** drift caution in
-   `modules/contabo-k3s-node/main.tf`.
+1. **Order the Contabo additional IP — PANEL ONLY (verified), a user action.**
+   Set `apiVip.address` (+ `terraform api_vip_address`) to the assigned value once
+   ordered. This CANNOT be done via Terraform/API for the existing control planes,
+   confirmed against the api.contabo.com spec + a live call (probe run 35688885132,
+   `GET /v1/vips` → `[]`):
+   - the `additionalIps` add-on exists **only on Create Instance**, not on
+     `POST /v1/compute/instances/{id}/upgrade` (which supports only
+     `privateNetworking`/`backup`), so it cannot be added to a running node;
+   - the VIP API (`/v1/vips`) has **no create/order** operation, only assign/unassign;
+   - the only create-time path would mean rebuilding a control plane, which is
+     forbidden here (`scripts/preflight_node_teardown.py`, "never wipe a node").
+   So order it in the **Contabo Customer Control Panel → Add-on Manager**
+   (~€3.50/mo, 1 per VPS) on a fuze-core node. There is no GitOps lever for this.
 2. **Confirm the additional-IP REASSIGNMENT write path.** The endpoint is the
    Contabo **VIP API** (`/v1/vips`, verified against the api.contabo.com VIP tag) —
    NOT `secondary-ips`, which does not exist:
@@ -101,15 +109,22 @@ should not do on its own:
      unverified "single POST re-homes an assigned IP" semantic. Until the
      round-trip is proven green, keep the feature off — failover would bind the VIP
      locally but the provider might not route it.
-3. **Fill the two missing `instanceId`s** in `values-contabo.yaml` (only
-   `vmi3383846` = `203383846` is known). Get them from
-   `GET /v1/compute/instances` (match by display name).
+3. **Instance ids — DONE.** All three `apiVip.nodes[].instanceId` are filled and
+   confirmed from `GET /v1/compute/instances`: fuze-core-1 (vmi3383846) 203383846,
+   fuze-core-3 (mendys-worker-1) 203410214, fuze-core-2 (vmi3396106) 203396106.
+   Re-confirm the k8s node NAMES against `kubectl get nodes` at enable time (the
+   values key on k8s node name, which `control-planes.tf` still records as vmi*/
+   mendys-worker-1 — the fuze-core-N names are Contabo display names).
 4. **Seal `contabo-api-credentials`** into the `fuzeinfra` namespace — see
    `deploy/sealed-secrets/contabo-api-credentials.yaml.template`.
-5. **Open `6443` on all 3 durable CPs' public interface.** Only the primary has it
-   today. For existing nodes (never wipe one — `scripts/preflight_node_teardown.py`):
-   `ufw allow 6443/tcp` on each of `fuze-core-2` and `fuze-core-3`. For
-   from-scratch rebuilds this must be added to the CP userdata firewall.
+5. **Open `6443` on all 3 durable CPs' public interface — codified, operator-applied.**
+   Only the primary has it today. `terraform/contabo/api-vip-firewall.tf` adds the
+   `ufw allow 6443/tcp` rule to all three, but it is double-gated on
+   `api_vip_enabled` AND `manage_control_plane_config`, and runs over SSH from a
+   workstation (CD holds no private key and must not open a public apiserver port).
+   It only adds a ufw rule — no k3s restart — so it is non-disruptive on a live CP.
+   Apply it in the same supervised run that flips the VIP gate. Never wipe a node
+   to do this (`scripts/preflight_node_teardown.py`).
 
 ## Enable sequence (GitOps — never hand-apply to prod)
 
