@@ -60,6 +60,26 @@ resource "contabo_instance" "node" {
   # cloud-init eth1 config, makes "configures eth1" and "paid for eth1" a
   # single atomic decision instead of two things that can silently drift.
   #
+  # Add-on id 560 -- same story as 1501 below, one drift cycle later: present
+  # live on BOTH fuzeinfra-ci-runner-1 and -2 (surfaced by PR #1143's plan,
+  # 2026-09-22, as an in-place change that would REMOVE it from both nodes),
+  # never declared here, id unnamed by Contabo's API or panel. Declared on the
+  # identical least-risk reading recorded for 1501: this only ever PRESERVES
+  # what is already live and paid for -- an unrelated PR's apply must not strip
+  # a paid add-on from the CI nodes as a side effect. Gated with its siblings
+  # so a deliberate private-networking disable releases the set together.
+  # Ordered FIRST because the provider diffs add_ons blocks positionally and
+  # the live API returns [560, 1477, 1501]; declaring them in live order is
+  # what makes the plan read clean instead of a three-way id rotation.
+  # Revisit if Contabo ever names this id.
+  dynamic "add_ons" {
+    for_each = local.private_network_enabled ? [1] : []
+    content {
+      id       = "560"
+      quantity = 1
+    }
+  }
+
   # Add-on id 1477 confirmed against the live API on 2026-09-03 while ordering
   # it for fuzeinfra-ci-runner-2 (POST /v1/compute/instances/{id}/upgrade
   # {"privateNetworking":{}} -> HTTP 200, {"addonsIds":[1477]}). The provider
