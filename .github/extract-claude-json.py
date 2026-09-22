@@ -1,7 +1,8 @@
 """Extracts the last {"action":...} JSON object from /tmp/claude_raw.txt."""
 import sys, json, re
 
-txt = open('/tmp/claude_raw.txt').read()
+with open('/tmp/claude_raw.txt') as _f:
+    txt = _f.read()
 matches = re.findall(r'\{[^{}]*"action"[^{}]*\}', txt, re.DOTALL)
 if matches:
     try:
