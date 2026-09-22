@@ -111,7 +111,9 @@ resource "null_resource" "control_plane_config" {
 
   provisioner "remote-exec" {
     inline = [
-      "set -euo pipefail",
+      # dash (the nodes' /bin/sh) rejects `set -o pipefail`; -eu is enough — the
+      # explicit `[ -n "$TOK" ]` check below handles a missing token.
+      "set -eu",
       "C=/etc/rancher/k3s/config.yaml",
       "U=/etc/systemd/system/k3s.service",
       "cp -f \"$C\" \"$C.bak-$(date +%s)\"",
