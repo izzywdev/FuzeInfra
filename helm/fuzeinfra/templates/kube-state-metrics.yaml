@@ -103,6 +103,23 @@ rules:
     resources:
       - volumes
     verbs: ["list", "watch"]
+  # Permission to LIST the CRs above is not permission to read the CRD that
+  # DEFINES them — the CustomResourceState collector resolves the Volume GVK
+  # against the CRD itself before it can watch anything. Without this, KSM
+  # fails cluster-scoped with:
+  #   customresourcedefinitions.apiextensions.k8s.io is forbidden: ...
+  #   cannot list CRDs at cluster scope
+  # and the longhorn_crd_volume_* series never appear — while the pod stays
+  # Ready and the rules above load with health=ok, so nothing surfaces the
+  # gap anywhere a dashboard would show it (#1049). CRDs are cluster-scoped
+  # objects, so this does widen the SA beyond the namespace; that is the
+  # standard requirement for KSM's CRS feature (matches upstream's own
+  # kube-state-metrics Helm chart RBAC for customResourceState), gated behind
+  # the same longhornVolumeMetrics.enabled flag as the grant above.
+  - apiGroups: ["apiextensions.k8s.io"]
+    resources:
+      - customresourcedefinitions
+    verbs: ["list", "watch"]
   {{- end }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
