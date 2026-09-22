@@ -112,7 +112,7 @@ jobs:
           fi
           echo "--- assign $TEST_IP -> $TARGET_ID ---"
           curl -sS -o /tmp/a.out -w 'assign HTTP %{http_code}\n' -X POST "${auth[@]}" \
-            -H "x-request-id: $(rid)" -H "Content-Type: application/json" "$vipbase/$RTYPE/$TARGET_ID"
+            -H "x-request-id: $(rid)" -H "Content-Type: application/json" -d '{}' "$vipbase/$RTYPE/$TARGET_ID"
           echo "  body: $(cat /tmp/a.out)"
           sleep 5
           NOW=$(holder); echo "holder after assign: ${NOW:-<none>}  (expected $TARGET_ID)"
@@ -123,7 +123,7 @@ jobs:
           sleep 3
           if [ -n "$ORIG" ]; then
             curl -sS -o /tmp/r.out -w 'reassign-original HTTP %{http_code}\n' -X POST "${auth[@]}" \
-              -H "x-request-id: $(rid)" -H "Content-Type: application/json" "$vipbase/$RTYPE/$ORIG"; echo "  body: $(cat /tmp/r.out)"
+              -H "x-request-id: $(rid)" -H "Content-Type: application/json" -d '{}' "$vipbase/$RTYPE/$ORIG"; echo "  body: $(cat /tmp/r.out)"
           fi
           FINAL=$(holder); echo "holder after restore: ${FINAL:-<none>}  (expected ${ORIG:-<none>})"
           echo "=== round-trip done ==="
