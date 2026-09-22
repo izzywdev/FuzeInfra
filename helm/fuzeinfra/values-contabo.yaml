@@ -554,10 +554,10 @@ apiVip:
     - address: "13.140.185.42"
       primaryNode: vmi3396106     # fuze-core-2 (monitoring — holds its OWN vip)
       routerId: 52
-    # core-3 (mendys-worker-1) — add after the owner buys its IP:
-    # - address: "<core-3 additional IP>"
-    #   primaryNode: mendys-worker-1
-    #   routerId: 53
+    # core-3 (mendys-worker-1) — additional IP purchased 2026-09-22.
+    - address: "13.140.185.205"
+      primaryNode: mendys-worker-1
+      routerId: 53
   # basePriority: monitoring node LOWEST (last to adopt a peer's VIP).
   nodes:
     - name: vmi3383846            # fuze-core-1
