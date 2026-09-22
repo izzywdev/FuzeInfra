@@ -51,7 +51,7 @@ Everything is gated OFF by default (`backups.enabled=false`).
     - /bin/sh
     - -c
     - |
-      set -eu
+      set -euo pipefail
       key="$(cat /backup/remote-key)"
       dest="/remote/$key"
       dir="$(dirname "$dest")"
@@ -80,7 +80,7 @@ Everything is gated OFF by default (`backups.enabled=false`).
     - /bin/sh
     - -c
     - |
-      set -eu
+      set -euo pipefail
       key="$(cat /backup/remote-key)"
       echo "Uploading /backup/dump.bin -> s3://$S3_BUCKET/$key"
       aws --endpoint-url "$S3_ENDPOINT" s3 cp /backup/dump.bin "s3://$S3_BUCKET/$key"
@@ -244,7 +244,7 @@ spec:
                 - /bin/sh
                 - -c
                 - |
-                  set -eu
+                  set -euo pipefail
                   ts="$(date -u +%Y%m%dT%H%M%SZ)"
                   {{- if eq .name "postgres" }}
                   # Full logical dump of every database + globals (roles/grants).
@@ -287,7 +287,20 @@ spec:
                     | gzip -c > /backup/dump.bin
                   echo "$PREFIX/neo4j/fuzeinfra-neo4j-$ts.cypher.gz" > /backup/remote-key
                   {{- end }}
-                  echo "Dump written: $(cat /backup/remote-key) ($(wc -c < /backup/dump.bin) bytes)"
+                  # A failed dump command still exits the pipeline 0 without
+                  # `pipefail` (fixed above) because `gzip` happily emits a
+                  # ~20-byte header for empty stdin and exits 0 itself — so
+                  # size + integrity are the backstop even with pipefail on.
+                  # Refuse to hand a too-small or corrupt artifact to the
+                  # upload container (see #1051).
+                  min_bytes={{ .cfg.minBytes | default $b.minDumpBytes }}
+                  n=$(wc -c < /backup/dump.bin)
+                  if [ "$n" -lt "$min_bytes" ]; then
+                    echo "dump is $n bytes (< $min_bytes minimum for {{ .name }}) - refusing to upload" >&2
+                    exit 1
+                  fi
+                  gzip -t /backup/dump.bin || { echo "dump.bin failed gzip integrity check (truncated?) - refusing to upload" >&2; exit 1; }
+                  echo "Dump written: $(cat /backup/remote-key) ($n bytes)"
               volumeMounts:
                 - name: backup
                   mountPath: /backup
