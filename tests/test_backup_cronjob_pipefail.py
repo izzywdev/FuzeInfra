@@ -63,11 +63,11 @@ def _render(extra_set: list[str]) -> list[dict]:
 
 
 def _iter_shell_scripts(doc: dict):
-    """Yield (container_name, script) for every /bin/sh -c command in a CronJob."""
+    """Yield (container_name, script) for every /bin/sh or /bin/bash -c command in a CronJob."""
     spec = doc["spec"]["jobTemplate"]["spec"]["template"]["spec"]
     for container in spec.get("initContainers", []) + spec.get("containers", []):
         command = container.get("command")
-        if command and len(command) >= 3 and command[0] == "/bin/sh" and command[1] == "-c":
+        if command and len(command) >= 3 and command[0] in ("/bin/sh", "/bin/bash") and command[1] == "-c":
             yield container["name"], command[2]
 
 
@@ -88,7 +88,7 @@ def test_backup_scripts_are_pipefail_safe_and_size_checked(sink):
     for doc in cronjobs:
         name = doc["metadata"]["name"]
         scripts = dict(_iter_shell_scripts(doc))
-        assert scripts, f"{name}: no /bin/sh -c scripts found"
+        assert scripts, f"{name}: no shell -c scripts found"
 
         for container_name, script in scripts.items():
             # (1) pipefail-safe.
@@ -165,3 +165,39 @@ def test_backup_min_bytes_is_configurable_per_database():
         "backups.minDumpBytes default did not apply to the postgres dump "
         f"container:\n{scripts['dump']}"
     )
+
+
+
+@pytest.mark.skipif(shutil.which("helm") is None, reason="helm not installed")
+@pytest.mark.parametrize("sink", ["s3", "pvc"])
+def test_dump_init_container_runs_under_bash(sink):
+    """The dump runs INSIDE each database's own image, so it must not trust /bin/sh.
+
+    Found by running the real images, not by reading them: mongo:7 and mariadb:11.4
+    ship a dash that REJECTS `set -o pipefail` ("Illegal option -o pipefail"), so a
+    `/bin/sh -c` dump script dies on its first line and that database is never backed
+    up. postgres:15 and neo4j:5 ship a newer dash that accepts it. A test that only
+    asserts the string `pipefail` is present passes against both -- which is how the
+    first version of this fix shipped. Pinning the interpreter is what makes the
+    string mean something; every supported database image ships bash.
+    """
+    docs = _render(["--set", f"backups.sink={sink}"])
+    cronjobs = [d for d in docs if d.get("kind") == "CronJob"]
+    assert cronjobs, "no backup CronJob rendered -- fixture is broken, test proves nothing"
+
+    checked = 0
+    for doc in cronjobs:
+        name = doc["metadata"]["name"]
+        spec = doc["spec"]["jobTemplate"]["spec"]["template"]["spec"]
+        for c in spec.get("initContainers") or []:
+            if c.get("name") != "dump":
+                continue
+            checked += 1
+            command = c.get("command") or []
+            if "pipefail" in (command[-1] if command else ""):
+                assert command[0] == "/bin/bash", (
+                    f"{name}: dump init container uses pipefail under {command[0]!r}. It "
+                    "runs in the database's own image, whose /bin/sh may be a dash that "
+                    "rejects pipefail outright and kills the backup on line one."
+                )
+    assert checked, "no dump init container found -- the assertion above never ran"

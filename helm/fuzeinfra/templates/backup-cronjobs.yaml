@@ -240,8 +240,18 @@ spec:
                   valueFrom:
                     secretKeyRef: { name: {{ $secretName }}, key: NEO4J_AUTH }
                 {{- end }}
+              # /bin/bash, NOT /bin/sh. This container runs inside each DATABASE's own
+              # image, and /bin/sh there is whatever that image ships. mongo:7 and
+              # mariadb:11.4 are Ubuntu-jammy based, whose dash predates `pipefail`:
+              # `set -o pipefail` is rejected as an illegal option and the script dies on
+              # its first line, so those backups would fail every night. postgres:15 and
+              # neo4j:5 ship a newer dash that accepts it, which is why a test that only
+              # greps for the string passes. All four images ship bash (verified by
+              # running each), and bash's pipefail is unconditional. The two upload
+              # containers below are unaffected: busybox's ash supports pipefail, and
+              # amazon/aws-cli's /bin/sh is bash.
               command:
-                - /bin/sh
+                - /bin/bash
                 - -c
                 - |
                   set -euo pipefail
