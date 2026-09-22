@@ -535,8 +535,11 @@ apiVip:
     name: "contabo-api-credentials"
     key: "KEEPALIVED_AUTH_PASS"
   keepalived:
-    # Must contain keepalived + bash + curl + jq (see values.yaml note).
+    # Built by .github/workflows/build-api-vip-keepalived-image.yml (keepalived +
+    # bash + curl + jq). Always-pull because the tag is mutable `latest`; pin to a
+    # sha-<commit> tag for immutability once the image is published.
     image: "ghcr.io/izzywdev/fuzeinfra-keepalived:latest"
+    imagePullPolicy: Always
   contabo:
     secretName: "contabo-api-credentials"
     resourceType: "instances"   # VERIFIED plural path literal
