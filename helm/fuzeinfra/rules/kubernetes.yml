@@ -47,7 +47,20 @@ groups:
           description: "Pod has been in Pending state for 15 minutes — possible scheduling or PVC issue."
 
       - alert: PodFailed
-        expr: kube_pod_status_phase{phase="Failed"} == 1
+        # A Failed pod owned by a Job (i.e. a Job/CronJob pod) is an EXPECTED
+        # terminal state that Kubernetes retains ON PURPOSE — failedJobsHistoryLimit
+        # keeps the last N failed Jobs' pods around for inspection. Those must not
+        # page here: a healthy CronJob never pushes an old failure out of its
+        # history, so a single legacy failed run (e.g. the mongodb backup dumps
+        # that broke for ~2 days, since fixed) keeps kube_pod_status_phase{Failed}=1
+        # and fires PodFailed FOREVER, long after backups went green again (#1090).
+        # Batch failures have their own signal — KubeJobFailed below — which is the
+        # design intent recorded in values.yaml ("Fail (and alert via
+        # kube-state-metrics job_failed)"). Bare pods and controller pods
+        # (ReplicaSet/StatefulSet/DaemonSet-owned) still page as before.
+        expr: |
+          kube_pod_status_phase{phase="Failed"} == 1
+          unless on (namespace, pod) kube_pod_owner{owner_kind="Job"}
         for: 0m
         labels:
           severity: critical
@@ -78,6 +91,32 @@ groups:
         annotations:
           summary: "Deployment {{ $labels.namespace }}/{{ $labels.deployment }} degraded"
           description: "Available replicas < desired. Rollout may be stuck."
+
+      # Batch/CronJob failures are NO LONGER surfaced by PodFailed (it now excludes
+      # Job-owned pods, because Kubernetes retains their terminal Failed pods by
+      # design). This is the replacement signal — the "alert via kube-state-metrics
+      # job_failed" that backups/values.yaml assumes exists. A Job that exhausts its
+      # backoffLimit sets kube_job_status_failed>0.
+      #
+      # The recency guard is load-bearing, and is exactly why PodFailed was wrong:
+      # a failed Job stays in CronJob history for days (failedJobsHistoryLimit), so
+      # an UNGUARDED kube_job_status_failed>0 would re-create #1090 one level up —
+      # paging forever on a run that failed a week ago and has since recovered.
+      # Gating on "started within the last 24h" means each new failed daily backup
+      # run keeps the alert live while the breakage is ongoing, but a long-since-
+      # recovered failure ages out on its own. `for: 15m` additionally rides out a
+      # run that fails once and then succeeds on its next scheduled attempt.
+      - alert: KubeJobFailed
+        expr: |
+          (kube_job_status_failed > 0)
+          and on (namespace, job_name)
+          (time() - kube_job_status_start_time < 86400)
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Job {{ $labels.namespace }}/{{ $labels.job_name }} failed"
+          description: "Job has failed pods (backoffLimit exhausted). For a backup CronJob this means the dump or upload did not complete — check the job's pods."
 
       - alert: PVCPending
         expr: kube_persistentvolumeclaim_status_phase{phase="Pending"} == 1

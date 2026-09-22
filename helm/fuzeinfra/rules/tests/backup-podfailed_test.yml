@@ -1,0 +1,102 @@
+# Unit tests for PodFailed + KubeJobFailed (rules/kubernetes.yml).
+#
+# Regression guard for #1090: a mongodb backup CronJob whose dumps failed for a
+# couple of days (since fixed) left terminal Failed pods retained in the Job
+# history (failedJobsHistoryLimit=3). The old PodFailed rule
+# (`kube_pod_status_phase{phase="Failed"} == 1`) fired on those retained pods
+# FOREVER — a healthy CronJob never pushes an old failure out of history — so a
+# critical alert kept paging days after backups went green.
+#
+# The fix: PodFailed excludes Job-owned pods, and batch failures instead alert
+# via KubeJobFailed on kube_job_status_failed, gated on the Job having started
+# recently so a long-recovered failure ages out instead of paging forever.
+#
+# Run in CI by helm-validate.yml:
+#   promtool test rules helm/fuzeinfra/rules/tests/*_test.yml
+rule_files:
+  - ../kubernetes.yml
+
+evaluation_interval: 1m
+
+tests:
+  # --- #1090 exactly: a retained Failed backup pod owned by a Job must NOT page.
+  - interval: 1m
+    name: PodFailed ignores a Failed pod owned by a Job (retained backup pod)
+    input_series:
+      - series: 'kube_pod_status_phase{namespace="fuzeinfra",pod="fuzeinfra-backup-mongodb-29820980-8mcg8",phase="Failed"}'
+        values: '1x30'
+      - series: 'kube_pod_owner{namespace="fuzeinfra",pod="fuzeinfra-backup-mongodb-29820980-8mcg8",owner_kind="Job",owner_name="fuzeinfra-backup-mongodb-29820980",owner_is_controller="true"}'
+        values: '1x30'
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: PodFailed
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: PodFailed
+        exp_alerts: []
+
+  # --- a Failed pod that is NOT a Job pod still pages (coverage preserved).
+  - interval: 1m
+    name: PodFailed still fires for a non-Job (controller/bare) Failed pod
+    input_series:
+      - series: 'kube_pod_status_phase{namespace="apps",pod="web-abc123",phase="Failed"}'
+        values: '1x30'
+      # ReplicaSet-owned, not Job-owned: the owner_kind="Job" exclusion must miss it.
+      - series: 'kube_pod_owner{namespace="apps",pod="web-abc123",owner_kind="ReplicaSet",owner_name="web-5f",owner_is_controller="true"}'
+        values: '1x30'
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: PodFailed
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              namespace: apps
+              pod: web-abc123
+              phase: Failed
+            exp_annotations:
+              summary: "Pod apps/web-abc123 is Failed"
+              description: "Pod entered the Failed phase."
+
+  # --- an ONGOING (recently started) failed backup job pages via KubeJobFailed.
+  - interval: 1m
+    name: KubeJobFailed fires for a recently started failed Job
+    input_series:
+      - series: 'kube_job_status_failed{namespace="fuzeinfra",job_name="fuzeinfra-backup-mongodb-29834000"}'
+        values: '3x30'
+      # Started at t=0; at any eval below (<= 30m) time()-start is well under 24h.
+      - series: 'kube_job_status_start_time{namespace="fuzeinfra",job_name="fuzeinfra-backup-mongodb-29834000"}'
+        values: '0x30'
+    alert_rule_test:
+      # for: 15m — a single-run blip must not page before it clears.
+      - eval_time: 10m
+        alertname: KubeJobFailed
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: KubeJobFailed
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              namespace: fuzeinfra
+              job_name: fuzeinfra-backup-mongodb-29834000
+            exp_annotations:
+              summary: "Job fuzeinfra/fuzeinfra-backup-mongodb-29834000 failed"
+              description: "Job has failed pods (backoffLimit exhausted). For a backup CronJob this means the dump or upload did not complete — check the job's pods."
+
+  # --- the #1090 shape at the Job level: a LONG-recovered failed Job (started
+  # far in the past, still retained in history) must NOT page. The start-time
+  # sample is negative to encode "started long before the evaluation window",
+  # so time()-start_time exceeds the 24h (86400s) recency window at every eval.
+  - interval: 1m
+    name: KubeJobFailed ignores a stale (>24h old) retained failed Job
+    input_series:
+      - series: 'kube_job_status_failed{namespace="fuzeinfra",job_name="fuzeinfra-backup-mongodb-29820980"}'
+        values: '3x30'
+      - series: 'kube_job_status_start_time{namespace="fuzeinfra",job_name="fuzeinfra-backup-mongodb-29820980"}'
+        values: '-100000x30'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: KubeJobFailed
+        exp_alerts: []
+      - eval_time: 30m
+        alertname: KubeJobFailed
+        exp_alerts: []
