@@ -57,5 +57,5 @@ resource "cloudflare_record" "api_vip" {
   type     = "A"
   proxied  = false
   ttl      = 60
-  comment  = "Active-active k3s API VIP (Contabo additional IP, kept live by keepalived). DNS-only round-robin: raw TLS on 6443."
+  comment  = "k3s API active-active VIP; DNS-only round-robin; keepalived-managed."
 }
