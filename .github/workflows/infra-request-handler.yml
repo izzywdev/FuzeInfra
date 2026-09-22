@@ -257,6 +257,16 @@ jobs:
         run: |
           # cloud-init labels nodes on join; this is a reconciling backstop in
           # case a node registered before its --node-label flags applied.
+          #
+          # fuzeinfra.io/pool MUST be reconciled here too. cloud-init sets it from
+          # role (--node-label fuzeinfra.io/pool=${role}, see
+          # modules/contabo-k3s-node/cloud-init.tftpl), but this backstop used to
+          # reapply only node-role/fuzeinfra.io/role — so a node that registered
+          # with a stale or missing pool label could never be corrected. That gap
+          # stranded fuzeinfra-ci-runner-1 at pool=durable: ARC runners require
+          # nodeAffinity fuzeinfra.io/pool In [ci, elastic]
+          # (runners/arc/runner-scale-set-values.yaml), so a CI node mislabelled
+          # durable is silently excluded from all runner scheduling.
           echo "$REQUESTS_JSON" | python3 -c '
           import json,sys,subprocess,time
           for r in json.load(sys.stdin):
@@ -265,7 +275,7 @@ jobs:
                   if subprocess.run(["kubectl","get","node",name]).returncode == 0:
                       break
                   time.sleep(10)
-              labels = ["node-role=%s"%role, "fuzeinfra.io/role=%s"%role]
+              labels = ["node-role=%s"%role, "fuzeinfra.io/role=%s"%role, "fuzeinfra.io/pool=%s"%role]
               for k,v in (r.get("labels") or {}).items():
                   labels.append("%s=%s"%(k,v))
               subprocess.run(["kubectl","label","node",name,*labels,"--overwrite"],check=True)
