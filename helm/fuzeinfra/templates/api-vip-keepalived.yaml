@@ -1,41 +1,33 @@
-{{- /* ============= API floating-VIP keepalived DaemonSet ================ */ -}}
+{{- /* ========== API active-active VIP keepalived DaemonSet ============ */ -}}
 {{- /*
-     HIGH AVAILABILITY FOR THE EXTERNAL k3s API ENDPOINT (docs/runbooks/api-floating-vip.md).
+     ACTIVE-ACTIVE-ACTIVE HA + LOAD BALANCING FOR THE EXTERNAL k3s API ENDPOINT
+     (docs/runbooks/api-floating-vip.md).
 
-     THE PROBLEM. etcd is HA (3 members across fuze-core-1/2/3) but the EXTERNAL
-     API endpoint is not: port 6443 is opened on the public interface of only the
-     primary control plane (terraform/contabo/provisioning.tf), so external kubectl,
-     GitHub Actions CD and every consumer's cluster-query.yml address one public IP.
-     If that node dies the control plane stays healthy but is externally unreachable.
+     THE MODEL. Each durable control plane owns its OWN Contabo additional IP (a
+     VIP). In steady state every node holds its own VIP and answers the API on it;
+     api.<domain> round-robins A records across all the VIPs (Terraform,
+     api-floating-vip.tf) so external kubectl / CD / consumers load-balance across
+     all live nodes. keepalived runs ONE vrrp_instance PER VIP on every node: the
+     owning node is MASTER for its VIP (base priority + ownVipBoost), the others are
+     BACKUP. If a node dies, the highest-priority surviving BACKUP takes over its
+     VIP — notify_master reassigns that IP to the survivor via the Contabo VIP API
+     (VERIFIED live 2026-09-22, run 35718868309) and keepalived binds it locally —
+     so the dead node's round-robin A record now resolves to a live node instead of
+     a black hole. HA (failover) + LB (round-robin) at once, using every IP.
 
-     THE MECHANISM. A Contabo "additional IP" is used as a floating public VIP. This
-     DaemonSet runs unicast keepalived on the three durable control planes; VRRP
-     elects a MASTER over the PRIVATE VLAN (10.0.0.0/22, never the public net), and
-     on transition to MASTER `notify_master` calls the Contabo API to REASSIGN the
-     additional IP to that node's instance. keepalived's own `virtual_ipaddress`
-     binds the VIP locally on the public interface. External clients keep a normal
-     kubeconfig pointed at VIP:6443 -- NO client-side change anywhere. This pairs
-     with the Cloudflare-tunnel break-glass path (terraform/contabo/cloudflare.tf,
-     k8s-api.<prod domain>) for the case where the Contabo IP/network itself fails.
+     PRIORITY ORDER IS LOAD-BEARING. scripts/label-durable-nodes.sh designates the
+     monitoring node (fuzeinfra.io/role=monitoring = fuze-core-2 / vmi3396106) the
+     LOWEST base priority, so it is the LAST to adopt a peer's VIP — the node doing
+     bulk Prometheus/Loki disk I/O never becomes the busiest API server. Keep the
+     apiVip.nodes basePriority order consistent with that script.
 
-     PRIORITY ORDER IS LOAD-BEARING, NOT COSMETIC. scripts/label-durable-nodes.sh
-     designates the monitoring node (fuzeinfra.io/role=monitoring, currently
-     fuze-core-2 / vmi3396106) the LOWEST-priority holder, so the node doing bulk
-     Prometheus/Loki disk I/O is the LAST to also serve the API -- on 2026-09-06 the
-     monitoring stack sharing a disk with the API-serving etcd starved it off the
-     disk and refused connections cluster-wide. Keep apiVip.nodes priorities
-     consistent with that script: monitoring node last.
-
-     GATED OFF BY DEFAULT (apiVip.enabled: false), so merging is a no-op. Before
-     enabling, the Contabo additional-IP REASSIGNMENT write path must be confirmed
-     (the read side is probed by .github/workflows/contabo-check-failover-ip.yml) --
-     see the runbook's preconditions. This renders nothing unless apiVip.enabled.
+     VRRP travels UNICAST over the PRIVATE VLAN (public IPs are not a shared L2
+     segment). GATED OFF by default (apiVip.enabled: false) — renders nothing.
 */ -}}
 {{- if .Values.apiVip.enabled }}
-{{- if not .Values.apiVip.address }}
-{{- fail "apiVip.enabled is true but apiVip.address (the Contabo floating VIP) is empty" }}
-{{- end }}
 {{- $vip := .Values.apiVip }}
+{{- if not $vip.vips }}{{ fail "apiVip.enabled is true but apiVip.vips is empty" }}{{- end }}
+{{- if not $vip.nodes }}{{ fail "apiVip.enabled is true but apiVip.nodes is empty" }}{{- end }}
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -44,22 +36,83 @@ metadata:
   labels:
     {{- include "fuzeinfra.labels" . | nindent 4 }}
 data:
-  # The full node table. The entrypoint selects THIS node's row by NODE_NAME at
-  # pod start (a DaemonSet pod cannot be templated per-node at render time), and
-  # derives the unicast peer list from the other rows.
+  # Per-node table (basePriority: monitoring node lowest) and per-VIP table
+  # (address + the node that primarily holds it). The entrypoint selects THIS
+  # node's row by NODE_NAME and builds one vrrp_instance per VIP.
   nodes.json: |
     {{ toJson $vip.nodes }}
-  keepalived.conf.tmpl: |
-    # Rendered per node by render-and-run.sh -- __PLACEHOLDERS__ are substituted
-    # from this node's nodes.json row before keepalived starts.
+  vips.json: |
+    {{ toJson $vip.vips }}
+  check-apiserver.sh: |
+    #!/bin/sh
+    exec curl -sk --max-time 2 -o /dev/null -w '%{http_code}' \
+      "https://127.0.0.1:{{ $vip.healthCheck.port }}{{ $vip.healthCheck.path }}" | grep -q '^200$'
+  notify.sh: |
+    #!/usr/bin/env bash
+    # keepalived per-VIP hook: `notify.sh MASTER <vip>`. On MASTER, reassign THAT
+    # vip to this node's instance via the Contabo VIP API so the provider routes it
+    # here (keepalived has already bound it locally). Mechanics VERIFIED live
+    # 2026-09-22 (run 35718868309):
+    #   holder = GET /v1/vips/{ip} -> .data[0].resourceId (top-level, not assignments[])
+    #   PATH resourceType is PLURAL "instances" (API rejects "instance")
+    #   assign POST needs a body: -d '{}' (else 400 "Body cannot be empty")
+    #   reassign = unassign(old) DELETE -> assign(self) POST
+    set -uo pipefail
+    STATE="${1:-}" ; VIP="${2:-}"
+    log() { echo "[api-vip notify] $(date -u +%FT%TZ) vip=$VIP $*"; }
+    [ "$STATE" = "MASTER" ] || { log "state=$STATE -> no reassignment"; exit 0; }
+    [ -n "$VIP" ] || { log "ERROR: no VIP arg"; exit 1; }
+    : "${CONTABO_INSTANCE_ID:?}" "${CONTABO_CLIENT_ID:?}" "${CONTABO_CLIENT_SECRET:?}"
+    : "${CONTABO_API_USER:?}" "${CONTABO_API_PASSWORD:?}"
+    RTYPE="${CONTABO_RESOURCE_TYPE:-instances}"
+    API="https://api.contabo.com" ; VIPBASE="$API/v1/vips/$VIP"
+    rid() { cat /proc/sys/kernel/random/uuid; }
+    TOK=$(curl -sS -X POST -H "Content-Type: application/x-www-form-urlencoded" \
+      "https://auth.contabo.com/auth/realms/contabo/protocol/openid-connect/token" \
+      --data-urlencode "client_id=${CONTABO_CLIENT_ID}" \
+      --data-urlencode "client_secret=${CONTABO_CLIENT_SECRET}" \
+      --data-urlencode "username=${CONTABO_API_USER}" \
+      --data-urlencode "password=${CONTABO_API_PASSWORD}" \
+      --data-urlencode "grant_type=password" | jq -r .access_token)
+    [ -n "$TOK" ] && [ "$TOK" != "null" ] || { log "ERROR: no Contabo token"; exit 1; }
+    CUR=$(curl -sS -H "Authorization: Bearer $TOK" -H "x-request-id: $(rid)" "$VIPBASE" \
+           | jq -r '.data[0].resourceId // empty' 2>/dev/null)
+    if [ "$CUR" = "$CONTABO_INSTANCE_ID" ]; then log "already on $CONTABO_INSTANCE_ID"; exit 0; fi
+    if [ -n "$CUR" ]; then
+      DC=$(curl -sS -o /tmp/vip.out -w '%{http_code}' -X DELETE \
+        -H "Authorization: Bearer $TOK" -H "x-request-id: $(rid)" "$VIPBASE/$RTYPE/$CUR")
+      log "unassign from $CUR -> HTTP $DC"; sleep 2
+    fi
+    CODE=$(curl -sS -o /tmp/vip.out -w '%{http_code}' -X POST \
+      -H "Authorization: Bearer $TOK" -H "x-request-id: $(rid)" \
+      -H "Content-Type: application/json" -d '{}' "$VIPBASE/$RTYPE/$CONTABO_INSTANCE_ID")
+    if [ "$CODE" -ge 200 ] && [ "$CODE" -lt 300 ]; then
+      log "assigned -> $CONTABO_INSTANCE_ID (HTTP $CODE)"
+    else
+      # keepalived already bound it locally; a provider failure should page, not flap.
+      log "WARN: assign HTTP $CODE: $(cat /tmp/vip.out)"
+    fi
+    exit 0
+  render.sh: |
+    #!/usr/bin/env bash
+    # Build keepalived.conf for THIS node: global header + one vrrp_instance per VIP.
+    set -eu
+    cp /cfg/notify.sh /etc/keepalived/notify.sh
+    cp /cfg/check-apiserver.sh /etc/keepalived/check-apiserver.sh
+    chmod 0700 /etc/keepalived/notify.sh /etc/keepalived/check-apiserver.sh
+    ROW=$(jq -c --arg n "$NODE_NAME" '.[]|select(.name==$n)' /cfg/nodes.json)
+    if [ -z "$ROW" ]; then echo "node $NODE_NAME not in apiVip.nodes; idling"; exec sleep infinity; fi
+    BASE=$(echo "$ROW" | jq -r '.basePriority')
+    THIS_PEER=$(echo "$ROW" | jq -r '.peerIp')
+    export CONTABO_INSTANCE_ID=$(echo "$ROW" | jq -r '.instanceId')
+    PEERS=$(jq -r --arg n "$NODE_NAME" '.[]|select(.name!=$n)|"        "+.peerIp' /cfg/nodes.json)
+    CONF=/etc/keepalived/keepalived.conf
+    cat > "$CONF" <<EOF
     global_defs {
         enable_script_security
         script_user root
-        router_id __NODE_NAME__
+        router_id $NODE_NAME
     }
-    # Health of the LOCAL apiserver. keepalived drops this node's effective
-    # priority when the check fails, so a node whose apiserver is unhealthy hands
-    # the VIP to a peer even while the host itself is up.
     vrrp_script chk_apiserver {
         script "/etc/keepalived/check-apiserver.sh"
         interval 2
@@ -68,109 +121,40 @@ data:
         fall 2
         weight -60
     }
-    vrrp_instance API_VIP {
-        state BACKUP
-        # No node self-promotes on boot ahead of a healthy current master.
-        nopreempt
-        interface __VRRP_IFACE__
-        virtual_router_id __ROUTER_ID__
-        priority __PRIORITY__
-        advert_int 1
-        # Unicast over the private VLAN -- Contabo public IPs are not a shared L2
-        # segment, so multicast VRRP would never converge.
-        unicast_src_ip __THIS_PEER_IP__
-        unicast_peer {
-    __UNICAST_PEERS__
-        }
-        authentication {
-            auth_type PASS
-            auth_pass __AUTH_PASS__
-        }
-        # keepalived binds/removes the VIP locally on the public interface as this
-        # node wins/loses MASTER. The Contabo-side reassignment is done by
-        # notify_master so the provider actually routes the /32 here.
-        virtual_ipaddress {
-            __VIP__/32 dev __VIP_IFACE__
-        }
-        track_script {
-            chk_apiserver
-        }
-        notify_master "/etc/keepalived/notify.sh MASTER"
-        notify_backup "/etc/keepalived/notify.sh BACKUP"
-        notify_fault  "/etc/keepalived/notify.sh FAULT"
-    }
-  check-apiserver.sh: |
-    #!/bin/sh
-    # Healthy local apiserver == HTTP 200 from /livez on loopback. -k because the
-    # cert is validated by real clients, not by this liveness probe.
-    exec curl -sk --max-time 2 -o /dev/null -w '%{http_code}' \
-      "https://127.0.0.1:{{ $vip.healthCheck.port }}{{ $vip.healthCheck.path }}" | grep -q '^200$'
-  notify.sh: |
-    #!/usr/bin/env bash
-    # keepalived state-transition hook. On MASTER, reassign the Contabo additional
-    # IP (the VIP) to THIS node's instance via the Contabo VIP API so the provider
-    # routes it here; keepalived has already bound it locally via virtual_ipaddress.
-    #
-    # ENDPOINT (Contabo VIPApi — verified against the api.contabo.com VIP tag):
-    #   assign   POST   /v1/vips/{ip}/{resourceType}/{resourceId}   (no body)
-    #   unassign DELETE /v1/vips/{ip}/{resourceType}/{resourceId}   (no body)
-    #   read     GET    /v1/vips/{ip}   -> .data[0].assignments[].resourceId
-    # A VIP has ONE holder. At a MASTER transition the old holder is usually dead
-    # and this node only knows its OWN instanceId, so we READ the current holder,
-    # UNASSIGN it, then ASSIGN to self — robust whether or not a bare POST re-homes
-    # an already-assigned IP (the single-POST semantic is unverified; this path
-    # does not depend on it). CONTABO_RESOURCE_TYPE (default "instances") is the one
-    # path literal to confirm once via GET /v1/vips/{ip} — see the runbook.
-    set -uo pipefail
-    STATE="${1:-}"
-    log() { echo "[api-vip notify] $(date -u +%FT%TZ) $*"; }
-    [ "$STATE" = "MASTER" ] || { log "state=$STATE -> no Contabo reassignment"; exit 0; }
-
-    : "${CONTABO_INSTANCE_ID:?}" "${API_VIP_ADDRESS:?}"
-    : "${CONTABO_CLIENT_ID:?}" "${CONTABO_CLIENT_SECRET:?}"
-    : "${CONTABO_API_USER:?}" "${CONTABO_API_PASSWORD:?}"
-    RTYPE="${CONTABO_RESOURCE_TYPE:-instances}"
-    API="https://api.contabo.com"
-    VIPBASE="$API/v1/vips/${API_VIP_ADDRESS}"
-    rid() { cat /proc/sys/kernel/random/uuid; }
-
-    TOK=$(curl -sS -X POST -H "Content-Type: application/x-www-form-urlencoded" \
-      "https://auth.contabo.com/auth/realms/contabo/protocol/openid-connect/token" \
-      --data-urlencode "client_id=${CONTABO_CLIENT_ID}" \
-      --data-urlencode "client_secret=${CONTABO_CLIENT_SECRET}" \
-      --data-urlencode "username=${CONTABO_API_USER}" \
-      --data-urlencode "password=${CONTABO_API_PASSWORD}" \
-      --data-urlencode "grant_type=password" | jq -r .access_token)
-    [ -n "$TOK" ] && [ "$TOK" != "null" ] || { log "ERROR: could not obtain Contabo token"; exit 1; }
-
-    # 1. Who holds the VIP now?
-    CUR=$(curl -sS -H "Authorization: Bearer $TOK" -H "x-request-id: $(rid)" "$VIPBASE" \
-           | jq -r '.data[0].assignments[]?.resourceId' 2>/dev/null | head -1)
-
-    # 2. If someone else holds it, unassign them first (skip if that node is gone —
-    #    a 4xx here is fine, the assign below is what matters).
-    if [ -n "$CUR" ] && [ "$CUR" != "null" ] && [ "$CUR" != "$CONTABO_INSTANCE_ID" ]; then
-      DC=$(curl -sS -o /tmp/vip.out -w '%{http_code}' -X DELETE \
-        -H "Authorization: Bearer $TOK" -H "x-request-id: $(rid)" \
-        "$VIPBASE/$RTYPE/$CUR")
-      log "unassign $API_VIP_ADDRESS from $CUR -> HTTP $DC"
-    elif [ "$CUR" = "$CONTABO_INSTANCE_ID" ]; then
-      log "$API_VIP_ADDRESS already assigned to $CONTABO_INSTANCE_ID; nothing to do"; exit 0
-    fi
-
-    # 3. Assign to self.
-    CODE=$(curl -sS -o /tmp/vip.out -w '%{http_code}' -X POST \
-      -H "Authorization: Bearer $TOK" -H "x-request-id: $(rid)" \
-      -H "Content-Type: application/json" \
-      "$VIPBASE/$RTYPE/$CONTABO_INSTANCE_ID")
-    if [ "$CODE" -ge 200 ] && [ "$CODE" -lt 300 ]; then
-      log "assigned $API_VIP_ADDRESS -> instance $CONTABO_INSTANCE_ID (HTTP $CODE)"
-    else
-      # Do NOT exit non-zero: keepalived has already bound the VIP locally, and a
-      # provider-side reassignment failure should page a human, not flap MASTER.
-      log "WARN: Contabo assign returned HTTP $CODE: $(cat /tmp/vip.out)"
-    fi
-    exit 0
+    EOF
+    i=0
+    while read -r VIPROW; do
+      [ -n "$VIPROW" ] || continue
+      ADDR=$(echo "$VIPROW" | jq -r '.address')
+      PRIMARY=$(echo "$VIPROW" | jq -r '.primaryNode')
+      RID=$(echo "$VIPROW" | jq -r '.routerId')
+      PRIO=$BASE
+      [ "$PRIMARY" = "$NODE_NAME" ] && PRIO=$((BASE + {{ $vip.vrrp.ownVipBoost | default 100 }}))
+      {
+        echo "vrrp_instance API_VIP_$i {"
+        echo "    state BACKUP"
+        echo "    nopreempt"
+        echo "    interface {{ $vip.vrrp.interface }}"
+        echo "    virtual_router_id $RID"
+        echo "    priority $PRIO"
+        echo "    advert_int 1"
+        echo "    unicast_src_ip $THIS_PEER"
+        echo "    unicast_peer {"
+        echo "$PEERS"
+        echo "    }"
+        echo "    authentication { auth_type PASS auth_pass $KEEPALIVED_AUTH_PASS }"
+        echo "    virtual_ipaddress { $ADDR/32 dev {{ $vip.interface }} }"
+        echo "    track_script { chk_apiserver }"
+        echo "    notify_master \"/etc/keepalived/notify.sh MASTER $ADDR\""
+        echo "    notify_backup \"/etc/keepalived/notify.sh BACKUP $ADDR\""
+        echo "    notify_fault  \"/etc/keepalived/notify.sh FAULT $ADDR\""
+        echo "}"
+      } >> "$CONF"
+      i=$((i+1))
+    done < <(jq -c '.[]' /cfg/vips.json)
+    echo "== rendered keepalived.conf ($i VIP instances; secrets elided) =="
+    sed 's/auth_pass .*/auth_pass ****/' "$CONF"
+    exec keepalived -n -l -f "$CONF" --dont-fork
 ---
 apiVersion: apps/v1
 kind: DaemonSet
@@ -188,18 +172,13 @@ spec:
         {{- include "fuzeinfra.labels" . | nindent 8 }}
         {{- include "fuzeinfra.selectorLabels" (dict "component" "api-vip-keepalived" "root" $) | nindent 8 }}
       annotations:
-        checksum/config: {{ printf "%v-%v-%v" $vip.address (toJson $vip.nodes) $vip.authPass | sha256sum }}
+        checksum/config: {{ printf "%v-%v-%v" (toJson $vip.vips) (toJson $vip.nodes) $vip.authPass | sha256sum }}
     spec:
-      # host networking + NET_ADMIN so keepalived can send VRRP on the VLAN NIC and
-      # add/remove the VIP on the public NIC.
       hostNetwork: true
       dnsPolicy: ClusterFirstWithHostNet
-      # Runs ONLY on the durable control planes. k3s applies node labels at
-      # registration; node-role.kubernetes.io/control-plane survives renames.
       nodeSelector:
         node-role.kubernetes.io/control-plane: "true"
       tolerations:
-        # Must run on the control planes despite their taints.
         - operator: Exists
       containers:
         - name: keepalived
@@ -209,52 +188,12 @@ spec:
             privileged: true
             capabilities:
               add: ["NET_ADMIN", "NET_BROADCAST", "NET_RAW"]
-          command:
-            - /bin/sh
-            - -c
-            - |
-              set -eu
-              cp /cfg/notify.sh /etc/keepalived/notify.sh
-              cp /cfg/check-apiserver.sh /etc/keepalived/check-apiserver.sh
-              chmod 0700 /etc/keepalived/notify.sh /etc/keepalived/check-apiserver.sh
-
-              # Select THIS node's row and build the unicast peer list from the rest.
-              ROW=$(jq -c --arg n "$NODE_NAME" '.[] | select(.name==$n)' /cfg/nodes.json)
-              if [ -z "$ROW" ]; then
-                echo "node $NODE_NAME has no apiVip.nodes entry; keepalived not started here"
-                exec sleep infinity
-              fi
-              PRIORITY=$(echo "$ROW" | jq -r '.priority')
-              THIS_PEER_IP=$(echo "$ROW" | jq -r '.peerIp')
-              export CONTABO_INSTANCE_ID=$(echo "$ROW" | jq -r '.instanceId')
-              PEERS=$(jq -r --arg n "$NODE_NAME" '.[] | select(.name!=$n) | "        "+.peerIp' /cfg/nodes.json)
-
-              sed \
-                -e "s|__NODE_NAME__|$NODE_NAME|g" \
-                -e "s|__VRRP_IFACE__|{{ $vip.vrrp.interface }}|g" \
-                -e "s|__VIP_IFACE__|{{ $vip.interface }}|g" \
-                -e "s|__ROUTER_ID__|{{ $vip.vrrp.routerId }}|g" \
-                -e "s|__PRIORITY__|$PRIORITY|g" \
-                -e "s|__THIS_PEER_IP__|$THIS_PEER_IP|g" \
-                -e "s|__VIP__|{{ $vip.address }}|g" \
-                -e "s|__AUTH_PASS__|$KEEPALIVED_AUTH_PASS|g" \
-                /cfg/keepalived.conf.tmpl > /etc/keepalived/keepalived.conf
-              # Peers are multi-line, so splice them in after the placeholder line.
-              awk -v peers="$PEERS" '{ if ($0 ~ /__UNICAST_PEERS__/) { print peers } else { print } }' \
-                /etc/keepalived/keepalived.conf > /etc/keepalived/keepalived.conf.tmp \
-                && mv /etc/keepalived/keepalived.conf.tmp /etc/keepalived/keepalived.conf
-
-              echo "== rendered keepalived.conf (secrets elided) =="
-              sed 's/auth_pass .*/auth_pass ****/' /etc/keepalived/keepalived.conf
-              exec keepalived -n -l -f /etc/keepalived/keepalived.conf --dont-fork
+          command: ["/bin/sh", "-c", "exec /cfg/render.sh"]
           env:
             - name: NODE_NAME
               valueFrom:
                 fieldRef:
                   fieldPath: spec.nodeName
-            - name: API_VIP_ADDRESS
-              value: {{ $vip.address | quote }}
-            # VRRP shared secret. Prefer the secret; fall back to the plaintext value.
             - name: KEEPALIVED_AUTH_PASS
               {{- if $vip.authPassSecret.name }}
               valueFrom:
@@ -264,8 +203,6 @@ spec:
               {{- else }}
               value: {{ $vip.authPass | quote }}
               {{- end }}
-            # Contabo API credentials for the notify_master reassignment. Reuses the
-            # same secret the autoscaler holds -- no new credential is minted here.
             - name: CONTABO_CLIENT_ID
               valueFrom:
                 secretKeyRef: {name: {{ $vip.contabo.secretName | quote }}, key: {{ $vip.contabo.keys.clientId | quote }}}

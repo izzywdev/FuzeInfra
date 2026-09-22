@@ -119,6 +119,13 @@ env:
   # needs NO Contabo additional IP. See terraform/contabo/cloudflare.tf +
   # docs/runbooks/api-floating-vip.md. (Enabled 2026-09-22.)
   TF_VAR_api_breakglass_enabled: "true"
+  # Active-active API VIP DNS (api.<domain> round-robin A records). Enabling here
+  # applies ONLY the DNS records via CD — the tls-san + 6443 firewall are
+  # ADDITIONALLY gated on manage_control_plane_config (a workstation-only SSH
+  # apply CD never sets), so CD never touches them. Addresses must match
+  # apiVip.vips[].address in helm/fuzeinfra/values-contabo.yaml.
+  TF_VAR_api_vip_enabled: "true"
+  TF_VAR_api_vip_addresses: '["13.140.184.164","13.140.185.42"]'
   # mendysrobotics.com zone ID — gates all mendys DNS + Access resources.
   # Default empty string disables those resources; set the secret to enable.
   TF_VAR_mendysrobotics_zone_id: ${{ secrets.MENDYSROBOTICS_ZONE_ID }}

@@ -67,13 +67,15 @@ jobs:
           [ -n "$TOK" ] && [ "$TOK" != "null" ] || { echo "ERROR: no token"; exit 1; }
           auth=(-H "Authorization: Bearer $TOK")
 
-          echo "=== GET /v1/vips (all additional IPs owned) ==="
-          # 200 with data:[] == authorized, zero additional IPs owned (not an error).
+          echo "=== GET /v1/vips (all additional IPs owned) — RAW data ==="
+          # totalElements>0 with an empty pretty list earlier was a jq bug on
+          # UNASSIGNED vips; print raw .data so addresses + assignment state show.
           curl -sS "${auth[@]}" -H "x-request-id: $(rid)" "$api/v1/vips?page=1&size=100" \
-            | jq '{pagination:._pagination, vips:[.data[]? | {ip, resourceType:(.assignments[]?.resourceType), holders:[.assignments[]?.resourceId]}]}'
+            | jq '{count:._pagination.totalElements, data:.data}'
 
-          echo "=== GET /v1/compute/instances/$REF_ID ipConfig (primary IP only) ==="
-          curl -sS "${auth[@]}" -H "x-request-id: $(rid)" "$api/v1/compute/instances/$REF_ID" | jq '.data[0].ipConfig'
+          echo "=== GET /v1/compute/instances/$REF_ID — ipConfig + addOns (add-on id) ==="
+          curl -sS "${auth[@]}" -H "x-request-id: $(rid)" "$api/v1/compute/instances/$REF_ID" \
+            | jq '{name:.data[0].displayName, ipConfig:.data[0].ipConfig, addOns:.data[0].addOns, additionalIps:.data[0].additionalIps}'
 
           echo "=== GET /v1/compute/instances (displayName -> instanceId -> region; fills apiVip.nodes) ==="
           curl -sS "${auth[@]}" -H "x-request-id: $(rid)" "$api/v1/compute/instances?size=200" \
@@ -93,32 +95,35 @@ jobs:
           fi
 
           vipbase="$api/v1/vips/$TEST_IP"
+          # The VIP's current holder is a TOP-LEVEL field (.resourceId), not under
+          # an assignments[] array. A VIP has one holder, so a reassignment is
+          # unassign(old) -> assign(new).
+          holder() { curl -sS "${auth[@]}" -H "x-request-id: $(rid)" "$vipbase" | jq -r '.data[0].resourceId // empty'; }
           echo "=== WRITE round-trip for $TEST_IP (resourceType=$RTYPE) ==="
-          ORIG=$(curl -sS "${auth[@]}" -H "x-request-id: $(rid)" "$vipbase" \
-                  | jq -r '.data[0].assignments[]?.resourceId' | head -1)
-          echo "original holder: ${ORIG:-<none>}"
+          ORIG=$(holder); echo "original holder: ${ORIG:-<none>}"
           if [ "$ORIG" = "$TARGET_ID" ]; then
-            echo "ERROR: test_ip is already on target_instance_id; pick a different target so the move is observable"; exit 1
+            echo "ERROR: test_ip is already on target_instance_id; pick a different target"; exit 1
           fi
-
+          if [ -n "$ORIG" ]; then
+            echo "--- unassign $TEST_IP from $ORIG ---"
+            curl -sS -o /tmp/u.out -w 'unassign HTTP %{http_code}\n' -X DELETE "${auth[@]}" \
+              -H "x-request-id: $(rid)" "$vipbase/$RTYPE/$ORIG"; echo "  body: $(cat /tmp/u.out)"
+            sleep 3
+          fi
           echo "--- assign $TEST_IP -> $TARGET_ID ---"
           curl -sS -o /tmp/a.out -w 'assign HTTP %{http_code}\n' -X POST "${auth[@]}" \
-            -H "x-request-id: $(rid)" -H "Content-Type: application/json" \
-            "$vipbase/$RTYPE/$TARGET_ID"; cat /tmp/a.out; echo
+            -H "x-request-id: $(rid)" -H "Content-Type: application/json" -d '{}' "$vipbase/$RTYPE/$TARGET_ID"
+          echo "  body: $(cat /tmp/a.out)"
           sleep 5
-          NOW=$(curl -sS "${auth[@]}" -H "x-request-id: $(rid)" "$vipbase" \
-                 | jq -r '.data[0].assignments[]?.resourceId' | head -1)
-          echo "holder after assign: ${NOW:-<none>}  (expected $TARGET_ID)"
+          NOW=$(holder); echo "holder after assign: ${NOW:-<none>}  (expected $TARGET_ID)"
 
-          echo "--- RESTORE: unassign from $TARGET_ID, reassign to ${ORIG:-<none>} ---"
-          curl -sS -o /dev/null -w 'unassign HTTP %{http_code}\n' -X DELETE "${auth[@]}" \
-            -H "x-request-id: $(rid)" "$vipbase/$RTYPE/$TARGET_ID"
-          if [ -n "$ORIG" ] && [ "$ORIG" != "null" ]; then
-            curl -sS -o /dev/null -w 'reassign-original HTTP %{http_code}\n' -X POST "${auth[@]}" \
-              -H "x-request-id: $(rid)" -H "Content-Type: application/json" \
-              "$vipbase/$RTYPE/$ORIG"
+          echo "--- RESTORE: unassign from ${NOW:-$TARGET_ID}, reassign to ${ORIG:-<none>} ---"
+          curl -sS -o /tmp/u2.out -w 'unassign HTTP %{http_code}\n' -X DELETE "${auth[@]}" \
+            -H "x-request-id: $(rid)" "$vipbase/$RTYPE/$TARGET_ID"; echo "  body: $(cat /tmp/u2.out)"
+          sleep 3
+          if [ -n "$ORIG" ]; then
+            curl -sS -o /tmp/r.out -w 'reassign-original HTTP %{http_code}\n' -X POST "${auth[@]}" \
+              -H "x-request-id: $(rid)" -H "Content-Type: application/json" -d '{}' "$vipbase/$RTYPE/$ORIG"; echo "  body: $(cat /tmp/r.out)"
           fi
-          FINAL=$(curl -sS "${auth[@]}" -H "x-request-id: $(rid)" "$vipbase" \
-                   | jq -r '.data[0].assignments[]?.resourceId' | head -1)
-          echo "holder after restore: ${FINAL:-<none>}  (expected ${ORIG:-<none>})"
+          FINAL=$(holder); echo "holder after restore: ${FINAL:-<none>}  (expected ${ORIG:-<none>})"
           echo "=== round-trip done ==="
