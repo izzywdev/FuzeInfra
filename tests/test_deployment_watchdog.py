@@ -104,12 +104,20 @@ def argo_app(name: str, phase: str, started_minutes_ago: float | None,
 
 
 def pod(name, namespace="fuzeinfra", *, container="app", restarts=0, reason=None,
-        ready=True, start_minutes_ago=5.0, phase="Running", message=None) -> dict:
+        ready=True, start_minutes_ago=5.0, phase="Running", message=None,
+        owner=None) -> dict:
+    """`owner`, if given, is (kind, name) and becomes the pod's sole ownerReference
+    — how a real Deployment/CronJob-owned pod carries its stable controller
+    identity (see _stable_workload_name)."""
     state = {"running": {"startedAt": _ts(start_minutes_ago)}} if reason is None else {
         "waiting": {"reason": reason, "message": message}
     }
+    meta = {"name": name, "namespace": namespace}
+    if owner is not None:
+        owner_kind, owner_name = owner
+        meta["ownerReferences"] = [{"kind": owner_kind, "name": owner_name}]
     return {
-        "metadata": {"name": name, "namespace": namespace},
+        "metadata": meta,
         "spec": {"nodeName": "vmi3396106", "containers": [{"name": container}]},
         "status": {
             "phase": phase,
@@ -1205,3 +1213,152 @@ def test_closing_frees_the_slot_for_the_same_run(monkeypatch):
     wd.main(["--repo", "izzywdev/FuzeInfra"])
     assert calls["closed"] == [776]
     assert len(calls["filed"]) == 1
+
+
+# ---------------------------------------------------------------------------
+# 11. the point-in-time ISSUE FLOOD: `[watchdog] stuck-containercreating: <pod>`
+#     filed a new issue every run because the dedupe SUBJECT was the raw pod
+#     name, which churns on every new pod instance
+#     (`fuzeinfra-backup-mongodb-29820980-8mcg8` -> a new `-<epoch>-<hash>`
+#     suffix every CronJob run; `<deploy>-<rs-hash>-<pod-hash>` every rollout).
+#     _stable_workload_name/_stable_pod_subject fix the KEY; close_resolved_
+#     findings gives the resulting issue a bounded lifecycle.
+# ---------------------------------------------------------------------------
+
+def test_stable_workload_name_strips_replicaset_pod_template_hash():
+    """Deployment-owned pod: subject is the Deployment, not `<deploy>-<rs>-<pod>`."""
+    p = pod("api-7c9b6d4f8-x2vqk", owner=("ReplicaSet", "api-7c9b6d4f8"))
+    assert wd._stable_workload_name(p) == "api"
+
+
+def test_stable_workload_name_strips_cronjob_job_and_pod_suffix():
+    """The exact case named in the flood: a CronJob-spawned backup pod."""
+    p = pod("fuzeinfra-backup-mongodb-29820980-8mcg8",
+            owner=("Job", "fuzeinfra-backup-mongodb-29820980"))
+    assert wd._stable_workload_name(p) == "fuzeinfra-backup-mongodb"
+
+
+def test_stable_workload_name_keeps_statefulset_pod_ordinal():
+    """StatefulSet pod names (`name-0`) are already stable — must not be mangled."""
+    p = pod("fuzeinfra-loki-0", owner=("StatefulSet", "fuzeinfra-loki"))
+    assert wd._stable_workload_name(p) == "fuzeinfra-loki"
+
+
+def test_stable_workload_name_falls_back_to_suffix_stripping_without_owner():
+    """No ownerReferences at all (e.g. a bare pod): strip suffix-shaped tails."""
+    p = pod("fuzeinfra-backup-mongodb-29820980-8mcg8")
+    assert wd._stable_workload_name(p) == "fuzeinfra-backup-mongodb"
+
+
+def test_stable_workload_name_is_unchanged_for_a_plain_name():
+    """No random-looking suffix to strip: the name passes through unchanged."""
+    p = pod("fuzeinfra-loki-0")
+    assert wd._stable_workload_name(p) == "fuzeinfra-loki-0"
+
+
+def test_stuck_container_creating_dedupe_key_is_stable_across_pod_churn():
+    """Two separate detection runs, two different pod instances of the same
+    CronJob, must produce the SAME Finding.key — the property the flood
+    violated."""
+    def _finding_for(pod_name, job_name):
+        p = pod(pod_name, container="mongodb", reason="ContainerCreating",
+                ready=False, start_minutes_ago=45, phase="Pending",
+                owner=("Job", job_name))
+        findings = wd.detect_stuck_container_creating({"items": [p]}, CFG, NOW)
+        assert len(findings) == 1
+        return findings[0]
+
+    first = _finding_for("fuzeinfra-backup-mongodb-29820980-8mcg8",
+                          "fuzeinfra-backup-mongodb-29820980")
+    second = _finding_for("fuzeinfra-backup-mongodb-30015550-p4x9z",
+                          "fuzeinfra-backup-mongodb-30015550")
+    assert first.key == second.key == "stuck-containercreating:fuzeinfra/fuzeinfra-backup-mongodb"
+    # The exact pod instance is still preserved for diagnostics.
+    assert first.facts["pod"] == "fuzeinfra-backup-mongodb-29820980-8mcg8"
+    assert second.facts["pod"] == "fuzeinfra-backup-mongodb-30015550-p4x9z"
+
+
+def _stuck_creating_pod(pod_name, job_name, minutes=45):
+    return pod(pod_name, container="mongodb", reason="ContainerCreating",
+               ready=False, start_minutes_ago=minutes, phase="Pending",
+               owner=("Job", job_name))
+
+
+def _churned_backup_issue(pod_name="fuzeinfra-backup-mongodb-29820980-8mcg8"):
+    key = "<!-- watchdog-key: stuck-containercreating:fuzeinfra/fuzeinfra-backup-mongodb -->"
+    instance = f"<!-- watchdog-instance: {pod_name} -->"
+    return {
+        "number": 1062,
+        "url": "https://github.com/izzywdev/FuzeInfra/issues/1062",
+        "title": "[watchdog] stuck-containercreating: fuzeinfra/fuzeinfra-backup-mongodb",
+        "body": f"{key}\n{instance}\n",
+    }
+
+
+def test_new_pod_instance_of_an_already_tracked_workload_is_not_refiled(monkeypatch):
+    """The flood, exactly: a fresh CronJob pod (new hash) must dedupe against
+    the already-open issue for this workload instead of filing #1063."""
+    new_pod = _stuck_creating_pod("fuzeinfra-backup-mongodb-30015550-p4x9z",
+                                  "fuzeinfra-backup-mongodb-30015550")
+    calls = _wire(monkeypatch, {"items": []}, [_churned_backup_issue()])
+    monkeypatch.setattr(wd, "collect_cluster_state",
+                        lambda cfg: ({"items": []}, {"items": [new_pod]}, {"items": []}))
+    wd.main(["--repo", "izzywdev/FuzeInfra"])
+    assert calls["filed"] == []
+
+
+def test_new_pod_instance_updates_the_tracked_issue_with_a_comment(monkeypatch):
+    """Not re-filed, but not silently swallowed either: the thread is updated."""
+    new_pod = _stuck_creating_pod("fuzeinfra-backup-mongodb-30015550-p4x9z",
+                                  "fuzeinfra-backup-mongodb-30015550")
+    calls = _wire(monkeypatch, {"items": []}, [_churned_backup_issue()])
+    monkeypatch.setattr(wd, "collect_cluster_state",
+                        lambda cfg: ({"items": []}, {"items": [new_pod]}, {"items": []}))
+    wd.main(["--repo", "izzywdev/FuzeInfra"])
+    (number, body), = calls["commented"]
+    assert number == 1062
+    assert "fuzeinfra-backup-mongodb-30015550-p4x9z" in body
+
+
+def test_same_pod_instance_duplicate_is_a_true_noop(monkeypatch):
+    """Re-detecting the SAME still-stuck pod must not comment every 15 minutes."""
+    same_pod = _stuck_creating_pod("fuzeinfra-backup-mongodb-29820980-8mcg8",
+                                   "fuzeinfra-backup-mongodb-29820980")
+    calls = _wire(monkeypatch, {"items": []}, [_churned_backup_issue()])
+    monkeypatch.setattr(wd, "collect_cluster_state",
+                        lambda cfg: ({"items": []}, {"items": [same_pod]}, {"items": []}))
+    wd.main(["--repo", "izzywdev/FuzeInfra"])
+    assert calls["filed"] == []
+    assert calls["commented"] == []
+
+
+def test_close_resolved_findings_closes_an_issue_no_longer_detected(monkeypatch):
+    commented, closed = [], []
+    monkeypatch.setattr(wd, "comment_issue", lambda repo, n, b: commented.append(n))
+    monkeypatch.setattr(wd, "close_issue", lambda repo, n: closed.append(n))
+    still_open, closed_lines = wd.close_resolved_findings(
+        "izzywdev/FuzeInfra", [_churned_backup_issue()], wd.KIND_CREATING, active_keys=set(),
+    )
+    assert still_open == []
+    assert closed == [1062]
+    assert commented == [1062]
+    assert closed_lines and "no longer detected" in closed_lines[0]
+
+
+def test_close_resolved_findings_leaves_a_still_active_issue_open():
+    key = "stuck-containercreating:fuzeinfra/fuzeinfra-backup-mongodb"
+    still_open, closed_lines = wd.close_resolved_findings(
+        "izzywdev/FuzeInfra", [_churned_backup_issue()], wd.KIND_CREATING, active_keys={key},
+    )
+    assert len(still_open) == 1
+    assert closed_lines == []
+
+
+def test_stuck_creating_issue_closes_when_the_workload_recovers(monkeypatch):
+    """Bounded lifecycle end-to-end: once the workload stops appearing in the
+    findings, its tracked issue closes instead of sitting open forever."""
+    calls = _wire(monkeypatch, {"items": []}, [_churned_backup_issue()])
+    monkeypatch.setattr(wd, "collect_cluster_state",
+                        lambda cfg: ({"items": []}, {"items": []}, {"items": []}))
+    wd.main(["--repo", "izzywdev/FuzeInfra"])
+    assert calls["closed"] == [1062]

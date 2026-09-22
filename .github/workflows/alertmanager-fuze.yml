@@ -22,8 +22,20 @@ on:
   repository_dispatch:
     types: [alertmanager-alert]
 
+# Keyed on (alertname, namespace) from the alert LABELS — never on `summary`,
+# which the Prometheus rules template with `{{ $labels.pod }}` and therefore
+# churns on every pod-instance rollover (e.g.
+# `fuzeinfra-backup-mongodb-29820980-8mcg8`). A summary-keyed group let two
+# concurrent firings of the SAME alertname (different pod, different summary)
+# run in parallel: both pass the "no open issue yet" search before either has
+# created one, so both open one -> the flood
+# (`🔴 Prod alert: <name>` #1084/#1090/#1091/#1092/#1094). Grouping on the
+# stable label pair serializes same-key runs so the second one's search always
+# sees the first one's issue. `crit-alert-bridge.js` always JSON.stringify()s a
+# real object (falling back to `{}`), so `fromJson` here never sees malformed
+# input.
 concurrency:
-  group: alertmanager-fuze-${{ github.event.client_payload.summary }}
+  group: "alertmanager-fuze-${{ fromJson(github.event.client_payload.labels).alertname || 'unknown' }}-${{ fromJson(github.event.client_payload.labels).namespace || 'none' }}"
   cancel-in-progress: false
 
 permissions:
@@ -103,13 +115,35 @@ jobs:
             echo "::warning::GH_TOKEN unset — cannot open @fuze issue in $OWNER_REPO"; exit 0
           fi
           ALERTNAME=$(jq -r '.alertname // "alert"' /tmp/alert_labels.json)
+          # Stable dedupe key: (namespace, alertname). Both are Alertmanager
+          # LABELS — never `summary`/`description`, which the Prometheus rules
+          # template with `{{ $labels.pod }}` and so churn on every pod
+          # instance (e.g. a CronJob backup pod's `-<epoch>-<hash>` suffix
+          # changes every run). Keying dedupe on the churning text is exactly
+          # what produced the flood this fixes
+          # (`🔴 Prod alert: <name>` #1084/#1090/#1091/#1092/#1094).
+          DEDUP_KEY="${NS}/${ALERTNAME}"
+          MARKER="<!-- alertmanager-key: ${DEDUP_KEY} -->"
+          TITLE="🔴 Prod alert: ${ALERTNAME} [${NS}]"
 
-          # Idempotent: one open issue per (repo, alertname). Match on the label +
-          # the alertname carried in the title so repeated firings don't pile on.
-          EXISTING=$(gh issue list --repo "$OWNER_REPO" --label alertmanager-autofix \
-            --state open --search "$ALERTNAME in:title" --json number --jq 'length' 2>/dev/null || echo 0)
-          if [ "${EXISTING:-0}" -gt 0 ]; then
-            echo "::notice::open alertmanager-autofix issue for '$ALERTNAME' already in $OWNER_REPO; skipping"
+          # Idempotent: one open issue per (namespace, alertname). Matched on a
+          # body marker first (robust to a human editing the title later), the
+          # stable title as a fallback — mirrors deployment_watchdog.py's
+          # filter_new_findings/watchdog-key convention.
+          EXISTING_JSON=$(gh issue list --repo "$OWNER_REPO" --label alertmanager-autofix \
+            --state open --search "$ALERTNAME in:title,body" --json number,title,body 2>/dev/null || echo '[]')
+          MATCH_NUMBER=$(printf '%s' "$EXISTING_JSON" | jq -r --arg marker "$MARKER" --arg title "$TITLE" \
+            '[.[] | select(((.body // "") | contains($marker)) or .title == $title)] | (first.number // empty)')
+
+          if [ -n "$MATCH_NUMBER" ]; then
+            echo "::notice::open alertmanager-autofix issue #$MATCH_NUMBER for '$DEDUP_KEY' in $OWNER_REPO; updating instead of filing a duplicate"
+            {
+              printf '🔁 Alert refired (not re-filed — see `%s` above).\n\n' "$MARKER"
+              printf -- '- **Alert:** %s\n' "${ALERT_SUMMARY:-$ALERTNAME}"
+              printf -- '- **Fired at:** %s\n' "${FIRED_AT:-unknown}"
+              printf -- '- **Routing run:** %s\n' "$RUN_URL"
+            } > /tmp/fuze_update.md
+            gh issue comment "$MATCH_NUMBER" --repo "$OWNER_REPO" --body-file /tmp/fuze_update.md
             exit 0
           fi
           gh label create alertmanager-autofix --repo "$OWNER_REPO" --color B60205 \
@@ -121,6 +155,7 @@ jobs:
             ASK="@fuze this alert fired for this repo's workload (namespace \`$NS\`) on the shared FuzeInfra cluster. FuzeInfra runs the platform but does not edit consumer code/charts. Please diagnose from this repo (deploy manifests, image/probes/resources), open a fix PR, and report back here."
           fi
           {
+            printf '%s\n' "$MARKER"
             printf '## 🔴 Prod alert firing on the shared FuzeInfra cluster\n\n'
             printf -- '- **Alert:** %s\n' "${ALERT_SUMMARY:-$ALERTNAME}"
             printf -- '- **Namespace:** `%s`\n' "$NS"
@@ -133,6 +168,6 @@ jobs:
           } > /tmp/fuze_body.md
 
           URL=$(gh issue create --repo "$OWNER_REPO" --label alertmanager-autofix \
-            --title "🔴 Prod alert: ${ALERTNAME} (${ALERT_SUMMARY:0:60})" \
+            --title "$TITLE" \
             --body-file /tmp/fuze_body.md)
           echo "::notice::opened @fuze issue $URL"
