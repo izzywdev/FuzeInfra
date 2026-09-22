@@ -75,6 +75,10 @@ jobs:
           echo "=== GET /v1/compute/instances/$REF_ID ipConfig (primary IP only) ==="
           curl -sS "${auth[@]}" -H "x-request-id: $(rid)" "$api/v1/compute/instances/$REF_ID" | jq '.data[0].ipConfig'
 
+          echo "=== GET /v1/compute/instances (displayName -> instanceId -> region; fills apiVip.nodes) ==="
+          curl -sS "${auth[@]}" -H "x-request-id: $(rid)" "$api/v1/compute/instances?size=200" \
+            | jq -r '.data[]? | "\(.displayName // .name)\t\(.instanceId)\t\(.region)"'
+
           if [ -n "${TEST_IP}" ]; then
             echo "=== GET /v1/vips/$TEST_IP (assignments reveal the resourceType literal) ==="
             curl -sS "${auth[@]}" -H "x-request-id: $(rid)" "$api/v1/vips/$TEST_IP" | jq '.data[0]'
