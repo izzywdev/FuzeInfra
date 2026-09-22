@@ -57,6 +57,26 @@ def _load_module():
 
 wd = _load_module()
 CFG = json.loads(CONFIG.read_text(encoding="utf-8"))
+
+
+@pytest.fixture(autouse=True)
+def _no_live_github(monkeypatch):
+    """Fail any test that reaches the real `gh` CLI.
+
+    Every GitHub side effect in the watchdog funnels through `wd.gh`, and the
+    issue helpers act on the LIVE repo passed via --repo. A test that forgets to
+    stub one of them silently lists — and could comment on or close — real
+    issues in izzywdev/FuzeInfra. That nearly happened when the clean-run path
+    gained an auto-close: test_no_findings_files_nothing_and_exits_zero made a
+    real `gh issue list` call and passed only because no stuck-argo-op issue
+    happened to be open. Tests that need GitHub behaviour stub the specific
+    helper (create_issue, comment_issue, ...) above this layer.
+    """
+    def _refuse(args, timeout=60):
+        pytest.fail(f"test reached the real gh CLI: gh {' '.join(args)}")
+    monkeypatch.setattr(wd, "gh", _refuse)
+
+
 NOW = datetime(2026, 9, 1, 12, 0, 0, tzinfo=timezone.utc)
 
 
@@ -939,6 +959,7 @@ def test_end_to_end_caps_issues_filed_reports_everything_and_dispatches_terminat
 def test_no_findings_files_nothing_and_exits_zero(monkeypatch):
     monkeypatch.setattr(wd, "collect_cluster_state", lambda cfg: ({"items": []}, {"items": []}, {"items": []}))
     monkeypatch.setattr(wd, "collect_pvc_usage", lambda p, cfg: ([], "prometheus"))
+    monkeypatch.setattr(wd, "list_open_watchdog_issues", lambda repo, label: [])
     monkeypatch.setattr(wd, "create_issue", lambda *a, **k: pytest.fail("filed an issue with no findings"))
     assert wd.main(["--repo", "izzywdev/FuzeInfra"]) == 0
 
@@ -984,24 +1005,30 @@ def test_one_containercreating_finding_per_pod_not_per_container():
     assert findings[0].facts["waiting_message"] == "already mounted or mount point busy"
 
 
-def test_open_issue_ceiling_stops_filing_until_something_is_closed(monkeypatch):
+def _crashloop_pods(n):
+    return {"items": [pod(f"api-{i}", restarts=600, reason="CrashLoopBackOff", ready=False,
+                          start_minutes_ago=900) for i in range(n)]}
+
+
+def _full_ceiling():
+    return [{"number": n, "url": f"u{n}", "title": f"[watchdog] x: {n}", "body": ""}
+            for n in range(CFG["issues"]["max_open"])]
+
+
+def test_open_issue_ceiling_still_holds_back_noise(monkeypatch):
     """max_per_run alone only spreads a backlog out; the ceiling bounds it.
 
     At 10 per run every 15 minutes, the 55 conditions the first live run found
-    would all have been filed within ~1.5h regardless. Nothing new is filed
-    while `max_open` issues are already open.
+    would all have been filed within ~1.5h regardless. Nothing NEW of the noisy
+    kinds is filed while `max_open` issues are already open.
     """
-    apps = {"items": [argo_app("fuzeinfra-prod", "Running", 37 * 60, "waiting for healthy state")]}
     filed = []
-    already_open = [{"number": n, "url": f"u{n}", "title": f"[watchdog] x: {n}", "body": ""}
-                    for n in range(CFG["issues"]["max_open"])]
-
-    monkeypatch.setattr(wd, "collect_cluster_state", lambda cfg: (apps, {"items": []}, {"items": []}))
+    monkeypatch.setattr(wd, "collect_cluster_state",
+                        lambda cfg: ({"items": []}, _crashloop_pods(5), {"items": []}))
     monkeypatch.setattr(wd, "collect_pvc_usage", lambda p, cfg: ([], "prometheus"))
-    monkeypatch.setattr(wd, "list_open_watchdog_issues", lambda repo, label: already_open)
+    monkeypatch.setattr(wd, "list_open_watchdog_issues", lambda repo, label: _full_ceiling())
     monkeypatch.setattr(wd, "ensure_label", lambda *a, **k: pytest.fail("touched labels with no slot"))
     monkeypatch.setattr(wd, "create_issue", lambda *a, **k: filed.append(a) or "url")
-    monkeypatch.setattr(wd, "dispatch_terminate_op", lambda *a, **k: None)
 
     exit_code = wd.main(["--repo", "izzywdev/FuzeInfra"])
 
@@ -1010,18 +1037,171 @@ def test_open_issue_ceiling_stops_filing_until_something_is_closed(monkeypatch):
     assert exit_code == 1
 
 
+def test_open_issue_ceiling_never_starves_a_stuck_argo_op(monkeypatch):
+    """REGRESSION (2026-09-15..20 prod freeze): a full ceiling must not mute the
+    one condition that freezes every prod deploy.
+
+    This test used to assert the OPPOSITE — that with max_open issues open, a
+    37-hour wedged fuzeinfra-prod sync files nothing. That was the freeze,
+    encoded as correct: 20 stuck-backup-pod issues held every slot, and because
+    auto-terminate rides on filing, the wedge was neither reported nor acted on.
+    """
+    apps = {"items": [argo_app("fuzeinfra-prod", "Running", 37 * 60, "waiting for healthy state")]}
+    filed, dispatched = [], []
+    monkeypatch.setattr(wd, "collect_cluster_state", lambda cfg: (apps, {"items": []}, {"items": []}))
+    monkeypatch.setattr(wd, "collect_pvc_usage", lambda p, cfg: ([], "prometheus"))
+    monkeypatch.setattr(wd, "list_open_watchdog_issues", lambda repo, label: _full_ceiling())
+    monkeypatch.setattr(wd, "ensure_label", lambda *a, **k: None)
+    monkeypatch.setattr(wd, "create_issue", lambda repo, label, title, body: filed.append(title) or "url")
+    monkeypatch.setattr(wd, "dispatch_terminate_op",
+                        lambda repo, wf, app, ref="main": dispatched.append(app))
+
+    wd.main(["--repo", "izzywdev/FuzeInfra"])
+
+    assert filed == ["[watchdog] stuck-argo-op: fuzeinfra-prod"]
+    assert dispatched == ["fuzeinfra-prod"]
+
+
 def test_ceiling_leaves_room_for_a_partial_batch(monkeypatch):
-    apps = {"items": [argo_app(f"app-{i}", "Running", 100, "stuck") for i in range(9)]}
     filed = []
     already_open = [{"number": n, "url": "u", "title": "t", "body": ""}
                     for n in range(CFG["issues"]["max_open"] - 3)]
 
-    monkeypatch.setattr(wd, "collect_cluster_state", lambda cfg: (apps, {"items": []}, {"items": []}))
+    monkeypatch.setattr(wd, "collect_cluster_state",
+                        lambda cfg: ({"items": []}, _crashloop_pods(9), {"items": []}))
     monkeypatch.setattr(wd, "collect_pvc_usage", lambda p, cfg: ([], "prometheus"))
     monkeypatch.setattr(wd, "list_open_watchdog_issues", lambda repo, label: already_open)
     monkeypatch.setattr(wd, "ensure_label", lambda *a, **k: None)
     monkeypatch.setattr(wd, "create_issue", lambda *a, **k: filed.append(a) or "url")
-    monkeypatch.setattr(wd, "dispatch_terminate_op", lambda *a, **k: None)
 
     wd.main(["--repo", "izzywdev/FuzeInfra"])
     assert len(filed) == 3
+
+
+# ---------------------------------------------------------------------------
+# 10. the 2026-09-15..20 freeze: detected 42 times, reported and acted on 0
+# ---------------------------------------------------------------------------
+#
+# The watchdog saw fuzeinfra-prod wedged at 47.3h and logged "already tracked by
+# #776 (not re-filed)". #776 was the PREVIOUS incident's issue, never closed.
+# Three compounding bugs; one test group each.
+
+ARGO_KEY = "<!-- watchdog-key: stuck-argo-op:fuzeinfra-prod -->"
+WEDGED = {"items": [argo_app("fuzeinfra-prod", "Running", 47 * 60,
+                             "waiting for healthy state of apps/Deployment/fuzeinfra-overprovisioning")]}
+
+
+def _stale_argo_issue(body_extra=""):
+    return {"number": 776, "url": "https://github.com/izzywdev/FuzeInfra/issues/776",
+            "title": "[watchdog] stuck-argo-op: fuzeinfra-prod", "body": ARGO_KEY + body_extra}
+
+
+def _wire(monkeypatch, apps, open_issues, comments=()):
+    calls = {"dispatched": [], "commented": [], "closed": [], "filed": []}
+    monkeypatch.setattr(wd, "collect_cluster_state", lambda cfg: (apps, {"items": []}, {"items": []}))
+    monkeypatch.setattr(wd, "collect_pvc_usage", lambda p, cfg: ([], "prometheus"))
+    monkeypatch.setattr(wd, "list_open_watchdog_issues", lambda repo, label: list(open_issues))
+    monkeypatch.setattr(wd, "list_issue_comments", lambda repo, n: list(comments))
+    monkeypatch.setattr(wd, "ensure_label", lambda *a, **k: None)
+    monkeypatch.setattr(wd, "create_issue", lambda repo, label, t, b: calls["filed"].append(t) or "url")
+    monkeypatch.setattr(wd, "comment_issue", lambda repo, n, b: calls["commented"].append((n, b)))
+    monkeypatch.setattr(wd, "close_issue", lambda repo, n: calls["closed"].append(n))
+    monkeypatch.setattr(wd, "dispatch_terminate_op",
+                        lambda repo, wf, app, ref="main": calls["dispatched"].append(app))
+    return calls
+
+
+# --- bug 1: auto-terminate only fired for NEWLY filed findings ---------------
+
+def test_already_tracked_argo_wedge_is_still_terminated(monkeypatch):
+    calls = _wire(monkeypatch, WEDGED, [_stale_argo_issue()])
+    wd.main(["--repo", "izzywdev/FuzeInfra"])
+    assert calls["dispatched"] == ["fuzeinfra-prod"]
+    assert calls["filed"] == []  # still deduplicated — no second issue
+    (number, body), = calls["commented"]
+    assert number == 776
+    assert "fuzeinfra-overprovisioning" in body  # names the blocking resource
+    assert wd.argo_terminated_marker("fuzeinfra-prod", _ts(47 * 60)) in body
+
+
+def test_already_terminated_operation_is_not_re_dispatched(monkeypatch):
+    """Bounded: one terminate per operation, never every 15 minutes."""
+    marker = wd.argo_terminated_marker("fuzeinfra-prod", _ts(47 * 60))
+    calls = _wire(monkeypatch, WEDGED, [_stale_argo_issue()], comments=[{"body": marker}])
+    wd.main(["--repo", "izzywdev/FuzeInfra"])
+    assert calls["dispatched"] == []
+
+
+def test_run_that_filed_the_issue_is_not_followed_by_a_second_terminate(monkeypatch):
+    """A newly filed issue carries the marker in its body, so the next run skips it."""
+    marker = wd.argo_terminated_marker("fuzeinfra-prod", _ts(47 * 60))
+    calls = _wire(monkeypatch, WEDGED, [_stale_argo_issue(body_extra=marker)])
+    wd.main(["--repo", "izzywdev/FuzeInfra"])
+    assert calls["dispatched"] == []
+
+
+def test_a_new_operation_on_the_same_app_is_terminated_again(monkeypatch):
+    """A marker for an OLDER op must not suppress action on a new wedge."""
+    old = wd.argo_terminated_marker("fuzeinfra-prod", _ts(20 * 24 * 60))
+    calls = _wire(monkeypatch, WEDGED, [_stale_argo_issue()], comments=[{"body": old}])
+    wd.main(["--repo", "izzywdev/FuzeInfra"])
+    assert calls["dispatched"] == ["fuzeinfra-prod"]
+
+
+def test_newly_filed_argo_issue_records_the_terminated_operation(monkeypatch):
+    bodies = []
+    calls = _wire(monkeypatch, WEDGED, [])
+    monkeypatch.setattr(wd, "create_issue", lambda repo, label, t, b: bodies.append(b) or "url")
+    wd.main(["--repo", "izzywdev/FuzeInfra"])
+    assert calls["dispatched"] == ["fuzeinfra-prod"]
+    assert wd.argo_terminated_marker("fuzeinfra-prod", _ts(47 * 60)) in bodies[0]
+
+
+# --- bug 2: resolved Argo issues were never closed ---------------------------
+
+def test_resolved_argo_issue_is_closed_on_a_clean_run(monkeypatch):
+    """The early return on zero findings used to skip ALL issue handling."""
+    calls = _wire(monkeypatch, {"items": []}, [_stale_argo_issue()])
+    assert wd.main(["--repo", "izzywdev/FuzeInfra"]) == 0
+    assert calls["closed"] == [776]
+
+
+def test_resolved_argo_issue_is_closed_alongside_other_findings(monkeypatch):
+    calls = _wire(monkeypatch, {"items": []}, [_stale_argo_issue()])
+    monkeypatch.setattr(wd, "collect_cluster_state",
+                        lambda cfg: ({"items": []}, _crashloop_pods(1), {"items": []}))
+    wd.main(["--repo", "izzywdev/FuzeInfra"])
+    assert calls["closed"] == [776]
+
+
+def test_still_wedged_argo_issue_is_not_closed(monkeypatch):
+    calls = _wire(monkeypatch, WEDGED, [_stale_argo_issue()])
+    wd.main(["--repo", "izzywdev/FuzeInfra"])
+    assert calls["closed"] == []
+
+
+def test_unreadable_application_list_never_mass_closes(monkeypatch):
+    """No 'items' key is not evidence of recovery."""
+    calls = _wire(monkeypatch, {}, [_stale_argo_issue()])
+    wd.main(["--repo", "izzywdev/FuzeInfra"])
+    assert calls["closed"] == []
+
+
+def test_dry_run_closes_nothing(monkeypatch):
+    calls = _wire(monkeypatch, {"items": []}, [_stale_argo_issue()])
+    wd.main(["--repo", "izzywdev/FuzeInfra", "--dry-run"])
+    assert calls["closed"] == []
+
+
+def test_closing_frees_the_slot_for_the_same_run(monkeypatch):
+    """A closed issue must not still count against max_open in the run that closed it."""
+    open_issues = [_stale_argo_issue()] + [
+        {"number": n, "url": "u", "title": f"[watchdog] x: {n}", "body": ""}
+        for n in range(CFG["issues"]["max_open"] - 1)
+    ]
+    calls = _wire(monkeypatch, {"items": []}, open_issues)
+    monkeypatch.setattr(wd, "collect_cluster_state",
+                        lambda cfg: ({"items": []}, _crashloop_pods(1), {"items": []}))
+    wd.main(["--repo", "izzywdev/FuzeInfra"])
+    assert calls["closed"] == [776]
+    assert len(calls["filed"]) == 1
