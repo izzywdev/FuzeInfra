@@ -11,7 +11,7 @@ import time
 import asyncio
 import logging
 from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Any
+from typing import Dict
 from pathlib import Path
 
 # Import our integration modules
