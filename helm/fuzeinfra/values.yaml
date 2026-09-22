@@ -1360,7 +1360,11 @@ clusterAutoscaler:
   # only right before the instance would renew anyway.
   scaleDownEnabled: false
   provider:
-    image: ghcr.io/izzywdev/fuzeinfra-contabo-ca-provider:latest
+    # Immutable per-build tag, not :latest — see values-contabo.yaml for why
+    # (#841). Overlays that actually run this (clusterAutoscaler.enabled=true)
+    # should keep this pinned to the same build as values-contabo.yaml unless
+    # deliberately testing a different one.
+    image: ghcr.io/izzywdev/fuzeinfra-contabo-ca-provider:sha-6d36880
     existingSecret: fuzeinfra-ca-provider
     productId: ""
     imageId: ""

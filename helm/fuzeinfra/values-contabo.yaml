@@ -755,8 +755,10 @@ clusterAutoscaler:
   # RawCancelDate, so the instant a human revokes in the panel that guard
   # opens and the next CA loop re-cancels within ~35s. The operator cannot
   # safely click revoke while any of this stack is running, and this is the
-  # only values-only kill switch — it avoids the provider :latest rollout race
-  # documented under provider.imageRollout below.
+  # only values-only kill switch. (Historically this also sidestepped the
+  # provider :latest rollout race documented at provider.image below -- #841
+  # pinned that to an immutable per-build tag, so the race no longer applies,
+  # but `enabled: false` is still the fastest kill switch available.)
   #
   # COST OF LEAVING IT OFF: none that is not already lost. The pool was wedged
   # at "max size reached" with 3 of 4 slots held by instances that will never
@@ -831,22 +833,19 @@ clusterAutoscaler:
   # brake while the join path is unproven, not a permanent setting.
   maxNodeProvisionTime: 90m
   provider:
-    # TODO: replace with the published image once fuzeinfra-contabo-ca-provider
-    # has a tagged release (see cluster-autoscaler/contabo-externalgrpc).
-    image: ghcr.io/izzywdev/fuzeinfra-contabo-ca-provider:latest
-    # Bump with the provider image build SHA so Argo rolls the :latest pod.
-    #
-    # ORDERING HAZARD, read before relying on this. On merge to main two
-    # workflows race: ca-provider-image.yml builds and pushes :latest (minutes),
-    # while deploy-prod triggers the Argo sync (seconds). If Argo wins, the pod
-    # restarts and re-pulls the OLD :latest, this annotation is already at its
-    # new value, and nothing ever rolls it again -- the change looks deployed
-    # and is not. After merging a provider change, VERIFY the running pod's
-    # image digest matches the digest ca-provider-image.yml just pushed:
-    #   kubectl -n fuzeinfra get pod -l app=fuzeinfra-contabo-ca-provider     #     -o jsonpath='{.items[*].status.containerStatuses[*].imageID}'
-    # and if it does not match, bump this value again in a follow-up PR. That
-    # is why this is a free-form marker rather than strictly the build SHA.
-    imageRollout: "cancel-raw-diag-2026-09-03"
+    # PINNED to an immutable per-build tag, not :latest (see #841). :latest
+    # meant Kubernetes saw no pod-template change on a rebuild, so a correct,
+    # merged, successfully-built provider fix did not deploy on its own -- it
+    # took a human remembering to bump the separate imageRollout annotation
+    # below (#834). ca-provider-image.yml (docker/metadata-action `type=sha`)
+    # publishes an immutable `sha-<short-commit-sha>` tag on every push to
+    # main alongside :latest, so THIS is now the deploy mechanism: bump the
+    # tag in Git, Argo syncs the new image, done -- one change, reviewable,
+    # and the diff shows exactly which build is going to prod. Pinned to the
+    # image built from commit 6d36880 (last successful
+    # ca-provider-image.yml run on main as of 2026-09-22:
+    # https://github.com/izzywdev/FuzeInfra/actions/runs/35035333001).
+    image: ghcr.io/izzywdev/fuzeinfra-contabo-ca-provider:sha-6d36880
     existingSecret: fuzeinfra-ca-provider
     # Current Contabo create-instance catalog: Cloud VPS 4 (4 vCPU / 8 GiB).
     # V92 is a retired SKU and fails ordering with "No offer was found".
