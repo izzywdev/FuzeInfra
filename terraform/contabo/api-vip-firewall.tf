@@ -43,7 +43,8 @@ resource "null_resource" "api_vip_open_6443" {
 
   provisioner "remote-exec" {
     inline = [
-      "set -euo pipefail",
+      # dash (the nodes' /bin/sh) rejects `set -o pipefail`; -eu is enough here.
+      "set -eu",
       "ufw allow 6443/tcp",
       "ufw status | grep -E '6443' || true",
     ]

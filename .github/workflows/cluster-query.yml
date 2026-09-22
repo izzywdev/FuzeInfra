@@ -38,14 +38,27 @@ on:
 permissions:
   contents: read
 
+# PER-CALLER concurrency. The old single global `cluster-query` group serialized
+# EVERY caller — this repo's sessions AND every consumer via repository_dispatch —
+# one-at-a-time, so a single slow/hung query held the group (up to the timeout
+# below) and turned a fleet-wide read tool into a fleet-wide read OUTAGE while the
+# runners were free. Keying the group per caller (the consumer's client_payload.id
+# for repository_dispatch, else the unique run_id) lets callers run independently;
+# a run_id key also stops a session's rapid successive dispatches from cancelling
+# one another. This is a read-only kubectl, so cross-caller parallelism is safe
+# (ARC maxRunners still caps total concurrency).
 concurrency:
-  group: cluster-query
+  group: cluster-query-${{ github.event.client_payload.id || github.run_id }}
   cancel-in-progress: false
 
 jobs:
   query:
     runs-on: staging
-    timeout-minutes: 120
+    # A read-only kubectl query has no business running for hours. 120m let a hung
+    # query (e.g. an accidental `logs -f`) sit on a runner and — under the old
+    # global concurrency group — block every other caller for that whole window.
+    # 10m is ample for any get/describe/logs/top/events read.
+    timeout-minutes: 10
     steps:
       - uses: azure/setup-kubectl@829323503d1be3d00ca8346e5391ca0b07a9ab0d # v5.1.0
 
