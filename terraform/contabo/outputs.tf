@@ -125,3 +125,28 @@ output "litellm_ci_service_token_client_secret" {
   value       = local.cloudflare_enabled ? cloudflare_zero_trust_access_service_token.litellm_ci[0].client_secret : ""
   sensitive   = true
 }
+
+# ---------------------------------------------------------------------------
+# k3s API break-glass service token (cloudflared access tcp).
+#
+# Same handling as litellm_ci above: sensitive, extracted deliberately from a
+# local terminal against the S3-backed state, never logged/committed. Use:
+#   export CF_ACCESS_CLIENT_ID="$(terraform output -raw k8s_api_breakglass_client_id)"
+#   export CF_ACCESS_CLIENT_SECRET="$(terraform output -raw k8s_api_breakglass_client_secret)"
+#   cloudflared access tcp --hostname k8s-api.$(terraform output -raw prod_domain) \
+#     --url 127.0.0.1:6443 \
+#     --service-token-id "$CF_ACCESS_CLIENT_ID" \
+#     --service-token-secret "$CF_ACCESS_CLIENT_SECRET" &
+#   kubectl --server https://127.0.0.1:6443 get --raw /livez   # end-to-end proof
+# ---------------------------------------------------------------------------
+output "k8s_api_breakglass_client_id" {
+  description = "Cloudflare Access service token client_id for the k3s API break-glass tunnel (cloudflared access tcp). Sent as the CF-Access-Client-Id header; kept sensitive for parity with its paired secret."
+  value       = (local.cloudflare_enabled && var.api_breakglass_enabled) ? cloudflare_zero_trust_access_service_token.k8s_api_breakglass[0].client_id : ""
+  sensitive   = true
+}
+
+output "k8s_api_breakglass_client_secret" {
+  description = "Cloudflare Access service token client_secret for the k3s API break-glass tunnel. A real credential — extract via `terraform output -raw`, use in the cloudflared access env, never paste elsewhere."
+  value       = (local.cloudflare_enabled && var.api_breakglass_enabled) ? cloudflare_zero_trust_access_service_token.k8s_api_breakglass[0].client_secret : ""
+  sensitive   = true
+}
