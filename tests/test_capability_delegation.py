@@ -140,6 +140,66 @@ def test_capability_environment_lookup():
     assert cd.capability_environment("gitops.edit") == "cloud-devops"
 
 
+# --------------------------------------------------------------------------
+# Workflow-backed capabilities
+#
+# Some capabilities cannot be owned by ANY environment. github.secret.provision is
+# the worked example: Anthropic's agent proxy refuses /repos/*/actions/secrets by
+# URL, and every environment in the manifest is anthropic_cloud, so no peer session
+# can hold that credential no matter what is provisioned. A dispatchable workflow
+# holds it in the repo instead. These pin that such a capability reads as
+# SATISFIABLE, so a caller does not fall back to improvising a workaround.
+# --------------------------------------------------------------------------
+
+
+def test_workflow_backed_capability_is_satisfiable_without_an_environment():
+    assert cd.capability_environment("github.secret.provision") is None
+    assert cd.capability_workflow("github.secret.provision") == "secret-provision.yml"
+    assert cd.is_satisfiable("github.secret.provision")
+
+
+def test_unknown_capability_is_not_satisfiable():
+    assert cd.capability_workflow("totally.unknown.cap") is None
+    assert not cd.is_satisfiable("totally.unknown.cap")
+
+
+def test_genuinely_unwired_capability_is_not_satisfiable():
+    """database.provision has neither an environment nor a workflow — still closed."""
+    assert cd.capability_environment("database.provision") is None
+    assert cd.capability_workflow("database.provision") is None
+    assert not cd.is_satisfiable("database.provision")
+
+
+def test_environment_backed_capability_is_satisfiable():
+    assert cd.is_satisfiable("gitops.edit")
+
+
+def test_every_declared_workflow_exists():
+    """A registry pointing at a workflow that isn't in the repo is a dead capability.
+
+    Declaring the route is not the same as having it; this is the same
+    declaration-vs-reality check the A2A surface tests apply to skills and images.
+    """
+    workflows = ROOT / ".github/workflows"
+    for cap, entry in cd.CAPABILITY_REGISTRY.items():
+        wf = entry.get("workflow")
+        if wf is None:
+            continue
+        assert (workflows / wf).is_file(), f"{cap} → {wf} does not exist in .github/workflows/"
+
+
+def test_no_capability_is_left_with_neither_route_silently():
+    """Every unsatisfiable capability must SAY so in its notes.
+
+    An entry with no environment and no workflow is a promise the fleet cannot keep;
+    the notes are where a caller finds out what is missing instead of retrying.
+    """
+    for cap, entry in cd.CAPABILITY_REGISTRY.items():
+        if cd.is_satisfiable(cap):
+            continue
+        assert entry.get("notes"), f"{cap} is unsatisfiable and undocumented"
+
+
 # --- challenge handshake -------------------------------------------------------------
 
 def test_challenge_round_trip():

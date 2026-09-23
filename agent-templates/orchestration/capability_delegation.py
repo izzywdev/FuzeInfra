@@ -56,10 +56,24 @@ from typing import Iterable, Optional
 # the credential itself. `read_only` flags capabilities safe to auto-honor; the rest keep
 # their existing human/GitOps gate (§4.4). `environment: None` means "not wired to any env
 # today" — delegation for it must fail closed until Phase 3 provisions the credential.
+#
+# `workflow` is the SECOND way a capability can be satisfied, and for some capabilities it
+# is the only possible one. A dispatchable GitHub Actions workflow holds the credential in
+# the repo rather than in any session's environment, so the caller triggers it and reads
+# the result instead of delegating to a peer. Prefer it whenever it is set: it is cheaper
+# than spawning a session, it is callable from wherever the caller already runs, and its
+# guardrails are enforced server-side by a committed filter rather than by the callee's
+# good behaviour.
+#
+# A capability may therefore be satisfiable with `environment: None`. Read the two fields
+# together — "cannot delegate" means BOTH are unset. `capability_environment()` keeps its
+# original narrow meaning (which env owns the credential) so existing callers are unchanged;
+# `capability_workflow()` and `is_satisfiable()` expose the rest.
 # --------------------------------------------------------------------------------------
 CAPABILITY_REGISTRY: dict[str, dict] = {
     "kubectl.read": {
         "environment": "selfhosted-devops",
+        "workflow": "cluster-query.yml",
         "read_only": True,
         "notes": "prod cluster read (get/logs); prefer the read-only cluster-query.yml for pure reads",
     },
@@ -77,10 +91,25 @@ CAPABILITY_REGISTRY: dict[str, dict] = {
         "notes": "tenants Exec-{ceo,cto,cfo,ciso}; governed by the frozen exec A2A card contract",
     },
     "github.secret.provision": {
-        "environment": None,  # NOT wired to any managed-agent env today (§5).
+        # Still None, and now permanently so rather than pending Phase 3: no
+        # managed-agent environment can EVER satisfy this. Anthropic's agent proxy
+        # refuses /repos/*/actions/secrets with
+        #   403 "Access to this GitHub Actions path is not permitted through this proxy"
+        # because it injects git credentials only, never secret admin (§5). The block is
+        # keyed on the URL, so adding a secret-write token to an environment does not lift
+        # it, and every environment in .fuze/manifest.json is `anthropic_cloud` and sits
+        # behind the same proxy — so delegating to a peer session buys nothing either.
+        "environment": None,
+        # A runner is NOT behind that proxy, so this is where the capability actually
+        # lives. Guardrails in tests/test_secret_provision_guard.py; the workflow accepts
+        # no value-bearing input, because this repo's job logs are public.
+        "workflow": "secret-provision.yml",
         "read_only": False,
-        "notes": "cloud-devops has `gh` but GITHUB_TOKEN is unset; needs a secret-write token added "
-        "to the owning env in Phase 3 before a delegate can actually do it",
+        "notes": "satisfied by dispatching secret-provision.yml (sources: verify|generate|copy). "
+        "A THIRD-PARTY key (Twilio, Mailjet) cannot be injected by any agent path — a human "
+        "adds the value out of band and the agent confirms it with source=verify. For a key "
+        "bound for the CLUSTER, seal it offline with scripts/seal-secret.sh instead "
+        "(docs/SECRETS_MANAGEMENT.md) — no GitHub secret and no agent plaintext at all.",
     },
     "database.provision": {
         "environment": None,  # NOT wired to any managed-agent env today.
@@ -176,6 +205,30 @@ def capability_environment(cap: str) -> Optional[str]:
     """
     entry = CAPABILITY_REGISTRY.get(cap)
     return entry["environment"] if entry else None
+
+
+def capability_workflow(cap: str) -> Optional[str]:
+    """The dispatchable workflow that satisfies `cap`, or None.
+
+    When this is set the caller should PREFER it over spawning a peer session: the
+    credential stays in the repo, the guard is a committed filter rather than the callee's
+    discretion, and it is callable from wherever the caller already runs. For
+    `github.secret.provision` it is the only thing that works at all — see the registry
+    entry for why no environment can satisfy it.
+    """
+    entry = CAPABILITY_REGISTRY.get(cap)
+    return entry.get("workflow") if entry else None
+
+
+def is_satisfiable(cap: str) -> bool:
+    """True when `cap` has SOME route — an owning environment or a workflow.
+
+    The fail-closed rule is on this function, not on `capability_environment()` alone:
+    a capability with `environment: None` but a `workflow` set is satisfiable, and
+    treating it as undelegatable would send a caller back to improvising the very
+    workaround the runbook forbids.
+    """
+    return bool(capability_environment(cap) or capability_workflow(cap))
 
 
 @dataclass
