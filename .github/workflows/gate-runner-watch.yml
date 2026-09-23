@@ -35,6 +35,11 @@ on:
       - 'governance/runner-watch.json'
       - '.github/workflows/runner-watch.yml'
       - '.github/workflows/gate-runner-watch.yml'
+      # The orphan-recovery CronJob drives runner-watch.yml's recover-only mode via
+      # repository_dispatch -- its detection logic (classify()/parse_scaler_line()) is
+      # exercised by tests/test_orphan_recovery_dispatch.py, run by this same gate below.
+      - 'runners/arc/gitops/orphan-recovery-dispatch.yaml'
+      - 'tests/test_orphan_recovery_dispatch.py'
   workflow_dispatch:
 
 permissions:
@@ -77,6 +82,30 @@ jobs:
             exit 1
           fi
 
+      # tests/test_orphan_recovery_dispatch.py exercises the CronJob's real embedded
+      # shell (classify()/parse_scaler_line()) via subprocess -- it is skipped on
+      # Windows (Git Bash truncates multi-line `bash -c` scripts) but this gate is
+      # ubuntu-latest, so every one of its 13 tests runs for real here, not just the
+      # 4 static-YAML ones a Windows dev box would see.
+      - name: Install pytest (for tests/test_orphan_recovery_dispatch.py)
+        run: python -m pip install --quiet pytest
+
+      - name: Self-test — orphan-recovery detection logic
+        run: |
+          set -euo pipefail
+          # --noconftest is REQUIRED, not a convenience. tests/conftest.py imports the
+          # live-integration stack (psycopg2, pymongo, redis, neo4j, pika, elasticsearch,
+          # kafka), so pytest rooted anywhere in tests/ loads it and dies at COLLECTION
+          # with ModuleNotFoundError before a single assertion runs (exit 4) unless this
+          # lightweight gate installs the whole DB stack. This suite is self-contained --
+          # it imports only subprocess/sys/pathlib/pytest/yaml and no test takes a fixture
+          # argument -- so skipping conftest costs nothing and keeps the gate fast.
+          pytest --noconftest -v tests/test_orphan_recovery_dispatch.py 2>&1 | tee selftest-orphan.txt
+          if grep -qiE '\bskipped\b' selftest-orphan.txt; then
+            echo "::error title=gate-runner-watch::A test in test_orphan_recovery_dispatch.py was SKIPPED on the Linux gate runner, where none of its 13 tests should ever skip. Failing rather than reporting green on fewer tests than were written."
+            exit 1
+          fi
+
       - name: Summary
         if: always()
         run: |
@@ -85,5 +114,9 @@ jobs:
             echo
             echo '```'
             tail -c 20000 selftest.txt 2>/dev/null | tail -20 || echo "(no output)"
+            echo '```'
+            echo
+            echo '```'
+            tail -c 20000 selftest-orphan.txt 2>/dev/null | tail -20 || echo "(no output)"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
