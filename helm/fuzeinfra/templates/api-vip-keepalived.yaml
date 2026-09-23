@@ -223,6 +223,15 @@ spec:
             - name: cfg
               mountPath: /cfg
               readOnly: true
+            # render.sh writes keepalived.conf + copies notify.sh/check-apiserver.sh
+            # into /etc/keepalived. That directory does not exist in the image, so
+            # without this writable mount every pod dies instantly with
+            # "cp: can't create '/etc/keepalived/notify.sh': No such file or
+            # directory" (observed in prod 2026-09-22). /cfg is the read-only
+            # ConfigMap and cannot be written to, so the rendered config needs its
+            # own emptyDir.
+            - name: run
+              mountPath: /etc/keepalived
           resources:
             requests: {cpu: 10m, memory: 32Mi}
             limits: {cpu: 100m, memory: 64Mi}
@@ -231,4 +240,6 @@ spec:
           configMap:
             name: fuzeinfra-api-vip-keepalived
             defaultMode: 0755
+        - name: run
+          emptyDir: {}
 {{- end }}
