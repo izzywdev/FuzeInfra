@@ -332,8 +332,21 @@ jobs:
           # self-tests of every distributed script -- including test_gate_required_checks.py,
           # whose gate has NO structural fallback and SystemExits without PyYAML. Matches
           # the canonical harden-gate.yml, which installs both before this same line.
-          pip install -q pyyaml pynacl
-          python -m unittest discover -s scripts/__tests__ -p 'test_*.py'
+          #
+          # pytest, and pytest AS THE RUNNER, for the same "must be known to fire" reason
+          # the broad glob above exists. `python -m unittest discover` cannot execute a
+          # pytest-style test: a module using @pytest.mark.parametrize is collected but its
+          # parametrized functions never run, and a module merely doing `import pytest`
+          # ImportErrors and takes the whole discovery down with it. Both happened here --
+          # scripts/__tests__/test_runner_health.py arrived doing both, and this step went
+          # red fleet-wide with a ModuleNotFoundError buried under 400 lines of passing
+          # output. Installing pytest without switching the runner would have been worse
+          # than the red: the import would resolve and unittest would report OK while
+          # silently running 19 FEWER tests -- precisely the vacuous gate the comment above
+          # warns about. Measured on this tree: unittest 416, pytest 435 + 2 subtests.
+          # pytest runs unittest.TestCase classes natively, so nothing is lost by the swap.
+          pip install -q pyyaml pynacl pytest
+          python -m pytest scripts/__tests__ -q
 
       - name: Identifier gate — contracts (enforcing)
         shell: bash

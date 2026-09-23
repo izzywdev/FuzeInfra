@@ -334,3 +334,62 @@ def test_repository_dispatch_type_is_registered():
 def test_workflow_token_permissions_are_minimal():
     """The job needs no write scope of its own — the PAT carries the privilege."""
     assert _workflow()["permissions"] == {"contents": "read"}
+
+
+# --------------------------------------------------------------------------
+# Containment of the admin PAT
+#
+# SECRETS_ADMIN_PAT is the most powerful credential in this repo: it writes
+# Actions secrets. secret-provision.yml is safe with it by construction — it
+# pins `gh secret set --repo "$REPO"` to github.repository, so it can only ever
+# touch THIS repo. Nothing structural stopped a DIFFERENT workflow from
+# referencing the same secret and using it anywhere the token's own scope
+# reaches, which is the whole repo set if the PAT was minted with "All
+# repositories" access.
+#
+# That is not a hypothetical in a repo where agents author workflow files. Fork
+# PRs never receive secrets, so the realistic path is a commit to a workflow on
+# this repo — precisely what CI can refuse. Scope the PAT down as well (the
+# token's own repository-access setting is the primary control); this is the
+# second layer, and the one that fails loudly in review.
+# --------------------------------------------------------------------------
+
+ADMIN_PAT = "SECRETS_ADMIN_PAT"
+
+
+def test_admin_pat_is_referenced_by_no_other_workflow():
+    """Only secret-provision.yml may reference the secret-writing PAT.
+
+    A second consumer would silently widen where that credential can be used,
+    and would not show up in this file's other tests — they all inspect
+    secret-provision.yml alone.
+    """
+    offenders = []
+    for path in sorted((ROOT / ".github/workflows").glob("*.yml")):
+        if path.name == WORKFLOW.name:
+            continue
+        if ADMIN_PAT in path.read_text(encoding="utf-8"):
+            offenders.append(path.name)
+    assert not offenders, (
+        f"{ADMIN_PAT} is referenced outside {WORKFLOW.name}: {offenders}. That credential "
+        f"writes Actions secrets; keep it to the one workflow whose guard is tested here, "
+        f"and scope the PAT itself to this repository only."
+    )
+
+
+def test_provision_pins_the_target_repo_to_this_repository():
+    """Every `gh secret` call is pinned to github.repository.
+
+    Without `--repo "$REPO"`, gh falls back to inferring the repo from the
+    checkout or from a caller-influenced value. Pinning is what makes an
+    all-repos-scoped PAT harmless *here* — the workflow cannot address another
+    repository even if the token could.
+    """
+    provision = _step(PROVISION_STEP)
+    assert provision["env"]["REPO"] == "${{ github.repository }}", (
+        "REPO must come from github.repository, not from any caller-supplied input"
+    )
+    for raw in provision["run"].splitlines():
+        line = raw.strip()
+        if line.startswith("gh secret "):
+            assert '--repo "$REPO"' in line, f"unpinned gh secret call: {line!r}"
