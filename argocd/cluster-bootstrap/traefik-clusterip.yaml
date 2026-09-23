@@ -7,6 +7,30 @@
 # Applied during provisioning by terraform/contabo/provisioning.tf.
 # Re-apply manually if the cluster is rebuilt without Terraform:
 #   kubectl apply -f argocd/cluster-bootstrap/traefik-clusterip.yaml
+#
+# HA: Traefik was a single-replica SPOF (confirmed live: `kube-system traefik 1/1`).
+# Every host on *.prod.fuzefront.com — plus app/plan/fuzehub and the fuzefront.com
+# apex — funnels through this one pod, so a restart/eviction/rollout drops every
+# in-flight connection cluster-wide with no connection draining. `deployment.replicas: 2`
+# + a PodDisruptionBudget (`minAvailable: 1`, so a voluntary eviction — e.g. node
+# drain, k3s upgrade — can never take both pods down at once) fixes that. Anti-affinity
+# is SOFT (`preferredDuringSchedulingIgnoredDuringExecution`), matching the CoreDNS HA
+# config in terraform/contabo/provisioning.tf: the cluster has a small durable node
+# pool, and a HARD anti-affinity rule could leave the second replica permanently
+# Pending if there's nowhere else eligible to schedule it — defeating HA by turning
+# it into a capacity outage instead. Soft anti-affinity spreads pods across nodes
+# when possible and still schedules (degraded, not down) when it isn't.
+#
+# Values keys verified against the upstream chart k3s bundles
+# (github.com/traefik/traefik-helm-chart, traefik/templates/):
+#   - deployment.replicas   — deployment.yaml: `replicas: {{ .Values.deployment.replicas }}`
+#   - podDisruptionBudget.enabled / .minAvailable — poddisruptionbudget.yaml, gated on
+#     `.Values.podDisruptionBudget.enabled`, guards `minAvailable: {{ .Values.podDisruptionBudget.minAvailable }}`
+#   - affinity              — _podtemplate.tpl: `{{- if .Values.affinity }} affinity: {{ toYaml .Values.affinity }}`,
+#     injected verbatim as standard PodSpec affinity; matchLabels targets
+#     `app.kubernetes.io/name: traefik` (the chart's selector label, from
+#     `traefik.labelselector` in _helpers.tpl), the same label style the CoreDNS
+#     HelmChartConfig in provisioning.tf already anti-affines on.
 apiVersion: helm.cattle.io/v1
 kind: HelmChartConfig
 metadata:
@@ -16,3 +40,17 @@ spec:
   valuesContent: |-
     service:
       type: ClusterIP
+    deployment:
+      replicas: 2
+    podDisruptionBudget:
+      enabled: true
+      minAvailable: 1
+    affinity:
+      podAntiAffinity:
+        preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            podAffinityTerm:
+              labelSelector:
+                matchLabels:
+                  app.kubernetes.io/name: traefik
+              topologyKey: kubernetes.io/hostname
