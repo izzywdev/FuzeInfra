@@ -1,0 +1,107 @@
+{{- if .Values.ciNodeIsolation.enabled }}
+# =============================================================================
+# CI-node isolation -- enforced at ADMISSION, not just convention
+# =============================================================================
+# WHY THIS EXISTS. PR #1193 (merged to main while this fix was in flight,
+# 2026-09-23) replaced the inert argocd/cluster-bootstrap/coredns-ha.yaml
+# HelmChartConfig with a real Deployment -- but that Deployment explicitly
+# tolerated `fuzeinfra.io/ci`, the NoSchedule taint
+# runners/arc/gitops/controller-selfheal.yaml's check 1 applies specifically
+# to keep non-CI workloads off the fuzeinfra.io/pool=ci nodes, AND it required
+# nodeAffinity excluding the control-plane. Net effect: both extra CoreDNS
+# replicas landed on fuzeinfra-ci-runner-1/-2 -- the two most churn-prone,
+# most resource-saturated nodes in the cluster (ci-runner-1 measured at 96%
+# CPU) -- instead of the durable fuze-core-* nodes. The taint alone did not
+# stop this: a NoSchedule taint only requires an EXPLICIT toleration to
+# bypass, and adding one is a one-line change that passed review because
+# nothing checked for it. That PR has been superseded (this repo's
+# nodeConfigurator.corednsHA in node-configurator.yaml fixes the actual
+# k3s-packaged CoreDNS instead), but the pattern that let it happen is not
+# fixed by superseding one PR.
+#
+# This ValidatingAdmissionPolicy is the k8s-level backstop: it rejects any Pod
+# CREATE/UPDATE carrying an explicit toleration for key `fuzeinfra.io/ci` from
+# outside the ARC runner namespaces, regardless of which repo, chart, or raw
+# `kubectl apply` produced it -- catching what a repo-local CI gate
+# (tests/test_ci_node_isolation_allowlist.py) structurally cannot: a manifest
+# applied directly, or one that lives in a different repo/chart entirely.
+#
+# SCOPE, DELIBERATELY NARROW. This only rejects a toleration entry that names
+# the key explicitly (`key: fuzeinfra.io/ci`). It does NOT reject a blanket
+# `tolerations: [{operator: Exists}]` with no key. Verified live 2026-09-23:
+# every DaemonSet that legitimately needs to run on EVERY node including the
+# CI pool -- fuzeinfra-node-exporter, fuzeinfra-promtail,
+# fuzeinfra-node-configurator (see templates/monitoring.yaml,
+# templates/node-configurator.yaml) -- uses exactly that keyless blanket form
+# for host-level observability/config, never an explicit key match. Narrowing
+# this policy to also catch keyless blanket tolerations would block those and
+# take down fleet-wide metrics/log collection -- worse than the problem being
+# solved.
+# TRADEOFF: a pod COULD still dodge this policy with a keyless blanket
+# toleration instead of naming the key. This policy raises the bar (no more
+# "just add one line naming the taint" passing silent review) without making
+# CI-node placement physically impossible for a sufficiently deliberate
+# bypass. Closing that residual gap would need a broader per-workload
+# node-affinity admission policy; judged not worth the added blast radius
+# (risk of blocking legitimate cluster-wide DaemonSets) for what it buys.
+#
+# VERIFIED SAFE TO ENABLE (2026-09-23, live cluster read, read-only):
+#   kubectl get pods -A -o json | <filter every pod for
+#     spec.tolerations[] where .key == 'fuzeinfra.io/ci'>
+# The ONLY matches cluster-wide were arc-runners namespace runner pods
+# (legitimate -- ARC's own scale-set values file
+# runners/arc/runner-scale-set-values.yaml sets this toleration) and the
+# PR #1193 coredns-ha Deployment this same change set's node-configurator fix
+# supersedes. allowedNamespaces below is exactly that observed set; nothing
+# else currently depends on this toleration.
+#
+# RECOVERY if this policy is ever wrongly blocking something legitimate: set
+# ciNodeIsolation.enabled: false and let Argo sync -- the policy and its
+# binding are removed immediately. This is a pure admission-time check with
+# no owned application state, so there is nothing to clean up afterward.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: fuzeinfra-ci-node-isolation
+  labels:
+    {{- include "fuzeinfra.labels" . | nindent 4 }}
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["pods"]
+  variables:
+    - name: tolersCiExplicitly
+      expression: >-
+        has(object.spec.tolerations) &&
+        object.spec.tolerations.exists(t, has(t.key) && t.key == 'fuzeinfra.io/ci')
+  validations:
+    - expression: "!variables.tolersCiExplicitly"
+      messageExpression: >-
+        "pod '" + object.metadata.name + "' may not explicitly tolerate fuzeinfra.io/ci "
+        + "from outside the ARC runner namespaces -- that taint exists so only CI "
+        + "workloads schedule on fuzeinfra.io/pool=ci nodes. See "
+        + "helm/fuzeinfra/templates/ci-node-isolation.yaml (FuzeInfra PR #1193 incident)."
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: fuzeinfra-ci-node-isolation-binding
+  labels:
+    {{- include "fuzeinfra.labels" . | nindent 4 }}
+spec:
+  policyName: fuzeinfra-ci-node-isolation
+  validationActions: [Deny]
+  matchResources:
+    namespaceSelector:
+      matchExpressions:
+        - key: kubernetes.io/metadata.name
+          operator: NotIn
+          values:
+            {{- range .Values.ciNodeIsolation.allowedNamespaces }}
+            - {{ . | quote }}
+            {{- end }}
+{{- end }}

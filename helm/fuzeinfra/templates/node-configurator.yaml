@@ -3,7 +3,7 @@
        both A and AAAA records exist for a host.  This fixes GHCR image pulls
        being TCP-reset mid-copy on Contabo's IPv6 CDN path (FuzeInfra#616).
        Disabled by default; enable via nodeConfigurator.preferIPv4.enabled. */ -}}
-{{- if or .Values.nodeConfigurator.preferIPv4.enabled .Values.nodeConfigurator.multipathBlacklist.enabled .Values.nodeConfigurator.ioPriority.enabled }}
+{{- if or .Values.nodeConfigurator.preferIPv4.enabled .Values.nodeConfigurator.multipathBlacklist.enabled .Values.nodeConfigurator.ioPriority.enabled .Values.nodeConfigurator.corednsHA.enabled }}
 {{- if .Values.nodeConfigurator.preferIPv4.enabled }}
 ---
 apiVersion: v1
@@ -107,7 +107,7 @@ spec:
       annotations:
         # Includes the rollout set: changing WHICH nodes are in it must restart the
         # DaemonSet, or the change reaches nothing.
-        checksum/config: {{ printf "%v-%v-%v" .Values.nodeConfigurator.preferIPv4.enabled .Values.nodeConfigurator.multipathBlacklist.enabled (join "," .Values.nodeConfigurator.multipathBlacklist.rolloutNodes) | sha256sum }}
+        checksum/config: {{ printf "%v-%v-%v-%v-%v" .Values.nodeConfigurator.preferIPv4.enabled .Values.nodeConfigurator.multipathBlacklist.enabled (join "," .Values.nodeConfigurator.multipathBlacklist.rolloutNodes) .Values.nodeConfigurator.corednsHA.enabled .Values.nodeConfigurator.corednsHA.replicas | sha256sum }}
     spec:
       # hostPID lets the multipath init container nsenter PID 1 and restart multipathd
       # on the host. Harmless when that feature is gated off.
@@ -196,6 +196,220 @@ spec:
               readOnly: true
             - name: host-cgroup
               mountPath: /host-cgroup
+        {{- end }}
+        {{- if .Values.nodeConfigurator.corednsHA.enabled }}
+        {{- /*
+             CoreDNS HA (FuzeInfra 2026-09-23 outage). The two CI nodes lost
+             flannel-WireGuard peering to the fuze-core-* control-plane nodes --
+             the ONLY place CoreDNS's single replica ran -- so every CI pod lost
+             ALL cluster DNS and ~300 jobs queued fleet-wide.
+
+             The repo already had a fix attempt (argocd/cluster-bootstrap/
+             coredns-ha.yaml, a HelmChartConfig with replicaCount:2) applied to
+             the cluster since 2026-07-29 and COMPLETELY INERT the whole time:
+             k3s does not deploy CoreDNS via Helm (`kubectl -n kube-system get
+             helmchart` returns only traefik/traefik-crd). CoreDNS is a
+             "packaged manifest" applied by the k3s deploy-controller from a
+             static file, tracked as a k3s.cattle.io/v1 Addon named "coredns"
+             (source /var/lib/rancher/k3s/server/manifests/coredns.yaml). A
+             HelmChartConfig with no matching HelmChart CR silently does
+             nothing -- Git claimed HA for ~2 months while prod ran replicas=1.
+             That file is deleted; this is its replacement, using a mechanism
+             that actually applies to a deploy-controller-managed component.
+
+             HOW THIS SURVIVES RECONCILIATION. k3s honours a `<name>.yaml.skip`
+             sentinel next to a packaged manifest: once present, the
+             deploy-controller never re-applies that file's content again, but
+             it does NOT delete or touch resources the file already created.
+             So:
+               1. touch coredns.yaml.skip -- stops k3s from ever reconciling
+                  replicas back down to 1.
+               2. write coredns-ha.yaml -- an independent manifest in the SAME
+                  directory (any file there becomes its own k3s Addon)
+                  containing ONLY a replacement Deployment named "coredns" in
+                  namespace kube-system. Every other packaged resource
+                  (ServiceAccount, RBAC, the "coredns" Corefile ConfigMap, the
+                  "kube-dns" Service) is left exactly as the (now-skipped)
+                  coredns.yaml created it -- minimising blast radius to just
+                  the field that mattered, replica count + scheduling.
+             Both files are (re)written on every DaemonSet pod (re)start, and
+             the deploy-controller PATCHES the existing live Deployment object
+             rather than deleting+recreating it, so there is never a window
+             with zero CoreDNS pods, regardless of which file it processes
+             first or how many times this runs.
+
+             topologySpreadConstraints below (maxSkew:1, DoNotSchedule,
+             topologyKey kubernetes.io/hostname) are cloned verbatim from the
+             live packaged Deployment -- REQUIRED spread across nodes, not the
+             PREFERRED podAntiAffinity the old inert file used (preferred
+             spread does not guarantee a 2nd replica lands on a different node,
+             which is exactly the guarantee this outage needed).
+
+             coredns-custom-config-volume/the "coredns-custom" ConfigMap (see
+             templates/coredns-split-horizon.yaml) is Corefile-only: k3s
+             auto-imports it for rewrite rules, but it has no field for
+             replica count or scheduling, so it cannot substitute for this.
+
+             Runs on k3s SERVER nodes only: the init container checks for
+             /host-k3s/server locally and exits 0 (no-op) on agent nodes (CI
+             runners, elastics), which have no such directory.
+        */}}
+        - name: coredns-ha
+          image: {{ .Values.nodeConfigurator.image }}
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            privileged: true
+          command:
+            - sh
+            - -c
+            - |
+              set -eu
+              SRV=/host-k3s/server
+              if [ ! -d "$SRV" ]; then
+                echo "not a k3s server node (no $SRV) - skipping coredns HA override"
+                exit 0
+              fi
+              MANIFESTS="$SRV/manifests"
+              mkdir -p "$MANIFESTS"
+
+              touch "$MANIFESTS/coredns.yaml.skip"
+
+              cat > "$MANIFESTS/coredns-ha.yaml" <<EOF
+              apiVersion: apps/v1
+              kind: Deployment
+              metadata:
+                name: coredns
+                namespace: kube-system
+                labels:
+                  k8s-app: kube-dns
+                  kubernetes.io/name: CoreDNS
+              spec:
+                replicas: {{ .Values.nodeConfigurator.corednsHA.replicas }}
+                revisionHistoryLimit: 0
+                selector:
+                  matchLabels:
+                    k8s-app: kube-dns
+                strategy:
+                  rollingUpdate:
+                    maxSurge: 25%
+                    maxUnavailable: 1
+                  type: RollingUpdate
+                template:
+                  metadata:
+                    labels:
+                      k8s-app: kube-dns
+                  spec:
+                    containers:
+                    - args:
+                      - -conf
+                      - /etc/coredns/Corefile
+                      image: rancher/mirrored-coredns-coredns:1.14.4
+                      imagePullPolicy: IfNotPresent
+                      livenessProbe:
+                        failureThreshold: 3
+                        httpGet:
+                          path: /health
+                          port: 8080
+                          scheme: HTTP
+                        initialDelaySeconds: 60
+                        periodSeconds: 10
+                        successThreshold: 1
+                        timeoutSeconds: 1
+                      name: coredns
+                      ports:
+                      - containerPort: 53
+                        name: dns
+                        protocol: UDP
+                      - containerPort: 53
+                        name: dns-tcp
+                        protocol: TCP
+                      - containerPort: 9153
+                        name: metrics
+                        protocol: TCP
+                      readinessProbe:
+                        failureThreshold: 3
+                        httpGet:
+                          path: /ready
+                          port: 8181
+                          scheme: HTTP
+                        periodSeconds: 2
+                        successThreshold: 1
+                        timeoutSeconds: 1
+                      resources:
+                        limits:
+                          memory: 170Mi
+                        requests:
+                          cpu: 100m
+                          memory: 70Mi
+                      securityContext:
+                        allowPrivilegeEscalation: false
+                        capabilities:
+                          add:
+                          - NET_BIND_SERVICE
+                          drop:
+                          - all
+                        readOnlyRootFilesystem: true
+                      terminationMessagePath: /dev/termination-log
+                      terminationMessagePolicy: File
+                      volumeMounts:
+                      - mountPath: /etc/coredns
+                        name: config-volume
+                        readOnly: true
+                      - mountPath: /etc/coredns/custom
+                        name: custom-config-volume
+                        readOnly: true
+                    dnsPolicy: Default
+                    nodeSelector:
+                      kubernetes.io/os: linux
+                    priorityClassName: system-cluster-critical
+                    restartPolicy: Always
+                    schedulerName: default-scheduler
+                    serviceAccount: coredns
+                    serviceAccountName: coredns
+                    terminationGracePeriodSeconds: 30
+                    tolerations:
+                    - key: CriticalAddonsOnly
+                      operator: Exists
+                    - effect: NoSchedule
+                      key: node-role.kubernetes.io/control-plane
+                      operator: Exists
+                    - effect: NoSchedule
+                      key: {{ .Values.global.durableNodeTaint.key }}
+                      operator: Equal
+                      value: "{{ .Values.global.durableNodeTaint.value }}"
+                    topologySpreadConstraints:
+                    - labelSelector:
+                        matchLabels:
+                          k8s-app: kube-dns
+                      maxSkew: 1
+                      topologyKey: kubernetes.io/hostname
+                      whenUnsatisfiable: DoNotSchedule
+                    - labelSelector:
+                        matchLabels:
+                          k8s-app: kube-dns
+                      maxSkew: 1
+                      topologyKey: topology.kubernetes.io/zone
+                      whenUnsatisfiable: ScheduleAnyway
+                    volumes:
+                    - configMap:
+                        defaultMode: 420
+                        items:
+                        - key: Corefile
+                          path: Corefile
+                        - key: NodeHosts
+                          path: NodeHosts
+                        name: coredns
+                      name: config-volume
+                    - configMap:
+                        defaultMode: 420
+                        name: coredns-custom
+                        optional: true
+                      name: custom-config-volume
+              EOF
+              echo "coredns-ha.yaml written (replicas={{ .Values.nodeConfigurator.corednsHA.replicas }}) + coredns.yaml.skip present on $SRV"
+          volumeMounts:
+            - name: host-k3s
+              mountPath: /host-k3s
         {{- end }}
         {{- if .Values.nodeConfigurator.preferIPv4.enabled }}
         - name: write-gai-conf
@@ -293,6 +507,18 @@ spec:
         - name: host-etc
           hostPath:
             path: /etc
+        {{- if .Values.nodeConfigurator.corednsHA.enabled }}
+        {{- /* /var/lib/rancher/k3s exists on EVERY node (server and agent) --
+               only server nodes have a "server" subdirectory under it, which is
+               what the init container tests for before writing anything. Type
+               Directory (not the empty-string default) so a node missing this
+               path entirely fails loudly instead of kubelet silently creating
+               an empty one. */}}
+        - name: host-k3s
+          hostPath:
+            path: /var/lib/rancher/k3s
+            type: Directory
+        {{- end }}
         {{- if .Values.nodeConfigurator.preferIPv4.enabled }}
         - name: gai-conf
           configMap:
