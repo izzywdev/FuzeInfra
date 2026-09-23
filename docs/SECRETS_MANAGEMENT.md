@@ -331,6 +331,30 @@ A `PROTECTED` list makes the workflow unable to write its own PAT, `KUBE_CONFIG`
 privileged credential under a caller-chosen name is a lateral move even though a copy prints
 nothing.
 
+### Provisioning into another repository (`target_repo`)
+
+`SECRETS_ADMIN_PAT` is scoped to **all** repositories on purpose, so each product's agents
+can provision through this one guarded workflow instead of every repo holding its own
+secret-writing credential. That scope means the token can reach repositories this workflow
+has no business touching, so **what decides where a dispatch lands is the allowlist, not the
+token**: `governance/secret-provision-targets.json`. Omit `target_repo` and it writes here.
+
+Adding a repository there **is a real grant** — it lets anyone who can dispatch this
+workflow (including via `repository_dispatch` with the widely distributed
+`FUZEINFRA_DISPATCH_TOKEN`) create and overwrite that repository's Actions secrets. Add it
+in a reviewed commit with a one-sentence `why`; an entry nobody can justify is an entry to
+remove.
+
+Two rules survive regardless of what is listed:
+
+- **`copy` is same-repo only.** Copying cross-repo would move *this* repository's secret
+  values into another one — exfiltration wearing a re-key's clothes. Off-repo dispatches may
+  `generate` a fresh value or `verify` presence. `PROTECTED` still applies to every target.
+- **The write uses the validated target.** The `Provision` step reads `env.TARGET`, set by
+  the guard *after* the allowlist check — never the dispatch payload again. Re-reading the
+  caller's value at the point of use would let the check pass on a listed repo while the
+  write went somewhere else.
+
 ### Third-party keys (Twilio, Mailjet, …) — breaking the apparent loop
 
 "Read it from a vault" looks circular: the agent needs a credential to fetch the credential.
