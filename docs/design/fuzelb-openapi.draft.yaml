@@ -1,0 +1,534 @@
+openapi: 3.1.0
+
+# =============================================================================
+# FuzeLB — ILLUSTRATIVE contract sketch (NOT FROZEN, NOT IMPLEMENTED)
+#
+# Companion to docs/design/fuzelb-managed-load-balancer.md. It exists so the
+# design can be reviewed against a concrete shape rather than prose alone.
+#
+# This file is DESIGN MATERIAL. It is deliberately under docs/design/ and NOT
+# under services/, so no contract test binds to it and no client is generated
+# from it. The frozen contract is Milestone 1's deliverable and will live at
+# services/fuzelb-api/openapi.yaml, guarded by tests/test_fuzelb_contract.py
+# the same way the custom-hostname-api contract is guarded today.
+#
+# Paths are abbreviated: listeners/rules/target-groups/targets/certificates
+# follow the same conventions demonstrated here and are enumerated in §5.2 of
+# the design document.
+# =============================================================================
+
+info:
+  title: FuzeLB — Managed Load Balancer API (draft)
+  version: "0.0.0-draft"
+  description: |
+    An AWS-ALB-equivalent managed layer-7 load balancer over Contabo VPS.
+
+    ## Layering (design §6)
+    This document describes the **public** API, which is a FuzeFront application
+    (user space). It is backed by a cluster-internal control plane
+    (`fuzelb-api.fuzeinfra.svc.cluster.local:8080`, kernel space) that has no
+    Ingress and no tunnel route, knows nothing about users or billing, and
+    authorizes a bearer capability rather than a person.
+
+    ## Authentication
+    `Authorization: Bearer <JWT>` minted by FuzeFront, validated against
+    FuzeFront's JWKS. Audience-bound (`aud=fuzeinfra-lb`), `exp <= 300s`,
+    carrying `tenant` and a `scope` set (`lb:read`, `lb:write`,
+    `lb:cert:write`, `lb:admin`). The token IS the authorization boundary:
+    every row is filtered by `tenant` in the query, and an object belonging to
+    another tenant returns 404 — never 403, which would confirm it exists.
+
+    ## Asynchrony
+    Creates and deletes return `202` with a state and `status.conditions[]`.
+    Contabo has no create API for additional IPs, so provisioning draws from a
+    pre-purchased pool; when the pool is dry the create fails fast with
+    `503 capacity_unavailable` + `Retry-After` rather than hanging.
+
+    ## Concurrency and idempotency
+    `Idempotency-Key` is required on POST (replay returns the original
+    response; same key + different body is 422). Mutations require
+    `If-Match: <etag>`; a stale ETag is 412.
+  contact:
+    name: FuzeInfra
+    url: https://github.com/izzywdev/FuzeInfra
+
+servers:
+  - url: https://api.fuzefront.com/lb/v1
+    description: Public API (FuzeFront application — user space)
+  - url: http://fuzelb-api.fuzeinfra.svc.cluster.local:8080/v1
+    description: Control plane (cluster-internal only — kernel space)
+
+security:
+  - bearerAuth: []
+
+tags:
+  - name: load-balancers
+  - name: target-groups
+  - name: certificates
+  - name: account
+
+paths:
+  /load-balancers:
+    get:
+      tags: [load-balancers]
+      operationId: listLoadBalancers
+      summary: List the calling tenant's load balancers
+      parameters:
+        - { name: "state", in: query, schema: { $ref: "#/components/schemas/LbState" } }
+        - { name: "region", in: query, schema: { type: string } }
+        - { name: "page[cursor]", in: query, schema: { type: string } }
+        - { name: "page[size]", in: query, schema: { type: integer, minimum: 1, maximum: 200, default: 50 } }
+      responses:
+        "200":
+          description: A page of load balancers
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: "#/components/schemas/LoadBalancer" }
+                  next_cursor: { type: [string, "null"] }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+    post:
+      tags: [load-balancers]
+      operationId: createLoadBalancer
+      summary: Create a load balancer (asynchronous)
+      description: |
+        Returns immediately with `state=provisioning`. VIPs are allocated from the
+        regional pool synchronously; instance creation, VLAN attachment, VIP
+        assignment, DNS publication and the first config push happen in the
+        background. Poll the resource, or watch `status.conditions[]`.
+      parameters:
+        - { name: Idempotency-Key, in: header, required: true, schema: { type: string, maxLength: 128 } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/LoadBalancerCreate" }
+      responses:
+        "202":
+          description: Accepted; provisioning has begun
+          headers:
+            Location: { schema: { type: string } }
+            ETag: { schema: { type: string } }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/LoadBalancer" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/Unprocessable" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503":
+          description: |
+            No capacity in the requested region — typically an exhausted additional-IP
+            pool (design §4.1). Honour `Retry-After`.
+          headers:
+            Retry-After: { schema: { type: integer } }
+          content:
+            application/problem+json:
+              schema: { $ref: "#/components/schemas/Problem" }
+
+  /load-balancers/{lbId}:
+    parameters:
+      - { name: lbId, in: path, required: true, schema: { type: string } }
+    get:
+      tags: [load-balancers]
+      operationId: getLoadBalancer
+      responses:
+        "200":
+          description: The load balancer
+          headers:
+            ETag: { schema: { type: string } }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/LoadBalancer" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    patch:
+      tags: [load-balancers]
+      operationId: updateLoadBalancer
+      parameters:
+        - { name: If-Match, in: header, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                name: { type: string }
+                size: { $ref: "#/components/schemas/SizeClass" }
+                tags: { type: object, additionalProperties: { type: string } }
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/LoadBalancer" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "412": { $ref: "#/components/responses/PreconditionFailed" }
+    delete:
+      tags: [load-balancers]
+      operationId: deleteLoadBalancer
+      description: |
+        Asynchronous. The VIPs return to the pool and are quarantined for at least
+        24h before reuse, so a previous tenant's stale DNS cache can never deliver
+        traffic to a new tenant. Contabo has no instance-delete API, so the
+        instances enter a cancellation queue (end-of-billing-period).
+      parameters:
+        - { name: If-Match, in: header, required: true, schema: { type: string } }
+      responses:
+        "202":
+          description: Deletion accepted; `state=deleting`
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/LoadBalancer" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "412": { $ref: "#/components/responses/PreconditionFailed" }
+
+  /target-groups/{tgId}/health:
+    parameters:
+      - { name: tgId, in: path, required: true, schema: { type: string } }
+    get:
+      tags: [target-groups]
+      operationId: getTargetGroupHealth
+      summary: Live per-target health, as the probers currently see it
+      description: |
+        Health is reported PER DATA-PLANE NODE. A target reachable from one node and
+        not the other is a network fact worth seeing, and collapsing it to a single
+        verdict would make a partition look like a target failure.
+      responses:
+        "200":
+          description: Current health
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [targets]
+                properties:
+                  targets:
+                    type: array
+                    items:
+                      type: object
+                      required: [target_id, address, port, state, per_node]
+                      properties:
+                        target_id: { type: string }
+                        address: { type: string }
+                        port: { type: integer }
+                        state:
+                          type: string
+                          enum: [initial, healthy, unhealthy, draining, unused]
+                        reason:
+                          type: string
+                          description: e.g. "Target.ResponseCodeMismatch (503, expected 200-299)"
+                        per_node:
+                          type: array
+                          items:
+                            type: object
+                            properties:
+                              node: { type: string }
+                              state: { type: string }
+                              last_checked_at: { type: string, format: date-time }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /quotas:
+    get:
+      tags: [account]
+      operationId: getQuotas
+      summary: The tenant's limits and current usage
+      description: |
+        Entitlement is carried in the token's claims; this endpoint renders it for
+        humans and agents. The kernel never calls user space to authorize (design §6.5).
+      responses:
+        "200":
+          description: Quotas
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  load_balancers: { $ref: "#/components/schemas/Quota" }
+                  target_groups: { $ref: "#/components/schemas/Quota" }
+                  certificates: { $ref: "#/components/schemas/Quota" }
+                  rules_per_listener: { $ref: "#/components/schemas/Quota" }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: FuzeFront-issued, audience-bound (`aud=fuzeinfra-lb`), `exp <= 300s`.
+
+  responses:
+    Unauthorized:
+      description: Missing, malformed, expired, or wrong-audience token
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
+    Forbidden:
+      description: Authenticated, but the token lacks the required scope
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
+    NotFound:
+      description: |
+        No such object **for this tenant**. Another tenant's object is also 404 —
+        a 403 would confirm it exists.
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
+    PreconditionFailed:
+      description: Stale `If-Match`; re-read and retry
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
+    Unprocessable:
+      description: |
+        Schema-valid but semantically rejected. For a config rejection, `detail`
+        carries the nginx validator's message verbatim.
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
+    RateLimited:
+      description: Per-tenant rate limit exceeded
+      headers:
+        RateLimit-Limit: { schema: { type: integer } }
+        RateLimit-Remaining: { schema: { type: integer } }
+        RateLimit-Reset: { schema: { type: integer } }
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
+
+  schemas:
+    Problem:
+      description: RFC 9457 problem document with a stable machine-readable `code`.
+      type: object
+      required: [type, title, status, code]
+      properties:
+        type: { type: string, format: uri }
+        title: { type: string }
+        status: { type: integer }
+        detail: { type: string }
+        instance: { type: string }
+        code:
+          type: string
+          enum:
+            - unauthorized
+            - forbidden
+            - not_found
+            - precondition_failed
+            - quota_exceeded
+            - capacity_unavailable
+            - invalid_rule
+            - invalid_target
+            - certificate_expired
+            - idempotency_key_reuse
+            - rate_limited
+
+    LbState:
+      type: string
+      enum: [provisioning, active, updating, degraded, failed, deleting, deleted]
+      description: |
+        `degraded` is first-class: one node down, the LB still serving. Collapsing it
+        into `active` or `failed` would make a customer's own alerting wrong.
+
+    SizeClass:
+      type: string
+      enum: [small, medium, large]
+
+    Quota:
+      type: object
+      properties:
+        limit: { type: integer }
+        used: { type: integer }
+
+    Condition:
+      type: object
+      required: [type, status]
+      properties:
+        type:
+          type: string
+          enum: [IpAllocated, NodesReady, VlanAttached, VipAssigned, DnsPublished, ConfigApplied, CertificateReady]
+        status: { type: string, enum: ["True", "False", "Unknown"] }
+        reason: { type: string }
+        message: { type: string }
+        last_transition_at: { type: string, format: date-time }
+
+    LoadBalancer:
+      type: object
+      required: [id, name, region, size, state, dns_name]
+      properties:
+        id: { type: string, examples: ["lb_01JKX7ZQ8R"] }
+        name: { type: string }
+        region: { type: string, examples: ["EU"] }
+        size: { $ref: "#/components/schemas/SizeClass" }
+        ip_version: { type: string, enum: [ipv4, dualstack], default: dualstack }
+        state: { $ref: "#/components/schemas/LbState" }
+        dns_name:
+          type: string
+          description: Stable hostname; one A record per VIP (round-robin, DNS-only).
+          examples: ["lb-01jkx7.lb.fuzefront.com"]
+        addresses:
+          type: array
+          description: The allocated VIPs. Empty until they bind.
+          items: { type: string }
+        estimated_ready_at: { type: string, format: date-time }
+        status:
+          type: object
+          properties:
+            conditions:
+              type: array
+              items: { $ref: "#/components/schemas/Condition" }
+            generation:
+              type: integer
+              description: Monotonic config generation last applied by the data plane.
+        tags: { type: object, additionalProperties: { type: string } }
+        created_at: { type: string, format: date-time }
+
+    LoadBalancerCreate:
+      type: object
+      additionalProperties: false
+      required: [name, region, listeners]
+      properties:
+        name: { type: string, minLength: 1, maxLength: 64 }
+        region: { type: string }
+        size: { $ref: "#/components/schemas/SizeClass" }
+        ip_version: { type: string, enum: [ipv4, dualstack], default: dualstack }
+        listeners:
+          type: array
+          minItems: 1
+          items: { $ref: "#/components/schemas/ListenerCreate" }
+        tags: { type: object, additionalProperties: { type: string } }
+
+    ListenerCreate:
+      type: object
+      additionalProperties: false
+      required: [protocol, port, default_action]
+      properties:
+        protocol: { type: string, enum: [HTTP, HTTPS] }
+        port: { type: integer, minimum: 1, maximum: 65535 }
+        certificate_ids:
+          type: array
+          items: { type: string }
+          description: Required for HTTPS. SNI selects among them.
+        tls_policy:
+          type: string
+          enum: [modern, intermediate]
+          default: intermediate
+        default_action: { $ref: "#/components/schemas/Action" }
+        rules:
+          type: array
+          items: { $ref: "#/components/schemas/RuleCreate" }
+
+    RuleCreate:
+      type: object
+      additionalProperties: false
+      required: [priority, conditions, action]
+      properties:
+        priority:
+          type: integer
+          minimum: 1
+          description: Lower wins. Reorder atomically via `PUT /listeners/{id}/rules:reorder`.
+        conditions:
+          type: array
+          minItems: 1
+          items: { $ref: "#/components/schemas/Condition_Match" }
+        action: { $ref: "#/components/schemas/Action" }
+
+    Condition_Match:
+      type: object
+      additionalProperties: false
+      required: [field, values]
+      properties:
+        field:
+          type: string
+          enum: [host, path-prefix, path-exact, path-regex, header, query, method, source-ip]
+        key:
+          type: string
+          description: Header or query-parameter name; required for `header` and `query`.
+        values:
+          type: array
+          minItems: 1
+          items: { type: string }
+
+    Action:
+      type: object
+      additionalProperties: false
+      required: [type]
+      properties:
+        type: { type: string, enum: [forward, redirect, fixed_response] }
+        target_group_id:
+          type: string
+          description: Required for `forward`.
+        redirect:
+          type: object
+          properties:
+            status_code: { type: integer, enum: [301, 302, 307, 308] }
+            host: { type: string }
+            path: { type: string }
+            scheme: { type: string, enum: [http, https] }
+        fixed_response:
+          type: object
+          properties:
+            status_code: { type: integer, minimum: 200, maximum: 599 }
+            content_type: { type: string }
+            body: { type: string, maxLength: 4096 }
+
+    TargetGroupCreate:
+      type: object
+      additionalProperties: false
+      required: [name, protocol, port]
+      properties:
+        name: { type: string }
+        protocol: { type: string, enum: [HTTP, HTTPS, GRPC] }
+        port: { type: integer, minimum: 1, maximum: 65535 }
+        algorithm:
+          type: string
+          enum: [round_robin, least_connections, ip_hash]
+          default: round_robin
+        stickiness:
+          type: object
+          properties:
+            enabled: { type: boolean, default: false }
+            duration_seconds: { type: integer, default: 86400 }
+        deregistration_delay_seconds:
+          type: integer
+          default: 30
+          description: Drain window. Existing connections finish; no new ones are sent.
+        health_check: { $ref: "#/components/schemas/HealthCheck" }
+
+    HealthCheck:
+      type: object
+      additionalProperties: false
+      properties:
+        protocol: { type: string, enum: [HTTP, HTTPS, TCP], default: HTTP }
+        path: { type: string, default: "/health" }
+        port: { type: [integer, "null"], description: "null = the target's traffic port" }
+        interval_seconds: { type: integer, minimum: 5, default: 15 }
+        timeout_seconds: { type: integer, minimum: 1, default: 5 }
+        healthy_threshold: { type: integer, minimum: 1, default: 2 }
+        unhealthy_threshold: { type: integer, minimum: 1, default: 2 }
+        matcher:
+          type: string
+          default: "200-299"
+          description: Acceptable status codes, e.g. "200-299" or "200,204".
+
+    Target:
+      type: object
+      additionalProperties: false
+      required: [address, port]
+      properties:
+        address:
+          type: string
+          description: |
+            IPv4/IPv6 of a customer backend. Link-local (169.254.0.0/16), loopback,
+            and the platform's own service CIDRs are rejected at validation AND at
+            render time — an open proxy is an SSRF pivot.
+        port: { type: integer, minimum: 1, maximum: 65535 }
+        weight: { type: integer, minimum: 0, maximum: 1000, default: 100 }
