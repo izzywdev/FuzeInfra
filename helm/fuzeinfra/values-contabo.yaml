@@ -1374,6 +1374,18 @@ alertmanager:
       receiver: github-fuze
       continue: true
       repeat_interval: 1h
+  # A Deployment at 0 available satisfies BOTH new-critical and pre-existing-warning
+  # rules (0 == 0, and 0 < desired), so without this every total outage would raise
+  # two alerts for one condition and the @fuze issue would arrive alongside a
+  # duplicate. Scoped to exactly that pair and matched on the same workload, so it
+  # suppresses nothing else: a degraded Deployment that never reaches zero still
+  # warns normally, because the source alert is not firing for it.
+  inhibitRules:
+    - source_matchers:
+        - alertname = DeploymentNoReplicasAvailable
+      target_matchers:
+        - alertname = DeploymentReplicasMismatch
+      equal: ["namespace", "deployment"]
 chromadb:
   # Pin to durable Longhorn-disk nodes. longhorn-manager only runs on the 3
   # durable nodes, so Longhorn registers node.longhorn.io objects only there;

@@ -135,8 +135,17 @@ From the same run — `<none>` in the READY column means zero ready replicas:
 | `fuzehub` | `fuzehub-frontend-mfe` | 0/2 | |
 | `fuzebi` | `fuzebi` | 0/2 | |
 
-Out of scope for this design, but recorded here because it is the evidence for S7 (§5):
-nothing alerts on "a publicly advertised host has no ready backend."
+Out of scope for this design, but recorded here because it is the evidence for S7
+(§5). **Correction (2026-09-23):** the first draft of this section said nothing
+alerts on it. That is wrong in letter and right in effect, and the real mechanism
+is sharper. `DeploymentReplicasMismatch` (`rules/kubernetes.yml`) *does* cover
+these — `available < desired` — at `severity: warning`. But severity is the
+**routing key**: `values-contabo.yaml` routes only `severity: critical` to the
+`github-fuze` receiver (the crit-alert Worker that opens an `@fuze` issue in the
+owning repo), and everything else lands on the `default` receiver, which its own
+comment calls a no-op. So the rule that covered these outages notified nobody, and
+a 1/2 blip and a totally-down public API shared one severity. The defect is
+severity mis-grading, not a missing rule.
 
 ### 2.8 What already exists that this design absorbs
 
@@ -346,7 +355,7 @@ of the above.
 | S4 | Consumer auto-PR can publish a `bypass` host for a colliding label; policy is a comment | Add a CI check on `materialized/consumers.tfvars`: reject any label colliding with an infra-owned host (`$routes` keys + `neo4j*`), fail the generating PR | §2.5 |
 | S5 | IdP OIDC endpoints public; IdP coupling leaks to the browser | FuzeFront auth proxy, then delete `authentik_oidc_endpoints` + its bypass | §2.6, §4.3 |
 | S6 | Traefik 1 replica, no draining, SPOF for all ingress | `HelmChartConfig` → `deployment.replicas: 2` + PDB `minAvailable: 1` | §2.2 |
-| S7 | No alert on a public host with zero ready backends | Prometheus rule on `kube_deployment_status_replicas_ready == 0` for deployments behind a bypass host | §2.7 |
+| S7 | Total unavailability is graded `warning`, and only `critical` is routed to a receiver that notifies — so a public API at 0 replicas pages nobody | Add `DeploymentNoReplicasAvailable` at `severity: critical` (guarded against deliberately scaled-to-zero workloads), and inhibit the duplicate warning | §2.7 |
 
 S3 and S4 are the pair worth doing together: S3 removes the exposure that exists,
 S4 stops it being recreated.
@@ -449,14 +458,23 @@ rules apply throughout, because they are the ones most often skipped:
 
 ### M4 — zero-ready-backend alerting
 
-- **AC4.1** A Prometheus rule fires when a deployment behind a `bypass` host has
-  zero ready replicas, and routes to Alertmanager.
-- **AC4.2** The rule is validated against the **live** §2.7 condition: it fires for
-  `fuzekeys-backend` and `fuzepicker-backend` in their current state, or against a
-  replayed series if they have recovered by then. A rule that has never fired on a
-  real outage is not accepted.
-- **AC4.3** The host→deployment mapping is derived from `public_app_hosts`, not
-  hand-maintained, so a new consumer host is covered without a follow-up edit.
+- **AC4.1** A Prometheus rule fires at `severity: critical` when a Deployment that
+  is meant to be running has zero available replicas, so it reaches the
+  `github-fuze` receiver rather than the no-op `default` one.
+- **AC4.2** The rule is validated against the **live** §2.7 condition — it fires for
+  `fuzekeys-backend` at 0/2 — by promtool unit test replaying that series. A rule
+  that has never been shown firing on a real outage is not accepted.
+- **AC4.3** ~~The host→deployment mapping is derived from `public_app_hosts`.~~
+  **Revised (2026-09-23):** dropped deliberately. Plumbing the tfvars host registry
+  into Prometheus labels is fragile, and it is the wrong discriminator anyway —
+  *any* Deployment that should be running and has no replicas is an outage worth
+  paging on, public or not. Severity is graded by impact (zero available vs
+  degraded), which needs no external mapping and cannot drift out of date.
+- **AC4.4** The negative cases are tested, not just the firing one: a Deployment
+  deliberately scaled to zero never fires (`fuzeinfra-airflow-worker` is 0/0 in
+  prod, and an unguarded rule would page about it forever — the #1090 shape), a
+  degraded 1/2 Deployment does not escalate to critical, and a short rolling update
+  through 0 available stays silent.
 
 ### M5 — device registry + `maxDevices`
 

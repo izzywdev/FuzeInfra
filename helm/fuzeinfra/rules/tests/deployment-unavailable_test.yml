@@ -1,0 +1,110 @@
+# Unit tests for DeploymentNoReplicasAvailable (rules/kubernetes.yml).
+#
+# Context: severity is the ROUTING key in this stack. values-contabo.yaml sends
+# only `severity: critical` to the github-fuze receiver; everything else goes to
+# the `default` receiver, which its own comment describes as a no-op. Before this
+# rule, total unavailability was covered only by DeploymentReplicasMismatch at
+# severity=warning — so it notified nobody.
+#
+# Observed 2026-09-22 (cluster-query run 35775983154): fuzekeys-backend 0/2 and
+# fuzepicker-backend 0/1, both behind Cloudflare Access `bypass` hosts (public
+# APIs), with nothing paged.
+#
+# The scaled-to-zero case is the one that makes this rule dangerous if written
+# naively: fuzeinfra-airflow-worker runs at 0/0 in prod on purpose, and an
+# unguarded `available == 0` would page about it forever — the #1090 shape.
+#
+# Run in CI by helm-validate.yml:
+#   promtool test rules helm/fuzeinfra/rules/tests/*_test.yml
+rule_files:
+  - ../kubernetes.yml
+
+evaluation_interval: 1m
+
+tests:
+  # --- the live outage this rule was written for: a public API at 0/2 pages.
+  - interval: 1m
+    name: DeploymentNoReplicasAvailable fires for a public API with 0 of 2 available
+    input_series:
+      - series: 'kube_deployment_status_replicas_available{namespace="fuzekeys",deployment="fuzekeys-backend"}'
+        values: '0x30'
+      - series: 'kube_deployment_spec_replicas{namespace="fuzekeys",deployment="fuzekeys-backend"}'
+        values: '2x30'
+    alert_rule_test:
+      # Still inside `for: 5m` — must not fire yet.
+      - eval_time: 4m
+        alertname: DeploymentNoReplicasAvailable
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: DeploymentNoReplicasAvailable
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              namespace: fuzekeys
+              deployment: fuzekeys-backend
+            exp_annotations:
+              summary: "Deployment fuzekeys/fuzekeys-backend has NO available replicas"
+              description: "Every replica is unavailable while fuzekeys-backend is meant to be running — if anything routes to this Deployment it is serving errors, not degraded service. Check the pods first (`-n fuzekeys get pods`, then `describe` / `logs` on a non-Ready one) via .github/workflows/cluster-query.yml; the usual causes are an image that cannot be pulled, a failing readiness probe, and a pod that cannot schedule. Fix it in Git — prod is GitOps under Argo selfHeal, so a `kubectl` change to the live object is reverted within seconds."
+
+  # --- THE GUARD: a deliberately scaled-to-zero Deployment must never page.
+  # fuzeinfra-airflow-worker is 0/0 in prod right now. Without the
+  # `spec_replicas > 0` conjunction this fires forever on a workload that is off
+  # on purpose.
+  - interval: 1m
+    name: DeploymentNoReplicasAvailable ignores a Deployment scaled to zero on purpose
+    input_series:
+      - series: 'kube_deployment_status_replicas_available{namespace="fuzeinfra",deployment="fuzeinfra-airflow-worker"}'
+        values: '0x60'
+      - series: 'kube_deployment_spec_replicas{namespace="fuzeinfra",deployment="fuzeinfra-airflow-worker"}'
+        values: '0x60'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: DeploymentNoReplicasAvailable
+        exp_alerts: []
+      - eval_time: 55m
+        alertname: DeploymentNoReplicasAvailable
+        exp_alerts: []
+
+  # --- a merely DEGRADED Deployment is not this alert's business. 1/2 stays with
+  # the existing warning; grading it critical would put routine rollout noise on
+  # the page-a-human path and train everyone to ignore it.
+  - interval: 1m
+    name: DeploymentNoReplicasAvailable does not fire for a degraded (1 of 2) Deployment
+    input_series:
+      - series: 'kube_deployment_status_replicas_available{namespace="fuzefront",deployment="fuzefront-backend"}'
+        values: '1x30'
+      - series: 'kube_deployment_spec_replicas{namespace="fuzefront",deployment="fuzefront-backend"}'
+        values: '2x30'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: DeploymentNoReplicasAvailable
+        exp_alerts: []
+      # ...and the pre-existing warning still covers that case, unchanged.
+      - eval_time: 15m
+        alertname: DeploymentReplicasMismatch
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              namespace: fuzefront
+              deployment: fuzefront-backend
+            exp_annotations:
+              summary: "Deployment fuzefront/fuzefront-backend degraded"
+              description: "Available replicas < desired. Rollout may be stuck."
+
+  # --- a rolling update of a single-replica Deployment legitimately passes
+  # through 0 available. `for: 5m` must ride that out rather than page on every
+  # deploy; a 3-minute dip stays silent.
+  - interval: 1m
+    name: DeploymentNoReplicasAvailable rides out a short rolling update
+    input_series:
+      - series: 'kube_deployment_status_replicas_available{namespace="fuzeinfra",deployment="a2a-relay"}'
+        values: '1x5 0x3 1x22'
+      - series: 'kube_deployment_spec_replicas{namespace="fuzeinfra",deployment="a2a-relay"}'
+        values: '1x30'
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: DeploymentNoReplicasAvailable
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: DeploymentNoReplicasAvailable
+        exp_alerts: []
