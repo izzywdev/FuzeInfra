@@ -111,6 +111,26 @@ jobs:
             if echo "$provision_out" | grep -q "HTTP 409"; then
               echo "::notice::Provisioning hit HTTP 409 (vault credential pre-provisioned) — re-running with --no-vault to write agent-ids.json."
               python providers/provision.py --provider anthropic --no-vault
+            elif echo "$provision_out" | grep -qiE 'credit balance is too low|no credits remaining|insufficient_quota|hit your session limit|usage limit reached'; then
+              # ENVIRONMENTAL, NOT A DEFECT IN THE MERGED PR. Observed on run
+              # 35851652933: `POST /v1/agents/... -> HTTP 400: "Your credit balance is
+              # too low to access the Anthropic API."` — which red-flagged the merge to
+              # main even though nothing about the commit was wrong and nothing in this
+              # repo could fix it. Billing is not a code review.
+              #
+              # This is the SAME treatment the "Managed Agents configured?" guard above
+              # already gives a stale/unentitled key: it probes, warns, and skips
+              # "rather than failing with an unhelpful Python traceback". An exhausted
+              # balance is the same class of condition as a 401 on that key — the
+              # account cannot currently provision — so it gets the same answer.
+              #
+              # Deliberately a WARNING and an explicit notice, never silence: the agents
+              # genuinely did not refresh, and the next person needs to know that and
+              # why. Matched on vendor-literal quota strings only (the same class
+              # .github/actions/fuze-code-action/classify.sh matches), so a real
+              # provisioning bug still exits 1 below.
+              echo "::warning title=agent-on-merge::Managed-Agents provisioning is credit/quota blocked — the Anthropic account cannot provision right now, so the role agents were NOT refreshed for this merge. This is environmental, not a defect in the merged PR, so the job passes. Add credits or raise the plan limit, then re-run this workflow to refresh them."
+              exit 0
             else
               exit 1
             fi

@@ -1,4 +1,4 @@
-# fuze:managed template=mcp-maintain.yml baseline=v1 digest=sha256:02295db8ceab15bc94878224b3ba60f5b02c91a86d53fc6c1f7e9b9b299ba474
+# fuze:managed template=mcp-maintain.yml baseline=v1 digest=sha256:c64f163d6dcb9d911e85adc62e89541b59068b70cc439de151e92ac654157c7b
 name: MCP Maintain
 
 # Keeps this repo's Model Context Protocol (MCP) surface current, as part of CI. The
@@ -141,7 +141,7 @@ jobs:
       - name: Mint fuze-agent App token
         id: app_token
         continue-on-error: true
-        uses: actions/create-github-app-token@v1
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
           app-id: ${{ secrets.FUZE_AGENT_APP_ID }}
           private-key: ${{ secrets.FUZE_AGENT_APP_PRIVATE_KEY }}
