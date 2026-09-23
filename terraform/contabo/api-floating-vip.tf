@@ -17,6 +17,16 @@
 # helm/fuzeinfra/values-contabo.yaml (two sources: Terraform owns DNS + tls-san,
 # Helm owns keepalived). GATED: empty list / disabled => everything inert.
 # See docs/runbooks/api-floating-vip.md.
+#
+# A DNS RECORD IS PUBLISHED PER ADDRESS, SO A VIP THAT IS NOT ACTUALLY SERVING
+# BECOMES A BLACK HOLE FOR ITS SHARE OF TRAFFIC. Adding an address here is the
+# LAST step, not the first: order the IP, let keepalived bind it, and confirm the
+# VIP answers on :6443 before it enters the round-robin. Both failure directions
+# showed up on 2026-09-23 — .185.205 was missing from DNS because the apply that
+# would have created it died with "Saved plan is stale" (two terraform PRs merged
+# minutes apart), while .184.164 resolved yet answered nothing, so roughly half of
+# DNS answers pointed at a dead endpoint. Publishing a record and verifying the
+# VIP serves belong together.
 # ---------------------------------------------------------------------------
 
 variable "api_vip_enabled" {
