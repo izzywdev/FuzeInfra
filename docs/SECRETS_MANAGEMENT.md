@@ -292,7 +292,69 @@ That gives every onboarded repo offline self-sealing with zero cluster access.
 
 ---
 
-## 7. Rules
+## 7. GitHub **Actions** secrets (`secret-provision.yml`)
+
+Everything above is about secrets bound for the **cluster**. GitHub *Actions* secrets are a
+separate store with a separate problem: **no Claude session can write them.** The Anthropic
+agent proxy refuses `/repos/*/actions/secrets` outright —
+
+```
+403 {"message":"Access to this GitHub Actions path is not permitted through this proxy."}
+```
+
+— because it injects *git* credentials only, never secret admin. The block is keyed on the
+URL, so it is **not** fixable by adding a token to a session's environment, and every
+managed-agent environment is `anthropic_cloud` behind the same proxy, so delegating to a
+peer session does not help either.
+
+A runner is not behind that proxy. `.github/workflows/secret-provision.yml` is therefore the
+write path, dispatchable by any session (and by consumers via `repository_dispatch`, type
+`secret-provision`, with the existing `FUZEINFRA_DISPATCH_TOKEN`). It holds
+`SECRETS_ADMIN_PAT` — a fine-grained PAT with **Secrets: write** — so no session ever does.
+
+### The one rule: a caller never transports a value
+
+**This repo's job logs are public.** A secret value passed as a `workflow_dispatch` input or
+a `client_payload` field is a published credential the moment anyone dispatches it — the
+same lesson §4 records for `kubectl get secret`. So the workflow declares **no value-bearing
+input at all**, and `tests/test_secret_provision_guard.py` fails the build if one is added.
+The three sources are exactly those that need no caller-side plaintext:
+
+| `source` | What it does | Use for |
+|---|---|---|
+| `generate` | mints a random **alphanumeric** value in-runner (a metachar like `&` breaks `airflow-init`) | passwords, webhook/shared secrets — anything the platform itself owns |
+| `copy` | re-keys an existing secret under a new name, disclosing nothing | renames, fanning one credential out to a second consumer |
+| `verify` | reports **presence + `updated_at`** only, never the value | confirming a human-injected key landed |
+
+A `PROTECTED` list makes the workflow unable to write its own PAT, `KUBE_CONFIG`,
+`FUZEINFRA_DISPATCH_TOKEN` and peers — as target *or* as `copy_from`, since re-keying a
+privileged credential under a caller-chosen name is a lateral move even though a copy prints
+nothing.
+
+### Third-party keys (Twilio, Mailjet, …) — breaking the apparent loop
+
+"Read it from a vault" looks circular: the agent needs a credential to fetch the credential.
+It isn't a loop, because **one injection by a human is irreducible** — and it's also only
+needed once, in one place. Pick by destination:
+
+- **Bound for the cluster → don't put it in GitHub at all.** Seal it offline with
+  `scripts/seal-secret.sh` (§3) on your own machine. Sealing is *public-key* encryption
+  against the committed cert, so it needs no cluster access and no GitHub secret; commit the
+  ciphertext and Argo delivers it. The plaintext never touches GitHub, a log, or an agent.
+  **This is the default answer** and it removes the loop entirely.
+- **Genuinely needed by CI → paste it once into the GitHub UI** (Settings → Secrets and
+  variables → Actions), then have the agent confirm with `source=verify`. The value crosses
+  exactly one boundary, browser → GitHub, with no agent and no log in the path.
+- **Already in Actions and needed in-cluster → `seal-contabo-api-credentials.yml`** is the
+  worked pattern: a runner reads the existing Actions secrets, seals them offline, and opens
+  a PR with only ciphertext.
+
+What an agent must **never** do is ask you to paste a key into chat, or accept one as a
+workflow input. Both publish it — the first into a transcript, the second into a public log.
+
+---
+
+## 8. Rules
 
 - **Never** commit a plaintext `Secret` manifest or a `.env` with real values.
 - **One SealedSecret per service** — least privilege, independent rotation.
@@ -302,6 +364,8 @@ That gives every onboarded repo offline self-sealing with zero cluster access.
 - **Never read a `Secret` through a CI workflow.** Read-only is not the same as
   safe-to-log: job logs are retained and repo-readable. Use the operator SSH path
   in §4, or rotate.
+- **Never pass a secret value as a workflow input**, and never paste one into an agent
+  session. Use `secret-provision.yml`'s value-free sources or offline sealing (§7).
 
 ## Related docs
 

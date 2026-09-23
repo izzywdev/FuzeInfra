@@ -30,9 +30,25 @@ mirrors design §5):
 python capability_delegation.py registry --cap kubectl.read
 ```
 
-- A real `environment` (e.g. `selfhosted-devops`, `cloud-devops`) → that's where you delegate.
-- `environment: null` (e.g. `github.secret.provision` today) → **stop, fail closed.** The
-  credential isn't wired to any environment yet (Phase 3). Surface the gap; don't improvise.
+- A **`workflow`** (e.g. `github.secret.provision` → `secret-provision.yml`) → **dispatch it
+  and read the result. Do this first, even when an `environment` is also set.** The
+  credential lives in the repo, the guard is a committed filter rather than the callee's
+  discretion, and it's callable from wherever you already run — no peer session, no spawn
+  cost. For `github.secret.provision` this is the *only* route that works: Anthropic's agent
+  proxy refuses `/repos/*/actions/secrets` by URL, and every environment in
+  `.fuze/manifest.json` is `anthropic_cloud` and sits behind that same proxy, so no peer can
+  hold that credential however it's provisioned.
+- A real `environment` and no workflow (e.g. `gitops.edit` → `cloud-devops`) → that's where
+  you delegate, per step 2.
+- **Neither** (`database.provision` today) → **stop, fail closed.** Nothing is wired yet;
+  surface the gap, don't improvise.
+
+Don't read `environment: null` alone as undelegatable — check both fields, or just call
+`is_satisfiable(cap)`, which is the rule in one place:
+
+```bash
+python capability_delegation.py registry --cap github.secret.provision
+```
 
 ### 2. Pick the transport — keyed on where **you** run (design §2b)
 
