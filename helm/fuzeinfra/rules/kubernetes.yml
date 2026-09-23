@@ -92,6 +92,52 @@ groups:
           summary: "Deployment {{ $labels.namespace }}/{{ $labels.deployment }} degraded"
           description: "Available replicas < desired. Rollout may be stuck."
 
+      # TOTAL unavailability, graded apart from the degraded warning above.
+      #
+      # This exists because severity is the routing key, not a description.
+      # values-contabo.yaml routes ONLY `severity: critical` to the github-fuze
+      # receiver (the crit-alert Worker that opens an @fuze issue in the owning
+      # repo); everything else lands on the `default` receiver, which its own
+      # comment calls a no-op. So a warning notifies nobody, by design.
+      #
+      # DeploymentReplicasMismatch covers 1/2 and 0/2 identically at
+      # severity=warning. The consequence, observed 2026-09-22: fuzekeys-backend
+      # sat at 0/2 and fuzepicker-backend at 0/1 — both backing hosts published
+      # with a Cloudflare Access `bypass` policy, i.e. public APIs — with nothing
+      # paged, because the only rule that covered them routed to the no-op.
+      # A one-replica blip and a total outage of a public API must not share a
+      # notification path.
+      #
+      # The `spec_replicas > 0` guard is load-bearing, not defensive: a
+      # deliberately scaled-to-zero Deployment reports 0 available forever.
+      # fuzeinfra-airflow-worker runs at 0/0 in prod today, so without the guard
+      # this alert would page continuously about a workload that is off on
+      # purpose — the same forever-firing shape as #1090.
+      #
+      # for: 5m rides out a normal rolling update (a single-replica Deployment
+      # legitimately passes through 0 available while rolling) without waiting
+      # the 10m the degraded warning allows. Five minutes of a public API with
+      # no backend is already an outage.
+      - alert: DeploymentNoReplicasAvailable
+        expr: |
+          kube_deployment_status_replicas_available == 0
+          and on (namespace, deployment) (kube_deployment_spec_replicas > 0)
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Deployment {{ $labels.namespace }}/{{ $labels.deployment }} has NO available replicas"
+          description: >-
+            Every replica is unavailable while {{ $labels.deployment }} is meant
+            to be running — if anything routes to this Deployment it is serving
+            errors, not degraded service. Check the pods first
+            (`-n {{ $labels.namespace }} get pods`, then `describe` / `logs` on a
+            non-Ready one) via .github/workflows/cluster-query.yml; the usual
+            causes are an image that cannot be pulled, a failing readiness probe,
+            and a pod that cannot schedule. Fix it in Git — prod is GitOps under
+            Argo selfHeal, so a `kubectl` change to the live object is reverted
+            within seconds.
+
       # Batch/CronJob failures are NO LONGER surfaced by PodFailed (it now excludes
       # Job-owned pods, because Kubernetes retains their terminal Failed pods by
       # design). This is the replacement signal — the "alert via kube-state-metrics
