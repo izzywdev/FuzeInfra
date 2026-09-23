@@ -22,7 +22,6 @@ Author: FuzeInfra Platform Team
 Created: 2024
 """
 
-import os
 import sys
 import json
 import argparse
