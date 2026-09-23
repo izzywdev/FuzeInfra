@@ -200,3 +200,74 @@ def test_cli_exits_zero_on_real_consumers_tfvars():
     finally:
         sys.argv = old_argv
     assert rc == 0
+
+
+# ---------------------------------------------------------------------------
+# Regression guards for two holes found when this change was integrated
+# alongside the de-exposure of elasticsearch/chromadb. Both were silent: the
+# guard passed, and a consumer could have taken the hostname.
+# ---------------------------------------------------------------------------
+
+
+def test_unpublished_chart_service_keeps_its_name_reserved(tmp_path):
+    """De-publishing a service must NOT release its hostname.
+
+    `elasticsearch` and `chromadb` were removed from ingress.yaml's `$routes`
+    and from cloudflare.tf's `launcher_services` precisely BECAUSE publishing a
+    raw datastore API to the internet is dangerous. Deriving the reserved set
+    only from the published sources meant that same change handed those names to
+    the consumer auto-PR pipeline, where they would be granted a `bypass` (no
+    Cloudflare Access) app — turning a hardening change into a worse exposure
+    than the one it removed.
+
+    Reservation therefore comes from the service EXISTING in the chart, not from
+    it currently being published.
+    """
+    for label in ("elasticsearch", "chromadb"):
+        sub = tmp_path / label
+        sub.mkdir()
+        path = _write_tfvars(sub, {label: "izzywdev/EvilApp"})
+        violations = guard.check(consumers_path=path)
+        assert violations, (
+            f"'{label}' is an un-published chart service and must STAY reserved; "
+            "otherwise de-exposing a datastore releases its public hostname"
+        )
+        assert label in violations[0]
+
+
+def test_hosts_declared_outside_routes_are_reserved(tmp_path):
+    """`$routes` is not the whole set of infra hostnames.
+
+    a2a-relay.yaml, a2a-gateway.yaml and handoff-mcp.yaml each declare their own
+    Ingress with a literal `"sub"`, so a derivation that reads only `$routes` +
+    neo4j-ingress.yaml leaves them claimable. `relay` is the sharpest case: it
+    fronts an unauthenticated public WebSocket endpoint.
+    """
+    for label in ("relay", "a2a-gateway", "mcp-handoff"):
+        sub = tmp_path / label
+        sub.mkdir()
+        path = _write_tfvars(sub, {label: "izzywdev/EvilApp"})
+        violations = guard.check(consumers_path=path)
+        assert violations, (
+            f"'{label}' is declared by a chart template's own Ingress and must be reserved"
+        )
+        assert label in violations[0]
+
+
+def test_reserved_set_is_a_superset_of_the_legacy_hardcoded_list():
+    """The derived set must cover everything the old hand-maintained list named.
+
+    `scripts-tools/materialize_cf_hosts.py` used to carry a literal
+    RESERVED_LABELS frozenset. Deriving replaces it, so the derivation must not
+    lose any name that list already protected.
+    """
+    legacy = {
+        "app", "auth", "plan", "fuzehub", "argocd",
+        "grafana", "neo4j", "prometheus", "alertmanager",
+    }
+    owned = set(guard.derive_infra_owned_hosts())
+    # The four public vanity hosts live in cloudflare.tf's public_vanity_hosts,
+    # not in the chart, so they stay an explicit concern of materialize_cf_hosts.
+    chart_side = legacy - {"app", "auth", "plan", "fuzehub"}
+    missing = chart_side - owned
+    assert not missing, f"derivation lost names the legacy list protected: {sorted(missing)}"

@@ -37,11 +37,51 @@ REPO_ROOT = Path(__file__).parent.parent
 CONSUMERS_TFVARS = REPO_ROOT / "terraform" / "contabo" / "materialized" / "consumers.tfvars"
 
 # Labels managed by bare *.tf — never allowed in the consumer registry.
-RESERVED_LABELS: frozenset[str] = frozenset({
+# Labels that live OUTSIDE the chart and so cannot be derived from it: the public
+# vanity hosts at the apex zone (cloudflare.tf `public_vanity_hosts`) plus argocd,
+# which is served by its own tunnel ingress rule rather than a chart Ingress.
+_NON_CHART_RESERVED: frozenset[str] = frozenset({
     "app", "auth", "plan", "fuzehub",  # public_vanity_hosts in cloudflare.tf
-    "argocd",                            # admin tunnel rule
-    "grafana", "neo4j", "prometheus", "alertmanager",  # admin UIs
+    "argocd",                          # admin tunnel rule
 })
+
+
+def _reserved_labels() -> frozenset[str]:
+    """Infra-owned labels, DERIVED rather than hand-listed.
+
+    This used to be a literal frozenset of nine names, and it had drifted badly:
+    it was missing elasticsearch, chromadb, airflow, flower, kafka-ui,
+    mongo-express, rabbitmq, unleash, authentik, litellm, neo4j-bolt, relay,
+    a2a-gateway and mcp-handoff — i.e. most of the platform, including hosts
+    fronting datastores and an unauthenticated public WebSocket endpoint. A
+    hand-maintained list of names that live somewhere else will always drift;
+    the only stable version is one computed from those sources at check time.
+
+    Falls back to the non-chart set alone if the derivation cannot run, so this
+    module keeps working (more permissively, and loudly) rather than crashing —
+    the dedicated CI guard, check_consumer_host_collisions.py, is the gate that
+    must not be bypassed.
+    """
+    reserved = set(_NON_CHART_RESERVED)
+    try:
+        import importlib.util
+
+        checker = Path(__file__).parent / "check_consumer_host_collisions.py"
+        spec = importlib.util.spec_from_file_location("_cf_collision_guard", checker)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        reserved |= set(module.derive_infra_owned_hosts())
+    except Exception as exc:  # pragma: no cover - defensive
+        print(
+            f"WARNING: could not derive infra-owned labels ({exc}); "
+            "falling back to the non-chart reserved set only. "
+            "check_consumer_host_collisions.py remains the authoritative gate.",
+            file=sys.stderr,
+        )
+    return frozenset(reserved)
+
+
+RESERVED_LABELS: frozenset[str] = _reserved_labels()
 
 # Only repos under this org are allowed to declare CF hosts.
 ALLOWED_ORG = "izzywdev"

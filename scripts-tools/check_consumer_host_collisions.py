@@ -76,6 +76,8 @@ CONSUMERS_TFVARS = REPO_ROOT / "terraform" / "contabo" / "materialized" / "consu
 INGRESS_YAML = REPO_ROOT / "helm" / "fuzeinfra" / "templates" / "ingress.yaml"
 NEO4J_INGRESS_YAML = REPO_ROOT / "helm" / "fuzeinfra" / "templates" / "neo4j-ingress.yaml"
 CLOUDFLARE_TF = REPO_ROOT / "terraform" / "contabo" / "cloudflare.tf"
+TEMPLATES_DIR = REPO_ROOT / "helm" / "fuzeinfra" / "templates"
+VALUES_YAML = REPO_ROOT / "helm" / "fuzeinfra" / "values.yaml"
 
 _LABEL_LINE_RE = re.compile(r'^"([^"]+)"\s*=\s*"([^"]+)"')
 _QUOTED_KEY_RE = re.compile(r'^\s*"([a-zA-Z0-9._-]+)"')
@@ -181,19 +183,89 @@ def extract_launcher_service_keys(path: Path) -> set[str]:
     return keys
 
 
+def extract_template_sub_hosts(templates_dir: Path = TEMPLATES_DIR) -> set[str]:
+    """Every `"sub" "<name>"` host declared by ANY chart template.
+
+    `$routes` is not the whole story. a2a-relay.yaml, a2a-gateway.yaml and
+    handoff-mcp.yaml each declare their own Ingress via `fuzeinfra.host` with a
+    literal `"sub"`, so deriving only from `$routes` + neo4j-ingress.yaml leaves
+    `relay`, `a2a-gateway` and `mcp-handoff` unreserved — and `relay` fronts an
+    unauthenticated public WebSocket endpoint. Scanning every template catches
+    those uniformly and picks up any future per-service Ingress for free.
+    """
+    if not templates_dir.is_dir():
+        raise ValueError(f"{templates_dir}: not a directory — has the chart moved?")
+    hosts: set[str] = set()
+    for path in sorted(templates_dir.rglob("*")):
+        if path.suffix not in {".yaml", ".yml", ".tpl"} or not path.is_file():
+            continue
+        for m in _SUB_RE.finditer(path.read_text(encoding="utf-8")):
+            hosts.add(m.group(1).lower())
+    if not hosts:
+        raise ValueError(
+            f"{templates_dir}: parsed zero 'sub' hosts across all templates — parser is broken"
+        )
+    return hosts
+
+
+def _camel_to_kebab(name: str) -> str:
+    """kafkaUi -> kafka-ui, a2aRelay -> a2a-relay, mongoExpress -> mongo-express."""
+    return re.sub(r"(?<!^)(?=[A-Z])", "-", name).lower()
+
+
+def extract_chart_service_names(path: Path = VALUES_YAML) -> set[str]:
+    """Every service the chart defines, whether or not it is currently PUBLISHED.
+
+    This is the source that makes de-publication safe. When elasticsearch and
+    chromadb were removed from `$routes` and `launcher_services` (because raw
+    datastore APIs should not be reachable from the internet), deriving only from
+    the published sources silently RELEASED those hostnames — a consumer repo's
+    auto-PR could then claim `elasticsearch.prod.fuzefront.com` with a `bypass`
+    (no Cloudflare Access) policy. Un-publishing a service must never hand its
+    name away.
+
+    A top-level values key owning an `enabled` gate is the durable fact;
+    publication is a policy toggle layered on top. Both the camelCase key and its
+    kebab-case hostname form are reserved — over-reserving costs a consumer one
+    rename, under-reserving costs a public datastore.
+    """
+    import yaml  # local import: keeps the checker importable without PyYAML for --help
+
+    if not path.exists():
+        raise ValueError(f"{path}: does not exist — has values.yaml moved?")
+    doc = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    names: set[str] = set()
+    for key, value in doc.items():
+        if isinstance(value, dict) and "enabled" in value:
+            names.add(key.lower())
+            names.add(_camel_to_kebab(key))
+    if not names:
+        raise ValueError(f"{path}: parsed zero gated services — parser is broken")
+    return names
+
+
 def derive_infra_owned_hosts(
     ingress_path: Path = INGRESS_YAML,
     neo4j_path: Path = NEO4J_INGRESS_YAML,
     cloudflare_tf_path: Path = CLOUDFLARE_TF,
+    templates_dir: Path = TEMPLATES_DIR,
+    values_path: Path = VALUES_YAML,
 ) -> dict[str, str]:
-    """Union the three sources into {hostname: source_description}."""
+    """Union every source into {hostname: source_description}.
+
+    Ordered most-specific-first so the reported source is the most useful one.
+    """
     owned: dict[str, str] = {}
     for host in extract_ingress_routes_keys(ingress_path):
         owned.setdefault(host, f"{ingress_path.name} $routes")
     for host in extract_neo4j_hosts(neo4j_path):
         owned.setdefault(host, f"{neo4j_path.name}")
+    for host in extract_template_sub_hosts(templates_dir):
+        owned.setdefault(host, "a chart template's own Ingress")
     for host in extract_launcher_service_keys(cloudflare_tf_path):
         owned.setdefault(host, "cloudflare.tf launcher_services")
+    for host in extract_chart_service_names(values_path):
+        owned.setdefault(host, "values.yaml (reserved: a chart service, published or not)")
     return owned
 
 
@@ -202,10 +274,14 @@ def check(
     ingress_path: Path = INGRESS_YAML,
     neo4j_path: Path = NEO4J_INGRESS_YAML,
     cloudflare_tf_path: Path = CLOUDFLARE_TF,
+    templates_dir: Path = TEMPLATES_DIR,
+    values_path: Path = VALUES_YAML,
 ) -> list[str]:
     """Return a list of violation messages (empty = clean)."""
     violations: list[str] = []
-    infra_owned = derive_infra_owned_hosts(ingress_path, neo4j_path, cloudflare_tf_path)
+    infra_owned = derive_infra_owned_hosts(
+        ingress_path, neo4j_path, cloudflare_tf_path, templates_dir, values_path
+    )
     labels = parse_consumer_labels(consumers_path)
 
     for label, repo in labels.items():
