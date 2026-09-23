@@ -47,6 +47,23 @@ func (s *Server) NodeGroupIncreaseSize(ctx context.Context, req *protos.NodeGrou
 		return nil, status.Errorf(codes.Unavailable, "NodeGroupIncreaseSize: listing elastic instances by name prefix %q: %v", s.cfg.NamePrefix, err)
 	}
 
+	// GUARD 2 (do not ratchet on an unpaid order): refuse to create while any
+	// elastic order is sitting in Contabo pending_payment. That outstanding
+	// order already IS the capacity CA is asking for — it just has not been
+	// paid/registered yet, and its cloud-init will not run until it is. Ordering
+	// another one now is exactly the ratchet that, on 2026-09-15, walked the
+	// pool to MaxSize with three unpaid orders that later became three paid VPSs
+	// and were then cancelled. Refuse (creating NOTHING); CA backs off and
+	// retries, by which time the order clears or is released out of band. See
+	// helm/fuzeinfra/values-contabo.yaml clusterAutoscaler re-enable checklist #2.
+	if pending := pendingPaymentInstances(prefixInstances); len(pending) > 0 {
+		names := strings.Join(instanceNames(pending), ",")
+		log.Printf("cluster-autoscaler(contabo): REFUSING NodeGroupIncreaseSize — %d elastic order(s) in pending_payment (%s); the outstanding order already represents the requested capacity (Delta=%d), creating NOTHING", len(pending), names, req.Delta)
+		return nil, status.Errorf(codes.Unavailable,
+			"refusing to scale up: %d elastic order(s) pending_payment (%s); the unpaid order already represents the requested capacity",
+			len(pending), names)
+	}
+
 	// The CAP counts only instances that still hold a slot. A cancelled
 	// instance keeps running and keeps matching ListByNamePrefix until the
 	// end of its paid month (Contabo has no immediate-terminate API — see
@@ -363,6 +380,24 @@ func (s *Server) NodeGroupDeleteNodes(ctx context.Context, req *protos.NodeGroup
 		if insts[i].RawCancelDate != "" {
 			log.Printf("contabo: instance %d (%s) already has cancelDate %q -- skipping redundant cancel",
 				ids[i], insts[i].Name, insts[i].RawCancelDate)
+			continue
+		}
+		// GUARD 3 (never cancel a paid, running instance). CA reaches this RPC
+		// only for instances it considers unregistered/failed — utilization
+		// scale-down is disabled and the reaper owns billing-aware release, so a
+		// running instance here is one that was PAID for but never joined k3s.
+		// Contabo has no cancellation reversal, so cancelling it destroys a VPS
+		// with no refund — exactly the 2026-09-15 incident, where three
+		// paid-but-never-joined instances were cancelled seconds after payment
+		// cleared. Such an instance needs ENROLLMENT (ca-salvage-enroll
+		// re-delivers its userData), not cancellation; if enrollment never
+		// happens the reaper releases it at end-of-period. Cancelling an UNPAID
+		// order (pending_payment, above) stays allowed — it is free and releases
+		// the outstanding order. See helm/fuzeinfra/values-contabo.yaml
+		// clusterAutoscaler re-enable checklist #3.
+		if mapContaboStatusToProtoState(insts[i].Status) == protos.InstanceStatus_instanceRunning {
+			log.Printf("contabo: REFUSING to cancel paid, running instance %d (%s), status=%q -- a paid never-joined instance needs enrollment (ca-salvage-enroll), not cancellation; leaving it for enrollment or the end-of-period reaper",
+				ids[i], insts[i].Name, insts[i].Status)
 			continue
 		}
 		if err := s.cloud.Delete(ctx, ids[i]); err != nil {

@@ -173,6 +173,26 @@ func (s *Server) NodeGroupNodes(ctx context.Context, req *protos.NodeGroupNodesR
 	protoInstances := make([]*protos.Instance, 0, len(instances))
 	for _, inst := range instances {
 		state := mapContaboStatusToProtoState(inst.Status)
+
+		// GUARD 1 (exempt pending_payment from the unregistered-cancel
+		// ratchet). Upstream clusterstate.go's expectedToRegister() drops an
+		// instance from the "unregistered" set ONLY when its state is
+		// instanceDeleting OR its ErrorInfo is non-nil. A Contabo order stuck in
+		// pending_payment has NOT had its cloud-init applied and cannot join
+		// until payment clears, yet removeOldUnregisteredNodes gates purely on
+		// elapsed time — so reported as a plain instanceCreating it hits
+		// maxNodeProvisionTime, is declared longUnregistered, and gets cancelled
+		// (destroying a VPS the instant payment makes it real) while CA orders a
+		// replacement. Pairing it with a non-nil ErrorInfo makes CA hold it as
+		// an expected-but-erroring instance instead of ratcheting. See
+		// helm/fuzeinfra/values-contabo.yaml clusterAutoscaler re-enable checklist #1.
+		var errorInfo *protos.InstanceErrorInfo
+		if isPendingPayment(inst.Status) {
+			errorInfo = &protos.InstanceErrorInfo{
+				ErrorCode:    "pending_payment",
+				ErrorMessage: "Contabo order awaiting payment; cloud-init not applied, cannot join until payment clears",
+			}
+		}
 		// The providerID is name-based (contabo://<name>), NOT the numeric Contabo
 		// instance ID. This is required because CA correlates a k8s Node to a
 		// cloud instance via Node.Spec.ProviderID, which is set at node-join time
@@ -188,7 +208,7 @@ func (s *Server) NodeGroupNodes(ctx context.Context, req *protos.NodeGroupNodesR
 			Id: "contabo://" + inst.Name,
 			Status: &protos.InstanceStatus{
 				InstanceState: state,
-				ErrorInfo:     nil,
+				ErrorInfo:     errorInfo,
 			},
 		}
 		protoInstances = append(protoInstances, protoInst)
@@ -204,8 +224,11 @@ func (s *Server) NodeGroupNodes(ctx context.Context, req *protos.NodeGroupNodesR
 func mapContaboStatusToProtoState(contaboStatus string) protos.InstanceStatus_InstanceState {
 	status := strings.ToLower(strings.TrimSpace(contaboStatus))
 	switch status {
-	// Creating states
-	case "provisioning", "installing", "pending":
+	// Creating states. pending_payment is an ordered-but-unpaid instance:
+	// still "coming up" from CA's perspective, and paired with a non-nil
+	// ErrorInfo in NodeGroupNodes (Guard 1) so CA exempts it from the
+	// unregistered-timeout cancel path rather than ratcheting on it.
+	case "provisioning", "installing", "pending", "pending_payment", "pendingpayment":
 		return protos.InstanceStatus_instanceCreating
 	// Running states
 	case "running", "ready":
@@ -217,4 +240,38 @@ func mapContaboStatusToProtoState(contaboStatus string) protos.InstanceStatus_In
 	default:
 		return protos.InstanceStatus_unspecified
 	}
+}
+
+// isPendingPayment reports whether a Contabo instance status means the order
+// has been placed but not yet paid. Contabo does NOT apply an instance's
+// cloud-init userData until payment clears, so such an instance can never join
+// k3s while in this state — and once payment clears it becomes a paid, running
+// VPS that must never be cancelled (see NodeGroupDeleteNodes Guard 3). Matched
+// tolerantly (case- and separator-insensitive) because Contabo has been seen to
+// return both "pending_payment" and "pendingPayment".
+func isPendingPayment(contaboStatus string) bool {
+	s := strings.ToLower(strings.TrimSpace(contaboStatus))
+	s = strings.NewReplacer("_", "", "-", "", " ", "").Replace(s)
+	return s == "pendingpayment"
+}
+
+// pendingPaymentInstances returns the subset of instances whose status is
+// pending_payment (an unpaid, unregisterable outstanding order).
+func pendingPaymentInstances(instances []contabo.Instance) []contabo.Instance {
+	var out []contabo.Instance
+	for _, inst := range instances {
+		if isPendingPayment(inst.Status) {
+			out = append(out, inst)
+		}
+	}
+	return out
+}
+
+// instanceNames returns the display names of the given instances, for logging.
+func instanceNames(instances []contabo.Instance) []string {
+	names := make([]string, 0, len(instances))
+	for _, inst := range instances {
+		names = append(names, inst.Name)
+	}
+	return names
 }
