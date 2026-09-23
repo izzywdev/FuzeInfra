@@ -81,6 +81,43 @@ func TestNodeGroupNodes_ReturnsInstancesWithCorrectMapping(t *testing.T) {
 	}
 }
 
+// TestNodeGroupNodes_PendingPaymentGetsErrorInfo is Guard 1: a pending_payment
+// order is reported as instanceCreating (still coming up) but WITH a non-nil
+// ErrorInfo, so upstream expectedToRegister() exempts it from the
+// unregistered-timeout cancel path instead of cancelling it at
+// maxNodeProvisionTime and ordering a replacement.
+func TestNodeGroupNodes_PendingPaymentGetsErrorInfo(t *testing.T) {
+	for _, statusStr := range []string{"pending_payment", "pendingPayment"} {
+		t.Run(statusStr, func(t *testing.T) {
+			fc := &fakeCloud{
+				instances: []contabo.Instance{
+					{ID: 200, Name: "elastic-pp-1", Status: statusStr, Tags: []string{"fuzeinfra-elastic"}},
+				},
+			}
+			cfg := provider.Config{ElasticTag: "fuzeinfra-elastic", MinSize: 0, MaxSize: 10}
+			s := provider.New(cfg, fc)
+
+			resp, err := s.NodeGroupNodes(context.Background(), &protos.NodeGroupNodesRequest{Id: "elastic"})
+			if err != nil {
+				t.Fatalf("NodeGroupNodes error: %v", err)
+			}
+			if len(resp.Instances) != 1 {
+				t.Fatalf("want 1 instance, got %d", len(resp.Instances))
+			}
+			got := resp.Instances[0]
+			if got.Status.InstanceState != protos.InstanceStatus_instanceCreating {
+				t.Fatalf("want instanceCreating for %q, got %d", statusStr, got.Status.InstanceState)
+			}
+			if got.Status.ErrorInfo == nil {
+				t.Fatalf("pending_payment (%q) must carry a non-nil ErrorInfo, else CA cancels it at maxNodeProvisionTime", statusStr)
+			}
+			if got.Status.ErrorInfo.ErrorCode != "pending_payment" {
+				t.Fatalf("want ErrorCode=pending_payment, got %q", got.Status.ErrorInfo.ErrorCode)
+			}
+		})
+	}
+}
+
 func TestNodeGroupNodes_StateMapping(t *testing.T) {
 	tests := []struct {
 		name          string

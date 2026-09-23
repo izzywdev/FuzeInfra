@@ -489,3 +489,93 @@ func TestDeleteNodes_MalformedProviderIDRejected(t *testing.T) {
 		t.Fatalf("must not delete on malformed ProviderID, but got %d delete calls", len(fc.deletedIDs))
 	}
 }
+
+// TestIncreaseSize_RefusesWhilePendingPayment is Guard 2: an outstanding
+// pending_payment order already represents the capacity CA is asking for, so
+// ordering another one is the ratchet that walked the pool to MaxSize with
+// unpaid orders on 2026-09-15. Scale-up must refuse and create NOTHING while
+// any prefix instance is pending_payment.
+func TestIncreaseSize_RefusesWhilePendingPayment(t *testing.T) {
+	fc := &fakeCloudCapTest{
+		instances: []contabo.Instance{
+			{ID: 1, Name: "fuzeinfra-elastic-0", Status: "pending_payment", Tags: []string{"fuzeinfra-elastic"}},
+		},
+	}
+	cfg := provider.Config{
+		NamePrefix: "fuzeinfra-elastic",
+		ElasticTag: "fuzeinfra-elastic",
+		MaxSize:    10,
+	}
+	s := provider.New(cfg, fc)
+
+	_, err := s.NodeGroupIncreaseSize(context.Background(), &protos.NodeGroupIncreaseSizeRequest{
+		Id:    "elastic",
+		Delta: 1,
+	})
+	if status.Code(err) != codes.Unavailable {
+		t.Fatalf("want Unavailable (refuse while an order is pending_payment), got %v", err)
+	}
+	if fc.createCalls != 0 {
+		t.Fatalf("must create NOTHING while an order is pending_payment, got %d create calls", fc.createCalls)
+	}
+}
+
+// TestDeleteNodes_RefusesRunningPaidInstance is Guard 3: CA reaches
+// NodeGroupDeleteNodes only for instances it considers unregistered, so a
+// running instance here is one that was PAID for and never joined k3s.
+// Cancelling it destroys a VPS with no refund (the 2026-09-15 incident), so the
+// provider must refuse — leaving it for enrollment or the end-of-period reaper.
+func TestDeleteNodes_RefusesRunningPaidInstance(t *testing.T) {
+	fc := &fakeCloudCapTest{
+		instances: []contabo.Instance{
+			{ID: 42, Name: "fuzeinfra-elastic-0", Status: "running", Tags: []string{"fuzeinfra-elastic"}},
+		},
+	}
+	cfg := provider.Config{
+		NamePrefix: "fuzeinfra-elastic",
+		ElasticTag: "fuzeinfra-elastic",
+	}
+	s := provider.New(cfg, fc)
+
+	_, err := s.NodeGroupDeleteNodes(context.Background(), &protos.NodeGroupDeleteNodesRequest{
+		Id: "elastic",
+		Nodes: []*protos.ExternalGrpcNode{
+			{ProviderID: "contabo://fuzeinfra-elastic-0"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("NodeGroupDeleteNodes must not error when skipping a paid instance, got %v", err)
+	}
+	if len(fc.deletedIDs) != 0 {
+		t.Fatalf("must NOT cancel a paid, running, never-joined instance, got %d delete call(s)", len(fc.deletedIDs))
+	}
+}
+
+// TestDeleteNodes_AllowsPendingPaymentCancel is the inverse of Guard 3:
+// cancelling an UNPAID (pending_payment) order is free and releases the
+// outstanding order, so it must still be allowed.
+func TestDeleteNodes_AllowsPendingPaymentCancel(t *testing.T) {
+	fc := &fakeCloudCapTest{
+		instances: []contabo.Instance{
+			{ID: 7, Name: "fuzeinfra-elastic-1", Status: "pending_payment", Tags: []string{"fuzeinfra-elastic"}},
+		},
+	}
+	cfg := provider.Config{
+		NamePrefix: "fuzeinfra-elastic",
+		ElasticTag: "fuzeinfra-elastic",
+	}
+	s := provider.New(cfg, fc)
+
+	_, err := s.NodeGroupDeleteNodes(context.Background(), &protos.NodeGroupDeleteNodesRequest{
+		Id: "elastic",
+		Nodes: []*protos.ExternalGrpcNode{
+			{ProviderID: "contabo://fuzeinfra-elastic-1"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("NodeGroupDeleteNodes error: %v", err)
+	}
+	if len(fc.deletedIDs) != 1 || fc.deletedIDs[0] != 7 {
+		t.Fatalf("must cancel an UNPAID pending_payment order, got deletes=%v", fc.deletedIDs)
+	}
+}
