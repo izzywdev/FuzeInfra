@@ -26,6 +26,7 @@ Offline: pure functions over plain data. No network, no token, no cluster.
 import datetime as dt
 import importlib.util
 import json
+import re
 import os
 import sys
 import tempfile
@@ -897,6 +898,121 @@ class WorkflowSuppliesTheProbeToken(unittest.TestCase):
         for st in wf["jobs"]["recover"]["steps"]:
             self.assertNotIn("RUNNER_PROBE_TOKEN", str(st.get("env", {})),
                              "recover must not receive the probe token")
+
+
+# ======================================================================================
+# recover-only -- the narrow automated mode driven by
+# runners/arc/gitops/orphan-recovery-dispatch.yaml (a Kubernetes CronJob, since GitHub's
+# own `schedule:` was observed 4-5h off on 2026-09-23). It must be structurally incapable
+# of publishing CI_RUNNER_LABELS -- see runner-watch.yml's "Resolve mode" step.
+# ======================================================================================
+
+class RecoverOnlyMode(unittest.TestCase):
+
+    @classmethod
+    def setUpClass(cls):
+        try:
+            import yaml
+        except ImportError:  # pragma: no cover
+            raise unittest.SkipTest("pyyaml not available")
+        with open(WORKFLOW, encoding="utf-8") as fh:
+            cls.body = fh.read()
+        with open(WORKFLOW, encoding="utf-8") as fh:
+            cls.wf = yaml.safe_load(fh)
+
+    def test_run_recover_never_writes_the_runner_labels_variable(self):
+        """The structural guarantee the whole mode depends on: even a bug in the
+        workflow's mode-resolution step could not make recovery publish a label,
+        because the function it calls is physically incapable of it. Only
+        run_decide() ever calls write_variable(..., RUNNER_VAR, ...); run_recover()
+        writes only its own ledger (STATE_VAR_RECOVER)."""
+        import inspect
+        source = inspect.getsource(rw.run_recover)
+        calls = re.findall(r"write_variable\(([^)]*)\)", source)
+        self.assertTrue(calls, "run_recover no longer calls write_variable at all")
+        for call in calls:
+            self.assertNotIn("RUNNER_VAR", call,
+                              "run_recover writes RUNNER_VAR: write_variable(%s)" % call)
+            self.assertIn("STATE_VAR_RECOVER", call)
+
+    def test_recover_only_is_a_valid_workflow_dispatch_choice(self):
+        mode_input = self.wf[True]["workflow_dispatch"]["inputs"]["mode"]
+        self.assertIn("recover-only", mode_input["options"])
+        # check stays the safe default even though recover-only now exists.
+        self.assertEqual(mode_input["default"], "check")
+
+    def test_repository_dispatch_runner_recovery_is_declared(self):
+        """The Kubernetes CronJob's only lever: repository_dispatch(runner-recovery).
+        Absent this trigger, the CronJob's POST to /dispatches has nothing to land on."""
+        triggers = self.wf.get(True, self.wf.get("on"))
+        self.assertIn("repository_dispatch", triggers)
+        self.assertIn("runner-recovery", triggers["repository_dispatch"]["types"])
+
+    def test_decide_job_flag_stays_check_for_recover_only_and_for_the_dispatch_type(self):
+        """Read the actual 'Resolve mode' step body rather than asserting the
+        property in prose: DECIDE_MODE must be assigned "check" on both the
+        recover-only branch and the repository_dispatch(runner-recovery) branch."""
+        step = next(
+            s for s in self.wf["jobs"]["decide"]["steps"]
+            if s.get("name") == "Resolve mode (the schedule is READ-ONLY)"
+        )
+        run = step["run"]
+        case_pattern = (
+            r"recover-only\)\s*\n\s*DECIDE_MODE=(\w+)\s*\n\s*RECOVER_MODE=(\w+)"
+        )
+        m = re.search(case_pattern, run)
+        self.assertIsNotNone(m, "could not find the recover-only case arm")
+        self.assertEqual(m.group(1), "check")
+        self.assertEqual(m.group(2), "apply")
+
+        dispatch_pattern = (
+            r'elif \[ "\$EVENT" = "repository_dispatch" \].*runner-recovery.*\n'
+            r"\s*DECIDE_MODE=(\w+)\s*\n\s*RECOVER_MODE=(\w+)"
+        )
+        m2 = re.search(dispatch_pattern, run)
+        self.assertIsNotNone(
+            m2, "could not find the repository_dispatch(runner-recovery) branch"
+        )
+        self.assertEqual(m2.group(1), "check")
+        self.assertEqual(m2.group(2), "apply")
+
+    def test_mode_resolution_does_not_bind_client_payload(self):
+        """A crafted client_payload must never be able to select `apply` -- only an
+        explicit human workflow_dispatch can. Checked against the step's actual
+        `env:` bindings (an explanatory comment mentioning the word is fine and
+        expected), not by banning the substring anywhere in the step."""
+        step = next(
+            s for s in self.wf["jobs"]["decide"]["steps"]
+            if s.get("name") == "Resolve mode (the schedule is READ-ONLY)"
+        )
+        env_values = " ".join(str(v) for v in step.get("env", {}).values())
+        self.assertNotIn("client_payload", env_values)
+
+    def test_decide_outputs_expose_decide_mode_and_recover_mode(self):
+        outputs = self.wf["jobs"]["decide"]["outputs"]
+        self.assertIn("decide_mode", outputs)
+        self.assertIn("recover_mode", outputs)
+
+    def test_decide_step_consumes_decide_mode_not_the_combined_mode(self):
+        """The Decide step (which can publish CI_RUNNER_LABELS) must read
+        decide_mode specifically -- if it read the old combined `mode` output
+        instead, a future change to that output's semantics could re-couple the
+        two operations this mode split apart."""
+        decide_step = next(
+            s for s in self.wf["jobs"]["decide"]["steps"] if s.get("name") == "Decide"
+        )
+        self.assertEqual(
+            decide_step["env"]["MODE"], "${{ steps.mode.outputs.decide_mode }}"
+        )
+
+    def test_recover_step_consumes_recover_mode(self):
+        recover_step = next(
+            s for s in self.wf["jobs"]["recover"]["steps"] if s.get("name") == "Recover"
+        )
+        self.assertEqual(
+            recover_step["env"]["RECOVER_MODE"],
+            "${{ needs.decide.outputs.recover_mode }}",
+        )
 
 
 if __name__ == "__main__":

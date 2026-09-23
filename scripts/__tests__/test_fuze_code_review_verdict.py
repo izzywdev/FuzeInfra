@@ -130,6 +130,143 @@ class SupersededTests(unittest.TestCase):
         self.assertIn("superseded", V.DECISIONS)
 
 
+class CheckOutputTests(unittest.TestCase):
+    """The approve-or-fail verdict the required check exits on.
+
+    It did not exist: the script wrote `decision` and `body` but never `check`, while the
+    workflow gates on `if [ "$CHECK" = "fail" ]`. $CHECK was always empty, so that line
+    never fired and the required check was VACUOUS -- observed on PR #1207, runs 449 and
+    453, both concluding `success` on a "COMMENT ONLY -- not an approval" verdict.
+
+    These pin the workflow header's APPROVE-OR-FAIL CONTRACT. The case that carries the
+    most weight is `test_bare_comment_fails`: passing every comment would have been the
+    easy reading, and it would silence fuze-ci-autofix's bounded loop entirely -- the
+    opposite of the mandate. The one directly above it, a DOWNGRADED approve passing, is
+    its mirror: keying on the gh command rather than the model verdict would deadlock
+    every governance PR, this one included.
+    """
+
+    def test_clean_approve_passes(self):
+        r = V.decide("success", sentinel(NONCE, CLEAN_APPROVE), NONCE, [])
+        self.assertEqual(r["decision"], "approve")
+        self.assertEqual(V.check_for(r), "pass")
+
+    def test_downgraded_approve_passes(self):
+        """Sensitive PR + model approve -> comment, but the CHECK keys on the verdict."""
+        r = V.decide("success", sentinel(NONCE, CLEAN_APPROVE), NONCE,
+                     [".github/workflows/fuze-code-review.yml"])
+        self.assertEqual(r["decision"], "comment")
+        self.assertTrue(r["downgraded"])
+        self.assertEqual(V.check_for(r), "pass")
+
+    def test_bare_comment_fails(self):
+        """A model `comment` on a NON-sensitive PR is not an approval -- it must fail.
+
+        This is what triggers the bounded auto-fix loop. Passing it would make the gate
+        look enforcing while never blocking anything.
+        """
+        r = V.decide("success", sentinel(NONCE, COMMENT_ONLY), NONCE, [])
+        self.assertEqual(r["decision"], "comment")
+        self.assertFalse(r["downgraded"])
+        self.assertEqual(V.check_for(r), "fail")
+
+    def test_request_changes_fails(self):
+        r = V.decide("success", sentinel(NONCE, REQUEST_CHANGES), NONCE, [])
+        self.assertEqual(V.check_for(r), "fail")
+
+    def test_abstain_fails(self):
+        r = V.decide("failure", sentinel(NONCE, CLEAN_APPROVE), NONCE, [])
+        self.assertEqual(r["decision"], "abstain")
+        self.assertEqual(V.check_for(r), "fail")
+
+    def test_deferral_passes(self):
+        r = V.decide("neutral", "", NONCE, [".github/workflows/x.yml"], "declined")
+        self.assertTrue(r["deferred"])
+        self.assertEqual(V.check_for(r), "pass")
+
+    def test_superseded_passes(self):
+        r = V.decide("", "", NONCE, [], "", "cancelled")
+        self.assertEqual(V.check_for(r), "pass")
+
+    def test_unknown_decision_fails_closed(self):
+        """A decision added later without revisiting check_for() must BLOCK, not pass."""
+        self.assertEqual(V.check_for({"decision": "something_new"}), "fail")
+
+    def test_every_declared_decision_is_mapped(self):
+        for decision in V.DECISIONS:
+            self.assertIn(
+                V.check_for({"decision": decision}), ("pass", "fail"),
+                f"{decision} has no check mapping",
+            )
+
+
+class OutageAndSkipTests(unittest.TestCase):
+    """The two PASS paths the contract documents and the script never implemented.
+
+    `outage` and `skip` are arms in the workflow's case statement, but nothing could ever
+    emit them: FUZE_ACTION_AVAILABILITY and FUZE_REVIEW_READY were passed as env and never
+    read. Both fell through to abstain. That was harmless only while `check` was unwired;
+    the moment the gate actually blocks, the owner's stated exception -- "mandatory UNLESS
+    the failure is a credit outage" -- would have inverted into every vendor outage
+    blocking every PR, and a repo with no LLM credential would block forever on a defect
+    that is not in the PR.
+
+    Both are matched on an EXACT string, never on `!= "true"` or truthiness, because both
+    decisions PASS: if an unset env var meant outage-or-skip, deleting one line from the
+    workflow would make this gate vacuous again -- the very bug being fixed.
+    """
+
+    def test_availability_outage_passes(self):
+        r = V.decide("failure", "", NONCE, [], "", "", "", "true")
+        self.assertEqual(r["decision"], "outage")
+        self.assertEqual(V.check_for(r), "pass")
+
+    def test_task_failure_is_not_an_outage(self):
+        """availability=false is a real failure and must still abstain."""
+        r = V.decide("failure", "", NONCE, [], "", "", "", "false")
+        self.assertEqual(r["decision"], "abstain")
+        self.assertEqual(V.check_for(r), "fail")
+
+    def test_unset_availability_fails_closed(self):
+        r = V.decide("failure", "", NONCE, [], "", "", "", "")
+        self.assertEqual(r["decision"], "abstain")
+
+    def test_unrecognised_availability_fails_closed(self):
+        for value in ("TRUE", "yes", "1", "maybe"):
+            with self.subTest(value=value):
+                r = V.decide("failure", "", NONCE, [], "", "", "", value)
+                self.assertEqual(r["decision"], "abstain")
+
+    def test_not_ready_skips_and_passes(self):
+        r = V.decide("", "", NONCE, [], "", "", "false")
+        self.assertEqual(r["decision"], "skip")
+        self.assertEqual(V.check_for(r), "pass")
+
+    def test_unset_ready_does_not_skip(self):
+        """The dangerous direction: a missing env var must NOT become a silent pass."""
+        r = V.decide("", sentinel(NONCE, CLEAN_APPROVE), NONCE, [], "", "", "")
+        self.assertEqual(r["decision"], "abstain")
+        self.assertEqual(V.check_for(r), "fail")
+
+    def test_unrecognised_ready_does_not_skip(self):
+        for value in ("FALSE", "no", "0", ""):
+            with self.subTest(value=value):
+                r = V.decide("", sentinel(NONCE, CLEAN_APPROVE), NONCE, [], "", "", value)
+                self.assertNotEqual(r["decision"], "skip")
+
+    def test_ready_true_reviews_normally(self):
+        r = V.decide("success", sentinel(NONCE, CLEAN_APPROVE), NONCE, [], "", "", "true")
+        self.assertEqual(r["decision"], "approve")
+
+    def test_outage_body_is_not_an_approval_claim(self):
+        body = V.render_body(V.decide("failure", "", NONCE, [], "", "", "", "true"), "", "")
+        self.assertIn("NOT an approval", body)
+
+    def test_skip_body_says_environmental(self):
+        body = V.render_body(V.decide("", "", NONCE, [], "", "", "false"), "", "")
+        self.assertIn("environmental", body)
+
+
 class WorkflowWiringTests(unittest.TestCase):
     """IF the workflow wires the job result, it must wire it correctly.
 
