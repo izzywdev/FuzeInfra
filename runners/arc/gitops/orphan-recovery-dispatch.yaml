@@ -1,0 +1,287 @@
+# =============================================================================
+# ARC orphan-recovery dispatcher (namespace: arc-systems)
+#
+# GitOps-managed by argocd/applications/arc-selfheal.yaml (same Application as
+# controller-selfheal.yaml -- that source is a non-recursive directory, so a
+# new top-level file here is picked up automatically with no Application edit).
+#
+# WHY THIS EXISTS (2026-09-23 fleet CI outage, ~300 jobs queued)
+#
+# .github/workflows/runner-watch.yml + scripts/runner_watch.py's `recover`
+# subcommand already have exactly the right selector for rescuing a stranded
+# run (stranded_runs(): never touches a run with an in_progress sibling, never
+# a job with a runner assigned, never one queued under the threshold, never the
+# same run twice). It never fires automatically for two compounding reasons:
+#
+#   1. `apply` is reachable ONLY via a human workflow_dispatch -- correctly so,
+#      because the SAME mode also republishes CI_RUNNER_LABELS fleet-wide, and
+#      "a timer must rewrite the fleet's runners on its own" is not a safety
+#      property anyone wants. runner-watch.yml's "Resolve mode" step adds a
+#      narrower `recover-only` mode this CronJob drives instead -- it is wired
+#      so it can NEVER reach label-publishing, only the bounded, self-limiting
+#      recovery sweep (scripts/runner_watch.py's `run_recover` never calls
+#      write_variable(..., CI_RUNNER_LABELS, ...) -- only `run_decide` does,
+#      and recover-only never runs `decide` in apply mode).
+#   2. GitHub's `schedule:` is best-effort and was observed 4-5 HOURS apart
+#      against a twice-hourly cron on 2026-09-23 -- not a dependable clock for
+#      a recovery mechanism. A Kubernetes CronJob's clock is not subject to
+#      GitHub's scheduler queue, so THIS is what fires on time; runner-watch.yml
+#      keeps its own `schedule:` too (belt & suspenders) -- this is the belt.
+#
+# THE SHARP DETECTION SIGNAL -- read this before touching the classify()
+# function below. Each ARC listener pod (ns arc-systems, one per scale set)
+# logs a line shaped:
+#   msg="Calculated target runner count" component=worker "assigned job"=N
+#   decision=D min=0 max=M currentRunnerCount=C
+#
+#   - "assigned job"=0 with the repo genuinely having runs QUEUED on GitHub is
+#     the orphan: GitHub's broker never re-hands a job queued against a
+#     listener session that died, so the recovered listener sits at
+#     assigned=0 forever even though work is waiting. Verified live
+#     2026-09-23: FuzeHub and FuzeMarket both sat at assigned=0 with 13 and 8
+#     runs queued; a manual cancel+rerun immediately moved FuzeHub to
+#     assigned=6 and it scaled to 5 runners.
+#   - "assigned job"=0 is ALSO the completely normal idle steady state
+#     (nothing queued) -- indistinguishable from the orphan by the log line
+#     alone. That is why classify() below never treats assigned=0 as an
+#     orphan without an independent GitHub Actions API read confirming
+#     queued>0 for that repo (GH_READ_TOKEN) -- an unconfirmed assigned=0 is
+#     "unknown", never "orphaned".
+#   - "assigned job"==max is capacity-bound: the scale set is AT its ceiling
+#     and draining normally. Re-running its queue would dump duplicate jobs
+#     onto an already-saturated pool. Verified live 2026-09-23: FuzeSDLC (260
+#     queued) and FuzePlan (45 queued) were both in this state against a
+#     2-node pool at 96% CPU -- treating that as "orphaned" would have been
+#     ACTIVELY HARMFUL, not just a no-op. classify() short-circuits this case
+#     before it ever reaches the queued-count check.
+#
+# GETTING THIS DISTINCTION WRONG MAKES THE TOOL ACTIVELY HARMFUL, not merely
+# useless -- say that again for whoever edits classify() next.
+#
+# WHAT THIS CRONJOB DOES AND DOES NOT DO
+#   - Reads listener pod logs (kubectl, RBAC below -- get/list pods + pods/log,
+#     nothing else, no write verbs at all).
+#   - For any listener at assigned=0, asks the GitHub Actions API whether that
+#     repo actually has queued runs (GH_READ_TOKEN -- Actions:read scope).
+#   - If -- and only if -- at least one listener classifies as "orphaned", fires
+#     ONE `repository_dispatch` (event_type: runner-recovery) against
+#     izzywdev/FuzeInfra using GH_DISPATCH_TOKEN. It does NOT itself cancel or
+#     re-dispatch any run -- runner-watch.yml's `recover` job (which already
+#     holds the fuze-agent App token with actions:write) does that, and reruns
+#     its own full stranded_runs() selector as the authoritative check. This
+#     CronJob is a clock + a cheap pre-filter, never the actor.
+#   - The `client_payload` this CronJob sends is informational only
+#     (orphan_candidates=<repo list>, for the job log) -- runner-watch.yml's
+#     mode resolution deliberately does NOT read client_payload to pick the
+#     mode for this event_type; it is unconditionally recover-only, so a
+#     spoofed/crafted payload can never escalate it to `apply`.
+#
+# SEALED-SECRET SCAFFOLDING -- NOT YET SEALED, OWED
+#   This manifest references Secret arc-systems/arc-orphan-recovery-dispatch
+#   with keys `dispatch_token` (Contents:RW on FuzeInfra only -- the SAME scope
+#   already documented for FUZEINFRA_DISPATCH_TOKEN in
+#   docs/INFRA_REQUEST_DISPATCH.md; reuse that token's VALUE rather than
+#   minting a new one where possible) and `read_token` (Actions:read on the
+#   fleet repos -- a real credential someone with GitHub org access has to
+#   produce; no session in this pipeline holds or is meant to hold that
+#   value). Seal it OFFLINE, once, with the plaintext values in hand:
+#
+#     scripts/seal-secret.sh arc-systems/arc-orphan-recovery-dispatch \
+#       dispatch_token=@./dispatch_token.txt \
+#       read_token=@./read_token.txt \
+#       --out runners/arc/gitops/arc-orphan-recovery-secret.yaml
+#
+#   Commit the resulting file (ciphertext only) into this SAME directory --
+#   the non-recursive Argo source picks it up with no further wiring. Until
+#   that file exists, secretKeyRef below is `optional: true` so the CronJob
+#   pod still starts and fails LOUDLY with a clear log message (never a silent
+#   CreateContainerConfigError) rather than a green-looking no-op.
+# =============================================================================
+apiVersion: v1
+kind: ServiceAccount
+metadata: {name: arc-orphan-recovery, namespace: arc-systems}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: {name: arc-orphan-recovery, namespace: arc-systems}
+rules:
+  # Read-only, and nothing but pods/log: this CronJob NEVER mutates cluster
+  # state -- its only write is an outbound HTTPS POST to the GitHub API,
+  # which is not a Kubernetes verb and needs no RBAC.
+  - {apiGroups: [""], resources: ["pods"], verbs: ["get", "list"]}
+  - {apiGroups: [""], resources: ["pods/log"], verbs: ["get"]}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: arc-orphan-recovery, namespace: arc-systems}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: arc-orphan-recovery}
+subjects: [{kind: ServiceAccount, name: arc-orphan-recovery, namespace: arc-systems}]
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: arc-orphan-recovery-dispatch
+  namespace: arc-systems
+  labels:
+    app.kubernetes.io/name: arc-orphan-recovery
+    app.kubernetes.io/component: ci-watchdog
+    app.kubernetes.io/part-of: arc
+spec:
+  # Independent clock, off-peak relative to runner-watch.yml's own `13,43`
+  # cron and to the top-of-hour pile-up GitHub's scheduler is worst at.
+  schedule: "*/10 * * * *"
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 300
+  successfulJobsHistoryLimit: 2
+  failedJobsHistoryLimit: 2
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      activeDeadlineSeconds: 180
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: arc-orphan-recovery
+            app.kubernetes.io/component: ci-watchdog
+        spec:
+          serviceAccountName: arc-orphan-recovery
+          restartPolicy: Never
+          containers:
+            - name: orphan-recovery
+              # Same image family as controller-selfheal.yaml (kubectl + sh +
+              # jq bundled); curl is installed at run time via apk (see MAIN
+              # LOOP) since this image's curl presence is unconfirmed and the
+              # cost is one small package fetch every 10 minutes.
+              image: alpine/k8s:1.36.2
+              imagePullPolicy: IfNotPresent
+              resources:
+                requests: {cpu: 10m, memory: 32Mi}
+                limits: {cpu: 200m, memory: 128Mi}
+              env:
+                - {name: GH_OWNER, value: "izzywdev"}
+                - name: GH_DISPATCH_TOKEN
+                  valueFrom:
+                    secretKeyRef:
+                      name: arc-orphan-recovery-dispatch
+                      key: dispatch_token
+                      optional: true
+                - name: GH_READ_TOKEN
+                  valueFrom:
+                    secretKeyRef:
+                      name: arc-orphan-recovery-dispatch
+                      key: read_token
+                      optional: true
+              command: ["/bin/sh", "-c"]
+              args:
+                - |
+                  set -u
+
+                  # =====================================================================
+                  # PURE HELPERS -- offline-testable. tests/test_orphan_recovery_dispatch.py
+                  # extracts this script from the CronJob manifest, truncates it at the
+                  # "MAIN LOOP" marker below, and sources it to drive parse_scaler_line /
+                  # classify directly with canned inputs. Keep both functions free of
+                  # kubectl/curl/any I/O so that test stays offline: no cluster, no network.
+                  # =====================================================================
+
+                  parse_scaler_line() {
+                    # stdin: one gha-rs-controller scaler log line, e.g.
+                    #   msg="Calculated target runner count" component=worker
+                    #   "assigned job"=0 decision=0 min=0 max=5 currentRunnerCount=0
+                    # prints "ASSIGNED MAX CURRENT" (space-separated), or nothing if the
+                    # line does not match this shape.
+                    sed -n "s/.*\"assigned job\"=\([0-9][0-9]*\).*max=\([0-9][0-9]*\).*currentRunnerCount=\([0-9][0-9]*\).*/\1 \2 \3/p"
+                  }
+
+                  classify() {
+                    # $1=assigned $2=max $3=queued ("" = unconfirmed/unknown)
+                    # See the manifest header for why each branch exists and why the
+                    # order matters (capacity-bound must short-circuit BEFORE the
+                    # queued-count check is even consulted).
+                    assigned="$1"; maxv="$2"; queued="$3"
+                    if [ -z "$assigned" ] || [ -z "$maxv" ]; then
+                      echo "unknown"; return 0
+                    fi
+                    if [ "$assigned" != "0" ] && [ "$assigned" = "$maxv" ]; then
+                      echo "capacity-bound"; return 0
+                    fi
+                    if [ "$assigned" != "0" ]; then
+                      echo "has-work"; return 0
+                    fi
+                    # assigned == 0: ambiguous without a confirmed queued count.
+                    if [ -z "$queued" ]; then
+                      echo "unknown"; return 0
+                    fi
+                    if [ "$queued" -gt 0 ] 2>/dev/null; then
+                      echo "orphaned"
+                    else
+                      echo "idle"
+                    fi
+                  }
+
+                  # ---- MAIN LOOP (talks to kubectl + the GitHub API; not exercised offline) ----
+
+                  if [ -z "${GH_DISPATCH_TOKEN:-}" ]; then
+                    echo "::error::GH_DISPATCH_TOKEN is unset. arc-systems/arc-orphan-recovery-dispatch has not been sealed yet -- see this CronJob's manifest header for the exact seal-secret.sh invocation. Failing loudly rather than silently doing nothing every 10 minutes."
+                    exit 1
+                  fi
+
+                  apk add --no-cache curl >/dev/null 2>&1 || true
+
+                  pods=$(kubectl get pods -n arc-systems \
+                    -l app.kubernetes.io/component=runner-scale-set-listener \
+                    -o jsonpath="{range .items[*]}{.metadata.name}{\"\n\"}{end}" 2>/dev/null)
+
+                  if [ -z "$pods" ]; then
+                    echo "warn: could not list scale-set listener pods (RBAC or API issue) -- nothing to check this pass"
+                    exit 0
+                  fi
+
+                  orphans=""
+                  for pod in $pods; do
+                    repo=$(echo "$pod" | sed -E "s/-[0-9a-f]+-listener$//")
+                    last=$(kubectl -n arc-systems logs "$pod" --tail=200 2>/dev/null | grep "Calculated target runner count" | tail -1)
+                    if [ -z "$last" ]; then
+                      echo "warn $repo: no scaler decision line in the last 200 log lines, skipping"
+                      continue
+                    fi
+                    parsed=$(echo "$last" | parse_scaler_line)
+                    assigned=$(echo "$parsed" | awk "{print \$1}")
+                    maxv=$(echo "$parsed" | awk "{print \$2}")
+                    current=$(echo "$parsed" | awk "{print \$3}")
+                    if [ -z "$assigned" ]; then
+                      echo "warn $repo: could not parse scaler line, skipping"
+                      continue
+                    fi
+
+                    queued=""
+                    if [ "$assigned" = "0" ] && [ -n "${GH_READ_TOKEN:-}" ]; then
+                      resp=$(curl -fsS -H "Authorization: Bearer ${GH_READ_TOKEN}" \
+                        -H "Accept: application/vnd.github+json" \
+                        "https://api.github.com/repos/${GH_OWNER}/${repo}/actions/runs?status=queued&per_page=1" 2>/dev/null)
+                      if [ -n "$resp" ]; then
+                        queued=$(echo "$resp" | jq -r ".total_count // empty" 2>/dev/null)
+                      fi
+                    fi
+
+                    verdict=$(classify "$assigned" "$maxv" "$queued")
+                    echo "listener $pod ($repo): assigned=$assigned max=$maxv current=$current queued=${queued:-unknown} -> $verdict"
+
+                    if [ "$verdict" = "orphaned" ]; then
+                      orphans="${orphans:+$orphans,}$repo"
+                    fi
+                  done
+
+                  if [ -z "$orphans" ]; then
+                    echo "ok: no genuinely orphaned listener this pass"
+                    exit 0
+                  fi
+
+                  echo "dispatching runner-recovery (recover-only) for orphaned repo(s): $orphans"
+                  curl -fsS -X POST \
+                    -H "Authorization: Bearer ${GH_DISPATCH_TOKEN}" \
+                    -H "Accept: application/vnd.github+json" \
+                    "https://api.github.com/repos/${GH_OWNER}/FuzeInfra/dispatches" \
+                    -d "{\"event_type\":\"runner-recovery\",\"client_payload\":{\"source\":\"arc-orphan-recovery-cronjob\",\"orphan_candidates\":\"${orphans}\"}}" \
+                    && echo "dispatched" \
+                    || echo "::error::repository_dispatch POST failed -- check GH_DISPATCH_TOKEN scope (Contents:RW on FuzeInfra)"
