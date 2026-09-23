@@ -87,8 +87,78 @@ jobs:
       - name: Apply argocd/cluster-bootstrap
         run: |
           kubectl apply -f argocd/cluster-bootstrap/
-          echo "Applied argocd/cluster-bootstrap/ — HelmChartConfigs (traefik, coredns, etc.)."
+          echo "Applied argocd/cluster-bootstrap/ — HelmChartConfigs (traefik, etc.)."
           echo "k3s helm-controller reconciles within ~15s."
+
+      # kubectl apply -f <dir> does NOT prune: a manifest deleted from git stays
+      # live in the cluster forever unless something explicitly removes it. This
+      # bit us for real: argocd/cluster-bootstrap/coredns-ha.yaml (PR #1193) was
+      # a coredns-ha Deployment explicitly tolerating fuzeinfra.io/ci and pinned
+      # OFF the control-plane, so both its replicas landed on the CI nodes. The
+      # PR that deletes that file (superseding it with the node-configurator
+      # mechanism in helm/fuzeinfra/templates/node-configurator.yaml, which fixes
+      # the REAL k3s-packaged CoreDNS instead) does nothing to the live object —
+      # confirmed: `kubectl -n kube-system get deploy coredns-ha` carries no
+      # argocd.argoproj.io/tracking-id, because this directory is NOT Argo-
+      # managed, it is applied here via plain `kubectl apply -f`. Left alone, the
+      # superseded Deployment keeps running with both replicas on the CI nodes
+      # forever, AND (once ci-node-isolation.yaml's ValidatingAdmissionPolicy is
+      # enabled) its pods can never be recreated on any future drain/restart —
+      # a confusing half-state, not an active outage, but a landmine.
+      #
+      # ORDERING IS LOAD-BEARING. coredns-ha's pods carry `k8s-app: kube-dns`,
+      # so they are live endpoints behind the SAME kube-dns Service the
+      # node-configurator's replacement replicas join — deleting coredns-ha
+      # BEFORE the replacement is Ready would dip cluster DNS capacity right
+      # when this very fix is rolling out. helm/fuzeinfra (Argo, via
+      # deploy-prod.yml) and this directory (kubectl apply, here) are two
+      # INDEPENDENT pipelines with no ordering guarantee between them on the
+      # same merge to main, so this step actively WAITS for the node-configurator
+      # CoreDNS to prove itself ready before touching coredns-ha, rather than
+      # assuming deploy-prod.yml already ran.
+      #
+      # Fails OPEN on timeout: if the replacement isn't ready yet, coredns-ha is
+      # left running (extra DNS capacity, not a duplicate outage) and this step
+      # only warns — it does not fail the job, so the rest of cluster-bootstrap
+      # still applies. The next push that touches these paths (or a manual
+      # workflow_dispatch) retries the cleanup; it eventually converges.
+      #
+      # NOT a general fix for the prune gap above — `kubectl apply --prune`
+      # needs careful label scoping to be safe and is a separate, deliberately
+      # out-of-scope piece of work (tracked separately; every OTHER file ever
+      # deleted from this directory has the same latent leak, coredns-ha is
+      # just the instance that was caught).
+      - name: Remove superseded coredns-ha Deployment (idempotent, ordered after the real fix is Ready)
+        run: |
+          set -u
+          if ! kubectl -n kube-system get deployment coredns-ha >/dev/null 2>&1; then
+            echo "coredns-ha already gone — nothing to clean up."
+            exit 0
+          fi
+
+          echo "coredns-ha still present; waiting up to 900s for the node-configurator's"
+          echo "replacement CoreDNS (deploy/coredns in kube-system) to reach >=2 ready replicas"
+          echo "before tearing coredns-ha down, so cluster DNS capacity never dips."
+          ready=0
+          for _ in $(seq 1 60); do
+            r=$(kubectl -n kube-system get deployment coredns -o jsonpath='{.status.readyReplicas}' 2>/dev/null || echo 0)
+            case "$r" in ''|*[!0-9]*) r=0 ;; esac
+            if [ "$r" -ge 2 ]; then
+              ready=1
+              echo "deploy/coredns readyReplicas=$r (>=2) — safe to remove coredns-ha."
+              break
+            fi
+            sleep 15
+          done
+
+          if [ "$ready" -eq 1 ]; then
+            kubectl -n kube-system delete deployment coredns-ha --ignore-not-found
+            echo "Deleted superseded coredns-ha Deployment."
+          else
+            echo "WARNING: deploy/coredns never reached >=2 ready replicas within 900s."
+            echo "Leaving coredns-ha running (fails open — extra DNS capacity is safer than"
+            echo "a capacity dip). Will retry on the next run touching these paths."
+          fi
 
       - name: Apply argocd/cluster-settings (server-side)
         run: |
