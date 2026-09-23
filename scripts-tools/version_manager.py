@@ -22,7 +22,6 @@ Author: FuzeInfra Platform Team
 Created: 2024
 """
 
-import os
 import sys
 import json
 import argparse
@@ -30,7 +29,7 @@ import subprocess
 import datetime
 import re
 from pathlib import Path
-from typing import Dict, List, Tuple, Optional, Union
+from typing import Dict, List, Optional
 from dataclasses import dataclass
 
 

@@ -1,0 +1,82 @@
+# ===========================================================================
+# runner-health
+# ===========================================================================
+# Watches the gap between "the pod is Running" and "GitHub can actually reach the
+# runner". Those are different facts, and the fleet-wide CI outage of 2026-09-23
+# (FuzeInfra#1187) lived entirely in the space between them: 18 of 19 runner pods
+# were `2/2 Running` with no restarts and no events, while GitHub reported every
+# one of them `offline` and ~275 jobs sat queued across 22 repos. Nothing was
+# watching, so the first symptom anyone saw was a PR that would not merge.
+#
+# WHY THIS RUNS ON A GITHUB-HOSTED RUNNER, DELIBERATELY.
+# `ca-health-check.yml` -- the closest existing check -- runs `runs-on: staging`,
+# i.e. on a self-hosted runner inside the very cluster it inspects. During #1187
+# both staging runners were on the broken nodes, so that workflow did not fail:
+# it stopped running entirely. Last execution 04:56Z on a */15 schedule, silent
+# for hours, green in the UI because absence of a run is not a red tick.
+#
+# A monitor hosted inside the thing it monitors cannot report that thing's
+# outage. This one needs no in-cluster placement -- just the Kubernetes API and
+# the GitHub API, both reachable from outside -- so it runs hosted on purpose.
+#
+# KNOWN LIMITATION, STATED PLAINLY: while the Actions budget is exhausted,
+# hosted jobs do not start at all, so this check is also silenced -- by a
+# different cause, with a different fix (billing). It is not a substitute for an
+# external uptime monitor. It is, however, independent of the cluster failure
+# mode it was written for, which the in-cluster version is not.
+#
+# Required repo secrets:
+#   KUBE_CONFIG   # base64 kubeconfig (same one ca-health-check/argocd-register use)
+#   GH_TOKEN      # cross-repo read for .../actions/runners on the fleet repos
+# ---------------------------------------------------------------------------
+
+name: runner-health
+
+on:
+  schedule:
+    - cron: '*/15 * * * *'
+  workflow_dispatch:
+    inputs:
+      warn_only:
+        description: 'Report findings but always exit 0'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: runner-health
+  cancel-in-progress: true
+
+jobs:
+  probe:
+    # See the header: hosted ON PURPOSE. Do not "fix" this to a self-hosted
+    # runner -- that reintroduces the blind spot this workflow exists to close.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - uses: azure/setup-kubectl@829323503d1be3d00ca8346e5391ca0b07a9ab0d # v5.1.0
+
+      - name: Configure read-only cluster access
+        env:
+          KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
+        run: |
+          set -euo pipefail
+          [ -n "$KUBE_CONFIG" ] || { echo "::error::KUBE_CONFIG unset"; exit 1; }
+          mkdir -p "$HOME/.kube"
+          printf '%s' "$KUBE_CONFIG" | base64 -d > "$HOME/.kube/config"
+          chmod 600 "$HOME/.kube/config"
+          echo "KUBECONFIG=$HOME/.kube/config" >> "$GITHUB_ENV"
+
+      - name: Detect runner pods that are Running but not online
+        env:
+          # Cross-repo: the scale sets serve the whole fleet, and each set names
+          # its own repo via spec.githubConfigUrl, so this reads runner lists in
+          # repos other than this one.
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+          WARN_ONLY: ${{ inputs.warn_only && '--warn-only' || '' }}
+        run: |
+          set -euo pipefail
+          python3 scripts/runner_health.py ${WARN_ONLY}

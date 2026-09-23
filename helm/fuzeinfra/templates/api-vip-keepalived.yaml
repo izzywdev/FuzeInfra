@@ -45,8 +45,21 @@ data:
     {{ toJson $vip.vips }}
   check-apiserver.sh: |
     #!/bin/sh
-    exec curl -sk --max-time 2 -o /dev/null -w '%{http_code}' \
-      "https://127.0.0.1:{{ $vip.healthCheck.port }}{{ $vip.healthCheck.path }}" | grep -q '^200$'
+    # LIVENESS, NOT AUTHORIZATION. This probe is unauthenticated, and an apiserver
+    # with anonymous-auth off answers 401 — which still proves it terminated TLS
+    # and served the request, i.e. it is alive. Requiring '200' therefore marked
+    # every HEALTHY node unhealthy: on 2026-09-23 all three nodes ran this, got
+    # 401, and keepalived docked each one by the track script's weight
+    # ("Changing effective priority from 150 to 90", 200->140, 240->180), so the
+    # owner could not hold its own VIP and one node ended up with all three.
+    # Only a real failure — connection refused, timeout (000) or a 5xx — should
+    # lower priority.
+    code=$(curl -sk --max-time 2 -o /dev/null -w '%{http_code}' \
+      "https://127.0.0.1:{{ $vip.healthCheck.port }}{{ $vip.healthCheck.path }}")
+    case "$code" in
+      200|401|403) exit 0 ;;
+      *)           exit 1 ;;
+    esac
   notify.sh: |
     #!/usr/bin/env bash
     # keepalived per-VIP hook: `notify.sh MASTER <vip>`. On MASTER, reassign THAT
@@ -143,7 +156,16 @@ data:
       {
         echo "vrrp_instance API_VIP_$i {"
         echo "    state BACKUP"
-        echo "    nopreempt"
+        # nopreempt ONLY for a VIP this node does not own. Unconditional nopreempt
+        # means an owner can never reclaim its own VIP: whoever wins the election
+        # first keeps it forever, so after a rolling restart one node can end up
+        # holding EVERY VIP while its peers hold none — all VIPs still answer, but
+        # the round-robin sends all three shares of traffic to a single node and
+        # the load-balancing half of this design is silently gone (observed
+        # 2026-09-23: fuze-core-1 held .164, .42 and .205). Keeping nopreempt for
+        # ADOPTED VIPs preserves the anti-flap intent — a recovering peer takes its
+        # own VIP back, but nothing bounces a VIP it merely inherited.
+        [ "$PRIMARY" = "$NODE_NAME" ] || echo "    nopreempt"
         echo "    interface {{ $vip.vrrp.interface }}"
         echo "    virtual_router_id $RID"
         echo "    priority $PRIO"
@@ -152,7 +174,21 @@ data:
         echo "    unicast_peer {"
         echo "$PEERS"
         echo "    }"
-        echo "    authentication { auth_type PASS auth_pass $KEEPALIVED_AUTH_PASS }"
+        # MUST be multi-line. keepalived's parser reads `authentication {` and then
+        # takes its directives from SUBSEQUENT lines, so the one-line brace form
+        # registers auth_type but never sees auth_pass, and every instance logs
+        #   "Authentication specified but no password given. Ignoring"
+        # i.e. VRRP runs UNAUTHENTICATED while the config looks correct and the
+        # password is present in the file (observed in prod 2026-09-23; the env var
+        # was populated and no truncation warning was emitted, which is what rules
+        # out the 8-byte limit as the cause). virtual_ipaddress below tolerates the
+        # one-line form, which is why only this block needed changing.
+        # Note: VRRPv2 auth_pass is 8 bytes; a longer secret is truncated to 8
+        # identically on every node, so peers still agree.
+        echo "    authentication {"
+        echo "        auth_type PASS"
+        echo "        auth_pass $KEEPALIVED_AUTH_PASS"
+        echo "    }"
         echo "    virtual_ipaddress { $ADDR/32 dev {{ $vip.interface }} }"
         echo "    track_script { chk_apiserver }"
         echo "    notify_master \"/etc/keepalived/notify.sh MASTER $ADDR\""
