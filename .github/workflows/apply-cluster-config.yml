@@ -87,7 +87,9 @@ jobs:
       - name: Apply argocd/cluster-bootstrap
         run: |
           kubectl apply -f argocd/cluster-bootstrap/
-          echo "Applied argocd/cluster-bootstrap/ — HelmChartConfigs (traefik, coredns, etc.)."
+          echo "Applied argocd/cluster-bootstrap/ — HelmChartConfig (traefik) + other bootstrap manifests."
+          echo "CoreDNS is NOT a HelmChartConfig target here (k3s has no coredns HelmChart) —"
+          echo "its HA fix lives in helm/fuzeinfra/templates/node-configurator.yaml instead."
 
       # Remove the superseded coredns-ha Deployment.
       #
