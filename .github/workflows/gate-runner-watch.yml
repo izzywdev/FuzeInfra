@@ -93,7 +93,14 @@ jobs:
       - name: Self-test — orphan-recovery detection logic
         run: |
           set -euo pipefail
-          pytest -v tests/test_orphan_recovery_dispatch.py 2>&1 | tee selftest-orphan.txt
+          # --noconftest is REQUIRED, not a convenience. tests/conftest.py imports the
+          # live-integration stack (psycopg2, pymongo, redis, neo4j, pika, elasticsearch,
+          # kafka), so pytest rooted anywhere in tests/ loads it and dies at COLLECTION
+          # with ModuleNotFoundError before a single assertion runs (exit 4) unless this
+          # lightweight gate installs the whole DB stack. This suite is self-contained --
+          # it imports only subprocess/sys/pathlib/pytest/yaml and no test takes a fixture
+          # argument -- so skipping conftest costs nothing and keeps the gate fast.
+          pytest --noconftest -v tests/test_orphan_recovery_dispatch.py 2>&1 | tee selftest-orphan.txt
           if grep -qiE '\bskipped\b' selftest-orphan.txt; then
             echo "::error title=gate-runner-watch::A test in test_orphan_recovery_dispatch.py was SKIPPED on the Linux gate runner, where none of its 13 tests should ever skip. Failing rather than reporting green on fewer tests than were written."
             exit 1
