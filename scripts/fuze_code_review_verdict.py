@@ -71,7 +71,47 @@ import secrets as _secrets_mod  # nonce generation; unrelated to GitHub Secrets
 import sys
 
 VALID_VERDICTS = ("approve", "request_changes", "comment")
-DECISIONS = ("approve", "request_changes", "comment", "abstain", "superseded")
+DECISIONS = (
+    "approve", "request_changes", "comment", "abstain", "superseded", "outage", "skip",
+)
+
+# Decisions that always pass the required check. `comment` is deliberately ABSENT:
+# it passes only as a downgraded approve or a guard deferral -- see check_for().
+ALWAYS_PASS = frozenset({"approve", "superseded", "outage", "skip"})
+
+
+def check_for(result: dict) -> str:
+    """pass | fail -- the approve-or-fail verdict the required check exits on.
+
+    THE SINGLE PLACE this is decided, and previously it did not exist at all: the script
+    wrote `decision` and `body` but never `check`, while the workflow gates on
+    `if [ "$CHECK" = "fail" ]`. `$CHECK` was therefore always empty and that line never
+    fired -- observed on PR #1207, where runs 449 and 453 concluded `success` while the
+    verdict was "COMMENT ONLY -- not an approval". The required check has been vacuous,
+    contrary to required-checks.json's `can_fail: true`.
+
+    The mapping is the workflow header's APPROVE-OR-FAIL CONTRACT, verbatim:
+
+      PASS  a clean `approve`; an `approve` DOWNGRADED to a comment on a CI/governance
+            PR (it keys on the MODEL verdict, not on which gh command ran -- keying it
+            on the downgrade would deadlock every governance PR, this one included); a
+            self-modification-guard DEFERRAL; a credit/quota AVAILABILITY OUTAGE (the
+            owner's stated exception); an environmental SKIP.
+      FAIL  `request_changes`; a model `comment` on a NON-sensitive PR -- not an
+            approval, and precisely what triggers fuze-ci-autofix's bounded loop; a
+            genuine ABSTAIN.
+
+    The subtlety worth stating: a bare `comment` FAILS. Treating every `comment` as a
+    pass would silence the auto-fix loop entirely, which is the opposite of the mandate.
+    An unrecognized decision fails, so a future decision added without thinking about
+    this function blocks rather than waves through.
+    """
+    decision = result["decision"]
+    if decision in ALWAYS_PASS:
+        return "pass"
+    if decision == "comment":
+        return "pass" if (result.get("downgraded") or result.get("deferred")) else "fail"
+    return "fail"
 
 
 def make_nonce() -> str:
@@ -141,7 +181,8 @@ def extract_verdict_json(result_text: str, nonce: str) -> tuple[dict | None, str
 
 
 def decide(action_conclusion: str, result_text: str, nonce: str,
-           sensitive_files: list[str], mode: str = "", job_result: str = "") -> dict:
+           sensitive_files: list[str], mode: str = "", job_result: str = "",
+           ready: str = "", availability: str = "") -> dict:
     """The single decision point. Returns a dict with keys: decision, reason, verdict,
     summary, findings, downgraded (bool: true iff a model "approve" was overridden by the
     sensitive-files rule), deferred (bool: true iff the review was legitimately deferred by
@@ -180,7 +221,58 @@ def decide(action_conclusion: str, result_text: str, nonce: str,
             "deferred": False,
         }
 
+    # RULE 0b — NOTHING TO REVIEW IS AN ENVIRONMENTAL SKIP, NOT A VERDICT.
+    # The review job gates its steps on `ready == 'true'`; when there is no LLM credential
+    # or no reviewable diff it never runs, leaving an EMPTY conclusion. Routed through the
+    # abstain branch below, a repo with no credential configured would block every PR
+    # forever on a defect that is not in the PR. The workflow header lists this as a PASS.
+    #
+    # Matched on the exact string "false" (the only other value the workflow emits), NOT on
+    # `ready != "true"`. That direction matters: an UNSET or unrecognised value must fall
+    # through to the conclusion checks and end up abstaining, because a skip PASSES -- if a
+    # missing env var meant skip, deleting one line from the workflow would silently make
+    # this gate vacuous again, which is the exact bug being fixed here.
+    if ready == "false":
+        return {
+            "decision": "skip",
+            "reason": (
+                "the review job reported nothing to review (no LLM credential configured, "
+                "or no reviewable diff). That is environmental, not a defect in this PR, so "
+                "the check passes; see the review job log for which."
+            ),
+            "verdict": None, "summary": "", "findings": [], "downgraded": False,
+            "deferred": False,
+        }
+
     if action_conclusion != "success":
+        # RULE 0c — A CLASSIFIED CREDIT/QUOTA OUTAGE PASSES. The owner's stated exception:
+        # "fuze-code-review becomes a mandatory check UNLESS the failure is a credit
+        # outage." Keyed on the action's `availability` output, which is true ONLY when
+        # every rung failed on a classified credit/quota/429/5xx signal (classify.sh exit
+        # 1) -- never on a task failure, and derived from the per-rung classify codes
+        # rather than by grepping logs.
+        #
+        # Exact "true" only, so an unset or unrecognised value stays an abstain. The action
+        # documents its own output as failing closed on an unknown failure ("treating it as
+        # real rather than as an outage"); reading it any more loosely here would undo that
+        # at the one place it decides whether a PR can merge.
+        #
+        # Checked AFTER the deferral below only in the sense that the deferral is a
+        # `neutral` conclusion with mode=declined, which never carries availability=true --
+        # the two cannot both apply.
+        if availability == "true":
+            return {
+                "decision": "outage",
+                "reason": (
+                    "every provider rung failed on a classified credit/quota/availability "
+                    "signal, not on the review itself. The owner's exception: a vendor "
+                    "outage does not block a PR. No review was produced, so this is not an "
+                    "approval either -- it comments and passes."
+                ),
+                "verdict": None, "summary": "", "findings": [], "downgraded": False,
+                "deferred": False,
+            }
+
         # RULE 6 — WORKFLOW-SELF-MODIFICATION GUARD IS A DEFERRAL, NOT A FAILURE.
         # claude-code-action deliberately DECLINES to review a PR that modifies the workflow
         # file invoking it (every workflow-migration PR trips it); fuze-code-action reports
@@ -258,6 +350,23 @@ def render_body(result: dict, mode: str, vendor: str) -> str:
     """Human-readable GitHub review body for the decision `result` from decide()."""
     lines = ["## fuze-code-review — automated verdict", ""]
 
+    if result["decision"] == "outage":
+        lines.append("**Provider outage — the check passes, but this is NOT an approval.**")
+        lines.append("")
+        lines.append(result["reason"])
+        lines.append("")
+        lines.append(
+            "_The required gates and human review still apply. Re-run this check once the "
+            "provider recovers if you want an actual review on this commit._"
+        )
+        return "\n".join(lines)
+
+    if result["decision"] == "skip":
+        lines.append("**Not reviewed this run — environmental, not a defect in this PR.**")
+        lines.append("")
+        lines.append(result["reason"])
+        return "\n".join(lines)
+
     if result["decision"] == "superseded":
         # Never posted — the workflow short-circuits before any gh call. Rendered only so
         # every decision has a body and the job log can show why nothing was said.
@@ -323,11 +432,18 @@ def render_body(result: dict, mode: str, vendor: str) -> str:
 def _write_github_output(decision: dict, body: str) -> None:
     out_path = os.environ.get("GITHUB_OUTPUT")
     if not out_path:
-        print(json.dumps({"decision": decision["decision"], "reason": decision["reason"]}))
+        print(json.dumps({
+            "decision": decision["decision"],
+            "check": check_for(decision),
+            "reason": decision["reason"],
+        }))
         return
     delim = f"FUZE_REVIEW_BODY_{_secrets_mod.token_hex(8)}"
     with open(out_path, "a", encoding="utf-8") as fh:
         fh.write(f"decision={decision['decision']}\n")
+        # `check` is what the workflow's decisive line exits on. Writing it is the whole
+        # point: without this row the step reads an empty $CHECK and never fails.
+        fh.write(f"check={check_for(decision)}\n")
         fh.write(f"body<<{delim}\n{body}\n{delim}\n")
 
 
@@ -340,11 +456,17 @@ def main() -> int:
     sensitive_raw = os.environ.get("FUZE_SENSITIVE_FILES", "")
     sensitive_files = [line for line in sensitive_raw.splitlines() if line.strip()]
     job_result = os.environ.get("FUZE_REVIEW_JOB_RESULT", "")
+    ready = os.environ.get("FUZE_REVIEW_READY", "")
+    availability = os.environ.get("FUZE_ACTION_AVAILABILITY", "")
 
-    result = decide(action_conclusion, result_text, nonce, sensitive_files, mode, job_result)
+    result = decide(action_conclusion, result_text, nonce, sensitive_files, mode,
+                    job_result, ready, availability)
     body = render_body(result, mode, vendor)
 
-    print(f"::notice title=fuze-code-review::decision={result['decision']} reason={result['reason']}")
+    print(
+        f"::notice title=fuze-code-review::decision={result['decision']} "
+        f"check={check_for(result)} reason={result['reason']}"
+    )
     _write_github_output(result, body)
 
     return 0
