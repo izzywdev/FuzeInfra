@@ -195,8 +195,22 @@ inputs:
       codex-action and run-gemini-cli have no notion of which bot actors may
       trigger a run — they are never triggered BY a GitHub actor here; the
       workflow decides whether to run and this action only carries out the task.
+
+      Defaults to this org's OWN agent identity. claude-code-action refuses to
+      run when the workflow actor is a bot ("Workflow initiated by non-human
+      actor: fuze-agent (type: Bot). Add bot to allowed_bots list"), and it
+      fails in ~2s BEFORE spending any tokens. Because every agent workflow here
+      runs under the fuze-agent App, an empty default made BOTH Claude rungs
+      (api-key and subscription-OAuth) fail on every agent-initiated PR, which
+      then surfaced misleadingly as "all rungs unreachable / availability" — i.e.
+      it looked like exhausted quota when no request had been made at all.
+
+      This does NOT reopen the self-trigger loop that claude-code-action's bot
+      guard defends against: loop safety here comes from the workflows' own
+      sentinels (`[skip mcp]`, `claude-loop-guard`), not from blocking our own
+      App. Only this org's agent identity is listed — deliberately not `*`.
     required: false
-    default: ''
+    default: 'fuze-agent,fuze-agent[bot]'
   additional-permissions:
     description: >-
       Passed through verbatim as claude-code-action `additional_permissions`
