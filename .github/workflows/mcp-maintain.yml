@@ -244,14 +244,7 @@ jobs:
           # `pull_request_target`), so a fork PR gets no secrets at all — neither
           # LITELLM_FUZE_KEY nor ANTHROPIC_API_KEY — so llm-endpoint resolves nothing,
           # preflight fails closed, and this job never starts.
-          # Must list the actor that actually triggers this job. Agent PRs run
-          # under the fuze-agent App, so "claude" alone made claude-code-action
-          # reject every run in ~2s with "Workflow initiated by non-human actor:
-          # fuze-agent (type: Bot)" — before spending a single token. The rung
-          # then reported an AVAILABILITY error, which reads as an expired
-          # subscription token or exhausted quota and repeatedly sent debugging
-          # down the wrong path. Same list as fuze.yml / fuze-cluster.yml.
-          allowed-bots: "fuzeone-bot,github-actions,fuze-agent,claude"
+          allowed-bots: "claude"
           task-prompt: |
             You are the **mcp-maintainer** for this repo (follow `.claude/agents/mcp-maintainer.md`
             exactly — same scope, boundaries, and done-contract). This is an automated CI run on
