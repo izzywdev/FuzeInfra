@@ -8,7 +8,6 @@ import os
 import sys
 import json
 import time
-import asyncio
 import logging
 from datetime import datetime
 from typing import Dict
