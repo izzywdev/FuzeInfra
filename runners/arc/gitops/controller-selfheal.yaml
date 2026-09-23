@@ -156,8 +156,15 @@ rules:
   - {apiGroups: ["apps"], resources: ["deployments"], verbs: ["get","patch"]}
   # AutoscalingListener pods live only in arc-systems (check 3) — namespaced
   # Role, not the cluster-wide ClusterRole, to keep delete scoped as tightly
-  # as possible.
-  - {apiGroups: [""], resources: ["pods"], verbs: ["get","list","delete"]}
+  # as possible. "create" is for check 7's short-lived per-CI-node DNS probe
+  # pod (also arc-systems) — added alongside the check itself so the new
+  # permission lands in the SAME commit as the code that needs it. A check
+  # added against stale RBAC returns an empty/errored `kubectl run` and reads
+  # as a false "ok" or a false CRIT depending on how the script treats the
+  # failure, not as the loud RBAC-denied error you'd expect — this repo has
+  # been bitten by exactly that class of silent gap before (see check 6's
+  # nodes get/list/patch, added with check 6 for the same reason).
+  - {apiGroups: [""], resources: ["pods"], verbs: ["get","list","create","delete"]}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
@@ -519,6 +526,77 @@ spec:
                         done
                       done
                     fi
+                  fi
+
+                  # ---- check 7: CI node on-VLAN but DNS-blind (overlay/flannel peering) ----
+                  # 2026-09-23 OUTAGE. Check 6's blind spot: both CI nodes kept
+                  # their private-VLAN InternalIP the whole time (check 6 saw
+                  # nothing wrong) but lost flannel-WireGuard peering to the
+                  # fuze-core-* control-plane nodes, which is where CoreDNS ran.
+                  # Every pod on the CI nodes stayed Running/Ready -- kubelet and
+                  # the apiserver path were both fine -- but could resolve NO
+                  # name at all, because the pod-network route to CoreDNS was
+                  # gone. Checks 1-6 all ask the apiserver questions ABOUT a node
+                  # (labels, taints, addresses); none of them sends a packet over
+                  # the pod network FROM a CI node, so none noticed. ~300 jobs
+                  # queued fleet-wide before this check existed.
+                  #
+                  # This is checked by scheduling a short-lived diagnostic pod
+                  # PINNED to each pool=ci node (nodeSelector
+                  # kubernetes.io/hostname) and nslookup-ing the in-cluster
+                  # kube-dns Service from inside it -- the exact path (pod -> CNI
+                  # -> overlay -> CoreDNS pod) that broke. This does NOT
+                  # auto-remediate: the fix that resolved the live incident was
+                  # `systemctl restart k3s-agent` on the affected node (flanneld
+                  # rebuilds its WireGuard peers on agent restart), which needs
+                  # privileged host access this ServiceAccount does not have --
+                  # an incorrectly-timed unprivileged restart attempt from inside
+                  # a pod would be worse than a loud, correct CRIT naming the
+                  # remediation. (helm/fuzeinfra values.nodeConfigurator.corednsHA
+                  # separately makes CoreDNS itself no longer a single point of
+                  # failure, but the overlay-network path from a CI node to
+                  # WHICHEVER node(s) run it can still break, so this check
+                  # stays even after that fix.)
+                  DNS_PROBE_TIMEOUT_SECS=20
+                  ci_node_names=$(kubectl get nodes -l fuzeinfra.io/pool=ci \
+                    -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null)
+
+                  if [ -z "$ci_node_names" ]; then
+                    echo "warn ci-node-dns: could not list pool=ci nodes, skipping check 7"
+                  else
+                    for _n in $ci_node_names; do
+                      # Pod name must be a valid DNS-1123 label: lowercase the
+                      # node name, replace anything non [a-z0-9-] with '-', cap
+                      # length so the "-dns-probe-<epoch>" suffix always fits
+                      # inside the 63-char limit.
+                      _short=$(printf '%s' "$_n" | tr 'A-Z' 'a-z' | tr -c 'a-z0-9-' '-' | cut -c1-20)
+                      _pod="arc-selfheal-${_short}-dns-probe-$(date +%s)"
+
+                      kubectl run "$_pod" -n arc-systems --image=alpine/k8s:1.36.2 \
+                        --restart=Never \
+                        --overrides="{\"spec\":{\"nodeSelector\":{\"kubernetes.io/hostname\":\"$_n\"},\"tolerations\":[{\"operator\":\"Exists\"}]}}" \
+                        --command -- sh -c 'nslookup kubernetes.default.svc.cluster.local' \
+                        >/dev/null 2>&1
+
+                      _phase=""
+                      _i=0
+                      while [ "$_i" -lt "$DNS_PROBE_TIMEOUT_SECS" ]; do
+                        _phase=$(kubectl get pod "$_pod" -n arc-systems -o jsonpath='{.status.phase}' 2>/dev/null)
+                        case "$_phase" in
+                          Succeeded|Failed) break ;;
+                        esac
+                        sleep 1
+                        _i=$((_i + 1))
+                      done
+
+                      if [ "$_phase" = "Succeeded" ]; then
+                        echo "ok ci-node-dns: $_n resolves cluster DNS over the pod network"
+                      else
+                        echo "CRIT ARC ci-node-dns: $_n cannot resolve cluster DNS (kubernetes.default.svc.cluster.local) from a pod scheduled on it after ${DNS_PROBE_TIMEOUT_SECS}s (phase=${_phase:-unknown}) - the pod-network path to CoreDNS is broken (e.g. lost flannel-WireGuard peering to the nodes CoreDNS runs on -- 2026-09-23 outage). The node otherwise looks healthy to the apiserver (kubelet/labels/taints all fine per checks 1-6), so only this check catches it. REMEDIATION: SSH to $_n and run 'systemctl restart k3s-agent' so flanneld rebuilds its WireGuard peers -- this cannot be automated from here (no privileged host exec granted to arc-selfheal)."
+                        crit=1
+                      fi
+                      kubectl delete pod "$_pod" -n arc-systems --wait=false --grace-period=0 >/dev/null 2>&1
+                    done
                   fi
 
                   # Fail the Job on CRIT so PodFailed alerting and

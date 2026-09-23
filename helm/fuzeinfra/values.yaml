@@ -1084,6 +1084,23 @@ apiVip:
   #     basePriority: <higher = adopts peers' VIPs sooner; monitoring lowest>
   nodes: []
 
+# Cluster-level backstop stopping a non-CI workload from scheduling onto the
+# fuzeinfra.io/pool=ci nodes via an explicit fuzeinfra.io/ci toleration --
+# see helm/fuzeinfra/templates/ci-node-isolation.yaml for the full rationale
+# (PR #1193 did exactly this to the old coredns-ha Deployment) and
+# tests/test_ci_node_isolation_allowlist.py for the repo-local half of the
+# same guard. OFF by default like every other cluster-admission-affecting
+# lever in this chart; values-contabo.yaml turns it on after a live audit
+# confirmed nothing besides ARC runner pods currently depends on this
+# toleration.
+ciNodeIsolation:
+  enabled: false
+  # Namespaces exempt from the block -- must stay in lockstep with
+  # ALLOWED_NAMESPACES in tests/test_ci_node_isolation_allowlist.py.
+  allowedNamespaces:
+    - arc-runners
+    - arc-systems
+
 nodeConfigurator:
   preferIPv4:
     enabled: false
@@ -1122,6 +1139,54 @@ nodeConfigurator:
     # k3s.service contains etcd; kubepods.slice contains every pod. 1000:100 = 10:1.
     k3sWeight: 1000
     podsWeight: 100
+  # Replace k3s's packaged CoreDNS Deployment with a >=2-replica version spread
+  # across separate nodes, via a manifest dropped into
+  # /var/lib/rancher/k3s/server/manifests/ on every k3s SERVER node (agent nodes
+  # are skipped: no /var/lib/rancher/k3s/server directory to write into).
+  #
+  # WHY NOT argocd/cluster-bootstrap/coredns-ha.yaml (the file this replaces).
+  # That file was a HelmChartConfig, which only takes effect against a matching
+  # HelmChart CR -- and k3s does NOT deploy CoreDNS via Helm (`kubectl -n
+  # kube-system get helmchart` returns only traefik/traefik-crd). CoreDNS is a
+  # "packaged manifest" the k3s deploy-controller applies from a static file
+  # (tracked as a k3s.cattle.io/v1 Addon named "coredns", source
+  # /var/lib/rancher/k3s/server/manifests/coredns.yaml). A HelmChartConfig with
+  # no matching HelmChart silently does nothing -- verified live: the file was
+  # applied 2026-07-29 (creationTimestamp, generation 2) and prod still ran
+  # replicas=1 on 2026-09-23, the day CoreDNS's single point of failure turned a
+  # one-node network blip into a ~300-job fleet-wide CI outage (the two CI nodes
+  # lost flannel-WireGuard peering to the 3 fuze-core-* control-plane nodes,
+  # which is where the sole CoreDNS pod ran, so every CI pod lost ALL DNS).
+  #
+  # HOW THIS SURVIVES RECONCILIATION. k3s supports a `<name>.yaml.skip` sentinel
+  # next to a packaged manifest: once present, the deploy-controller never
+  # re-applies THAT file again, but it does not touch resources the file already
+  # created. The DaemonSet writes coredns.yaml.skip (stopping k3s from ever
+  # reconciling replicas back to 1) AND coredns-ha.yaml -- a second, independent
+  # manifest in the same directory containing ONLY a replacement Deployment
+  # object named "coredns" (same name/namespace as the packaged one; every other
+  # packaged resource -- ServiceAccount/RBAC/the "coredns" Corefile ConfigMap/
+  # the "kube-dns" Service -- is left exactly as-is, minimising blast radius).
+  # Because both files are written together and the deploy-controller PATCHES
+  # the existing live Deployment object rather than deleting+recreating it,
+  # there is no window with zero CoreDNS pods regardless of which file the
+  # controller happens to process first.
+  #
+  # topologySpreadConstraints (maxSkew:1, whenUnsatisfiable: DoNotSchedule,
+  # topologyKey: kubernetes.io/hostname) are cloned verbatim from the live
+  # packaged Deployment -- REQUIRED spread, not the PREFERRED podAntiAffinity
+  # the old inert HelmChartConfig used (preferred spread does not guarantee a
+  # 2nd replica lands on a different node, which is exactly the guarantee this
+  # outage needed).
+  #
+  # OFF by default (matches every other host-touching lever in this DaemonSet);
+  # a human enables it per overlay and verifies `kubectl -n kube-system get
+  # deploy coredns` shows >=2/2 ready on 2 different nodes.
+  corednsHA:
+    enabled: false
+    # Spread across the 3 fuze-core-* control-plane nodes (topologySpreadConstraints
+    # enforces DIFFERENT nodes, not which ones); 2 survives losing either.
+    replicas: 2
   image: docker.io/busybox:1.36.1
 
 kubeStateMetrics:
