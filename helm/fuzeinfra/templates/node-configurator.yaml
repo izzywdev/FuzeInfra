@@ -359,6 +359,33 @@ spec:
                         name: custom-config-volume
                         readOnly: true
                     dnsPolicy: Default
+                    # Cluster DNS must live on the STABLE nodes. The tolerations below
+                    # only PERMIT the control-plane/durable nodes; without this affinity
+                    # nothing steers CoreDNS toward them, and on 2026-09-23 both replicas
+                    # duly landed on autoscaled elastic nodes instead -- which the Contabo
+                    # reaper releases on billing boundaries. Cluster DNS following the
+                    # autoscaler around is not a trade worth making (the same warning the
+                    # since-deleted argocd/cluster-bootstrap/coredns-ha.yaml carried).
+                    #
+                    # REQUIRED rather than preferred, deliberately: a soft preference is
+                    # what we effectively had, and the scheduler ignored it under load.
+                    # The two terms are OR'd -- control-plane nodes (fuze-core-*, the only
+                    # label that reliably identifies them here; they carry no pool label)
+                    # or any future explicitly-durable node. Safe as a hard constraint:
+                    # there are 3 control-plane nodes for 2 replicas, so a single node
+                    # drain still schedules, and if all 3 were gone the cluster has no
+                    # etcd quorum and is down regardless.
+                    affinity:
+                      nodeAffinity:
+                        requiredDuringSchedulingIgnoredDuringExecution:
+                          nodeSelectorTerms:
+                          - matchExpressions:
+                            - key: node-role.kubernetes.io/control-plane
+                              operator: Exists
+                          - matchExpressions:
+                            - key: {{ .Values.global.durableNodeTaint.key }}
+                              operator: In
+                              values: ["{{ .Values.global.durableNodeTaint.value }}"]
                     nodeSelector:
                       kubernetes.io/os: linux
                     priorityClassName: system-cluster-critical
