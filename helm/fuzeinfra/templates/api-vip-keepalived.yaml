@@ -97,6 +97,16 @@ data:
     #!/usr/bin/env bash
     # Build keepalived.conf for THIS node: global header + one vrrp_instance per VIP.
     set -eu
+    # keepalived runs with enable_script_security, which refuses any script whose
+    # DIRECTORY is writable by non-root — not just the script itself. The emptyDir
+    # mounted here lands as 0777, so keepalived logged
+    #   "Unsafe permissions found for script '/etc/keepalived/notify.sh' - disabling."
+    # and silently dropped the notify hooks while VRRP itself kept working. The
+    # effect was subtle and bad: on failover a node still bound the peer's VIP
+    # locally, but notify.sh never ran, so the Contabo VIP was never reassigned
+    # provider-side and the adopted VIP stayed unreachable (observed in prod
+    # 2026-09-23: 13.140.184.164 bound on fuze-core-3, HTTP 000 from outside).
+    chmod 0755 /etc/keepalived
     cp /cfg/notify.sh /etc/keepalived/notify.sh
     cp /cfg/check-apiserver.sh /etc/keepalived/check-apiserver.sh
     chmod 0700 /etc/keepalived/notify.sh /etc/keepalived/check-apiserver.sh
