@@ -10,7 +10,7 @@ import json
 import time
 import asyncio
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Dict
 from pathlib import Path
 
