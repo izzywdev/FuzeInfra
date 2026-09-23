@@ -71,7 +71,7 @@ import secrets as _secrets_mod  # nonce generation; unrelated to GitHub Secrets
 import sys
 
 VALID_VERDICTS = ("approve", "request_changes", "comment")
-DECISIONS = ("approve", "request_changes", "comment", "abstain")
+DECISIONS = ("approve", "request_changes", "comment", "abstain", "superseded")
 
 
 def make_nonce() -> str:
@@ -141,7 +141,7 @@ def extract_verdict_json(result_text: str, nonce: str) -> tuple[dict | None, str
 
 
 def decide(action_conclusion: str, result_text: str, nonce: str,
-           sensitive_files: list[str], mode: str = "") -> dict:
+           sensitive_files: list[str], mode: str = "", job_result: str = "") -> dict:
     """The single decision point. Returns a dict with keys: decision, reason, verdict,
     summary, findings, downgraded (bool: true iff a model "approve" was overridden by the
     sensitive-files rule), deferred (bool: true iff the review was legitimately deferred by
@@ -150,6 +150,36 @@ def decide(action_conclusion: str, result_text: str, nonce: str,
     `decision` is always one of DECISIONS. Only `decision == "approve"` may ever result in
     the workflow calling `gh pr review --approve` — every other value must not.
     """
+    # RULE 0 — A CANCELLED RUN WAS SUPERSEDED; IT IS NOT A FAILED REVIEW.
+    # Concurrency cancels the in-flight run whenever a new commit lands, so every push
+    # during a review produces one cancelled run. Routed through the abstain branch below
+    # it posted "No verdict was reached — this run is NOT an approval … reported as a
+    # failed check deliberately", which reads exactly like a provider outage. Five such
+    # comments landed across FuzeInfra#1188 and #1207, every one of them caused by the
+    # author's own next push. That is not a harmless nit: the whole point of the abstain
+    # text is to make a review that COULD NOT RUN impossible to mistake for a clean one,
+    # and a channel that cries wolf on every push trains readers to skim past the real thing.
+    #
+    # Keyed on the JOB's result, which GitHub sets, and never on an empty
+    # `action_conclusion`: a skipped or never-started review job also yields an empty
+    # conclusion, and that must keep failing closed as an abstain
+    # (test_empty_conclusion_abstains pins it). Only "cancelled" is a supersede.
+    #
+    # Safe to pass the check: a cancelled run is always superseded by a newer run on a
+    # newer SHA, and GitHub evaluates required checks against the head SHA — so this
+    # verdict can never be the one a merge relies on. It posts NOTHING.
+    if job_result == "cancelled":
+        return {
+            "decision": "superseded",
+            "reason": (
+                "the review job was cancelled, which on this workflow means a newer commit "
+                "superseded it. A newer run is reviewing that commit; this one has nothing "
+                "to say and posts nothing."
+            ),
+            "verdict": None, "summary": "", "findings": [], "downgraded": False,
+            "deferred": False,
+        }
+
     if action_conclusion != "success":
         # RULE 6 — WORKFLOW-SELF-MODIFICATION GUARD IS A DEFERRAL, NOT A FAILURE.
         # claude-code-action deliberately DECLINES to review a PR that modifies the workflow
@@ -228,6 +258,14 @@ def render_body(result: dict, mode: str, vendor: str) -> str:
     """Human-readable GitHub review body for the decision `result` from decide()."""
     lines = ["## fuze-code-review — automated verdict", ""]
 
+    if result["decision"] == "superseded":
+        # Never posted — the workflow short-circuits before any gh call. Rendered only so
+        # every decision has a body and the job log can show why nothing was said.
+        lines.append("**Superseded — nothing posted.**")
+        lines.append("")
+        lines.append(result["reason"])
+        return "\n".join(lines)
+
     if result["decision"] == "abstain":
         lines.append("**No verdict was reached — this run is NOT an approval.**")
         lines.append("")
@@ -301,8 +339,9 @@ def main() -> int:
     vendor = os.environ.get("FUZE_ACTION_VENDOR", "")
     sensitive_raw = os.environ.get("FUZE_SENSITIVE_FILES", "")
     sensitive_files = [line for line in sensitive_raw.splitlines() if line.strip()]
+    job_result = os.environ.get("FUZE_REVIEW_JOB_RESULT", "")
 
-    result = decide(action_conclusion, result_text, nonce, sensitive_files, mode)
+    result = decide(action_conclusion, result_text, nonce, sensitive_files, mode, job_result)
     body = render_body(result, mode, vendor)
 
     print(f"::notice title=fuze-code-review::decision={result['decision']} reason={result['reason']}")

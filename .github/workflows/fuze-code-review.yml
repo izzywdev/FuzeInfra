@@ -389,6 +389,12 @@ jobs:
           FUZE_ACTION_AVAILABILITY: ${{ needs.review.outputs.availability }}
           FUZE_REVIEW_READY: ${{ needs.review.outputs.ready }}
           FUZE_SENSITIVE_FILES: ${{ needs.review.outputs.sensitive_files }}
+          # The JOB's result, set by GitHub, not the action's own conclusion output. A
+          # cancelled review job means concurrency superseded it on a new commit; the
+          # script turns that into `superseded` and posts nothing. Distinct from an empty
+          # conclusion (a skipped or never-started job), which still fails closed as an
+          # abstain.
+          FUZE_REVIEW_JOB_RESULT: ${{ needs.review.result }}
         run: python3 scripts/fuze_code_review_verdict.py
 
       - name: Submit GitHub review (approve-or-fail; outage/skip pass, non-approve fails)
@@ -415,6 +421,14 @@ jobs:
               ;;
             outage)
               gh pr comment "$PR_NUMBER" --body-file "$BODY_FILE"
+              ;;
+            superseded)
+              # Deliberately posts NOTHING. A cancelled run was superseded by a newer
+              # commit, and a newer run is reviewing that commit. Commenting here spammed
+              # the PR with "no verdict was reached" on every push, which is the same text
+              # a real provider outage produces -- five such false alarms across #1188 and
+              # #1207. A channel that cries wolf on every push gets skimmed past.
+              echo "::notice title=fuze-code-review::superseded by a newer commit -- a newer run reviews it. Nothing posted."
               ;;
             skip)
               echo "::notice title=fuze-code-review::not reviewed this run (see the review job) -- passing, this is environmental."
