@@ -547,28 +547,37 @@ apiVip:
     enabled: true               # api.prod.fuzefront.com round-robin across the VIPs
     hostnameLabel: "api"
   # One per additional IP (confirmed live: core-1 -> .164, core-2 -> .42).
+  #
+  # primaryNode / nodes[].name MUST be the KUBERNETES node name, not the Contabo
+  # hostname. render.sh matches the pod's own spec.nodeName against nodes[].name
+  # and, on no match, logs "node <x> not in apiVip.nodes; idling" and binds
+  # NOTHING — keepalived stays Running with 0 restarts, so it looks healthy while
+  # no VIP exists anywhere. That is exactly what happened on 2026-09-22 when these
+  # still held the Contabo hostnames (vmi3383846 / vmi3396106 / mendys-worker-1)
+  # after the nodes were restored to fuze-core-N. instanceId stays the Contabo
+  # instance id — that one IS provider-side and must not be renamed.
   vips:
     - address: "13.140.184.164"
-      primaryNode: vmi3383846     # fuze-core-1
+      primaryNode: fuze-core-1
       routerId: 51
     - address: "13.140.185.42"
-      primaryNode: vmi3396106     # fuze-core-2 (monitoring — holds its OWN vip)
+      primaryNode: fuze-core-2    # monitoring — holds its OWN vip
       routerId: 52
-    # core-3 (mendys-worker-1) — additional IP purchased 2026-09-22.
+    # core-3 — additional IP purchased 2026-09-22.
     - address: "13.140.185.205"
-      primaryNode: mendys-worker-1
+      primaryNode: fuze-core-3
       routerId: 53
   # basePriority: monitoring node LOWEST (last to adopt a peer's VIP).
   nodes:
-    - name: vmi3383846            # fuze-core-1
+    - name: fuze-core-1
       peerIp: "10.0.0.6"
       instanceId: "203383846"
       basePriority: 150
-    - name: mendys-worker-1       # fuze-core-3
+    - name: fuze-core-3
       peerIp: "10.0.0.3"
       instanceId: "203410214"
       basePriority: 140
-    - name: vmi3396106            # fuze-core-2 (monitoring)
+    - name: fuze-core-2           # monitoring
       peerIp: "10.0.0.2"
       instanceId: "203396106"
       basePriority: 100
