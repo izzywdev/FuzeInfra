@@ -84,7 +84,10 @@ jobs:
           tests/test_capability_delegation.py \
           tests/test_deployment_watchdog.py \
           tests/test_desktop_env_projection.py \
-          tests/test_selfheal_metrics.py
+          tests/test_selfheal_metrics.py \
+          tests/test_arc_selfheal_offvlan.py \
+          tests/test_arc_selfheal_dns_reachability.py \
+          tests/test_helm_chart_config_has_chart.py
 
     - name: Install Docker Compose
       run: |

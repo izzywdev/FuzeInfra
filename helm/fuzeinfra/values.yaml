@@ -1084,6 +1084,23 @@ apiVip:
   #     basePriority: <higher = adopts peers' VIPs sooner; monitoring lowest>
   nodes: []
 
+# Cluster-level backstop stopping a non-CI workload from scheduling onto the
+# fuzeinfra.io/pool=ci nodes via an explicit fuzeinfra.io/ci toleration --
+# see helm/fuzeinfra/templates/ci-node-isolation.yaml for the full rationale
+# (PR #1193 did exactly this to the old coredns-ha Deployment) and
+# tests/test_ci_node_isolation_allowlist.py for the repo-local half of the
+# same guard. OFF by default like every other cluster-admission-affecting
+# lever in this chart; values-contabo.yaml turns it on after a live audit
+# confirmed nothing besides ARC runner pods currently depends on this
+# toleration.
+ciNodeIsolation:
+  enabled: false
+  # Namespaces exempt from the block -- must stay in lockstep with
+  # ALLOWED_NAMESPACES in tests/test_ci_node_isolation_allowlist.py.
+  allowedNamespaces:
+    - arc-runners
+    - arc-systems
+
 nodeConfigurator:
   preferIPv4:
     enabled: false

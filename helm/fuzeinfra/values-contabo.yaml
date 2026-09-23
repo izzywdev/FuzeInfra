@@ -1232,6 +1232,17 @@ serviceChromaCollections:
 # Enable IPv4-preference node configurator on Contabo — fixes GHCR pulls being
 # TCP-reset over IPv6 CDN paths (FuzeInfra#616). Uses busybox from Docker Hub
 # so the DaemonSet itself never touches GHCR.
+# ENABLED 2026-09-23, after a live read-only audit of every pod cluster-wide
+# (kubectl get pods -A -o json, filtered for spec.tolerations[].key ==
+# 'fuzeinfra.io/ci') found the toleration used ONLY by arc-runners namespace
+# runner pods and by the PR #1193 coredns-ha Deployment this same change set's
+# node-configurator fix supersedes -- nothing else in prod depends on it, so
+# denying it outside allowedNamespaces has zero known collateral today. See
+# helm/fuzeinfra/templates/ci-node-isolation.yaml for the full rationale,
+# scope, and recovery step (set enabled: false to remove it immediately).
+ciNodeIsolation:
+  enabled: true
+
 nodeConfigurator:
   preferIPv4:
     enabled: true
