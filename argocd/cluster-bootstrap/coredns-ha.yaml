@@ -1,34 +1,205 @@
-apiVersion: helm.cattle.io/v1
-kind: HelmChartConfig
+# ===========================================================================
+# coredns-ha — extra CoreDNS replicas on the WORKER islands
+# ===========================================================================
+# WHAT THIS REPLACES, AND WHY. This file used to hold a `HelmChartConfig` named
+# `coredns` (PR #474, issue #375) asking for `replicaCount: 2` + anti-affinity.
+# It never did anything. `HelmChartConfig` only overrides a k3s `HelmChart`, and
+# CoreDNS is not one:
+#
+#   $ kubectl -n kube-system get helmchart
+#   NAME          ...
+#   traefik       ...
+#   traefik-crd   ...          # <- the ONLY two
+#
+#   $ kubectl -n kube-system get addon
+#   coredns   /var/lib/rancher/k3s/server/manifests/coredns.yaml
+#
+# CoreDNS is a k3s *Addon* applied from a static manifest by the wrangler
+# objectset controller. So the override targeted a chart that does not exist,
+# nothing errored, and `spec.replicas` stayed `1` from the day it merged until
+# 2026-09-23 — all that time believing DNS was HA when it was a single pod.
+# Merging a fix is not applying one; this file now carries an object that
+# actually exists, and tests/test_coredns_ha.py fails if the inert form returns.
+#
+# WHY REPLICAS ALONE WOULD NOT HAVE HELPED (measured during FuzeInfra#1187).
+# The k3s CoreDNS pod tolerates only `CriticalAddonsOnly` and the control-plane
+# taint. EVERY node here is tainted:
+#
+#   fuze-core-1/2/3                 node-role.kubernetes.io/control-plane
+#   fuzeinfra-ci-runner-1/2         fuzeinfra.io/ci
+#   fuzeinfra-prod-elastic-v2-*     fuzeinfra.io/elastic
+#
+# so CoreDNS can only ever schedule on the three control-plane nodes. During
+# #1187 the flannel/WireGuard overlay between the CI nodes and all three
+# control-plane nodes was down, while CI<->elastic was fine. From a pod on
+# fuzeinfra-ci-runner-1:
+#
+#   10.42.0.1  (core-1)    unreachable
+#   10.42.1.1  (core-3)    unreachable
+#   10.42.2.10 (core-2)    unreachable
+#   10.42.6.1  (elastic)   CONNECTED
+#   10.42.19.1 (own node)  CONNECTED
+#
+# Every possible home for CoreDNS was on the unreachable side, so CI-node pods
+# had NO resolver at all — `getent hosts kubernetes.default` returned nothing.
+# Bumping replicas from 1 to 2 would have put the second pod on another
+# control-plane node and changed nothing. The property that was missing is not
+# "more replicas", it is "a replica the worker islands can actually reach".
+#
+# WHAT THIS DOES. A second Deployment we own, whose pods carry `k8s-app: kube-dns`
+# so the existing `kube-dns` Service selects them as additional endpoints, pinned
+# OFF the control-plane by nodeAffinity and spread across worker hosts. The
+# k3s-owned Deployment keeps serving the control-plane island; this one serves
+# the CI and elastic islands. Neither manages the other, so the addon controller
+# has nothing to revert.
+#
+# SAFETY. Endpoints are readiness-gated: a replica that cannot load its Corefile
+# never becomes Ready and never receives a query, so a bad rollout degrades to
+# "no extra endpoints" rather than to broken cluster DNS. The container spec is
+# copied from the live k3s Deployment (same image, args, ConfigMaps, probes,
+# securityContext) precisely so there is no second, drifting DNS configuration.
+#
+# WHAT THIS IS NOT. This does NOT repair the overlay — that is node-level work
+# tracked in FuzeInfra#1187. It removes the single-island failure mode so a
+# partitioned worker node keeps a resolver it can reach.
+#
+# A stronger version of this idea is NodeLocal DNSCache (a DaemonSet plus
+# `internalTrafficPolicy: Local`), which makes every node's DNS strictly local.
+# That is a larger change to cluster DNS and is deliberately not bundled here.
+# ---------------------------------------------------------------------------
+apiVersion: apps/v1
+kind: Deployment
 metadata:
-  name: coredns
+  name: coredns-ha
   namespace: kube-system
+  labels:
+    k8s-app: kube-dns
+    kubernetes.io/name: CoreDNS
+    fuzeinfra.io/component: coredns-ha
 spec:
-  valuesContent: |-
-    replicaCount: 2
-    # Tolerate the durable-node taint (fuzeinfra.io/durable=true:NoSchedule).
-    #
-    # CoreDNS already tolerates node-role.kubernetes.io/control-plane, which is
-    # what lets it run on these three nodes today -- but the durable taint is a
-    # SEPARATE key and that existing toleration does not cover it (verified on
-    # the live pod 2026-09-07).
-    #
-    # Without this, cluster DNS loses the three most stable nodes as placement
-    # candidates and ends up entirely on autoscaled elastic nodes, which the
-    # reaper releases on billing boundaries. Cluster DNS following the
-    # autoscaler around is not a trade worth making, and the anti-affinity below
-    # cannot spread across failure domains if only one pool remains eligible.
-    tolerations:
-      - key: fuzeinfra.io/durable
-        operator: Equal
-        value: "true"
-        effect: NoSchedule
-    affinity:
-      podAntiAffinity:
-        preferredDuringSchedulingIgnoredDuringExecution:
-          - weight: 100
-            podAffinityTerm:
-              labelSelector:
-                matchLabels:
-                  app.kubernetes.io/name: coredns
-              topologyKey: kubernetes.io/hostname
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+  selector:
+    matchLabels:
+      fuzeinfra.io/component: coredns-ha
+  template:
+    metadata:
+      labels:
+        # `k8s-app: kube-dns` is what puts these pods into the EXISTING kube-dns
+        # Service's endpoint set (its selector is exactly {k8s-app: kube-dns}).
+        # The component label is what this Deployment selects on, so it owns only
+        # its own pods and never adopts the k3s-managed ones.
+        k8s-app: kube-dns
+        kubernetes.io/name: CoreDNS
+        fuzeinfra.io/component: coredns-ha
+    spec:
+      priorityClassName: system-cluster-critical
+      serviceAccountName: coredns
+      # CoreDNS must not resolve through cluster DNS -- it IS cluster DNS.
+      dnsPolicy: Default
+      nodeSelector:
+        kubernetes.io/os: linux
+      # Tolerate the worker taints. Without these the pods are unschedulable
+      # everywhere except the control-plane, which is the island we are trying
+      # to stop depending on.
+      tolerations:
+        - key: CriticalAddonsOnly
+          operator: Exists
+        - key: fuzeinfra.io/ci
+          operator: Exists
+        - key: fuzeinfra.io/elastic
+          operator: Exists
+      affinity:
+        nodeAffinity:
+          # Stay OFF the control-plane: the k3s-owned CoreDNS already covers it,
+          # and a replica there would be unreachable from a partitioned worker --
+          # the exact failure this file exists to prevent.
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: node-role.kubernetes.io/control-plane
+                    operator: DoesNotExist
+      topologySpreadConstraints:
+        # Spread over hosts against ALL kube-dns pods, so two replicas never
+        # share a node and therefore never share a node's failure.
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      containers:
+        - name: coredns
+          image: rancher/mirrored-coredns-coredns:1.14.4
+          imagePullPolicy: IfNotPresent
+          args: ["-conf", "/etc/coredns/Corefile"]
+          resources:
+            limits:
+              memory: 170Mi
+            requests:
+              cpu: 100m
+              memory: 70Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              add: ["NET_BIND_SERVICE"]
+              drop: ["all"]
+          ports:
+            - containerPort: 53
+              name: dns
+              protocol: UDP
+            - containerPort: 53
+              name: dns-tcp
+              protocol: TCP
+            - containerPort: 9153
+              name: metrics
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+              scheme: HTTP
+            initialDelaySeconds: 60
+            periodSeconds: 10
+            timeoutSeconds: 1
+            successThreshold: 1
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: 8181
+              scheme: HTTP
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 1
+            successThreshold: 1
+            failureThreshold: 3
+          volumeMounts:
+            - name: config-volume
+              mountPath: /etc/coredns
+              readOnly: true
+            - name: custom-config-volume
+              mountPath: /etc/coredns/custom
+              readOnly: true
+      volumes:
+        # The SAME ConfigMaps the k3s-owned Deployment mounts. Sharing them is
+        # deliberate: a separate copy would drift, and split-brain DNS config is
+        # far worse than one fewer replica.
+        - name: config-volume
+          configMap:
+            name: coredns
+            defaultMode: 420
+            items:
+              - key: Corefile
+                path: Corefile
+              - key: NodeHosts
+                path: NodeHosts
+        - name: custom-config-volume
+          configMap:
+            name: coredns-custom
+            defaultMode: 420
+            optional: true
