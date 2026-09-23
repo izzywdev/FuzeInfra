@@ -126,10 +126,10 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: "check (report only, writes nothing) | apply (publish CI_RUNNER_LABELS and recover stranded runs)"
+        description: "check (report only, writes nothing) | apply (publish CI_RUNNER_LABELS and recover stranded runs) | recover-only (run ONLY the recovery sweep; structurally cannot publish CI_RUNNER_LABELS -- see the Resolve mode step)"
         required: false
         type: choice
-        options: [check, apply]
+        options: [check, apply, recover-only]
         default: check
       repos:
         description: "Comma-separated owner/name slugs to target — empty = the whole fleet (FuzeSDLC governance/ruleset-fleet.json)"
@@ -141,6 +141,15 @@ on:
         required: false
         type: string
         default: ""
+  # repository_dispatch (type=runner-recovery) is how a Kubernetes CronJob
+  # (runners/arc/gitops/orphan-recovery-dispatch.yaml) drives recovery on a clock that
+  # actually fires on time -- GitHub's own `schedule:` below was observed 4-5 HOURS apart
+  # against a twice-hourly cron on 2026-09-23, which is why recovery cannot depend on it
+  # alone. This event type is ALWAYS recover-only -- see "Resolve mode" -- regardless of
+  # anything in client_payload, so a crafted payload can never reach `apply` and republish
+  # CI_RUNNER_LABELS from an unattended trigger.
+  repository_dispatch:
+    types: [runner-recovery]
   schedule:
     # Every 30 minutes. The cadence is a deliberate three-way trade, stated so the next
     # person changing it knows what they are trading:
@@ -196,6 +205,8 @@ jobs:
     timeout-minutes: 20
     outputs:
       mode: ${{ steps.mode.outputs.mode }}
+      decide_mode: ${{ steps.mode.outputs.decide_mode }}
+      recover_mode: ${{ steps.mode.outputs.recover_mode }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
@@ -208,17 +219,62 @@ jobs:
         env:
           EVENT: ${{ github.event_name }}
           INPUT_MODE: ${{ inputs.mode }}
+          DISPATCH_ACTION: ${{ github.event.action }}
         run: |
           set -euo pipefail
           # apply is only ever reached by an explicit human dispatch, the same safety shape
           # prune-merged-branches.yml uses for its destructive mode. A timer must not be
           # able to rewrite the fleet's runners or cancel anybody's build on its own.
+          #
+          # recover-only is a THIRD, NARROWER mode: it runs ONLY the recovery sweep
+          # (cancel+re-dispatch a stranded run) and is structurally incapable of publishing
+          # CI_RUNNER_LABELS, because DECIDE_MODE stays "check" here no matter what --
+          # scripts/runner_watch.py's run_recover() never calls write_variable(...,
+          # CI_RUNNER_LABELS, ...) at all (only run_decide() does), so even a bug in this
+          # step could not make recovery publish a label. This is safe to automate where
+          # blanket `apply` is not: the stranded_runs() selector never touches a run with an
+          # in_progress sibling, never a job with a runner assigned, never one queued under
+          # the threshold, and never re-touches the same run twice -- its worst case is
+          # bounded and self-limiting. Label republication is unbounded fleet-wide mutation
+          # with no such bound, which is why full `apply` stays human-dispatch-only.
+          #
+          # repository_dispatch (type=runner-recovery) is ALWAYS recover-only, unconditionally
+          # -- see runners/arc/gitops/orphan-recovery-dispatch.yaml, the Kubernetes CronJob
+          # that fires it on a clock that actually keeps time (GitHub's own `schedule:`
+          # below does not -- observed 4-5 HOURS apart against a twice-hourly cron on
+          # 2026-09-23). Deliberately NOT reading github.event.client_payload here for mode
+          # purposes: this event type can never be escalated to apply by a crafted payload,
+          # only ever by an explicit human workflow_dispatch.
+          DECIDE_MODE=check
+          RECOVER_MODE=check
+          if [ "$EVENT" = "workflow_dispatch" ]; then
+            case "$INPUT_MODE" in
+              apply)
+                DECIDE_MODE=apply
+                RECOVER_MODE=apply
+                ;;
+              recover-only)
+                DECIDE_MODE=check
+                RECOVER_MODE=apply
+                ;;
+              *)
+                DECIDE_MODE=check
+                RECOVER_MODE=check
+                ;;
+            esac
+          elif [ "$EVENT" = "repository_dispatch" ] && [ "$DISPATCH_ACTION" = "runner-recovery" ]; then
+            DECIDE_MODE=check
+            RECOVER_MODE=apply
+          fi
+          # Kept for logging/back-compat: "true apply" only when BOTH sub-modes are apply.
           MODE=check
-          if [ "$EVENT" = "workflow_dispatch" ] && [ "$INPUT_MODE" = "apply" ]; then
+          if [ "$DECIDE_MODE" = "apply" ] && [ "$RECOVER_MODE" = "apply" ]; then
             MODE=apply
           fi
+          echo "decide_mode=$DECIDE_MODE" >> "$GITHUB_OUTPUT"
+          echo "recover_mode=$RECOVER_MODE" >> "$GITHUB_OUTPUT"
           echo "mode=$MODE" >> "$GITHUB_OUTPUT"
-          echo "mode=$MODE"
+          echo "decide_mode=$DECIDE_MODE recover_mode=$RECOVER_MODE mode=$MODE"
 
       - name: Mint the fuze-agent App token
         id: token
@@ -265,7 +321,7 @@ jobs:
       - name: Decide
         env:
           GH_TOKEN: ${{ steps.token.outputs.token }}
-          MODE: ${{ steps.mode.outputs.mode }}
+          MODE: ${{ steps.mode.outputs.decide_mode }}
           TARGET_REPOS: ${{ inputs.repos }}
           RUNNER_WATCH_HUB: ${{ github.repository }}
           FLEET_FILE: ${{ runner.temp }}/ruleset-fleet.json
@@ -369,9 +425,10 @@ jobs:
       - name: Recover
         env:
           GH_TOKEN: ${{ steps.token.outputs.token }}
-          MODE: ${{ needs.decide.outputs.mode }}
+          RECOVER_MODE: ${{ needs.decide.outputs.recover_mode }}
           EVENT: ${{ github.event_name }}
           INPUT_MODE: ${{ inputs.mode }}
+          DISPATCH_ACTION: ${{ github.event.action }}
           TARGET_REPOS: ${{ inputs.repos }}
           STRANDED_MINUTES: ${{ inputs.stranded_minutes }}
           RUNNER_WATCH_HUB: ${{ github.repository }}
@@ -380,16 +437,22 @@ jobs:
           set -euo pipefail
           # Recompute rather than trusting the upstream output alone: `if: !cancelled()`
           # means this job also runs when `decide` FAILED, in which case its output is
-          # empty — and an empty MODE must resolve to check, never to apply.
-          MODE="${MODE:-}"
-          if [ -z "$MODE" ]; then
-            MODE=check
-            if [ "$EVENT" = "workflow_dispatch" ] && [ "$INPUT_MODE" = "apply" ]; then
-              MODE=apply
+          # empty — and an empty RECOVER_MODE must resolve to check, never to apply. Mirrors
+          # the "Resolve mode" step's precedence: workflow_dispatch mode=apply OR
+          # mode=recover-only both mean "run the recovery sweep for real"; repository_dispatch
+          # type=runner-recovery means the same, unconditionally, regardless of any
+          # client_payload content (never read here for mode purposes — see that step).
+          RECOVER_MODE="${RECOVER_MODE:-}"
+          if [ -z "$RECOVER_MODE" ]; then
+            RECOVER_MODE=check
+            if [ "$EVENT" = "workflow_dispatch" ] && { [ "$INPUT_MODE" = "apply" ] || [ "$INPUT_MODE" = "recover-only" ]; }; then
+              RECOVER_MODE=apply
+            elif [ "$EVENT" = "repository_dispatch" ] && [ "$DISPATCH_ACTION" = "runner-recovery" ]; then
+              RECOVER_MODE=apply
             fi
           fi
           FLAG=--check
-          [ "$MODE" = "apply" ] && FLAG=--apply
+          [ "$RECOVER_MODE" = "apply" ] && FLAG=--apply
           ARGS=()
           if [ -n "${TARGET_REPOS:-}" ]; then ARGS+=(--repos "$TARGET_REPOS"); fi
           if [ -n "${STRANDED_MINUTES:-}" ]; then
