@@ -88,6 +88,45 @@ jobs:
         run: |
           kubectl apply -f argocd/cluster-bootstrap/
           echo "Applied argocd/cluster-bootstrap/ — HelmChartConfigs (traefik, coredns, etc.)."
+
+      # Remove the superseded coredns-ha Deployment.
+      #
+      # WHY THIS STEP EXISTS. PR #1193 added argocd/cluster-bootstrap/coredns-ha.yaml:
+      # a standalone 2-replica CoreDNS Deployment that tolerated the fuzeinfra.io/ci
+      # taint AND required nodeAffinity excluding the control-plane, so both replicas
+      # landed on fuzeinfra-ci-runner-1/-2 — the two most churn-prone, most saturated
+      # nodes in the cluster. PR #1205 superseded it (nodeConfigurator.corednsHA now
+      # fixes the REAL k3s-packaged CoreDNS) and deleted that manifest.
+      #
+      # Deleting the file is NOT enough. The step above applies this directory with a
+      # plain `kubectl apply -f`, which never prunes, so a manifest removed from git
+      # keeps running in the cluster forever. Verified 2026-09-23: after #1205 merged,
+      # `kubectl -n kube-system get deploy coredns-ha` was still Running with both pods
+      # on the CI nodes, and the object carries no argocd tracking-id (this directory is
+      # workflow-applied, not Argo-managed), so nothing else would ever reap it.
+      #
+      # ORDERING IS LOAD-BEARING — DO NOT "SIMPLIFY" THIS INTO AN UNCONDITIONAL DELETE.
+      # We remove coredns-ha only once the real CoreDNS reports >=2 ready replicas.
+      # Deleting it first would drop cluster DNS to a single replica (or zero, mid-roll),
+      # which is precisely the single-point-of-failure that turned a one-node overlay
+      # blip into a ~300-job fleet-wide CI outage on 2026-09-23. If the packaged CoreDNS
+      # is not HA yet, we leave coredns-ha alone and succeed; the next run retries.
+      - name: Remove superseded coredns-ha Deployment
+        run: |
+          set -euo pipefail
+          if ! kubectl -n kube-system get deployment coredns-ha >/dev/null 2>&1; then
+            echo "coredns-ha not present — nothing to do (idempotent no-op)."
+            exit 0
+          fi
+          READY=$(kubectl -n kube-system get deployment coredns                     -o jsonpath='{.status.readyReplicas}' 2>/dev/null || echo 0)
+          READY=${READY:-0}
+          if [ "$READY" -lt 2 ]; then
+            echo "::warning title=apply-cluster-config::packaged CoreDNS has ${READY} ready replica(s), need >=2. Leaving coredns-ha in place; will retry on the next run."
+            exit 0
+          fi
+          echo "packaged CoreDNS is HA (${READY} ready replicas) — removing superseded coredns-ha."
+          kubectl -n kube-system delete deployment coredns-ha --ignore-not-found
+          echo "coredns-ha removed; cluster DNS is now the packaged CoreDNS on the durable nodes."
           echo "k3s helm-controller reconciles within ~15s."
 
       - name: Apply argocd/cluster-settings (server-side)
