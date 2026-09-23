@@ -30,6 +30,7 @@ keyword check cannot distinguish.
 Offline: parses one YAML file and runs bash. No network, no GitHub, no cluster.
 """
 
+import json
 import re
 import subprocess
 import sys
@@ -50,6 +51,7 @@ pytestmark = pytest.mark.skipif(
 
 ROOT = Path(__file__).parents[1]
 WORKFLOW = ROOT / ".github/workflows/secret-provision.yml"
+ALLOWLIST_PATH = "governance/secret-provision-targets.json"
 
 VALIDATE_STEP = "Validate request"
 PROVISION_STEP = "Provision"
@@ -80,34 +82,51 @@ def _step(name: str) -> dict:
     raise AssertionError(f"step {name!r} not found in {WORKFLOW}")
 
 
-def run_guard(tmp_path, **env) -> subprocess.CompletedProcess:
-    """Execute the real validation step with the given inputs."""
+def run_guard(tmp_path, allowlist=None, **env) -> subprocess.CompletedProcess:
+    """Execute the real validation step with the given inputs.
+
+    `allowlist`, when given, stands in for governance/secret-provision-targets.json so a
+    test can exercise a target the REAL policy does not list. Without it, a test for the
+    cross-repo copy rule would pass for the wrong reason — rejected by the allowlist it
+    never got past, proving nothing about the copy rule itself.
+    """
     github_env = tmp_path / "github_env"
     github_env.touch()
+    if allowlist is None:
+        cwd = ROOT
+    else:
+        (tmp_path / "governance").mkdir(exist_ok=True)
+        (tmp_path / ALLOWLIST_PATH).write_text(
+            json.dumps({"targets": allowlist}), encoding="utf-8"
+        )
+        cwd = tmp_path
     full = {
         "SECRET_NAME": "",
         "SOURCE": "",
         "COPY_FROM": "",
         "LENGTH": "48",
+        "TARGET_REPO": "",
+        "SELF_REPO": "izzywdev/FuzeInfra",
         "GITHUB_ENV": str(github_env),
-        "PATH": "/usr/bin:/bin",
+        "PATH": "/usr/bin:/bin:/usr/local/bin",
     }
     full.update({k: str(v) for k, v in env.items()})
     return subprocess.run(
         ["bash", "-c", _step(VALIDATE_STEP)["run"]],
         env=full,
+        cwd=cwd,
         capture_output=True,
         text=True,
     )
 
 
-def ok(tmp_path, **env) -> None:
-    r = run_guard(tmp_path, **env)
+def ok(tmp_path, allowlist=None, **env) -> None:
+    r = run_guard(tmp_path, allowlist=allowlist, **env)
     assert r.returncode == 0, f"expected ALLOWED, got rc={r.returncode}: {r.stdout}{r.stderr}"
 
 
-def blocked(tmp_path, **env) -> None:
-    r = run_guard(tmp_path, **env)
+def blocked(tmp_path, allowlist=None, **env) -> None:
+    r = run_guard(tmp_path, allowlist=allowlist, **env)
     assert r.returncode != 0, f"expected BLOCKED, but it was allowed: {r.stdout}{r.stderr}"
 
 
@@ -377,19 +396,129 @@ def test_admin_pat_is_referenced_by_no_other_workflow():
     )
 
 
-def test_provision_pins_the_target_repo_to_this_repository():
-    """Every `gh secret` call is pinned to github.repository.
+def test_provision_takes_its_target_from_the_validated_env_not_the_payload():
+    """`REPO` must be the Validate step's allowlist-checked `TARGET`.
 
-    Without `--repo "$REPO"`, gh falls back to inferring the repo from the
-    checkout or from a caller-influenced value. Pinning is what makes an
-    all-repos-scoped PAT harmless *here* — the workflow cannot address another
-    repository even if the token could.
+    This replaces an earlier pin to `github.repository`, which `target_repo`
+    deliberately relaxes. The property that survives is the one that mattered: the
+    repository written to is the one the guard approved. Re-reading
+    `github.event.*.target_repo` here would route around the allowlist entirely —
+    the check would pass on a listed value while the write used whatever the caller
+    sent second.
     """
     provision = _step(PROVISION_STEP)
-    assert provision["env"]["REPO"] == "${{ github.repository }}", (
-        "REPO must come from github.repository, not from any caller-supplied input"
+    repo_expr = provision["env"]["REPO"]
+    assert "env.TARGET" in repo_expr, (
+        f"REPO must come from the validated env.TARGET, got {repo_expr!r}"
+    )
+    assert "github.event" not in repo_expr, (
+        f"REPO reads the dispatch payload directly ({repo_expr!r}), bypassing the allowlist"
     )
     for raw in provision["run"].splitlines():
         line = raw.strip()
         if line.startswith("gh secret "):
             assert '--repo "$REPO"' in line, f"unpinned gh secret call: {line!r}"
+
+
+def test_target_is_allowlist_checked_before_it_is_exported(tmp_path):
+    """The guard must consult the allowlist file, not a list inlined in the workflow."""
+    script = _step(VALIDATE_STEP)["run"]
+    assert ALLOWLIST_PATH in script, (
+        f"the Validate step never reads {ALLOWLIST_PATH}; an inlined list of target repos "
+        f"is invisible to anyone auditing who can write where"
+    )
+    # Exported only after the check: an early `TARGET=` export would be usable by the
+    # Provision step even on a rejected repo, since a failed guard still wrote it.
+    assert script.index(ALLOWLIST_PATH) < script.index('echo "TARGET=$TARGET"'), (
+        "TARGET is exported to GITHUB_ENV before the allowlist check runs"
+    )
+
+
+def test_allowlist_file_is_well_formed():
+    data = json.loads((ROOT / ALLOWLIST_PATH).read_text(encoding="utf-8"))
+    targets = data["targets"]
+    assert targets, "an empty allowlist would make every dispatch fail"
+    slugs = [e["repo"] for e in targets]
+    assert "izzywdev/FuzeInfra" in slugs, (
+        "this repository must stay listed — it is the default when target_repo is omitted"
+    )
+    assert len(slugs) == len({s.lower() for s in slugs}), f"duplicate entries: {slugs}"
+    for entry in targets:
+        assert entry["repo"].count("/") == 1, f"{entry['repo']} is not owner/repo"
+        assert entry.get("why", "").strip(), (
+            f"{entry['repo']} has no `why`. An entry nobody can justify in one sentence "
+            f"is an entry to remove — it grants secret writes to that repository."
+        )
+
+
+# --- the live guard, exercised ------------------------------------------------
+
+
+def test_target_defaults_to_this_repository(tmp_path):
+    r = run_guard(tmp_path, SECRET_NAME="SOME_SECRET", SOURCE="verify", TARGET_REPO="")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "izzywdev/FuzeInfra" in r.stdout
+
+
+@pytest.mark.parametrize(
+    "target",
+    [
+        "izzywdev/NotListed",
+        "someoneelse/FuzeInfra",
+        "izzywdev",  # not owner/repo
+        "izzywdev/a/b",  # too many segments
+        "/FuzeInfra",
+        "izzywdev/",
+        "izzywdev/Fuze Infra",  # space
+        "izzywdev/Fuze;rm -rf /",  # metachars
+    ],
+)
+def test_bad_or_unlisted_targets_blocked(tmp_path, target):
+    blocked(tmp_path, SECRET_NAME="SOME_SECRET", SOURCE="verify", TARGET_REPO=target)
+
+
+def test_listed_target_allowed_case_insensitively(tmp_path):
+    """GitHub slugs are case-insensitive, so an allowlist that a lowercase spelling
+    slips past would be a bypass rather than a nicety."""
+    ok(tmp_path, SECRET_NAME="SOME_SECRET", SOURCE="verify", TARGET_REPO="izzywdev/fuzeinfra")
+
+
+# An allowlist that DOES list a foreign repo, so the copy rule is tested on its own
+# terms rather than being masked by an allowlist rejection.
+TWO_TARGETS = [
+    {"repo": "izzywdev/FuzeInfra", "why": "self"},
+    {"repo": "izzywdev/FuzeFront", "why": "test fixture: a genuinely allowlisted peer"},
+]
+
+
+def test_copy_is_refused_cross_repo_even_when_the_target_is_allowlisted(tmp_path):
+    """A cross-repo copy moves THIS repository's secret values into another repo.
+
+    PROTECTED stops the worst names, but the operation itself is exfiltration wearing a
+    re-key's clothes, so it is refused off-repo whatever the allowlist says. The target
+    here IS listed, so an allowlist rejection cannot be what makes this pass.
+    """
+    blocked(tmp_path, allowlist=TWO_TARGETS, SECRET_NAME="NEW_NAME", SOURCE="copy",
+            COPY_FROM="OLD_NAME", TARGET_REPO="izzywdev/FuzeFront")
+
+
+def test_generate_is_allowed_to_that_same_allowlisted_peer(tmp_path):
+    """Pins that the refusal above is the COPY rule, not the target being foreign."""
+    ok(tmp_path, allowlist=TWO_TARGETS, SECRET_NAME="SOME_SECRET", SOURCE="generate",
+       TARGET_REPO="izzywdev/FuzeFront")
+
+
+def test_verify_is_allowed_to_that_same_allowlisted_peer(tmp_path):
+    ok(tmp_path, allowlist=TWO_TARGETS, SECRET_NAME="SOME_SECRET", SOURCE="verify",
+       TARGET_REPO="izzywdev/FuzeFront")
+
+
+def test_copy_still_allowed_same_repo(tmp_path):
+    ok(tmp_path, SECRET_NAME="NEW_NAME", SOURCE="copy", COPY_FROM="OLD_NAME",
+       TARGET_REPO="izzywdev/FuzeInfra")
+
+
+def test_protected_names_blocked_for_every_target(tmp_path):
+    """The PROTECTED list is not weakened by pointing somewhere else."""
+    blocked(tmp_path, SECRET_NAME="SECRETS_ADMIN_PAT", SOURCE="generate",
+            TARGET_REPO="izzywdev/FuzeInfra")
