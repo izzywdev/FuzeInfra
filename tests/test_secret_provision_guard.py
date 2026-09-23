@@ -30,6 +30,7 @@ keyword check cannot distinguish.
 Offline: parses one YAML file and runs bash. No network, no GitHub, no cluster.
 """
 
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -301,6 +302,28 @@ def test_both_event_shapes_feed_the_filter(var, payload_key):
     expr = _step(VALIDATE_STEP)["env"][var]
     assert f"inputs.{payload_key}" in expr, f"{var} ignores workflow_dispatch"
     assert f"client_payload.{payload_key}" in expr, f"{var} ignores repository_dispatch"
+
+
+def test_every_step_reads_both_event_shapes():
+    """Generalises the pin above to EVERY step, not just the filter.
+
+    The narrow version of this test checked the Validate step alone and therefore
+    missed `COPY_VALUE` in the Provision step, which keyed off
+    `github.event.inputs.copy_from` only. `github.event.inputs` is null on
+    repository_dispatch, so that expression was permanently empty there and
+    source=copy failed with a "resolved empty ... does not exist" error blaming the
+    wrong thing. Any step reading a dispatch field has the same trap, so scan them
+    all: wherever an expression reads `inputs.<key>`, it must also read
+    `client_payload.<key>`.
+    """
+    pattern = re.compile(r"github\.event\.inputs\.([A-Za-z0-9_]+)")
+    for step in _workflow()["jobs"]["provision"]["steps"]:
+        for var, expr in (step.get("env") or {}).items():
+            for key in set(pattern.findall(str(expr))):
+                assert f"client_payload.{key}" in str(expr), (
+                    f"{step.get('name')}/{var} reads github.event.inputs.{key} but never "
+                    f"github.event.client_payload.{key} — it is empty on repository_dispatch"
+                )
 
 
 def test_repository_dispatch_type_is_registered():
