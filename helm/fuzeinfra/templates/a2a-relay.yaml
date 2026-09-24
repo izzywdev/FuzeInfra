@@ -55,6 +55,11 @@ spec:
     metadata:
       labels:
         {{- include "fuzeinfra.selectorLabels" (dict "component" "a2a-relay" "root" $) | nindent 8 }}
+        # Opt in to the edge egress lockdown (templates/networkpolicy-edge.yaml):
+        # internet + DNS allowed, every in-cluster destination denied. This pod is
+        # internet-facing, so it must never be able to reach postgres/redis/mongo/
+        # neo4j/elasticsearch. Removing this label silently removes that protection.
+        fuzeinfra.io/egress-profile: edge
       annotations:
         # roll the pod when the embedded relay.py changes (selfHeal syncs the ConfigMap
         # but won't restart the Deployment on its own).

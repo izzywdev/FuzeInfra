@@ -639,6 +639,26 @@ cloudflareTunnel:
 #      does not exist at the edge and mcp-handoff.prod.fuzefront.com still answers
 #      302 to the *.prod email-OTP login — which a machine caller cannot complete.
 #      This PR touches terraform/ so that apply finally runs.
+# Edge egress lockdown. CIDRs verified against the LIVE cluster rather than
+# assumed from k3s defaults (cluster-query run 35969755843):
+#   pods     10.42.0.0/16  — nodes carry 10.42.0.0/24 ... 10.42.19.0/24
+#   services 10.43.0.0/16  — the apiserver Service is 10.43.0.1
+#   VLAN     10.0.0.0/22   — Contabo private net 60932; node InternalIPs 10.0.0.1-.9
+# The VLAN entry matters as much as the other two: without it an edge pod could
+# still reach a datastore by node IP instead of by Service IP.
+networkPolicy:
+  enabled: true
+  clusterCidrs:
+    - "10.42.0.0/16"
+    - "10.43.0.0/16"
+    - "10.0.0.0/22"
+  probe:
+    enabled: true
+    blockedHost: fuzeinfra-postgres
+    blockedPort: 5432
+    allowedHost: pypi.org
+    allowedPort: 443
+
 a2aRelay:
   enabled: true
 

@@ -1,0 +1,146 @@
+{{- if .Values.networkPolicy.enabled }}
+{{- $root := . -}}
+{{- /*
+  EDGE EGRESS LOCKDOWN (M1a of docs/design/realtime-messaging-and-edge-hardening.md).
+
+  WHAT THIS CLOSES
+  The internet-facing pods — a2a-relay above all, which is reachable at
+  relay.<domain> and in v0 has NO bearer ("the capability is the unguessable
+  cse_... session-id") — sit in the `fuzeinfra` namespace on a flat pod network.
+  Nothing stopped a compromised edge pod opening postgres:5432, redis:6379,
+  mongodb:27017, neo4j:7687 or elasticsearch:9200. None of those are reachable
+  from outside the cluster, and all of them were one RCE away.
+
+  WHY EGRESS-ONLY, AND WHY ONLY THESE PODS
+  policyTypes is deliberately [Egress]. Restricting ingress here would add
+  almost nothing — the threat is outbound lateral movement, not inbound — while
+  risking Prometheus scraping and kubelet health probes. This is the smallest
+  change that closes the actual hole, with a blast radius of exactly the pods
+  carrying the opt-in label below.
+
+  WHY "ALLOW THE INTERNET, DENY THE CLUSTER"
+  A NetworkPolicy cannot express DNS names, only CIDRs, and these pods genuinely
+  need the public internet: a2a-relay runs `pip install websockets` at container
+  start, a2a-gateway runs `npm install -g @anthropic-ai/claude-code`, and
+  a2a-gateway/handoff-mcp both call api.anthropic.com. Inverting the usual
+  allowlist — permit 0.0.0.0/0 EXCEPT the cluster's own ranges — keeps all of
+  that working while removing every in-cluster destination.
+
+  None of the three declares a ServiceAccount, RBAC binding or any Kubernetes API
+  usage, so excluding the service CIDR (which contains the apiserver at
+  10.43.0.1) costs them nothing. Verified before this was written; if a future
+  edge workload needs the API, give it a narrower profile rather than widening
+  this one.
+
+  OPT-IN BY LABEL, NOT BY COMPONENT NAME
+  Selecting on `fuzeinfra.io/egress-profile: edge` rather than each component's
+  own labels means the probe Job below can carry the identical label and be
+  subject to the identical policy — which is what makes enforcement provable
+  rather than assumed — without impersonating a real Service's endpoints.
+*/ -}}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: fuzeinfra-edge-egress
+  labels:
+    {{- include "fuzeinfra.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      fuzeinfra.io/egress-profile: edge
+  policyTypes:
+    - Egress
+  egress:
+    # 1. DNS. Without this rule every name lookup fails and the pod cannot reach
+    #    anything at all, including the internet it is still allowed to use —
+    #    the classic way a deny-by-default egress policy "breaks the internet".
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # 2. The public internet, minus every in-cluster range. The `except` list is
+    #    what actually enforces the lockdown, so it must cover the pod CIDR, the
+    #    service CIDR AND the private VLAN the nodes sit on — a gap in any one of
+    #    them reopens the path this policy exists to close.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              {{- range .Values.networkPolicy.clusterCidrs }}
+              - {{ . | quote }}
+              {{- end }}
+{{- if .Values.networkPolicy.probe.enabled }}
+---
+{{- /*
+  ENFORCEMENT PROBE (acceptance criterion AC1.2).
+
+  A NetworkPolicy that is not enforced fails open and silently: the object
+  applies cleanly, `kubectl get networkpolicy` lists it, and nothing changes.
+  k3s enforces policy through an embedded kube-router controller unless started
+  with --disable-network-policy (which this cluster does not), but "the config
+  says it should work" is not evidence.
+
+  This Job carries the same opt-in label as the edge pods, so it is governed by
+  the same policy, and asserts BOTH directions — a blocked in-cluster
+  destination and a permitted external one. Asserting only the blocked side
+  would pass just as well if the pod had no network at all.
+
+  Read the verdict with cluster-query.yml:
+    -n fuzeinfra logs job/fuzeinfra-edge-egress-probe
+*/}}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: fuzeinfra-edge-egress-probe
+  labels:
+    {{- include "fuzeinfra.labels" . | nindent 4 }}
+  annotations:
+    # Re-run the probe whenever the policy's CIDR set changes.
+    checksum/cidrs: {{ .Values.networkPolicy.clusterCidrs | toJson | sha256sum }}
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        {{- include "fuzeinfra.labels" $root | nindent 8 }}
+        fuzeinfra.io/egress-profile: edge
+    spec:
+      restartPolicy: Never
+      {{- include "fuzeinfra.durableToleration" $root | nindent 6 }}
+      containers:
+        - name: probe
+          image: {{ .Values.networkPolicy.probe.image | default "busybox:1.36" }}
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              fail=0
+              # MUST be blocked: an in-cluster datastore.
+              if nc -z -w 4 {{ .Values.networkPolicy.probe.blockedHost }} {{ .Values.networkPolicy.probe.blockedPort }} 2>/dev/null; then
+                echo "FAIL blocked-target reachable: {{ .Values.networkPolicy.probe.blockedHost }}:{{ .Values.networkPolicy.probe.blockedPort }} — egress policy is NOT enforced"
+                fail=1
+              else
+                echo "PASS blocked-target refused: {{ .Values.networkPolicy.probe.blockedHost }}:{{ .Values.networkPolicy.probe.blockedPort }}"
+              fi
+              # MUST be allowed: DNS + the public internet the edge pods depend on.
+              if nc -z -w 6 {{ .Values.networkPolicy.probe.allowedHost | quote }} {{ .Values.networkPolicy.probe.allowedPort }} 2>/dev/null; then
+                echo "PASS allowed-target reachable: {{ .Values.networkPolicy.probe.allowedHost }}:{{ .Values.networkPolicy.probe.allowedPort }}"
+              else
+                echo "FAIL allowed-target unreachable: {{ .Values.networkPolicy.probe.allowedHost }}:{{ .Values.networkPolicy.probe.allowedPort }} — policy is too strict, or DNS is broken"
+                fail=1
+              fi
+              [ "$fail" -eq 0 ] && echo "PROBE RESULT: PASS" || echo "PROBE RESULT: FAIL"
+              exit "$fail"
+          resources:
+            requests: { cpu: 10m, memory: 16Mi }
+            limits:   { cpu: 100m, memory: 64Mi }
+{{- end }}
+{{- end }}
