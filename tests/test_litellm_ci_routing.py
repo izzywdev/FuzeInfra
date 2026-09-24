@@ -134,10 +134,19 @@ def test_the_credential_gate_is_on_resolution_not_on_one_secrets_name():
     assert "uses: ./.github/actions/llm-endpoint" in live, (
         "the gate must be whether llm-endpoint resolved ANY usable credential"
     )
-    assert "secrets.LITELLM_CI_KEY" not in live, (
-        "gating on LITELLM_CI_KEY by name is what made a repo running on a configured "
-        "fallback vendor read as uncredentialed and skip green"
-    )
+    # LITELLM_CI_KEY may appear as a forwarded `with:` input to fuze-code-action
+    # (public-gateway tier probe) — that is NOT gating. What is banned is referencing
+    # it in a condition or shell test, which is what made a repo on the fallback vendor
+    # read as uncredentialed. The specific skip-green strings are covered by
+    # test_no_skip_green_path_came_back; this assertion guards any other conditional use.
+    for line in live.splitlines():
+        if "secrets.LITELLM_CI_KEY" in line:
+            assert line.strip().startswith("litellm-ci-key:"), (
+                f"secrets.LITELLM_CI_KEY appears outside a forwarded `with: litellm-ci-key:` "
+                f"input (line: {line.strip()!r}). "
+                "Gating on LITELLM_CI_KEY by name is what made a repo running on a configured "
+                "fallback vendor read as uncredentialed and skip green."
+            )
 
 
 def test_no_provider_key_or_gateway_url_is_hardcoded_in_the_workflow():
