@@ -192,3 +192,9 @@ dev-overrides/
 # modules/ or a render harness must never commit provider binaries).
 **/.terraform/
 **/.terraform.lock.hcl
+
+# Agent worktrees. Claude Code's `isolation: "worktree"` checks out a full copy of
+# the repo per subagent under here (~70MB each), so an untracked-files check will
+# flag them mid-run. They are transient — removed when the agent finishes — and
+# must never be committed.
+.claude/worktrees/

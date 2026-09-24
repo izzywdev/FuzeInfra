@@ -157,9 +157,19 @@ resource "null_resource" "provision" {
       "sleep 15",
       "kubectl wait --for=condition=ready node --all --timeout=120s",
 
-      # --- Lock Traefik to ClusterIP (no external LoadBalancer binding) ---
+      # --- Lock Traefik to ClusterIP (no external LoadBalancer binding) + HA ---
       # All HTTP(S) must come through the Cloudflare tunnel; direct VPS access is blocked.
       # HelmChartConfig overrides k3s's bundled Traefik before ArgoCD even syncs.
+      #
+      # This MUST stay byte-identical to argocd/cluster-bootstrap/traefik-clusterip.yaml.
+      # The two are applied by different paths — this literal runs ONCE from cloud-init at
+      # first boot, while apply-cluster-config.yml re-applies the manifest on every push to
+      # main — so if they diverge, a freshly provisioned node runs whatever THIS says until
+      # the next push to main happens to reconcile it. Leaving the HA settings out here
+      # would mean every new node comes up as a single-replica Traefik SPOF for an
+      # unbounded window, which is exactly the condition the manifest exists to remove.
+      # Same reason CoreDNS's 2-replica HA config is duplicated in the block below rather
+      # than left to CI — that is the established precedent here, not an exception.
       "kubectl apply -f - <<'HELMCFG'",
       "apiVersion: helm.cattle.io/v1",
       "kind: HelmChartConfig",
@@ -170,6 +180,20 @@ resource "null_resource" "provision" {
       "  valuesContent: |",
       "    service:",
       "      type: ClusterIP",
+      "    deployment:",
+      "      replicas: 2",
+      "    podDisruptionBudget:",
+      "      enabled: true",
+      "      minAvailable: 1",
+      "    affinity:",
+      "      podAntiAffinity:",
+      "        preferredDuringSchedulingIgnoredDuringExecution:",
+      "          - weight: 100",
+      "            podAffinityTerm:",
+      "              labelSelector:",
+      "                matchLabels:",
+      "                  app.kubernetes.io/name: traefik",
+      "              topologyKey: kubernetes.io/hostname",
       "HELMCFG",
       # Wait for k3s to reconcile Traefik to ClusterIP (it polls ~every 15s)
       "for i in $(seq 1 20); do TYPE=$(kubectl get svc traefik -n kube-system -o jsonpath='{.spec.type}' 2>/dev/null); [ \"$TYPE\" = 'ClusterIP' ] && break; sleep 5; done",

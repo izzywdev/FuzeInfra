@@ -758,8 +758,13 @@ locals {
     "mongo-express" = { name = "Mongo Express", logo = "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/mongodb.png", path = "" }
     "rabbitmq"      = { name = "RabbitMQ", logo = "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/rabbitmq.png", path = "" }
     "neo4j"         = { name = "Neo4j", logo = "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/neo4j.png", path = "" }
-    "elasticsearch" = { name = "Elasticsearch", logo = "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/elasticsearch.png", path = "" }
-    "chromadb"      = { name = "ChromaDB", logo = "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/chroma.png", path = "/api/v2/heartbeat" }
+    # elasticsearch and chromadb are deliberately NOT here (M3-S3). They are raw
+    # datastore HTTP APIs, not admin UIs — Neo4j is the kept exception because
+    # Neo4j Browser IS an admin UI and the owner decision keeps it launcher-only.
+    # Removing these tiles also drops their hosts from local.launcher_hosts
+    # below, which is what lets the duplicate-tile reconciler and Ingress
+    # removal (helm/fuzeinfra/templates/ingress.yaml) stay in sync: no tile, no
+    # published host, no dangling Access-app coverage to reconcile.
     # FuzeFront admin UIs (izzywdev/FuzeFront). Unleash lands UNDER the *.prod
     # wildcard, so the catch-all tunnel rule → Traefik, the *.prod CNAME, and the
     # *.prod Access app already cover routing/DNS/gating — no per-host tunnel

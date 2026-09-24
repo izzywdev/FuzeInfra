@@ -10,9 +10,18 @@
   "kafka-ui"          (dict "svc" "fuzeinfra-kafka-ui"          "port" $root.Values.kafkaUi.port           "enabled" (and $root.Values.kafkaUi.enabled $root.Values.kafka.enabled))
   "mongo-express"     (dict "svc" "fuzeinfra-mongo-express"     "port" $root.Values.mongoExpress.port      "enabled" (and $root.Values.mongoExpress.enabled $root.Values.mongodb.enabled))
   "rabbitmq"          (dict "svc" "fuzeinfra-rabbitmq"          "port" $root.Values.rabbitmq.managementPort "enabled" $root.Values.rabbitmq.enabled)
-  "elasticsearch"     (dict "svc" "fuzeinfra-elasticsearch"     "port" $root.Values.elasticsearch.port     "enabled" $root.Values.elasticsearch.enabled)
-  "chromadb"          (dict "svc" "fuzeinfra-chromadb"          "port" $root.Values.chromadb.port          "enabled" $root.Values.chromadb.enabled)
 -}}
+{{- /* elasticsearch and chromadb are deliberately NOT routes here: they are raw
+       datastore HTTP APIs, not admin UIs, and publishing them to the internet
+       behind only the *.prod Cloudflare Access wildcard was a hardening gap
+       (M3-S3). They stay ClusterIP-only — in-cluster service DNS
+       (fuzeinfra-elasticsearch:9200, fuzeinfra-chromadb:8000) is unaffected.
+       For read-only checks use cluster-query.yml; for a live HTTP connection an
+       operator uses kubectl port-forward — see
+       docs/runbooks/datastore-port-forward-access.md. Neo4j Browser is the
+       deliberate exception (owner decision, M3-S3): it keeps its own Ingress
+       in neo4j-ingress.yaml because it is an admin UI, not a raw datastore
+       API, and the App Launcher tile is its only access path. */ -}}
 {{- /* The Middleware below is a Traefik CRD (traefik.io/v1alpha1). It exists
        only on the Traefik-based ingress (prod / Contabo k3s); on nginx-based
        clusters (kind, Docker Desktop) the CRD is absent, so gate both the
