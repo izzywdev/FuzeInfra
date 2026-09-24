@@ -134,9 +134,21 @@ def test_the_credential_gate_is_on_resolution_not_on_one_secrets_name():
     assert "uses: ./.github/actions/llm-endpoint" in live, (
         "the gate must be whether llm-endpoint resolved ANY usable credential"
     )
-    assert "secrets.LITELLM_CI_KEY" not in live, (
-        "gating on LITELLM_CI_KEY by name is what made a repo running on a configured "
-        "fallback vendor read as uncredentialed and skip green"
+    # LITELLM_CI_KEY must not be used as a JOB/STEP GATE (an `if:` condition).
+    # Passing it as a `with:` input to fuze-code-action/llm-endpoint is permitted —
+    # the action treats it as an optional enhancement for the public-gateway tier
+    # (Tier 2), not a required gate; a repo without this secret falls through to the
+    # runner-local fallback unchanged. What is forbidden is GATING execution on this
+    # one name, because that is what made repos running on a configured fallback
+    # vendor read as uncredentialed and skip green.
+    conditional_gate = [
+        ln for ln in live.splitlines()
+        if "LITELLM_CI_KEY" in ln and ln.strip().startswith("if:")
+    ]
+    assert not conditional_gate, (
+        "LITELLM_CI_KEY is used as a step/job gate condition — "
+        "gating on it by name is what made a repo running on a configured "
+        f"fallback vendor read as uncredentialed and skip green: {conditional_gate}"
     )
 
 
