@@ -1,0 +1,184 @@
+# =============================================================================
+# ArgoCD Application — Headlamp (read-only Kubernetes web UI), namespace `headlamp`
+#
+# WHY IT EXISTS
+#   The only way to look at prod was cluster-query.yml: one kubectl invocation
+#   per workflow run, output in PUBLIC job logs. Headlamp gives an interactive,
+#   Access-gated view of the same cluster state. It is a READ surface only.
+#
+# READ-ONLY IS THE WHOLE DESIGN — do not widen it.
+#   Prod is GitOps: no session and no human UI holds a mutate credential for this
+#   cluster; the only route to a change is a commit Argo syncs (CLAUDE.md, "GitOps
+#   + self-heal"). The upstream chart defaults to binding its ServiceAccount to
+#   `cluster-admin`, which would turn this UI into a browser-shaped write path
+#   (exec, delete, Secret reads) guarded by nothing but Cloudflare Access.
+#   So:
+#     * clusterRoleBinding.create=false — the chart's own binding is off.
+#     * The SA is bound (extraManifests below) to the built-in `view` ClusterRole
+#       (namespaced read, EXCLUDES Secrets and pods/exec) plus
+#       `headlamp-cluster-read`, which adds get/list/watch on the cluster-scoped
+#       kinds `view` omits (nodes, PVs, StorageClasses, CRDs, RBAC objects, …).
+#     * No Secret read anywhere. This matches cluster-query.yml's policy.
+#   tests/test_headlamp_readonly.py enforces all of the above offline.
+#
+# AUTH
+#   config.unsafeUseServiceAccountToken=true: every viewer acts as the read-only
+#   SA, so nobody has to mint and paste a token (minting one is itself a cluster
+#   write, which has no path here). Upstream labels this "only safe behind an
+#   auth proxy" — Cloudflare Access is that proxy: headlamp.prod.fuzefront.com
+#   sits under the *.prod wildcard Access app (Google + email allowlist) and is
+#   reachable only through the CF Tunnel (Traefik is ClusterIP-only).
+#   Per-user OIDC via Authentik would require k3s apiserver OIDC flags and only
+#   pays off for per-user WRITE access, which GitOps rules out — not done.
+#
+# PLACEMENT
+#   Separate Application (not in helm/fuzeinfra) because it needs cluster-scoped
+#   RBAC; project `default` for the same reason as sealed-secrets/longhorn — the
+#   `fuzeinfra` AppProject does not permit ClusterRole/ClusterRoleBinding.
+#   Registered by deploy-prod's argocd/applications/*.yaml glob; converges via
+#   automated selfHeal (not in SYNC_APPS). No durable/ci tolerations on purpose:
+#   an admin UI belongs on the general pool.
+# =============================================================================
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: headlamp
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: https://kubernetes-sigs.github.io/headlamp/
+    chart: headlamp
+    # Pin the chart; bump deliberately.
+    targetRevision: 0.45.0
+    helm:
+      releaseName: headlamp
+      values: |
+        fullnameOverride: headlamp
+
+        config:
+          inCluster: true
+          unsafeUseServiceAccountToken: true
+          # No OIDC (see AUTH above); stops the chart emitting an empty Secret.
+          oidc:
+            secret:
+              create: false
+
+        serviceAccount:
+          create: true
+          name: headlamp
+
+        # OFF: the chart's binding defaults to cluster-admin. Bindings live in
+        # extraManifests below so the role names are explicit and reviewable.
+        clusterRoleBinding:
+          create: false
+
+        ingress:
+          enabled: true
+          ingressClassName: traefik
+          annotations:
+            traefik.ingress.kubernetes.io/router.entrypoints: web
+          hosts:
+            - host: headlamp.prod.fuzefront.com
+              paths:
+                - path: /
+                  type: Prefix
+
+        resources:
+          requests:
+            cpu: 25m
+            memory: 64Mi
+          limits:
+            cpu: 500m
+            memory: 256Mi
+
+        extraManifests:
+          - |
+            apiVersion: rbac.authorization.k8s.io/v1
+            kind: ClusterRole
+            metadata:
+              name: headlamp-cluster-read
+            rules:
+              - apiGroups: [""]
+                resources: [nodes, persistentvolumes, namespaces, events, componentstatuses]
+                verbs: [get, list, watch]
+              - apiGroups: [events.k8s.io]
+                resources: [events]
+                verbs: [get, list, watch]
+              - apiGroups: [storage.k8s.io]
+                resources: [storageclasses, csidrivers, csinodes, volumeattachments]
+                verbs: [get, list, watch]
+              - apiGroups: [apiextensions.k8s.io]
+                resources: [customresourcedefinitions]
+                verbs: [get, list, watch]
+              - apiGroups: [rbac.authorization.k8s.io]
+                resources: [clusterroles, clusterrolebindings, roles, rolebindings]
+                verbs: [get, list, watch]
+              - apiGroups: [networking.k8s.io]
+                resources: [ingressclasses]
+                verbs: [get, list, watch]
+              - apiGroups: [scheduling.k8s.io]
+                resources: [priorityclasses]
+                verbs: [get, list, watch]
+              - apiGroups: [node.k8s.io]
+                resources: [runtimeclasses]
+                verbs: [get, list, watch]
+              - apiGroups: [admissionregistration.k8s.io]
+                resources: [validatingwebhookconfigurations, mutatingwebhookconfigurations, validatingadmissionpolicies, validatingadmissionpolicybindings]
+                verbs: [get, list, watch]
+              - apiGroups: [metrics.k8s.io]
+                resources: [nodes, pods]
+                verbs: [get, list]
+              - apiGroups: [argoproj.io]
+                resources: [applications, applicationsets, appprojects]
+                verbs: [get, list, watch]
+              - apiGroups: [longhorn.io]
+                resources: [volumes, replicas, engines, nodes]
+                verbs: [get, list, watch]
+          - |
+            apiVersion: rbac.authorization.k8s.io/v1
+            kind: ClusterRoleBinding
+            metadata:
+              name: headlamp-view
+            roleRef:
+              apiGroup: rbac.authorization.k8s.io
+              kind: ClusterRole
+              name: view
+            subjects:
+              - kind: ServiceAccount
+                name: headlamp
+                namespace: headlamp
+          - |
+            apiVersion: rbac.authorization.k8s.io/v1
+            kind: ClusterRoleBinding
+            metadata:
+              name: headlamp-cluster-read
+            roleRef:
+              apiGroup: rbac.authorization.k8s.io
+              kind: ClusterRole
+              name: headlamp-cluster-read
+            subjects:
+              - kind: ServiceAccount
+                name: headlamp
+                namespace: headlamp
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: headlamp
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    managedNamespaceMetadata:
+      annotations:
+        fuzeinfra.io/owner-repo: izzywdev/FuzeInfra
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 15s
+        factor: 2
+        maxDuration: 5m

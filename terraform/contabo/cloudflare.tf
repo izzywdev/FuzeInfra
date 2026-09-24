@@ -792,6 +792,12 @@ locals {
     # only identity layer it gets. That is the whole reason the wall must keep
     # working — see the Access policies above.
     "litellm" = { name = "LiteLLM", logo = "https://avatars.githubusercontent.com/u/121462774?s=200&v=4", path = "/ui" }
+    # Headlamp read-only Kubernetes UI (argocd/applications/headlamp.yaml,
+    # Ingress → svc headlamp:80 in ns headlamp). Under the *.prod wildcard, so
+    # this bookmark is all that is needed. Like LiteLLM, Access is its only
+    # identity layer: every viewer acts as a read-only ServiceAccount
+    # (unsafeUseServiceAccountToken), which is why that SA must stay read-only.
+    "headlamp" = { name = "Headlamp", logo = "https://raw.githubusercontent.com/kubernetes-sigs/headlamp/v0.45.0/docs/images/icon.png", path = "" }
   }
 
   # Tiles whose target is NOT https://<key>.<prod_domain><path>.
