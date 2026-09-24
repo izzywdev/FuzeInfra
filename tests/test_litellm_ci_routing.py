@@ -134,9 +134,17 @@ def test_the_credential_gate_is_on_resolution_not_on_one_secrets_name():
     assert "uses: ./.github/actions/llm-endpoint" in live, (
         "the gate must be whether llm-endpoint resolved ANY usable credential"
     )
-    assert "secrets.LITELLM_CI_KEY" not in live, (
+    # Passing `secrets.LITELLM_CI_KEY` as the `litellm-ci-key` input to llm-endpoint
+    # is the correct pattern — the action resolves credential availability internally.
+    # What is forbidden is using it as a gate condition (the old skip-green pattern).
+    bad_refs = [
+        ln.strip() for ln in live.splitlines()
+        if "secrets.LITELLM_CI_KEY" in ln
+        and "litellm-ci-key:" not in ln
+    ]
+    assert not bad_refs, (
         "gating on LITELLM_CI_KEY by name is what made a repo running on a configured "
-        "fallback vendor read as uncredentialed and skip green"
+        f"fallback vendor read as uncredentialed and skip green. Bad refs: {bad_refs}"
     )
 
 
