@@ -216,12 +216,17 @@ jobs:
     # the fix BACK to the PR head branch so fuze-code-review re-reviews it, bounded by
     # FUZE_AUTOFIX_MAX_ROUNDS. The `claude-auto-fix-ci-` guard keeps the separate-PR
     # path's branches out of this loop; the default-branch guard is unchanged.
+    # Same-repo guard: workflow_run runs with full secrets access. Checking out a fork PR's
+    # code would allow the attacker's .github/actions/fuze-code-action to run with those
+    # secrets. Fork PRs cannot receive pushes from this workflow anyway, so restricting to
+    # same-repo PRs loses no real capability while closing the injection path.
     if: >-
       ${{ github.event.workflow_run.name == 'Fuze Code Review' &&
           github.event.workflow_run.conclusion == 'failure' &&
           !startsWith(github.event.workflow_run.head_branch, 'claude-auto-fix-ci-') &&
           github.event.workflow_run.head_branch != 'master' &&
-          github.event.workflow_run.head_branch != 'main' }}
+          github.event.workflow_run.head_branch != 'main' &&
+          github.event.workflow_run.head_repository.full_name == github.repository }}
     runs-on: ubuntu-latest
     steps:
       - name: Preflight — is any LLM key configured?
