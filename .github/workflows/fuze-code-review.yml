@@ -1,4 +1,4 @@
-# fuze:managed template=fuze-code-review.yml baseline=v1 digest=sha256:7175d094674d99d37a5b30a886b34b225071798b6ea48946a004b0f16a12843d
+# fuze:managed template=fuze-code-review.yml baseline=v1 digest=sha256:554ed00a59af9b34a8e39ef04c04b87dba29fb8bdab0fcc2a6fb691a239acc90
 name: Fuze Code Review
 
 # THE CANONICAL LLM CODE REVIEW + APPROVAL GATE — now a MANDATORY approve-or-fail check.
@@ -379,6 +379,7 @@ jobs:
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           litellm-key: ${{ secrets.LITELLM_FUZE_KEY }}
+          litellm-ci-key: ${{ secrets.LITELLM_CI_KEY }}
           anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY }}
           # fuze:secret-sourcing CLAUDE_CODE_OAUTH_TOKEN=fleet — distributed by provision-llm-vendor-keys.yml (optional, skipped-by-name when unset); tracked separately from the provision-secrets.yml SRC_ block that FLEET_SOURCED mirrors
           claude-code-oauth-token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
