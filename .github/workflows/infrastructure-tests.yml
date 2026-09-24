@@ -87,7 +87,8 @@ jobs:
           tests/test_selfheal_metrics.py \
           tests/test_arc_selfheal_offvlan.py \
           tests/test_arc_selfheal_dns_reachability.py \
-          tests/test_helm_chart_config_has_chart.py
+          tests/test_helm_chart_config_has_chart.py \
+          tests/test_headlamp_readonly.py
 
     - name: Install Docker Compose
       run: |
