@@ -154,6 +154,8 @@ spec:
               # cost is one small package fetch every 10 minutes.
               image: alpine/k8s:1.36.2
               imagePullPolicy: IfNotPresent
+              securityContext:
+                allowPrivilegeEscalation: false
               resources:
                 requests: {cpu: 10m, memory: 32Mi}
                 limits: {cpu: 200m, memory: 128Mi}
