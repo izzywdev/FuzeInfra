@@ -1529,6 +1529,30 @@ clusterAutoscaler:
 # HANDOFF_MCP_TOKEN) and populates helm/fuzeinfra/files/handoff-state/*.json.
 # Exposed at mcp-handoff.<domain> (Ingress here + CF Access bypass in Terraform).
 # -----------------------------------------------------------------------------
+# =============================================================================
+# NetworkPolicy — edge egress lockdown (M1a).
+#
+# OFF by default because the `except` CIDRs below are cluster-specific: kind and
+# EKS do not use k3s's ranges, and a policy carrying the wrong ones either fails
+# to block anything or blocks the internet the edge pods need. Each overlay sets
+# its own and opts in.
+# =============================================================================
+networkPolicy:
+  enabled: false
+  # Ranges treated as "inside the cluster" and therefore denied. Must cover the
+  # pod CIDR, the service CIDR and any private node network — a gap in any one
+  # reopens the lateral-movement path.
+  clusterCidrs: []
+  probe:
+    # A Job that proves the policy is actually ENFORCED rather than merely
+    # applied, by asserting a blocked destination AND an allowed one.
+    enabled: false
+    image: busybox:1.36
+    blockedHost: fuzeinfra-postgres
+    blockedPort: 5432
+    allowedHost: pypi.org
+    allowedPort: 443
+
 a2aRelay:
   # A2A WSS relay for cloud<->cloud Claude Code session messaging
   # (agent-templates/orchestration/a2a_relay). Off by default; on in values-contabo.
