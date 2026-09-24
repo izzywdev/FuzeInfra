@@ -32,9 +32,20 @@ CHART = REPO / "helm" / "fuzeinfra"
 POLICY_NAME = "fuzeinfra-edge-egress"
 LABEL = "fuzeinfra.io/egress-profile"
 
-# The pods the lockdown exists for. If a future edge service is added, it belongs
-# in this list AND must carry the label.
-EDGE_WORKLOADS = {"a2a-relay", "a2a-gateway", "handoff-mcp"}
+# The pods the lockdown exists for, identified by their CHART COMPONENT
+# (`app.kubernetes.io/name`, set by the `fuzeinfra.selectorLabels` helper), not by
+# `metadata.name`.
+#
+# That distinction is load-bearing rather than stylistic. This chart is
+# inconsistent about the release prefix: 24 workloads render as `fuzeinfra-<x>`
+# (`fuzeinfra-postgres`, `fuzeinfra-airflow-webserver`, …) while these three and
+# `custom-hostname-api` render bare. Matching on `metadata.name` would therefore
+# hard-code a convention only some of the chart follows, and would break — with a
+# misleading "workload outside the lockdown" message — the day one of these is
+# renamed to match the majority. The component label is the chart's actual
+# identity for a workload and is what the NetworkPolicy's own selector is derived
+# from, so it stays correct either way.
+EDGE_COMPONENTS = {"a2a-relay", "a2a-gateway", "handoff-mcp"}
 
 pytestmark = pytest.mark.skipif(
     shutil.which("helm") is None, reason="helm not installed"
@@ -51,6 +62,13 @@ def _render(values: str) -> list:
         capture_output=True, text=True, check=True,
     ).stdout
     return [d for d in yaml.safe_load_all(out) if d]
+
+
+def _component(doc) -> str | None:
+    """A workload's chart component, independent of any release-name prefix."""
+    return (doc["spec"]["template"]["metadata"].get("labels") or {}).get(
+        "app.kubernetes.io/name"
+    )
 
 
 def _policy(docs):
@@ -127,11 +145,11 @@ def test_every_edge_workload_carries_the_label():
     the policy still renders correctly."""
     docs = _render("values-contabo.yaml")
     labelled = {
-        d["metadata"]["name"] for d in docs
+        _component(d) for d in docs
         if d.get("kind") == "Deployment"
         and (d["spec"]["template"]["metadata"].get("labels") or {}).get(LABEL) == "edge"
     }
-    missing = EDGE_WORKLOADS - labelled
+    missing = EDGE_COMPONENTS - labelled
     assert not missing, f"internet-facing workloads outside the lockdown: {sorted(missing)}"
 
 
@@ -140,11 +158,13 @@ def test_no_datastore_accidentally_joins_the_lockdown():
     cluster it serves."""
     docs = _render("values-contabo.yaml")
     labelled = {
-        d["metadata"]["name"] for d in docs
+        _component(d) for d in docs
         if d.get("kind") in {"Deployment", "StatefulSet"}
         and (d["spec"]["template"]["metadata"].get("labels") or {}).get(LABEL) == "edge"
     }
-    assert labelled <= EDGE_WORKLOADS, f"unexpected pods in the lockdown: {sorted(labelled - EDGE_WORKLOADS)}"
+    assert labelled <= EDGE_COMPONENTS, (
+        f"unexpected pods in the lockdown: {sorted(labelled - EDGE_COMPONENTS)}"
+    )
 
 
 # --- the enforcement probe --------------------------------------------------
@@ -172,3 +192,22 @@ def test_probe_asserts_both_directions():
     script = json.dumps(job["spec"]["template"]["spec"]["containers"][0]["args"])
     assert "blocked-target" in script
     assert "allowed-target" in script
+
+
+def test_edge_workloads_expose_the_component_label_the_other_tests_key_on():
+    """Guards the guard: if `app.kubernetes.io/name` ever stops being emitted,
+    `_component()` returns None and the two tests above would compare against
+    {None} — passing or failing for reasons unrelated to the lockdown."""
+    docs = _render("values-contabo.yaml")
+    edge = [
+        d for d in docs
+        if d.get("kind") == "Deployment"
+        and (d["spec"]["template"]["metadata"].get("labels") or {}).get(LABEL) == "edge"
+    ]
+    assert edge, "no edge-labelled Deployments rendered at all"
+    for d in edge:
+        assert _component(d), (
+            f"{d['metadata']['name']} carries the egress-profile label but no "
+            "app.kubernetes.io/name — the component-keyed assertions would silently "
+            "compare against None"
+        )
