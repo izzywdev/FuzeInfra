@@ -130,13 +130,40 @@ def test_no_skip_green_path_came_back():
 
 
 def test_the_credential_gate_is_on_resolution_not_on_one_secrets_name():
+    """The gate must be "did llm-endpoint resolve ANY usable credential", never "is this
+    one secret set".
+
+    Narrowed 2026-09-24. This previously asserted `"secrets.LITELLM_CI_KEY" not in live`
+    — the string absent ANYWHERE — and that was too broad in a way that only stayed
+    hidden by accident. `litellm-ci-key: ${{ secrets.LITELLM_CI_KEY }}` is how the key is
+    HANDED TO llm-endpoint for resolution, and it is the canonical pattern in
+    fuze.yml, fuze-cluster.yml, fuze-code-review.yml, fuze-ci-autofix.yml (twice) and
+    mcp-maintain.yml. a2a-maintain.yml was simply the last workflow missing it, so the
+    blanket assertion passed only until governance-sync reconciled this file to the
+    FuzeSDLC canonical — then it failed on a change that is the opposite of the
+    regression it guards.
+
+    Passing the secret as an INPUT is resolution. Reading it in a CONDITION is gating,
+    and gating by name is what made a repo running on a configured fallback vendor read
+    as uncredentialed and skip green. So the rule is now about WHERE the name appears:
+    the input mapping is the only permitted live use, which also catches an `if:`, a
+    shell `[ -z "$LITELLM_CI_KEY" ]`, or an `env:` hoist feeding a condition — none of
+    which the old blanket check distinguished from the legitimate case.
+    """
     live = _workflow_live()
     assert "uses: ./.github/actions/llm-endpoint" in live, (
         "the gate must be whether llm-endpoint resolved ANY usable credential"
     )
-    assert "secrets.LITELLM_CI_KEY" not in live, (
-        "gating on LITELLM_CI_KEY by name is what made a repo running on a configured "
-        "fallback vendor read as uncredentialed and skip green"
+
+    offending = [
+        ln.strip() for ln in live.splitlines()
+        if "LITELLM_CI_KEY" in ln and not ln.strip().startswith("litellm-ci-key:")
+    ]
+    assert not offending, (
+        "LITELLM_CI_KEY may only be PASSED to llm-endpoint as the `litellm-ci-key:` "
+        "input, never referenced anywhere else in this workflow — any other use is "
+        "gating on one secret's name, which makes a repo running on a configured "
+        f"fallback vendor read as uncredentialed and skip green. Found: {offending}"
     )
 
 
