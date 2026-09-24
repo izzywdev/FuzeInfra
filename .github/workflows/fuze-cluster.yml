@@ -1,4 +1,4 @@
-# fuze:managed template=fuze-cluster.yml baseline=v1 digest=sha256:1ffed15442ea5b8847f4d5840529835ee42bdb2e3a5fde822f0798fffe9f4243
+# fuze:managed template=fuze-cluster.yml baseline=v1 digest=sha256:5609f62a36ed467b017d3dfb42af0a552739caa994d696720a8373b833f97b76
 name: Fuze (cluster-capable)
 
 # THE PRIVILEGED HALF OF THE `@fuze` ENTRYPOINT. Identical trigger surface to
@@ -169,6 +169,7 @@ jobs:
         with:
           github-token: ${{ secrets.GH_TOKEN || secrets.GITHUB_TOKEN }}
           litellm-key: ${{ secrets.LITELLM_FUZE_KEY }}
+          litellm-ci-key: ${{ secrets.LITELLM_CI_KEY }}
           anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY }}
           claude-code-oauth-token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           openai-api-key: ${{ secrets.OPENAI_API_KEY }}

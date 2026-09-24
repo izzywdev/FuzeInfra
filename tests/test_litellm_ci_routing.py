@@ -134,9 +134,17 @@ def test_the_credential_gate_is_on_resolution_not_on_one_secrets_name():
     assert "uses: ./.github/actions/llm-endpoint" in live, (
         "the gate must be whether llm-endpoint resolved ANY usable credential"
     )
-    assert "secrets.LITELLM_CI_KEY" not in live, (
+    # Passing the secret INTO llm-endpoint (its `litellm-ci-key` input, which the canonical
+    # template now does) is how the action learns it; that is resolution, not a gate. Any
+    # OTHER reference -- an `if:`, an env var a preflight tests -- is a gate by name.
+    input_form = re.compile(r"^\s*litellm-ci-key:\s*\$\{\{\s*secrets\.LITELLM_CI_KEY\s*\}\}\s*$")
+    gating = [
+        ln.strip() for ln in live.splitlines()
+        if "secrets.LITELLM_CI_KEY" in ln and not input_form.match(ln)
+    ]
+    assert not gating, (
         "gating on LITELLM_CI_KEY by name is what made a repo running on a configured "
-        "fallback vendor read as uncredentialed and skip green"
+        f"fallback vendor read as uncredentialed and skip green: {gating}"
     )
 
 
