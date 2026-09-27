@@ -12,7 +12,7 @@ import argparse
 import subprocess
 from pathlib import Path
 from typing import Dict, List, Optional, Any
-from datetime import datetime, timedelta
+from datetime import datetime
 import requests
 from tinydb import TinyDB, Query
 from cryptography.fernet import Fernet
