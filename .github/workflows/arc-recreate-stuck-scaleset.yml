@@ -152,9 +152,13 @@ jobs:
               failed="$failed $NAME"; echo "::endgroup::"; continue
             fi
 
-            UID=$(kubectl -n "$NS" get autoscalingrunnerset "$NAME" \
+            # NB: NOT `UID` — that shadows bash's readonly builtin (the runner's
+            # numeric user id). Under `set -uo pipefail` (no -e) an assignment to
+            # a readonly name fails but does not abort, so `UID` would keep the
+            # runner uid and every guard below that reads it would be bogus.
+            ARS_UID=$(kubectl -n "$NS" get autoscalingrunnerset "$NAME" \
               -o jsonpath='{.metadata.uid}' 2>/dev/null)
-            if [ -z "$UID" ]; then
+            if [ -z "$ARS_UID" ]; then
               echo "  '$NAME' not found in $NS — nothing to recreate."
               skipped="$skipped $NAME"; echo "::endgroup::"; continue
             fi
@@ -199,7 +203,7 @@ jobs:
             for i in $(seq 1 40); do
               NEWUID=$(kubectl -n "$NS" get autoscalingrunnerset "$NAME" \
                 -o jsonpath='{.metadata.uid}' 2>/dev/null)
-              if [ -n "$NEWUID" ] && [ "$NEWUID" != "$UID" ]; then
+              if [ -n "$NEWUID" ] && [ "$NEWUID" != "$ARS_UID" ]; then
                 echo "  recreated after ~$((i*15))s (new uid)"; break
               fi
               NEWUID=""
