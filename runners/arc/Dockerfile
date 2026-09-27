@@ -33,8 +33,13 @@
 
 # Pinned by digest for reproducibility / supply-chain hardening. The trailing
 # tag comment tracks the human-readable ref. Base is Ubuntu 24.04.
-FROM ghcr.io/actions/actions-runner@sha256:08c30b0a7105f64bddfc485d2487a22aa03932a791402393352fdf674bda2c29
-# ^ ghcr.io/actions/actions-runner:latest as of 2026-07-10
+FROM ghcr.io/actions/actions-runner@sha256:e5496277be5d09bc968b3d64911b74e219ac4a3f2edce956a3ecf9271bea1ef4
+# ^ ghcr.io/actions/actions-runner:2.337.0 (latest as of 2026-09-27). Was 2.335.1:
+# with DISABLE_RUNNER_UPDATE=1 the runner cannot self-update, so once GitHub
+# stopped accepting 2.335.1 every runner exited 7 ("outdated"), ARC marked each
+# EphemeralRunnerSet/AutoscalingRunnerSet phase=Outdated (sticky) and tore the
+# scale set down — the 2026-09-27 fleet-wide listener-absent outage (#1199).
+# Keep this base current; a stale pin here takes down every scale set at once.
 
 USER root
 
