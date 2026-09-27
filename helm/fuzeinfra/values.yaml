@@ -913,6 +913,11 @@ backups:
     image: neo4j:5             # ships cypher-shell; APOC stream export (online)
     host: fuzeinfra-neo4j
     boltPort: 7687
+    # cypher-shell emits its column header plus an empty/null value when APOC
+    # successfully exports a genuinely empty graph. Compressed, that valid
+    # result is about 40 bytes. Keep this above gzip's 20-byte empty-stream
+    # artifact while allowing a new/empty Neo4j database to be backed up.
+    minBytes: 32
   # -------------------------------------------------------------------------
   # VOLUME backups (templates/backup-volume-cronjobs.yaml)
   # -------------------------------------------------------------------------
