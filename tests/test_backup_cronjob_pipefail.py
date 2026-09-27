@@ -167,6 +167,21 @@ def test_backup_min_bytes_is_configurable_per_database():
     )
 
 
+@pytest.mark.skipif(shutil.which("helm") is None, reason="helm not installed")
+def test_empty_neo4j_export_has_a_safe_database_specific_floor():
+    """Allow Neo4j's valid empty export, but still reject a bare gzip stream."""
+    docs = _render(["--set", "backups.sink=s3"])
+    neo4j_job = next(
+        d for d in docs if d.get("kind") == "CronJob"
+        and d["metadata"]["name"] == "fuzeinfra-backup-neo4j"
+    )
+    scripts = dict(_iter_shell_scripts(neo4j_job))
+    assert "min_bytes=32" in scripts["dump"], (
+        "Neo4j must use its database-specific floor: cypher-shell's valid empty "
+        "APOC export compresses to about 40 bytes, while gzip of empty stdin is "
+        f"about 20 bytes. Script:\n{scripts['dump']}"
+    )
+
 
 @pytest.mark.skipif(shutil.which("helm") is None, reason="helm not installed")
 @pytest.mark.parametrize("sink", ["s3", "pvc"])
