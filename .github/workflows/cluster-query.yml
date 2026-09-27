@@ -53,7 +53,11 @@ concurrency:
 
 jobs:
   query:
-    runs-on: staging
+    # This is a control-plane diagnostic and only requires KUBE_CONFIG. Running
+    # it inside the cluster made read-only incident response unavailable exactly
+    # when the staging runner was down. Match the proven GitHub-hosted recovery
+    # workflow so diagnostics remain reachable during cluster incidents.
+    runs-on: ubuntu-latest
     # A read-only kubectl query has no business running for hours. 120m let a hung
     # query (e.g. an accidental `logs -f`) sit on a runner and — under the old
     # global concurrency group — block every other caller for that whole window.
