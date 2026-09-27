@@ -1,0 +1,115 @@
+{{- if .Values.networkPolicy.adminPlane.enabled }}
+{{- /*
+  ADMIN-PLANE INGRESS LOCKDOWN (M1b of docs/design/realtime-messaging-and-edge-hardening.md).
+
+  WHAT THIS CLOSES
+  The admin and observability UIs are gated from the INTERNET by Cloudflare Access
+  and by nothing at all from INSIDE the cluster. Every Service here is ClusterIP,
+  and `fuzeinfra` shares a flat pod network with 24 other namespaces, so a pod in
+  any of them could open these ports directly and skip Access entirely:
+
+    prometheus    :9090  no auth, and it runs --web.enable-admin-api, so a caller
+                         can POST /api/v1/admin/tsdb/delete_series and destroy the
+                         metric history its own alerts are evaluated against
+    alertmanager  :9093  no auth — a caller can POST a silence and blind the
+                         alerting plane, defeating the zero-ready-backend alerting
+                         added in #1175
+    grafana       :3000  OIDC on the UI, but the port answers without it
+    mongo-express :8081  a full MongoDB admin UI, in a pod that holds the real
+                         MONGODB_USER / MONGODB_PASSWORD
+    kafka-ui      :8080  browse and produce against every topic
+    flower        :5555  Celery task introspection and control
+
+  Prometheus's admin API cannot simply be switched off — backup-volume-cronjobs.yaml
+  needs it for TSDB snapshots. That is precisely why this control belongs at the
+  network layer rather than the flag layer.
+
+  WHY INGRESS-ONLY, AND WHY NOT NAMESPACE-WIDE
+  policyTypes is [Ingress], the mirror of networkpolicy-edge.yaml next door, which
+  is [Egress]. A namespace-wide default-deny would have to enumerate every consumer
+  namespace that legitimately reaches the datastores, and a wrong entry takes live
+  consumer apps down (AC1.3). This selects a named set of pods where no application
+  dependency is plausible, and leaves the datastore hot path — postgres 5432,
+  redis 6379, mongodb 27017, kafka 9092, bolt 7687, otlp 4317/4318 — untouched.
+
+  DELIBERATELY EXCLUDED, because each one IS consumer-facing:
+    elasticsearch      NOTES.txt advertises fuzeinfra-elasticsearch:9200 to
+                       consumers, and coredns-split-horizon.yaml aliases it
+    airflow-webserver  AIRFLOW__API__AUTH_BACKENDS=basic_auth — apps may trigger DAGs
+    loki / tempo       documented as otel-collector-only, but enforcing that
+                       contract could break a consumer violating it; measure first
+  coredns-split-horizon.yaml rewrites the PUBLIC hostnames of several of these
+  services to in-cluster Services, so cross-namespace access to those names is an
+  expected pattern in general. Re-read that file before widening this set.
+
+  WHY THERE IS NO PROBE JOB HERE, unlike the edge policy
+  Rule 1 below permits every pod in this namespace on every port, and the chart must
+  not render into a foreign namespace (Argo rejects the whole Application, not just
+  the stray resource). So any probe this chart could deploy would be *allowed* by
+  the policy under test and could never fail — it would be decoration, not evidence.
+  Enforcement is a property of the CNI controller, not of an individual policy: k3s
+  enforces via an embedded kube-router unless started with --disable-network-policy,
+  and networkpolicy-edge.yaml's egress probe is what demonstrates that controller is
+  live. The same controller evaluates ingress rules. To check this policy's effect
+  by hand, exec into a pod in another namespace and attempt one of the ports above;
+  that is a deliberate manual step rather than a self-approving automated one.
+
+  NO PORT LIST, ON PURPOSE
+  Both permitted sources are already trusted — the namespace's own pods and the
+  ingress controller. Enumerating each component's ports would add a silent
+  breakage mode (a port added to a Service but not here) without narrowing anything
+  that matters.
+
+  OPT-IN BY LABEL
+  `fuzeinfra.io/ingress-profile: admin` keeps this to one object instead of six
+  near-identical per-component policies, and makes the protected set greppable.
+  Removing the label from a workload silently removes its protection.
+*/}}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: fuzeinfra-admin-ingress
+  labels:
+    {{- include "fuzeinfra.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      fuzeinfra.io/ingress-profile: admin
+  policyTypes:
+    - Ingress
+  ingress:
+    # 1. This namespace's own pods. Keeping it broad is what stops the
+    #    observability plane breaking: Prometheus scrapes Grafana and Alertmanager,
+    #    Grafana queries Prometheus/Loki/Tempo, Prometheus posts alerts to
+    #    Alertmanager, and the backup CronJob calls Prometheus's snapshot API — all
+    #    within `fuzeinfra`. Enumerating those flows instead would buy little: every
+    #    pod here is an infra component under one trust boundary, and the three
+    #    internet-facing ones (a2a-relay, a2a-gateway, handoff-mcp) already cannot
+    #    reach any in-cluster address at all, because networkpolicy-edge.yaml denies
+    #    them the whole cluster CIDR range.
+    - from:
+        - podSelector: {}
+    # 2. Traefik — the only path the Cloudflare Tunnel can arrive by, and therefore
+    #    the only route that has already passed Cloudflare Access. It lives in
+    #    kube-system (argocd/cluster-bootstrap/traefik-clusterip.yaml), so this has
+    #    to be a namespaceSelector + podSelector pair. A bare kube-system selector
+    #    would admit every system pod.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: traefik
+    {{- with .Values.networkPolicy.adminPlane.extraAllowedNamespaces }}
+    # 3. Escape hatch for a namespace that turns out to need admin-plane access.
+    #    Prefer a narrow entry here over removing a workload's opt-in label: the
+    #    label is all-or-nothing for that pod, this is not.
+    - from:
+        {{- range . }}
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ . | quote }}
+        {{- end }}
+    {{- end }}
+{{- end }}

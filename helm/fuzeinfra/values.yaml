@@ -1557,6 +1557,27 @@ networkPolicy:
     blockedPort: 5432
     allowedHost: pypi.org
     allowedPort: 443
+  # ---------------------------------------------------------------------------
+  # M1b — admin-plane INGRESS lockdown (templates/networkpolicy-admin.yaml).
+  #
+  # Separate gate from `enabled` above on purpose: that one turns on an EGRESS
+  # policy whose correctness depends on cluster-specific CIDRs, this one turns on
+  # an INGRESS policy that depends on none. An overlay can want either without the
+  # other, and coupling them would make enabling the safe half require getting the
+  # CIDRs right first.
+  #
+  # Restricts the admin/observability UIs (prometheus, alertmanager, grafana,
+  # mongo-express, kafka-ui, flower) to this namespace plus Traefik, closing the
+  # path that let any pod in any of the 24 other namespaces reach them directly and
+  # bypass Cloudflare Access. Opt-in per workload via the label
+  # `fuzeinfra.io/ingress-profile: admin`.
+  # ---------------------------------------------------------------------------
+  adminPlane:
+    enabled: false
+    # Namespaces granted admin-plane access on top of `fuzeinfra` + Traefik. Each
+    # entry is a real grant to EVERY pod in that namespace, so add one only for a
+    # named, understood need — and prefer it to dropping a workload's opt-in label.
+    extraAllowedNamespaces: []
 
 a2aRelay:
   # A2A WSS relay for cloud<->cloud Claude Code session messaging
