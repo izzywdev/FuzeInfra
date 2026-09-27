@@ -28,17 +28,26 @@ jobs:
           printf '%s' "$KUBE_CONFIG" | base64 -d > "$HOME/.kube/config"
           chmod 600 "$HOME/.kube/config"
 
-      - name: Hard refresh and sync FuzeKeys
+      - name: Terminate stale operation, hard refresh, and sync FuzeKeys
         run: |
           set -euo pipefail
           export KUBECONFIG="$HOME/.kube/config"
           app=fuzekeys-platform
-          kubectl -n argocd annotate application "$app" argocd.argoproj.io/refresh=hard --overwrite
           phase=$(kubectl -n argocd get application "$app" -o jsonpath='{.status.operationState.phase}' 2>/dev/null || true)
           if [ "$phase" = Running ]; then
-            echo "::error::Argo operation already running; terminate it before starting another sync"
-            exit 1
+            echo "Terminating stale Argo operation"
+            kubectl -n argocd patch application "$app" --type=json \
+              -p '[{"op":"remove","path":"/operation"}]' || true
+            sleep 3
+            phase=$(kubectl -n argocd get application "$app" -o jsonpath='{.status.operationState.phase}' 2>/dev/null || true)
+            if [ "$phase" = Running ]; then
+              kubectl -n argocd patch application "$app" --subresource=status --type=merge \
+                -p '{"status":{"operationState":{"phase":"Failed","message":"Terminated by FuzeKeys recovery workflow before resync"}}}'
+            fi
           fi
+
+          kubectl -n argocd annotate application "$app" argocd.argoproj.io/refresh=hard --overwrite
+          sleep 2
           kubectl -n argocd patch application "$app" --type merge \
             -p '{"operation":{"initiatedBy":{"username":"github-actions"},"sync":{"prune":false}}}'
 
