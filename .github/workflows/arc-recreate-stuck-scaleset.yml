@@ -157,7 +157,7 @@ jobs:
             # a readonly name fails but does not abort, so `UID` would keep the
             # runner uid and every guard below that reads it would be bogus.
             ARS_UID=$(kubectl -n "$NS" get autoscalingrunnerset "$NAME" \
-              -o jsonpath='{.metadata.uid}' 2>/dev/null)
+              -o jsonpath='{.metadata.uid}' 2>/dev/null || true)
             if [ -z "$ARS_UID" ]; then
               echo "  '$NAME' not found in $NS — nothing to recreate."
               skipped="$skipped $NAME"; echo "::endgroup::"; continue
@@ -199,10 +199,14 @@ jobs:
             # NEW UID (not just presence) proves it is a fresh object, not the
             # old one still finalizing.
             echo "  waiting for Argo to recreate the AutoscalingRunnerSet…"
+            # `|| true`: Actions runs this step as `bash -e`, and kubectl exits
+            # non-zero while the object is absent — exactly the window this loop
+            # polls through. Without it the step died on the first probe (run
+            # 36357284691). Same for the ARS_UID lookup above.
             NEWUID=""
             for i in $(seq 1 40); do
               NEWUID=$(kubectl -n "$NS" get autoscalingrunnerset "$NAME" \
-                -o jsonpath='{.metadata.uid}' 2>/dev/null)
+                -o jsonpath='{.metadata.uid}' 2>/dev/null || true)
               if [ -n "$NEWUID" ] && [ "$NEWUID" != "$ARS_UID" ]; then
                 echo "  recreated after ~$((i*15))s (new uid)"; break
               fi
