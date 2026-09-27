@@ -21,7 +21,12 @@ on:
 jobs:
   validate-and-sync:
     name: Validate → ArgoCD sync
-    runs-on: staging
+    # Production control-plane work needs only the stored kubeconfig. Keeping it
+    # on the in-cluster `staging` runner creates a circular failure: when that
+    # runner is unavailable, the workflow that repairs/syncs the cluster cannot
+    # start. The GitHub-hosted recovery workflow already proves this kubeconfig
+    # path reaches the API server safely from ubuntu-latest.
+    runs-on: ubuntu-latest
     timeout-minutes: 120
     environment: production
 
