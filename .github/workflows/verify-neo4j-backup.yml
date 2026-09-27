@@ -1,0 +1,65 @@
+name: Verify Neo4j production backup
+
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: azure/setup-kubectl@829323503d1be3d00ca8346e5391ca0b07a9ab0d # v5.1.0
+
+      - name: Configure kubectl
+        env:
+          KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
+        run: |
+          set -euo pipefail
+          test -n "$KUBE_CONFIG"
+          mkdir -p "$HOME/.kube"
+          printf '%s' "$KUBE_CONFIG" | base64 -d > "$HOME/.kube/config"
+          chmod 600 "$HOME/.kube/config"
+
+      - name: Wait for ArgoCD to apply the Neo4j floor
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 60); do
+            command=$(kubectl -n fuzeinfra get cronjob fuzeinfra-backup-neo4j \
+              -o jsonpath='{.spec.jobTemplate.spec.template.spec.initContainers[?(@.name=="dump")].command[2]}')
+            if grep -q 'min_bytes=32' <<<"$command"; then
+              echo "Live CronJob contains min_bytes=32."
+              exit 0
+            fi
+            echo "Attempt $attempt/60: ArgoCD has not applied min_bytes=32 yet."
+            sleep 5
+          done
+          echo "::error::Timed out waiting for the live CronJob to reach min_bytes=32."
+          exit 1
+
+      - name: Run one production backup
+        id: backup
+        run: |
+          set -euo pipefail
+          job="neo4j-backup-smoke-${GITHUB_RUN_ID}"
+          echo "job=$job" >> "$GITHUB_OUTPUT"
+          kubectl -n fuzeinfra create job --from=cronjob/fuzeinfra-backup-neo4j "$job"
+          kubectl -n fuzeinfra wait --for=condition=complete "job/$job" --timeout=8m
+
+      - name: Show backup result
+        if: always() && steps.backup.outputs.job != ''
+        env:
+          JOB: ${{ steps.backup.outputs.job }}
+        run: |
+          set -u
+          kubectl -n fuzeinfra get job "$JOB" -o wide || true
+          pod=$(kubectl -n fuzeinfra get pod -l "job-name=$JOB" \
+            -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+          if [ -n "$pod" ]; then
+            echo "=== dump init-container ==="
+            kubectl -n fuzeinfra logs "$pod" -c dump --tail=200 || true
+            echo "=== upload container ==="
+            kubectl -n fuzeinfra logs "$pod" -c upload --tail=200 || true
+          fi
