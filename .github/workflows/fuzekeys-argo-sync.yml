@@ -1,0 +1,64 @@
+name: Sync FuzeKeys in Argo CD
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sync-fuzekeys-argocd
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: production
+    steps:
+      - uses: azure/setup-kubectl@829323503d1be3d00ca8346e5391ca0b07a9ab0d # v5.1.0
+
+      - name: Configure kubectl
+        env:
+          KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
+        run: |
+          set -euo pipefail
+          test -n "$KUBE_CONFIG" || { echo "::error::KUBE_CONFIG unset"; exit 1; }
+          mkdir -p "$HOME/.kube"
+          printf '%s' "$KUBE_CONFIG" | base64 -d > "$HOME/.kube/config"
+          chmod 600 "$HOME/.kube/config"
+
+      - name: Hard refresh and sync FuzeKeys
+        run: |
+          set -euo pipefail
+          export KUBECONFIG="$HOME/.kube/config"
+          app=fuzekeys-platform
+          kubectl -n argocd annotate application "$app" argocd.argoproj.io/refresh=hard --overwrite
+          phase=$(kubectl -n argocd get application "$app" -o jsonpath='{.status.operationState.phase}' 2>/dev/null || true)
+          if [ "$phase" = Running ]; then
+            echo "::error::Argo operation already running; terminate it before starting another sync"
+            exit 1
+          fi
+          kubectl -n argocd patch application "$app" --type merge \
+            -p '{"operation":{"initiatedBy":{"username":"github-actions"},"sync":{"prune":false}}}'
+
+          for attempt in $(seq 1 60); do
+            phase=$(kubectl -n argocd get application "$app" -o jsonpath='{.status.operationState.phase}')
+            sync=$(kubectl -n argocd get application "$app" -o jsonpath='{.status.sync.status}')
+            health=$(kubectl -n argocd get application "$app" -o jsonpath='{.status.health.status}')
+            revision=$(kubectl -n argocd get application "$app" -o jsonpath='{.status.sync.revision}')
+            echo "attempt=$attempt phase=$phase sync=$sync health=$health revision=$revision"
+            case "$phase" in
+              Succeeded)
+                test "$sync" = Synced
+                exit 0
+                ;;
+              Failed|Error)
+                kubectl -n argocd get application "$app" -o jsonpath='{.status.operationState.message}{"\n"}'
+                exit 1
+                ;;
+            esac
+            sleep 5
+          done
+          echo "::error::Timed out waiting for Argo sync"
+          exit 1
