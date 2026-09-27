@@ -1,0 +1,257 @@
+# ===========================================================================
+# arc-recreate-stuck-scaleset — recreate an AutoscalingRunnerSet whose ARC
+# controller has torn down its listener + EphemeralRunnerSet and then wedged
+# WITHOUT recreating them.
+# ===========================================================================
+# WHY THIS EXISTS (2026-09-27, issue #1199 — fleet-wide listener-absent outage)
+# ---------------------------------------------------------------------------
+# 19 of 22 scale sets (every set EXCEPT fuzeagent / fuzekeys / fuzex) sat with
+# NO AutoscalingListener pod and NO EphemeralRunnerSet for days, so their CI
+# queued forever (mendysrobotics, staging, fuzefront, … all starved). Verified
+# live via cluster-query on 2026-09-27:
+#
+#   * `get autoscalinglistener -A`  -> only fuzeagent/fuzekeys/fuzex listeners.
+#   * `get ephemeralrunnerset -A`   -> only fuzeagent/fuzekeys/fuzex ERS.
+#   * `describe autoscalingrunnerset mendysrobotics` -> phase: Outdated,
+#     finalizer present, NO deletionTimestamp, phantom status
+#     "Running Ephemeral Runners: 4" with ZERO actual runner pods.
+#   * controller log, every reconcile, for each of the 19:
+#       "Ephemeral runner set is outdated" -> "Deleting the listener" ->
+#       "Listener is deleted" -> "All ephemeral runner sets are deleted" ->
+#       "deleting runner scale set"  ... then SILENCE. It tears everything
+#     down and never recreates — the reconcile concludes and does not requeue.
+#   * All `arc-runners-*` Argo Applications report Synced + Healthy, so Argo
+#     sees no drift and will not self-correct.
+#
+# The 19 sets are genuinely "Outdated" (their live ERS was built from an OLD
+# pod-template spec; a later runner-scale-set-values.yaml change moved the
+# desired hash). The controller deletes the stale ERS but wedges before
+# recreating. controller-selfheal.yaml check 3b restarting the controller every
+# 15 min has NOT recovered them — a restart re-runs the same teardown, it does
+# not clear the stale object.
+#
+# WHY DELETE-AND-LET-ARGO-RECREATE IS THE CURE (same mechanism as
+# arc-repair-drifted-scaleset.yml, different detection):
+#   Deleting the AutoscalingRunnerSet cascades (ownerReferences) to its ERS,
+#   any runners and its listener, and its finalizer deregisters the scale set
+#   from GitHub. The `arc-runners-<name>` Argo app has automated selfHeal, so it
+#   recreates the object from Git within ~3 min — as a BRAND-NEW object: fresh
+#   generation, single owner, no phantom status, no stale runner-scale-set-id.
+#   The controller then builds a fresh ERS whose spec hash equals the current
+#   desired (identical to what the 3 healthy sets already have), so it is NOT
+#   outdated, and it creates the listener and keeps it — exactly the steady
+#   state the 3 healthy sets have held for days.
+#
+# WHY THIS IS A SEPARATE WORKFLOW FROM arc-repair-drifted-scaleset.yml:
+#   That workflow's "Detect drift" guard fires ONLY when the live ARS still
+#   carries a stale `dind` INITCONTAINER (the 2026-08-31 duplicate-dind drift).
+#   The 2026-09-27 sets are clean on that axis (initContainers == only
+#   init-dind-externals), so arc-repair correctly SKIPS them as "already
+#   clean". This workflow detects the DIFFERENT symptom — listener absent while
+#   the ARS exists — and refuses to touch anything else.
+#
+# WHY DELETING IS SAFE HERE, AND GUARDED SO IT STAYS SAFE:
+#   A scale set with no listener produces ZERO runners — it is 100%
+#   non-functional, so deleting it interrupts no running job. To keep that true
+#   rather than assumed, this workflow REFUSES to delete a set that (a) is not
+#   allowlisted, (b) does not exist, (c) STILL HAS a listener pod (i.e. is
+#   healthy — never disturb it), or (d) has any runner Pod in arc-runners (a
+#   real job could be in flight). It also requires a typed confirmation. Those
+#   guards make it a no-op on a healthy fleet and safe to re-run.
+#
+# THIS IS A REPAIR TOOL, NOT A DEPLOY PATH. Prod is GitOps. The durable fix for
+# the recurring wedge is tracked in #1199 (controller-selfheal check 3b should
+# stop hammering restart on a mass listener-absence it cannot fix, and escalate
+# instead). Reach for this only when cluster-query shows listener-absent sets
+# whose ARS exists and Argo reports Synced.
+#
+# Required secret: KUBE_CONFIG — same base64 kubeconfig used by cluster-query /
+# arc-repair-drifted-scaleset / deploy-prod.
+#
+# Example:
+#   gh workflow run arc-recreate-stuck-scaleset.yml --repo izzywdev/FuzeInfra \
+#     -f scale_sets="mendysrobotics" -f confirm=RECREATE
+
+name: arc-recreate-stuck-scaleset
+
+on:
+  workflow_dispatch:
+    inputs:
+      scale_sets:
+        description: 'Space-separated scale-set names to recreate (must be allowlisted below). Default = the 19 stuck on 2026-09-27 (#1199).'
+        required: true
+        default: "fuze-runner fuzebi fuzecall fuzecontact fuzedeploy fuzeexecutive fuzefinance fuzefront fuzehub fuzemarket fuzemerchandize fuzepicker fuzeplan fuzesales fuzeservice fuzesocial mendysrobotics mendysroboticswp staging"
+        type: string
+      confirm:
+        description: 'Type RECREATE to confirm deleting + recreating these AutoscalingRunnerSets.'
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: arc-recreate-stuck-scaleset
+  cancel-in-progress: false
+
+jobs:
+  recreate:
+    # ubuntu-latest, never a self-hosted runner: this workflow repairs the ARC
+    # scale sets, so it must not depend on one being healthy (same reasoning as
+    # arc-repair-drifted-scaleset.yml / arc-register.yml). During the incident
+    # that motivated it, 19 of them could not run a job at all.
+    runs-on: ubuntu-latest
+    steps:
+      - name: Confirm intent
+        env:
+          CONFIRM: ${{ inputs.confirm }}
+        run: |
+          if [ "$CONFIRM" != "RECREATE" ]; then
+            echo "::error title=arc-recreate::Refusing: 'confirm' must be exactly RECREATE (got '${CONFIRM}')."
+            exit 1
+          fi
+
+      - uses: azure/setup-kubectl@829323503d1be3d00ca8346e5391ca0b07a9ab0d # v5.1.0
+
+      - name: Configure kubectl
+        env:
+          KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
+        run: |
+          if [ -z "$KUBE_CONFIG" ]; then echo "::error::KUBE_CONFIG unset"; exit 1; fi
+          mkdir -p "$HOME/.kube"
+          printf '%s' "$KUBE_CONFIG" | base64 -d > "$HOME/.kube/config"
+          chmod 600 "$HOME/.kube/config"
+          echo "KUBECONFIG=$HOME/.kube/config" >> "$GITHUB_ENV"
+
+      - name: Recreate
+        # SCALE_SETS is workflow input — routed through env: rather than
+        # interpolated into the script, so a name containing shell
+        # metacharacters is a value, never syntax (gate-sast flags the direct
+        # ${{ }} form for exactly this).
+        env:
+          SCALE_SETS: ${{ inputs.scale_sets }}
+        run: |
+          set -uo pipefail
+          NS=arc-runners
+          SYS=arc-systems
+          LISTENER_SEL="app.kubernetes.io/component=runner-scale-set-listener"
+
+          # Fail-closed allowlist: every scale set FuzeInfra manages in
+          # argocd/applications/arc-runners.yaml. A name not on this list is a
+          # typo or a mistake, and this workflow deletes things — so refuse
+          # rather than guess. Keep in sync with arc-repair-drifted-scaleset.yml.
+          ALLOWED="fuze-runner fuzeagent fuzebi fuzecall fuzecontact fuzedeploy fuzeexecutive fuzefinance fuzefront fuzehub fuzekeys fuzemarket fuzemerchandize fuzepicker fuzeplan fuzesales fuzesdlc fuzeservice fuzesocial fuzex mendysrobotics mendysroboticswp staging"
+
+          recreated=""; skipped=""; failed=""
+
+          for NAME in $SCALE_SETS; do
+            echo "::group::$NAME"
+            ok=0
+            for a in $ALLOWED; do [ "$a" = "$NAME" ] && ok=1; done
+            if [ "$ok" != 1 ]; then
+              echo "::error title=arc-recreate::'$NAME' is not an allowlisted scale set — refusing."
+              failed="$failed $NAME"; echo "::endgroup::"; continue
+            fi
+
+            # NB: NOT `UID` — that shadows bash's readonly builtin (the runner's
+            # numeric user id). Under `set -uo pipefail` (no -e) an assignment to
+            # a readonly name fails but does not abort, so `UID` would keep the
+            # runner uid and every guard below that reads it would be bogus.
+            ARS_UID=$(kubectl -n "$NS" get autoscalingrunnerset "$NAME" \
+              -o jsonpath='{.metadata.uid}' 2>/dev/null)
+            if [ -z "$ARS_UID" ]; then
+              echo "  '$NAME' not found in $NS — nothing to recreate."
+              skipped="$skipped $NAME"; echo "::endgroup::"; continue
+            fi
+
+            # GUARD 1 — never disturb a set that already has a listener. A
+            # present listener means the set is functional (or the controller is
+            # actively serving it); this workflow only touches listener-ABSENT
+            # sets. This also makes re-running the workflow a no-op once healed.
+            LCOUNT=$(kubectl -n "$SYS" get pods \
+              -l "actions.github.com/scale-set-name=${NAME},${LISTENER_SEL}" \
+              -o name 2>/dev/null | wc -l | tr -d ' ')
+            if [ "$LCOUNT" != "0" ]; then
+              echo "  '$NAME' already has a listener pod ($LCOUNT) — healthy, skipping."
+              skipped="$skipped $NAME"; echo "::endgroup::"; continue
+            fi
+
+            # GUARD 2 — never interrupt a running job. A listener-absent set
+            # should have no runner pods; if one exists, bail out of caution.
+            RCOUNT=$(kubectl -n "$NS" get pods \
+              -l "actions.github.com/scale-set-name=${NAME}" \
+              -o name 2>/dev/null | wc -l | tr -d ' ')
+            if [ "$RCOUNT" != "0" ]; then
+              echo "::warning title=arc-recreate::'$NAME' has $RCOUNT runner pod(s) despite no listener — NOT deleting (a job may be in flight). Investigate manually."
+              skipped="$skipped $NAME"; echo "::endgroup::"; continue
+            fi
+
+            PHASE=$(kubectl -n "$NS" get autoscalingrunnerset "$NAME" \
+              -o jsonpath='{.status.phase}' 2>/dev/null)
+            echo "  listener-absent, no runner pods, status.phase='${PHASE:-<none>}' — deleting AutoscalingRunnerSet/$NAME (cascades to its ERS/runners/listener; finalizer deregisters GitHub)…"
+
+            if ! kubectl -n "$NS" delete autoscalingrunnerset "$NAME" --timeout=120s; then
+              echo "::error title=arc-recreate::delete failed for $NAME (finalizer may be wedged — check the controller)."
+              failed="$failed $NAME"; echo "::endgroup::"; continue
+            fi
+
+            # Argo reconciles on a ~3min loop; selfHeal recreates the deleted
+            # object. Poll rather than sleep so a fast sync is not punished. A
+            # NEW UID (not just presence) proves it is a fresh object, not the
+            # old one still finalizing.
+            echo "  waiting for Argo to recreate the AutoscalingRunnerSet…"
+            NEWUID=""
+            for i in $(seq 1 40); do
+              NEWUID=$(kubectl -n "$NS" get autoscalingrunnerset "$NAME" \
+                -o jsonpath='{.metadata.uid}' 2>/dev/null)
+              if [ -n "$NEWUID" ] && [ "$NEWUID" != "$ARS_UID" ]; then
+                echo "  recreated after ~$((i*15))s (new uid)"; break
+              fi
+              NEWUID=""
+              sleep 15
+            done
+            if [ -z "$NEWUID" ]; then
+              echo "::error title=arc-recreate::$NAME was NOT recreated within 10min. Check: kubectl -n argocd get application arc-runners-$NAME"
+              failed="$failed $NAME"; echo "::endgroup::"; continue
+            fi
+
+            # Now wait for the ARC controller to build a listener for the fresh
+            # object — the actual success signal this whole workflow exists for.
+            echo "  waiting for the controller to create a listener pod…"
+            GOT=0
+            for i in $(seq 1 24); do
+              C=$(kubectl -n "$SYS" get pods \
+                -l "actions.github.com/scale-set-name=${NAME},${LISTENER_SEL}" \
+                -o name 2>/dev/null | wc -l | tr -d ' ')
+              if [ "$C" != "0" ]; then echo "  listener present after ~$((i*15))s"; GOT=1; break; fi
+              sleep 15
+            done
+            if [ "$GOT" != 1 ]; then
+              echo "::error title=arc-recreate::$NAME recreated but NO listener appeared within 6min — the controller is still wedged for this set."
+              failed="$failed $NAME"; echo "::endgroup::"; continue
+            fi
+
+            echo "  ✓ recreated with a listener"
+            recreated="$recreated $NAME"
+            echo "::endgroup::"
+          done
+
+          {
+            echo "### arc-recreate-stuck-scaleset"
+            echo ""
+            echo "| outcome | scale sets |"
+            echo "|---|---|"
+            echo "| recreated (listener now present) | ${recreated:-(none)} |"
+            echo "| skipped (healthy / absent / has runner pod) | ${skipped:-(none)} |"
+            echo "| failed | ${failed:-(none)} |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          [ -n "$failed" ] && exit 1
+          echo "Done. Recreated:${recreated:-(none)}"
+
+      - name: Post-recreate state
+        if: always()
+        run: |
+          echo "=== AutoscalingListener pods (arc-systems) ==="
+          kubectl -n arc-systems get pods -l app.kubernetes.io/component=runner-scale-set-listener -o wide 2>&1 || true
+          echo "=== AutoscalingRunnerSets (arc-runners) ==="
+          kubectl -n arc-runners get autoscalingrunnersets 2>&1 || true
