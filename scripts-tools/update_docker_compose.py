@@ -4,8 +4,6 @@ Docker Compose Update Script for FuzeInfra
 Updates container names and volume references to use consistent fuzeinfra naming
 """
 
-import re
-
 def update_docker_compose():
     """Update the docker-compose file with consistent naming"""
     
