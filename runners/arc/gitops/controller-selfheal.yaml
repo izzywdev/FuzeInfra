@@ -241,6 +241,49 @@ spec:
                   # check 2 and check 3b never double-restart it in the same pass.
                   restarted=0
 
+                  # ---- ARC controller restart COOLDOWN (guards check 2 and check 3b) ----
+                  # A `rollout restart` only helps if the controller is then LEFT ALONE long
+                  # enough to converge: on start it re-reconciles every AutoscalingRunnerSet,
+                  # which means a GitHub round-trip per set plus recreating each
+                  # AutoscalingListener. This CronJob fires every 15m and both restart sites
+                  # below used to fire unconditionally on a listener miss — so a fleet-wide
+                  # listener outage became SELF-SUSTAINING: restart, get killed mid-sweep 15m
+                  # later, listeners still absent, restart again, forever. The watchdog became
+                  # the outage.
+                  #
+                  # Observed 2026-09-27: 19 of 22 listeners absent for >24h (fleet CI stalled,
+                  # thousands of runs queued, some >1400m) while the controller pod was NEVER
+                  # older than the cron interval — sampled at 13m, 2m3s and 6m5s. The
+                  # AutoscalingRunnerSets were all present, not terminating, and Argo reported
+                  # every arc-runners Application Synced+Healthy, so nothing else flagged it.
+                  #
+                  # So: only restart if the RUNNING controller has already had COOLDOWN seconds
+                  # to converge. Otherwise leave it running and still emit CRIT, so the incident
+                  # stays visible instead of being papered over by another restart.
+                  #
+                  # 2700s (45m) = 3x the cron interval, so the loop cannot re-form: at most one
+                  # restart per three runs, and the controller always gets >= 2 full cron
+                  # windows of uninterrupted time to finish reconciling.
+                  CONTROLLER_COOLDOWN_SECS=2700
+                  # Age of the youngest running controller pod, in seconds. -1 = unknown (no
+                  # pod found / kubectl or jq failed), which deliberately ALLOWS a restart:
+                  # "we cannot tell" must not block recovery of a genuinely wedged controller.
+                  ctrl_age=$(kubectl -n arc-systems get pods -o json 2>/dev/null | jq -r '
+                    [ .items[]
+                      | select(.metadata.name | startswith("arc-controller-gha-rs-controller-"))
+                      | select(.status.startTime != null)
+                      | .status.startTime ]
+                    | sort | last
+                    | if . == null then -1 else ((now - fromdate) | floor) end' 2>/dev/null)
+                  case "${ctrl_age:-}" in ''|*[!0-9-]*) ctrl_age=-1 ;; esac
+
+                  # 0 = restart allowed, 1 = still inside the cooldown window.
+                  controller_restart_allowed() {
+                    [ "$ctrl_age" -lt 0 ] && return 0
+                    [ "$ctrl_age" -lt "$CONTROLLER_COOLDOWN_SECS" ] && return 1
+                    return 0
+                  }
+
                   # ---- check 1: a schedulable node carries fuzeinfra.io/pool=ci ----
                   # CI_NODES: nodes that SHOULD carry the label. k3s applies --node-label
                   # only at agent registration and Terraform never reconciles it, so the
@@ -298,10 +341,13 @@ spec:
                       # with no schedulable node; the label auto-repair above already
                       # fired, so the next cron run will see the node and try a restart.
                       echo "runners stuck, but the CI pool above is the cause - NOT restarting the controller (auto-repair attempted above)"
-                    else
-                      echo "STUCK detected -> restarting ARC controller"
+                    elif controller_restart_allowed; then
+                      echo "STUCK detected -> restarting ARC controller (controller age ${ctrl_age}s >= ${CONTROLLER_COOLDOWN_SECS}s cooldown)"
                       kubectl -n arc-systems rollout restart deployment/arc-controller-gha-rs-controller
                       restarted=1
+                    else
+                      echo "CRIT ARC runners-stuck-cooldown: runners are stuck but NOT restarting the controller - it has only been running ${ctrl_age}s of the ${CONTROLLER_COOLDOWN_SECS}s cooldown. A restart here would kill an in-flight reconcile and is what turns a transient stall into a self-sustaining outage. Leaving it to converge; the next run may restart it once the cooldown elapses."
+                      crit=1
                     fi
                   else
                     echo "ok controller: creating runners normally"
@@ -360,11 +406,14 @@ spec:
                     else
                       echo "CRIT ARC listener-absent:$absent has no listener pod at all (any phase) - that scale set's CI has 0 runners and check 3 has nothing Terminating to force-delete. Requesting a controller reconcile to recreate the missing listener(s); the underlying node instability still needs manual attention."
                       crit=1
-                      if [ "$restarted" -eq 0 ]; then
+                      if [ "$restarted" -ne 0 ]; then
+                        echo "controller already restarted this run (check 2) - not restarting again"
+                      elif controller_restart_allowed; then
+                        echo "controller age ${ctrl_age}s >= ${CONTROLLER_COOLDOWN_SECS}s cooldown -> restarting to force a listener reconcile"
                         kubectl -n arc-systems rollout restart deployment/arc-controller-gha-rs-controller
                         restarted=1
                       else
-                        echo "controller already restarted this run (check 2) - not restarting again"
+                        echo "CRIT ARC listener-absent-cooldown: NOT restarting the controller - it has only been running ${ctrl_age}s of the ${CONTROLLER_COOLDOWN_SECS}s cooldown, so it is still inside the window it needs to reconcile every scale set and recreate the missing listener(s). Restarting again HERE is precisely what made the 2026-09-27 outage self-sustaining (19/22 listeners absent >24h, controller never older than the 15m cron). Leaving it alone to converge. If the listeners are STILL absent once the cooldown has elapsed, the controller cannot recreate them unaided - read 'kubectl -n arc-systems logs deployment/arc-controller-gha-rs-controller' and fix the cause instead of restarting."
                       fi
                     fi
                   fi
