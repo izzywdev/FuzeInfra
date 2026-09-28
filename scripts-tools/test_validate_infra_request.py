@@ -6,7 +6,6 @@ validate() returns (decision, reasons) where decision is one of:
   "apply" -> whitelisted; handler auto-applies
   "gate"  -> valid request, not whitelisted; handler opens a gated PR
 """
-import json
 import os
 import sys
 import unittest
