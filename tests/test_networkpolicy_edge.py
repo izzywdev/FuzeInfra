@@ -211,3 +211,46 @@ def test_edge_workloads_expose_the_component_label_the_other_tests_key_on():
             "app.kubernetes.io/name — the component-keyed assertions would silently "
             "compare against None"
         )
+
+
+# --- the probe Job must stay deployable ------------------------------------
+#
+# 2026-09-28: editing the probe script wedged the ENTIRE fuzeinfra-prod Argo
+# Application. A Job's spec.template is immutable, so Argo tried to PATCH the
+# existing Job, the API server rejected it with "field is immutable", and Argo
+# retried and failed — blocking every prod deploy, not just this Job, until the
+# sync option below was added. These pin both halves of that fix.
+
+
+def test_probe_job_is_replaced_not_patched():
+    """Without Replace=true, ANY edit to the probe breaks the whole app's sync."""
+    docs = _render("values-contabo.yaml")
+    jobs = [d for d in docs if d.get("kind") == "Job"
+            and d["metadata"]["name"] == "fuzeinfra-edge-egress-probe"]
+    assert jobs, "probe Job not rendered in prod"
+    opts = (jobs[0]["metadata"].get("annotations") or {}).get(
+        "argocd.argoproj.io/sync-options", ""
+    )
+    assert "Replace=true" in opts, (
+        "the probe Job must carry argocd.argoproj.io/sync-options: Replace=true. "
+        "A Job's spec.template is immutable, so without it Argo patches instead of "
+        "recreating, hits 'field is immutable', and stops syncing the ENTIRE "
+        "fuzeinfra-prod Application"
+    )
+
+
+def test_probe_job_rolls_when_the_script_changes():
+    """The checksum must cover the probe config, not just the CIDR list.
+
+    The original annotation hashed only clusterCidrs, so editing the script left
+    the Job's annotations identical — it neither re-ran nor announced a change,
+    which is half of why the immutability breakage was confusing.
+    """
+    docs = _render("values-contabo.yaml")
+    jobs = [d for d in docs if d.get("kind") == "Job"
+            and d["metadata"]["name"] == "fuzeinfra-edge-egress-probe"]
+    ann = jobs[0]["metadata"].get("annotations") or {}
+    assert "checksum/probe" in ann, (
+        "probe Job needs a checksum over networkPolicy.probe so a script or target "
+        "change rolls it"
+    )

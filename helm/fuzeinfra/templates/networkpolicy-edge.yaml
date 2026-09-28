@@ -103,7 +103,20 @@ metadata:
   labels:
     {{- include "fuzeinfra.labels" . | nindent 4 }}
   annotations:
-    # Re-run the probe whenever the policy's CIDR set changes.
+    # A Job's spec.template is IMMUTABLE. Without this, ANY edit to the probe —
+    # the script, the image, the targets — makes Argo try to PATCH the existing
+    # Job, which the API server rejects with "field is immutable". Argo retries,
+    # fails, and the WHOLE fuzeinfra-prod Application stops syncing: not just this
+    # Job, everything. That happened on 2026-09-28 (revision 423f7d8) and wedged
+    # prod deploys until it was fixed. Replace=true makes Argo delete and recreate
+    # the Job instead of patching it, which is the supported way to ship a mutable
+    # Job through GitOps.
+    argocd.argoproj.io/sync-options: Replace=true
+    # Re-run the probe whenever anything about it changes — not just the CIDR set.
+    # The old checksum covered only clusterCidrs, so a script change did not roll
+    # the Job; combined with the immutability above, that is exactly how an edited
+    # probe both failed to run AND broke the sync.
+    checksum/probe: {{ .Values.networkPolicy.probe | toJson | sha256sum }}
     checksum/cidrs: {{ .Values.networkPolicy.clusterCidrs | toJson | sha256sum }}
 spec:
   backoffLimit: 0
