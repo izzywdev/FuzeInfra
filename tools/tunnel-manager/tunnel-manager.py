@@ -11,7 +11,7 @@ import yaml
 import argparse
 import subprocess
 from pathlib import Path
-from typing import Dict, List, Optional, Any
+from typing import Dict, List
 from datetime import datetime, timedelta
 import requests
 from tinydb import TinyDB, Query
