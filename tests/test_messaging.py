@@ -6,7 +6,6 @@ import time
 import json
 import pika
 from kafka import KafkaConsumer
-from kafka.errors import KafkaError
 
 
 class TestKafka:
