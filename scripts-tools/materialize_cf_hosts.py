@@ -43,6 +43,10 @@ CONSUMERS_TFVARS = REPO_ROOT / "terraform" / "contabo" / "materialized" / "consu
 _NON_CHART_RESERVED: frozenset[str] = frozenset({
     "app", "auth", "plan", "fuzehub",  # public_vanity_hosts in cloudflare.tf
     "argocd",                          # admin tunnel rule
+    "www",                             # cloudflare_record.website_www — canonical-host
+                                       # redirect to the fuzefront.com apex. Owned by a
+                                       # bare .tf resource, not by public_vanity_hosts,
+                                       # so it is not derivable from either source.
 })
 
 
