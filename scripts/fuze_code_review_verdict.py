@@ -190,6 +190,12 @@ def decide(action_conclusion: str, result_text: str, nonce: str,
 
     `decision` is always one of DECISIONS. Only `decision == "approve"` may ever result in
     the workflow calling `gh pr review --approve` — every other value must not.
+
+    `job_result` is FUZE_REVIEW_JOB_RESULT from the workflow — the GitHub-set result of the
+    review job itself (not the fuze-code-action conclusion). The only value that changes
+    behaviour here is "cancelled": a cancelled job was superseded by a newer commit, so it
+    returns decision="superseded" and posts nothing, rather than abstaining and failing the
+    required check. Any other non-empty value falls through to the normal conclusion checks.
     """
     # RULE 0 — A CANCELLED RUN WAS SUPERSEDED; IT IS NOT A FAILED REVIEW.
     # Concurrency cancels the in-flight run whenever a new commit lands, so every push
