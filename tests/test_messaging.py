@@ -1,7 +1,6 @@
 """
 Tests for messaging services: Kafka and RabbitMQ
 """
-import pytest
 import time
 import json
 import pika
