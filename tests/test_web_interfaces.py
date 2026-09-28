@@ -1,7 +1,6 @@
 """
 Tests for web interface services: Mongo Express, Kafka UI, RabbitMQ Management, Neo4j Browser
 """
-import pytest
 import requests
 
 
