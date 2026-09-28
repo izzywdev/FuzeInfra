@@ -239,7 +239,7 @@ import json
 import os
 import subprocess
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace as _dc_replace
 from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -303,6 +303,14 @@ class RepoFacts:
     #: an operator has pinned this repo out of the watcher's reach
     #: (governance/runner-watch.json `pinned`). The watcher reports but never writes.
     pinned: bool = False
+    #: True when this repo's pool is an EPHEMERAL, SCALE-TO-ZERO pool — every pool in this
+    #: fleet is a `gha-runner-scale-set` with `minRunners: 0`
+    #: (runners/arc/runner-scale-set-values.yaml), which registers a runner only while a
+    #: job is assigned. For such a pool `online_runners == 0` is the NORMAL RESTING STATE,
+    #: not evidence of a fault, so it must not be read as "down". Set False only for a
+    #: genuinely static pool with always-registered runners, where 0 really does mean down.
+    #: Comes from governance/runner-watch.json `ephemeral_pools`.
+    ephemeral_pool: bool = True
 
 
 @dataclass(frozen=True)
@@ -415,6 +423,32 @@ def decide_runner(facts: RepoFacts) -> Decision:
         )
 
     if facts.online_runners == 0:
+        # An EPHEMERAL scale-to-zero pool registers a runner only while a job is assigned,
+        # so 0 online is its idle state and says NOTHING about health. Reading it as "down"
+        # is what pinned this whole fleet to metered hosted runners: every private repo's
+        # pool is `minRunners: 0`, so every probe of an idle pool returned 0, every decision
+        # came out `ubuntu-latest`, and the account's Actions budget was spent on work the
+        # cluster was sitting idle waiting to do. Measured 2026-09-28: 14 private repos
+        # decided `ubuntu-latest` with the reason "has 0 runners online" while all 22
+        # scale-set listeners were Running and healthy; the single repo that escaped
+        # (MendysRobotics, online=5) did so only because the probe happened to land while
+        # runners were mid-job — a race, not a health check.
+        #
+        # The original reasoning (pods Running is not proof a runner registered) is still
+        # sound and is NOT reverted: it argues against trusting pod state, which this does
+        # not do. It just cannot be carried by a metric whose healthy value is also 0.
+        # The genuine down-pool case keeps its safety net one layer out, in the recovery
+        # sweep (`stranded_runs`), which cancels and re-dispatches any run left queued with
+        # no runner past `stranded_minutes` — an OUTCOME check that observes the pool
+        # failing to serve a real job instead of guessing from an idle-runner count.
+        if facts.ephemeral_pool:
+            return Decision(
+                facts.declared_pool,
+                f"private repo, pool '{facts.declared_pool}' reports 0 idle runners — the "
+                f"normal resting state of a scale-to-zero pool, not a fault; routing to it "
+                f"and leaving a genuinely down pool to the stranded-run recovery sweep",
+                liveness_verified=True,
+            )
         return Decision(
             HOSTED,
             f"self-hosted pool '{facts.declared_pool}' has 0 runners online — refusing to "
@@ -735,6 +769,11 @@ class Policy:
     capability: Dict[str, str] = field(default_factory=dict)  # slug -> "cluster"
     hysteresis: int = DEFAULT_HYSTERESIS
     stranded_minutes: int = DEFAULT_STRANDED_MINUTES
+    #: are the fleet's self-hosted pools ephemeral/scale-to-zero? True for every pool here
+    #: (`gha-runner-scale-set`, `minRunners: 0`), which makes `0 runners online` the idle
+    #: state rather than a fault — see RepoFacts.ephemeral_pool. Defaults True because that
+    #: is what the fleet actually runs; set False only for always-registered static runners.
+    ephemeral_pools: bool = True
 
 
 def load_policy(policy_file: str = POLICY_FILE) -> Policy:
@@ -749,6 +788,7 @@ def load_policy(policy_file: str = POLICY_FILE) -> Policy:
         capability={k: str(v) for k, v in (data.get("capability") or {}).items()},
         hysteresis=int(data.get("hysteresis", DEFAULT_HYSTERESIS)),
         stranded_minutes=int(data.get("stranded_minutes", DEFAULT_STRANDED_MINUTES)),
+        ephemeral_pools=bool(data.get("ephemeral_pools", True)),
     )
 
 
@@ -917,6 +957,7 @@ def run_decide(slugs: List[str], policy: Policy, *, apply: bool, hub: str,
             capability=policy.capability.get(slug, ""),
             online_runners=facts.online_runners,
             pinned=slug in policy.pinned,
+            ephemeral_pool=policy.ephemeral_pools,
         )
 
         if needs_liveness(facts):
@@ -1068,9 +1109,11 @@ def main(argv: Optional[List[str]] = None) -> int:
         if args.stranded_minutes < 1:
             ap.error("--stranded-minutes must be >= 1: a threshold of 0 would make every "
                      "freshly-queued job a cancellation candidate")
-        policy = Policy(pinned=policy.pinned, capability=policy.capability,
-                        hysteresis=policy.hysteresis,
-                        stranded_minutes=args.stranded_minutes)
+        # `replace` rather than re-listing fields: a hand-built Policy() silently reset
+        # every lever the author forgot to copy forward, which would have discarded an
+        # operator's explicit `ephemeral_pools: false` on any run that passed
+        # --stranded-minutes. Overriding one knob must never reset the others.
+        policy = _dc_replace(policy, stranded_minutes=args.stranded_minutes)
     if args.repos.strip():
         slugs = [s.strip() for s in args.repos.split(",") if s.strip()]
     else:
