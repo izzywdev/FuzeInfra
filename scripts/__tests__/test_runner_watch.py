@@ -83,13 +83,29 @@ class DecideRunner(unittest.TestCase):
         self.assertEqual(d.labels, "ubuntu-latest")
         self.assertIn("no self-hosted runner declared", d.reason)
 
-    def test_zero_online_refuses_to_queue_onto_a_down_pool(self):
-        """THE point of the whole watcher.
+    def test_idle_scale_to_zero_pool_is_still_used(self):
+        """A scale-to-zero pool reports 0 runners when IDLE, and that is not a fault.
+
+        This is the regression that cost the account its Actions budget. Every pool in this
+        fleet is a `gha-runner-scale-set` with `minRunners: 0`, so it registers a runner
+        only while a job is assigned; probing an idle pool therefore returns 0. Reading that
+        as "down" sent every private repo to `ubuntu-latest` while the cluster sat idle.
+        Measured 2026-09-28: 14 private repos decided `ubuntu-latest` for the reason "has 0
+        runners online" while all 22 scale-set listeners were Running."""
+        d = rw.decide_runner(facts(online_runners=0))
+        self.assertEqual(d.labels, "fuze-runner")
+        self.assertIn("0 idle runners", d.reason)
+        self.assertTrue(d.liveness_verified)
+
+    def test_zero_online_on_a_STATIC_pool_still_refuses_to_queue(self):
+        """The original guarantee, kept for pools where 0 genuinely means down.
 
         A budget-exhausted hosted runner is recoverable by a human with a card in minutes;
         a down cluster is repaired BY workflows, so routing CI onto it while it is down
-        removes the means of fixing it."""
-        d = rw.decide_runner(facts(online_runners=0))
+        removes the means of fixing it. That reasoning is untouched — it simply cannot be
+        carried by a metric whose HEALTHY value is also 0, which is why it now applies only
+        when the pool is declared non-ephemeral."""
+        d = rw.decide_runner(facts(online_runners=0, ephemeral_pool=False))
         self.assertEqual(d.labels, "ubuntu-latest")
         self.assertIn("0 runners online", d.reason)
         self.assertTrue(d.liveness_verified)
@@ -119,9 +135,14 @@ class DecideRunner(unittest.TestCase):
         """The two failure shapes must not collapse into each other. If they ever did, an
         unreachable API would read as 'the pool is down' and migrate everybody."""
         unverified = rw.decide_runner(facts(online_runners=None))
-        down = rw.decide_runner(facts(online_runners=0))
-        self.assertIsNone(unverified.labels)
+        down = rw.decide_runner(facts(online_runners=0, ephemeral_pool=False))
+        idle = rw.decide_runner(facts(online_runners=0))
+        self.assertIsNone(unverified.labels, "unverified must never be written")
         self.assertEqual(down.labels, "ubuntu-latest")
+        # And the third shape must stay distinct from BOTH: an idle scale-to-zero pool is
+        # neither unverified nor down, and collapsing it into either is a real defect —
+        # into `down` spends the budget, into `unverified` freezes the fleet's routing.
+        self.assertEqual(idle.labels, "fuze-runner")
 
     def test_cluster_capability_pins_self_hosted_even_on_a_public_repo(self):
         """A hosted runner cannot reach the cluster at all, so cost cannot enter into it
@@ -135,6 +156,41 @@ class DecideRunner(unittest.TestCase):
         d = rw.decide_runner(facts(capability="cluster", declared_pool=""))
         self.assertIsNone(d.labels)
         self.assertTrue(d.warning)
+
+    def test_ephemeral_pools_lever_round_trips_from_the_policy_file(self):
+        """The lever has to actually reach the decision, not just exist in JSON.
+
+        `decide_runner` reads only RepoFacts, so an operator setting `ephemeral_pools: false`
+        is inert unless load_policy parses it AND run_decide copies it onto the facts. The
+        shipped default must stay true: false is what pinned the fleet to hosted runners."""
+        with tempfile.TemporaryDirectory() as td:
+            f = os.path.join(td, "runner-watch.json")
+            with open(f, "w", encoding="utf-8") as fh:
+                json.dump({"ephemeral_pools": False, "hysteresis": 2}, fh)
+            self.assertFalse(rw.load_policy(f).ephemeral_pools)
+
+            with open(f, "w", encoding="utf-8") as fh:
+                json.dump({"hysteresis": 2}, fh)
+            self.assertTrue(rw.load_policy(f).ephemeral_pools,
+                            "absent key must default to the fleet's actual shape (true)")
+
+        shipped = rw.load_policy(os.path.join(REPO_ROOT, "governance", "runner-watch.json"))
+        self.assertTrue(shipped.ephemeral_pools,
+                        "shipping ephemeral_pools=false re-pins every private repo to "
+                        "metered hosted runners")
+
+    def test_overriding_one_knob_does_not_reset_the_others(self):
+        """--stranded-minutes used to be applied by rebuilding Policy() field by field,
+        which silently dropped any lever the author forgot to copy — including
+        ephemeral_pools. Guard the property rather than the spelling."""
+        base = rw.Policy(hysteresis=7, stranded_minutes=20, ephemeral_pools=False,
+                         pinned={"a": "b"}, capability={"c": "cluster"})
+        import dataclasses
+        overridden = dataclasses.replace(base, stranded_minutes=99)
+        self.assertEqual(overridden.stranded_minutes, 99)
+        self.assertFalse(overridden.ephemeral_pools)
+        self.assertEqual(overridden.hysteresis, 7)
+        self.assertEqual(overridden.pinned, {"a": "b"})
 
     def test_operator_pin_stops_the_watcher_writing(self):
         """The override lever from #249 (`vars.CI_RUNNER_LABELS`) could not survive the

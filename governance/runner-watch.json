@@ -43,10 +43,26 @@
     "the recovery job will cancel + re-dispatch its run. It is the one knob on a DESTRUCTIVE",
     "operation, so it is deliberately generous: an ordinary busy-pool wait must never be",
     "mistaken for a stranding. Lower it only with evidence about real queue times, not to",
-    "make a demo faster."
+    "make a demo faster.",
+    "",
+    "`ephemeral_pools` says the fleet's self-hosted pools are EPHEMERAL / scale-to-zero.",
+    "Every pool here is a `gha-runner-scale-set` with `minRunners: 0`",
+    "(runners/arc/runner-scale-set-values.yaml), so a pool registers a runner only while a",
+    "job is assigned to it and an IDLE pool legitimately reports ZERO runners online. With",
+    "this true, `0 online` is read as the resting state and the repo still routes to its",
+    "pool; the genuinely-down case is caught one layer out by the recovery sweep, which",
+    "re-dispatches runs left queued with no runner past `stranded_minutes` - an outcome",
+    "check, not a guess from an idle count.",
+    "",
+    "This defaults TRUE because reading 0 as 'down' is what pinned the whole private fleet",
+    "to metered hosted runners and spent the account's Actions budget: measured 2026-09-28,",
+    "14 private repos decided `ubuntu-latest` because their pool 'has 0 runners online'",
+    "while all 22 scale-set listeners were Running and healthy. Set it FALSE only for a",
+    "static pool with always-registered runners, where 0 really does mean down."
   ],
   "pinned": {},
   "capability": {},
+  "ephemeral_pools": true,
   "hysteresis": 2,
   "stranded_minutes": 20
 }
