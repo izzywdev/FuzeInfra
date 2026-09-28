@@ -162,6 +162,11 @@ spec:
       labels:
         {{- include "fuzeinfra.labels" . | nindent 8 }}
         {{- include "fuzeinfra.selectorLabels" (dict "component" "prometheus" "root" $) | nindent 8 }}
+        # Opt in to the admin-plane ingress lockdown (templates/networkpolicy-admin.yaml):
+        # reachable only from this namespace and Traefik, never from another
+        # namespace directly. This port is unauthenticated, and --web.enable-admin-api makes delete_series callable.
+        # Removing this label silently removes that protection.
+        fuzeinfra.io/ingress-profile: admin
     spec:
       serviceAccountName: fuzeinfra-monitoring
       securityContext:
@@ -310,6 +315,11 @@ spec:
       labels:
         {{- include "fuzeinfra.labels" . | nindent 8 }}
         {{- include "fuzeinfra.selectorLabels" (dict "component" "alertmanager" "root" $) | nindent 8 }}
+        # Opt in to the admin-plane ingress lockdown (templates/networkpolicy-admin.yaml):
+        # reachable only from this namespace and Traefik, never from another
+        # namespace directly. This port is unauthenticated — a POSTed silence would blind the alerting plane.
+        # Removing this label silently removes that protection.
+        fuzeinfra.io/ingress-profile: admin
     spec:
       {{- with .Values.alertmanager.nodeSelector }}
       # Pin to durable (Longhorn-disk) nodes. Longhorn only registers a
@@ -423,6 +433,11 @@ spec:
       labels:
         {{- include "fuzeinfra.labels" . | nindent 8 }}
         {{- include "fuzeinfra.selectorLabels" (dict "component" "grafana" "root" $) | nindent 8 }}
+        # Opt in to the admin-plane ingress lockdown (templates/networkpolicy-admin.yaml):
+        # reachable only from this namespace and Traefik, never from another
+        # namespace directly. This port is OIDC guards the UI, not the port.
+        # Removing this label silently removes that protection.
+        fuzeinfra.io/ingress-profile: admin
     spec:
       {{- if .Values.grafana.dashboardSidecar.enabled }}
       serviceAccountName: fuzeinfra-monitoring

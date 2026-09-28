@@ -561,6 +561,11 @@ spec:
       labels:
         {{- include "fuzeinfra.labels" . | nindent 8 }}
         {{- include "fuzeinfra.selectorLabels" (dict "component" "airflow-flower" "root" $) | nindent 8 }}
+        # Opt in to the admin-plane ingress lockdown (templates/networkpolicy-admin.yaml):
+        # reachable only from this namespace and Traefik, never from another
+        # namespace directly. This port is Celery task introspection and control.
+        # Removing this label silently removes that protection.
+        fuzeinfra.io/ingress-profile: admin
     spec:
       {{- /* Flower has no DAG sync, so this is its only init container. It
              reads the Celery result backend, which is the same Postgres

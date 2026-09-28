@@ -305,6 +305,11 @@ spec:
       labels:
         {{- include "fuzeinfra.labels" . | nindent 8 }}
         {{- include "fuzeinfra.selectorLabels" (dict "component" "kafka-ui" "root" $) | nindent 8 }}
+        # Opt in to the admin-plane ingress lockdown (templates/networkpolicy-admin.yaml):
+        # reachable only from this namespace and Traefik, never from another
+        # namespace directly. This port is browse and produce against every topic.
+        # Removing this label silently removes that protection.
+        fuzeinfra.io/ingress-profile: admin
     spec:
       {{- include "fuzeinfra.durableToleration" $ | nindent 6 }}
       containers:
@@ -588,6 +593,11 @@ spec:
       labels:
         {{- include "fuzeinfra.labels" . | nindent 8 }}
         {{- include "fuzeinfra.selectorLabels" (dict "component" "mongo-express" "root" $) | nindent 8 }}
+        # Opt in to the admin-plane ingress lockdown (templates/networkpolicy-admin.yaml):
+        # reachable only from this namespace and Traefik, never from another
+        # namespace directly. This port is a full MongoDB admin UI, and this pod holds the real Mongo credentials.
+        # Removing this label silently removes that protection.
+        fuzeinfra.io/ingress-profile: admin
     spec:
       {{- include "fuzeinfra.durableToleration" $ | nindent 6 }}
       containers:

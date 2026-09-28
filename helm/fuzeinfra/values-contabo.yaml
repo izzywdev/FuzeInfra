@@ -658,6 +658,15 @@ networkPolicy:
     blockedPort: 5432
     allowedHost: pypi.org
     allowedPort: 443
+  # M1b — admin-plane ingress lockdown. Closes the path that let a pod in any of
+  # the 24 non-system namespaces reach prometheus:9090, alertmanager:9093,
+  # grafana:3000, mongo-express:8081, kafka-ui:8080 or flower:5555 directly,
+  # skipping the Cloudflare Access wall that guards them from the internet.
+  # extraAllowedNamespaces stays empty: nothing outside `fuzeinfra` is known to
+  # need admin-plane access, and each entry would grant it to a whole namespace.
+  adminPlane:
+    enabled: true
+    extraAllowedNamespaces: []
 
 a2aRelay:
   enabled: true
