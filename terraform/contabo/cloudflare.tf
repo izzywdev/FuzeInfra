@@ -164,6 +164,50 @@ resource "cloudflare_record" "website_apex" {
   allow_overwrite = true
 }
 
+# DNS: www.fuzefront.com → the SAME tunnel as the apex (FuzeInfra#1278).
+#
+# Until this record existed, `www` was an UNPROXIED CNAME to
+# d27hi5funhy3o7.cloudfront.net — an AWS CloudFront/S3 distribution defined in
+# neither this repo nor FuzeFront — so fuzefront.com and www.fuzefront.com
+# served two DIFFERENT BRANDS: the apex served the FuzeOne marketing site
+# through the tunnel, while `www` served a stale FuzeHub landing page
+# (last-modified 2026-07-02) that bypassed the tunnel and the cluster entirely.
+# A visitor reached a different company depending on three letters.
+#
+# Pointing `www` at the tunnel sends it to Traefik via the catch-all
+# ingress_rule above, where the fuzefront-website Ingress claims BOTH hosts and
+# its nginx returns `301 https://fuzefront.com$request_uri` for the `www` Host —
+# so the apex is the single canonical origin (izzywdev/FuzeFront#1201).
+#
+# ORDERING — the host must be CLAIMED before it is ROUTED. Traefik answers 404
+# for a host no Ingress claims, so flipping this record while FuzeFront's
+# Ingress lacked the `www` rule would have turned a working host into a live
+# 404. Verified present in the running cluster before this landed:
+#   kubectl -n fuzefront get ingress fuzefront-website
+#     -o custom-columns=NAME:.metadata.name,HOSTS:.spec.rules[*].host
+#   -> fuzefront-website   fuzefront.com,www.fuzefront.com
+#
+# Not part of the vanity for_each above, for the same reason as the apex: this
+# REPLACES a pre-existing record that Terraform does not own, so it needs
+# `allow_overwrite = true`. Adding `www` to public_vanity_hosts instead would
+# plan cleanly and then fail at apply on the duplicate CloudFront CNAME.
+#
+# The CloudFront distribution itself is deliberately untouched — it is owned by
+# neither this repo nor FuzeFront. Once this record moves, `www.fuzefront.com`
+# stops reaching it regardless of what it still serves; retiring or repointing
+# it is a follow-up for whoever owns it.
+resource "cloudflare_record" "website_www" {
+  count           = local.cloudflare_enabled ? 1 : 0
+  zone_id         = var.cloudflare_zone_id
+  name            = "www"
+  value           = cloudflare_zero_trust_tunnel_cloudflared.fuzeinfra[0].cname
+  type            = "CNAME"
+  proxied         = true
+  ttl             = 1
+  allow_overwrite = true
+  comment         = "Canonical-host redirect to the fuzefront.com apex (FuzeInfra#1278)."
+}
+
 # ---------------------------------------------------------------------------
 # Multi-tenant portal DNS + TLS (FuzeFront EPIC-16)
 #
