@@ -1496,3 +1496,79 @@ spec:
         duration: 10s
         factor: 2
         maxDuration: 3m
+---
+# -----------------------------------------------------------------------------
+# mendysroboticsscrapers  ->  workflows target it with `runs-on: mendysroboticsscrapers`
+#
+# Onboards izzywdev/MendysRoboticsScrapers (PRIVATE) — the only active private
+# repo in the fleet with no self-hosted pool at all prior to this block, so
+# every job fell through to `ubuntu-latest` and billed private Actions minutes.
+# Separate scale set from `mendysrobotics` (main repo) and `mendysroboticswp`
+# (WordPress site) for the same reason those two are split: its own CI jobs,
+# its own job-matching key, no cross-repo interference.
+#
+# Prerequisite: the GitHub App (githubConfigSecret: arc-runner-github-app) must
+# have the MendysRoboticsScrapers repository added to its installation. Verify
+# via GitHub App settings -> Repository access; if missing, the listener pod
+# will log "could not find installation" and never pick up jobs. This cannot be
+# confirmed from this session (installation reads return 403) — see the PR
+# description checklist.
+#
+# DO NOT MERGE until the arc-runners listener fleet is healthy (19/22 listener
+# pods were missing at authoring time). Merging while the fleet is down would
+# give this repo a pool with no listener — jobs would queue forever, strictly
+# worse than its current working-but-costly hosted CI.
+# -----------------------------------------------------------------------------
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: arc-runners-mendysroboticsscrapers
+  namespace: argocd
+  labels:
+    app.kubernetes.io/part-of: arc-runners
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: fuzeinfra
+  sources:
+    - repoURL: ghcr.io/actions/actions-runner-controller-charts
+      chart: gha-runner-scale-set
+      targetRevision: "0.14.2"
+      helm:
+        releaseName: mendysroboticsscrapers
+        valueFiles:
+          - $values/runners/arc/runner-scale-set-values.yaml
+        parameters:
+          - name: githubConfigUrl
+            value: "https://github.com/izzywdev/MendysRoboticsScrapers"
+          - name: runnerScaleSetName
+            value: "mendysroboticsscrapers"
+          - name: maxRunners
+            value: "5"
+          - name: minRunners
+            value: "0"
+    - repoURL: https://github.com/izzywdev/FuzeInfra.git
+      targetRevision: main
+      ref: values
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: arc-runners
+  ignoreDifferences:
+    - group: actions.github.com
+      kind: EphemeralRunnerSet
+      jsonPointers:
+        - /spec/replicas
+        - /spec/patchID
+  syncPolicy:
+    automated:
+      selfHeal: true
+      prune: false
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 3m
