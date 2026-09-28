@@ -278,3 +278,90 @@ def test_probe_runs_on_a_schedule():
     """A check that only runs on dispatch detects nothing on its own."""
     triggers = _workflow()[True]  # YAML parses the `on:` key as the boolean True
     assert "schedule" in triggers, "runner-health must be scheduled, not dispatch-only"
+
+
+# --- starvation: an EMPTY pool with work waiting -----------------------------
+#
+# The inverse of the #1187 signature the rest of this file pins. #1187 was pods
+# that exist but serve nothing. This is no pods at all while jobs queue — and
+# until 2026-09-28 `evaluate()` returned before it could see it, so the probe
+# printed "no stranded runners" through an ~18h `staging` outage with 30+ jobs
+# queued behind it.
+
+
+def test_empty_pool_with_queued_work_is_critical():
+    """The outage the old check could not see."""
+    findings = rh.evaluate(
+        {"staging": "izzywdev/FuzeInfra"},
+        [],
+        {"izzywdev/FuzeInfra": {"runners": []}},
+        queued_by_repo={"izzywdev/FuzeInfra": ["Helm Chart Validation", "deploy-prod"]},
+    )
+    assert len(findings) == 1
+    assert findings[0].level == rh.CRITICAL
+    assert "starved" in findings[0].message
+
+
+def test_empty_pool_with_nothing_queued_stays_silent():
+    """An idle pool is the normal resting state and must not page anyone.
+
+    This is the whole reason the check keys on queued DEMAND rather than on pod
+    count: most scale sets sit at zero pods almost all the time.
+    """
+    assert rh.evaluate(
+        {"fuzebi": "izzywdev/FuzeBI"},
+        [],
+        {"izzywdev/FuzeBI": {"runners": []}},
+        queued_by_repo={"izzywdev/FuzeBI": []},
+    ) == []
+
+
+def test_unreadable_queued_data_does_not_invent_a_finding():
+    """A failed GitHub read must degrade to "cannot tell", never to a false alarm —
+    and equally never to a false all-clear, which is why the fetch warns."""
+    assert rh.evaluate(
+        {"staging": "izzywdev/FuzeInfra"},
+        [],
+        {"izzywdev/FuzeInfra": {"runners": []}},
+        queued_by_repo={"izzywdev/FuzeInfra": None},
+    ) == []
+
+
+def test_starvation_check_is_backward_compatible():
+    """Called without queued data at all, behaviour is exactly as before."""
+    assert rh.evaluate(
+        {"staging": "izzywdev/FuzeInfra"}, [], {"izzywdev/FuzeInfra": {"runners": []}}
+    ) == []
+
+
+def test_parse_queued_runs_selects_only_queued():
+    payload = {"workflow_runs": [
+        {"name": "Helm Chart Validation", "status": "queued"},
+        {"name": "deployment-watchdog", "status": "in_progress"},
+        {"name": "runner-health", "status": "completed"},
+        {"name": "deploy-prod", "status": "queued"},
+    ]}
+    assert rh.parse_queued_runs(payload) == ["Helm Chart Validation", "deploy-prod"]
+
+
+def test_parse_queued_runs_tolerates_an_empty_or_missing_payload():
+    assert rh.parse_queued_runs({}) == []
+    assert rh.parse_queued_runs(None) == []
+
+
+def test_replays_the_2026_09_27_staging_outage():
+    """The real numbers: zero pods in arc-runners, zero online runners, 30 queued.
+
+    `runner-health` printed "OK: 22 scale set(s) checked, no stranded runners" at
+    08:03Z while `Helm Chart Validation` had been queued since 06:58Z and prod
+    deploys were stalled. This asserts the rewritten check goes CRITICAL on that
+    exact state.
+    """
+    findings = rh.evaluate(
+        {"staging": "izzywdev/FuzeInfra"},
+        [],  # kubectl -n arc-runners get pods -> nothing
+        {"izzywdev/FuzeInfra": {"runners": []}},
+        queued_by_repo={"izzywdev/FuzeInfra": [f"run-{i}" for i in range(30)]},
+    )
+    assert [f.level for f in findings] == [rh.CRITICAL]
+    assert "30 queued" in findings[0].message

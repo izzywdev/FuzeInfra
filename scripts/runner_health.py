@@ -145,7 +145,28 @@ def online_runner_names(runners_payload, scale_set):
     return names
 
 
-def evaluate(scale_sets, pods, runners_by_repo, min_age_seconds=DEFAULT_MIN_AGE_SECONDS):
+def parse_queued_runs(payload, labels_hint=None):
+    """GitHub workflow-run list -> names of runs that are QUEUED.
+
+    `queued` here means GitHub has a run it cannot place. We deliberately do NOT
+    try to match a run to a specific scale set by label: the runs API does not
+    report the `runs-on` labels of a pending job without a second call per run,
+    and the failure this feeds is pool-wide anyway -- when a repo's self-hosted
+    pool is empty, everything targeting it stalls together. Over-reporting a
+    queued run against a sibling set in the same repo is the safe direction: it
+    raises an alarm a human resolves in seconds, whereas under-reporting is the
+    silence that hid an 18-hour outage.
+    """
+    runs = (payload or {}).get("workflow_runs") or []
+    return [
+        f"{r.get('name') or r.get('display_title') or r.get('id')}"
+        for r in runs
+        if r.get("status") == "queued"
+    ]
+
+
+def evaluate(scale_sets, pods, runners_by_repo, min_age_seconds=DEFAULT_MIN_AGE_SECONDS,
+             queued_by_repo=None):
     """Compare local pod state against GitHub's view. Returns findings, worst first.
 
     The load-bearing case is CRITICAL: pods that are Running and settled while GitHub
@@ -156,12 +177,36 @@ def evaluate(scale_sets, pods, runners_by_repo, min_age_seconds=DEFAULT_MIN_AGE_
     for scale_set, repo in sorted(scale_sets.items()):
         set_pods = pods_for_scale_set(pods, scale_set)
         settled = [p for p in set_pods if p["settled"]]
+        online = online_runner_names(runners_by_repo.get(repo), scale_set)
+
         if not settled:
-            # Zero runners is the normal idle state for an ephemeral scale set, and a
-            # pod that is still starting is not evidence of anything.
+            # Zero runners is the normal idle state for an ephemeral scale set --
+            # but ONLY while nothing is waiting for it. An empty pool with jobs
+            # queued against it is starvation, and it is the failure this check
+            # used to miss completely.
+            #
+            # 2026-09-27: the `staging` pool sat at zero pods for ~18h with 30+
+            # jobs queued, and this function reported "no stranded runners" the
+            # whole time, because it returned here before looking at anything.
+            # The old check only ever asked the inverse question -- pods running
+            # that GitHub does not see -- so zero pods AND zero registrations
+            # read as perfectly healthy. A gate that cannot see the outage it is
+            # meant to catch is worse than no gate, because it is believed.
+            queued = queued_by_repo.get(repo) if queued_by_repo else None
+            if queued:
+                findings.append(
+                    Finding(
+                        CRITICAL,
+                        scale_set,
+                        repo,
+                        f"0 runner pod(s) and {len(online)} online runner(s), but "
+                        f"{len(queued)} queued workflow run(s) are waiting -- the pool "
+                        f"is starved and those jobs will never start",
+                        tuple(sorted({q for q in queued}))[:5],
+                    )
+                )
             continue
 
-        online = online_runner_names(runners_by_repo.get(repo), scale_set)
         nodes = tuple(sorted({p["node"] for p in settled}))
 
         # Count the stranded PODS directly rather than deriving a count from
@@ -284,7 +329,25 @@ def main(argv=None):
             print(f"::warning::could not read runners for {repo}: {exc}")
             runners_by_repo[repo] = None
 
-    findings = evaluate(scale_sets, pods, runners_by_repo, args.min_age_seconds)
+    # Queued demand per repo. Only needed to tell an idle pool (fine) from a
+    # starved one (not fine), so a failure here degrades to "cannot tell" rather
+    # than to a false all-clear: an unreadable repo contributes no queued runs and
+    # the zero-pod case stays silent, exactly as it did before this check existed.
+    queued_by_repo = {}
+    for repo in sorted(set(scale_sets.values())):
+        try:
+            queued_by_repo[repo] = parse_queued_runs(
+                _run_json(
+                    ["gh", "api", f"repos/{repo}/actions/runs?status=queued&per_page=100"]
+                )
+            )
+        except RuntimeError as exc:
+            print(f"::warning::could not read queued runs for {repo}: {exc}")
+            queued_by_repo[repo] = None
+
+    findings = evaluate(
+        scale_sets, pods, runners_by_repo, args.min_age_seconds, queued_by_repo
+    )
 
     try:
         findings += dns_endpoint_findings(

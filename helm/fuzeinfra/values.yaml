@@ -1555,6 +1555,13 @@ networkPolicy:
     image: busybox:1.36
     blockedHost: fuzeinfra-postgres
     blockedPort: 5432
+    # How long to keep retrying the BLOCKED target before calling it unenforced.
+    # The CNI programs a new pod's policy rules asynchronously, so a probe that
+    # samples once at container start can beat its own policy and report a
+    # fail-open that is really a startup race — which is exactly what happened on
+    # 2026-09-28. An enforced policy refuses within a few seconds; an absent one
+    # stays reachable for the whole window, so this cleanly separates the two.
+    enforcementGraceSeconds: 45
     allowedHost: pypi.org
     allowedPort: 443
   # ---------------------------------------------------------------------------

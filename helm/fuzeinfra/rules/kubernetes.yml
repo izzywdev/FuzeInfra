@@ -164,6 +164,41 @@ groups:
           summary: "Job {{ $labels.namespace }}/{{ $labels.job_name }} failed"
           description: "Job has failed pods (backoffLimit exhausted). For a backup CronJob this means the dump or upload did not complete — check the job's pods."
 
+      # A FAILED k3s bundled-chart install job, which KubeJobFailed above cannot
+      # catch and is not graded to notify anyone even when it does.
+      #
+      # k3s installs its bundled charts (traefik, coredns, metrics-server…) by
+      # running a `helm-install-<chart>` Job, and a HelmChartConfig edit triggers a
+      # fresh one. If that Job fails, the helm-controller leaves the PREVIOUS
+      # release running and stops reconciling: the cluster quietly keeps serving
+      # old config while Git says otherwise, with nothing to show for it but a
+      # Failed Job nobody looks at.
+      #
+      # Observed 2026-09-28: `helm-install-traefik` had been Failed for 4d3h,
+      # starting the day the Traefik HA change (#1191) merged. The HelmChartConfig
+      # was applied correctly and carried `deployment.replicas: 2` — but the
+      # upgrade it kicked off failed, so prod kept running ONE Traefik replica, the
+      # single point of failure that PR existed to remove. Git, the manifest and
+      # the PR all said HA; the cluster said 1/1, for four days.
+      #
+      # WHY THIS CANNOT JUST BE FOLDED INTO KubeJobFailed: that rule is gated on
+      # `time() - kube_job_status_start_time < 86400` so a long-recovered backup
+      # failure ages out instead of paging forever. That gate is right for a daily
+      # CronJob — each new failed run re-arms it — and exactly wrong here. A
+      # helm-install Job runs ONCE. It never retries, so it never re-arms, so after
+      # 24h the only signal that prod has stopped reconciling goes silent. This
+      # rule deliberately has no such gate: the failure is permanent until a human
+      # acts, so the alert must be too.
+      - alert: HelmInstallJobFailed
+        expr: |
+          kube_job_status_failed{namespace="kube-system", job_name=~"helm-install-.+"} > 0
+        for: 15m
+        labels:
+          severity: critical
+        annotations:
+          summary: "k3s chart install job {{ $labels.job_name }} has failed — cluster config is NOT reconciling"
+          description: "The helm-controller Job for a k3s bundled chart failed, so the previous release is still running and further HelmChartConfig edits will not take effect. Inspect it with cluster-query: -n kube-system describe job {{ $labels.job_name }}"
+
       - alert: PVCPending
         expr: kube_persistentvolumeclaim_status_phase{phase="Pending"} == 1
         for: 5m

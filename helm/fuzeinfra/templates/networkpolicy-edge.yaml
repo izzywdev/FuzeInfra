@@ -123,12 +123,45 @@ spec:
           args:
             - |
               fail=0
+              BLOCKED_HOST={{ .Values.networkPolicy.probe.blockedHost | quote }}
+              BLOCKED_PORT={{ .Values.networkPolicy.probe.blockedPort }}
+              GRACE={{ .Values.networkPolicy.probe.enforcementGraceSeconds | default 45 }}
+
+              # Print what we are actually talking to. When this probe failed in
+              # prod on 2026-09-28 the single line "reachable" could not
+              # distinguish a dead policy from a mis-resolved name, and cost a
+              # round trip to find out.
+              echo "INFO probe pod $(hostname) resolving ${BLOCKED_HOST}"
+              nslookup "$BLOCKED_HOST" 2>/dev/null | sed -n 's/^/INFO   /p' || echo "INFO   (nslookup unavailable)"
+
               # MUST be blocked: an in-cluster datastore.
-              if nc -z -w 4 {{ .Values.networkPolicy.probe.blockedHost }} {{ .Values.networkPolicy.probe.blockedPort }} 2>/dev/null; then
-                echo "FAIL blocked-target reachable: {{ .Values.networkPolicy.probe.blockedHost }}:{{ .Values.networkPolicy.probe.blockedPort }} — egress policy is NOT enforced"
-                fail=1
+              #
+              # RETRY, do not sample once. The CNI programs a new pod's policy
+              # rules asynchronously, after it observes the pod -- so a container
+              # that runs `nc` in its first second can beat its own policy into
+              # place and report "NOT enforced" on a cluster that enforces
+              # perfectly. The original probe did exactly that, and its output was
+              # indistinguishable from a real fail-open. Poll until the connection
+              # is refused or the grace period expires: a policy that is working
+              # shows up as refused within a few seconds, and one that is genuinely
+              # absent stays reachable for the whole window.
+              blocked=0
+              waited=0
+              while [ "$waited" -lt "$GRACE" ]; do
+                if nc -z -w 4 "$BLOCKED_HOST" "$BLOCKED_PORT" 2>/dev/null; then
+                  echo "INFO   t=${waited}s still reachable"
+                  sleep 5
+                  waited=$((waited + 5))
+                else
+                  blocked=1
+                  break
+                fi
+              done
+              if [ "$blocked" -eq 1 ]; then
+                echo "PASS blocked-target refused after ${waited}s: ${BLOCKED_HOST}:${BLOCKED_PORT}"
               else
-                echo "PASS blocked-target refused: {{ .Values.networkPolicy.probe.blockedHost }}:{{ .Values.networkPolicy.probe.blockedPort }}"
+                echo "FAIL blocked-target still reachable after ${GRACE}s: ${BLOCKED_HOST}:${BLOCKED_PORT} — egress policy is NOT enforced (this is not a startup race; the policy had the whole grace window to take effect)"
+                fail=1
               fi
               # MUST be allowed: DNS + the public internet the edge pods depend on.
               if nc -z -w 6 {{ .Values.networkPolicy.probe.allowedHost | quote }} {{ .Values.networkPolicy.probe.allowedPort }} 2>/dev/null; then
