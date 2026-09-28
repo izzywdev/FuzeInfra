@@ -1,0 +1,104 @@
+# Unit tests for HelmInstallJobFailed (rules/kubernetes.yml).
+#
+# The gap this rule closes, measured rather than imagined:
+#
+#   2026-09-28, cluster-query -n kube-system get jobs
+#     job.batch/helm-install-traefik   Failed   0/1   4d3h
+#
+# The Traefik HA change (#1191) set deployment.replicas: 2 in the HelmChartConfig.
+# The config applied cleanly — the live object carried replicas: 2 at generation 3
+# — but the helm-controller Job it triggered FAILED, so the previous single-replica
+# release kept running. Prod served ONE Traefik replica, the exact SPOF that PR
+# removed, for four days, while Git and the manifest both said HA.
+#
+# Nothing alerted, for two compounding reasons this file pins:
+#   1. KubeJobFailed is severity=warning, and values-contabo.yaml routes only
+#      severity=critical to a notifying receiver.
+#   2. KubeJobFailed is gated on start_time being within 24h, so a job that fails
+#      ONCE and never retries goes silent after a day — which is every
+#      helm-install job.
+#
+# Run in CI by helm-validate.yml:
+#   promtool test rules helm/fuzeinfra/rules/tests/*_test.yml
+rule_files:
+  - ../kubernetes.yml
+
+evaluation_interval: 1m
+
+tests:
+  # --- the live outage: a helm-install job failed days ago and is still failed.
+  - interval: 1m
+    name: HelmInstallJobFailed fires for a job that failed long ago and never retries
+    input_series:
+      - series: 'kube_job_status_failed{namespace="kube-system",job_name="helm-install-traefik"}'
+        values: '1x30'
+      # Started four days ago. KubeJobFailed's 24h gate excludes this; that is the
+      # whole point — this rule must fire anyway.
+      - series: 'kube_job_status_start_time{namespace="kube-system",job_name="helm-install-traefik"}'
+        values: '0x30'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: HelmInstallJobFailed
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              namespace: kube-system
+              job_name: helm-install-traefik
+            exp_annotations:
+              summary: "k3s chart install job helm-install-traefik has failed — cluster config is NOT reconciling"
+              description: "The helm-controller Job for a k3s bundled chart failed, so the previous release is still running and further HelmChartConfig edits will not take effect. Inspect it with cluster-query: -n kube-system describe job helm-install-traefik"
+
+  # --- severity must stay critical, or it routes to the no-op receiver and this
+  # rule reproduces the very silence it was written to end.
+  - interval: 1m
+    name: HelmInstallJobFailed is graded critical so it actually notifies
+    input_series:
+      - series: 'kube_job_status_failed{namespace="kube-system",job_name="helm-install-coredns"}'
+        values: '1x30'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: HelmInstallJobFailed
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              namespace: kube-system
+              job_name: helm-install-coredns
+            exp_annotations:
+              summary: "k3s chart install job helm-install-coredns has failed — cluster config is NOT reconciling"
+              description: "The helm-controller Job for a k3s bundled chart failed, so the previous release is still running and further HelmChartConfig edits will not take effect. Inspect it with cluster-query: -n kube-system describe job helm-install-coredns"
+
+  # --- NEGATIVE: a healthy install job is silent.
+  - interval: 1m
+    name: HelmInstallJobFailed stays silent for a successful install job
+    input_series:
+      - series: 'kube_job_status_failed{namespace="kube-system",job_name="helm-install-traefik"}'
+        values: '0x30'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: HelmInstallJobFailed
+        exp_alerts: []
+
+  # --- NEGATIVE: a failed job OUTSIDE kube-system is not this rule's business.
+  # The backup CronJobs live in fuzeinfra and are covered by KubeJobFailed, whose
+  # 24h ageing-out is correct for something that retries daily. Catching them here
+  # too would page forever on a long-recovered backup — the #1090 shape.
+  - interval: 1m
+    name: HelmInstallJobFailed ignores failed jobs in other namespaces
+    input_series:
+      - series: 'kube_job_status_failed{namespace="fuzeinfra",job_name="helm-install-decoy"}'
+        values: '1x30'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: HelmInstallJobFailed
+        exp_alerts: []
+
+  # --- NEGATIVE: an ordinary kube-system job that is not a chart install.
+  - interval: 1m
+    name: HelmInstallJobFailed ignores non-helm jobs in kube-system
+    input_series:
+      - series: 'kube_job_status_failed{namespace="kube-system",job_name="some-maintenance-job"}'
+        values: '1x30'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: HelmInstallJobFailed
+        exp_alerts: []
