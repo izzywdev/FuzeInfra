@@ -117,6 +117,17 @@ serviceNeo4jInstances:
     resources:
       requests: {cpu: 200m, memory: 1Gi}
       limits: {cpu: "1", memory: 2Gi}
+  - name: fuzesocial
+    enabled: true
+    passwordSecret:
+      name: neo4j-fuzesocial-credentials
+      key: password
+    storage: 10Gi
+    nodeSelector:
+      node.longhorn.io/create-default-disk: "true"
+    resources:
+      requests: {cpu: 200m, memory: 1Gi}
+      limits: {cpu: "1", memory: 2Gi}
 redis:
   # Pin to durable Longhorn-disk nodes. longhorn-manager only runs on the 3
   # durable nodes, so Longhorn registers node.longhorn.io objects only there;
