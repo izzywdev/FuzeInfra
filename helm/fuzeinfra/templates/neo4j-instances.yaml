@@ -64,13 +64,13 @@ spec:
           image: {{ $.Values.neo4j.image }}
           imagePullPolicy: {{ include "fuzeinfra.pullPolicy" $ }}
           env:
-            - name: NEO4J_PASSWORD
+            - name: AUTH_PASSWORD
               valueFrom:
                 secretKeyRef:
                   name: {{ .passwordSecret.name }}
                   key: {{ .passwordSecret.key }}
             - name: NEO4J_AUTH
-              value: "neo4j/$(NEO4J_PASSWORD)"
+              value: "neo4j/$(AUTH_PASSWORD)"
             - name: NEO4J_PLUGINS
               value: '["apoc"]'
             - name: NEO4J_server_threads_worker__count
