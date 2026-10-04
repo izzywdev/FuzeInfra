@@ -1,0 +1,118 @@
+{{- /*
+Workload-identity authenticator RBAC — the CLUSTER-SCOPED half of letting a
+service verify Kubernetes ServiceAccount identities. OWNED BY FuzeInfra.
+
+WHY HERE AND NOT IN THE CONSUMER CHART. A consumer AppProject may whitelist only
+`Namespace` among cluster-scoped kinds (#629; kept by #639, which moved project
+OWNERSHIP to product repos but explicitly left that narrowing "not in
+question"). Whitelisting ClusterRoleBinding by kind cannot be narrowed by name,
+and every consumer project with an app-of-apps also holds the `argocd`
+destination — so a project that may create ClusterRoleBindings may bind itself
+`cluster-admin`. A grant that reaches beyond the consumer's own namespace is
+therefore provisioned here, reviewed in this repo.
+
+The FuzeFront security service authenticates workloads in two steps
+(backend/security/src/services/workload-identity.ts in izzywdev/FuzeFront):
+
+  1. POST /apis/authentication.k8s.io/v1/tokenreviews — TokenReview is a
+     cluster-scoped API, so this needs a ClusterRole + ClusterRoleBinding.
+  2. GET /api/v1/namespaces/<caller ns>/configmaps?labelSelector=
+     security.fuze.dev/workload-identity=true — only ever the CALLING
+     workload's namespace. That needs read in the namespaces that host
+     identity declarations, not cluster-wide read.
+
+What FuzeFront#1198 shipped granted `configmaps get,list` CLUSTER-WIDE: every
+ConfigMap in kube-system, argocd and fuzeinfra. Measured 2026-10-04, the only
+namespace holding `security.fuze.dev/workload-identity=true` ConfigMaps is
+`fuzefront`, so splitting the grant changes nothing the service does.
+
+ADOPTION. `name` deliberately matches the objects FuzeFront#1198 created
+(fuzefront-workload-authenticator), which are live and tracked by the
+`fuzefront` app. Rendering the same names here moves them under fuzeinfra-prod
+and narrows their rules on the next sync — no manual delete (prod writes are
+GitOps-only), no window with no TokenReview grant, and it stops the `fuzefront`
+app from trying to PRUNE cluster objects its project forbids, which would
+keep its sync failing even after FuzeFront stops rendering them.
+
+ORDERING. The namespaced registry Role (wave -1) is applied and healthy before
+the ClusterRole drops cluster-wide ConfigMap read (wave 0), so the authenticator
+never loses the ability to read its registry.
+
+Every registryNamespaces entry must be an allowed destination of the
+`fuzeinfra` AppProject (argocd/projects/fuzeinfra.yaml): rendering into any
+other namespace fails the WHOLE fuzeinfra-prod sync (FuzeInfra#668).
+tests/test_workload_identity_rbac.py enforces that.
+*/ -}}
+{{- $root := . }}
+{{- range $index, $auth := .Values.workloadIdentity.authenticators }}
+{{- $name := required (printf "workloadIdentity.authenticators[%d].name is required" $index) $auth.name }}
+{{- $sa := required (printf "workloadIdentity.authenticators[%d].serviceAccount is required" $index) $auth.serviceAccount }}
+{{- $ns := required (printf "workloadIdentity.authenticators[%d].namespace is required" $index) $auth.namespace }}
+{{- range $regNs := $auth.registryNamespaces }}
+---
+# Read identity declarations in {{ $regNs }} only. RBAC cannot filter by label,
+# so this is namespace-wide ConfigMap read — inside one namespace, not all.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $name }}-registry
+  namespace: {{ $regNs }}
+  labels:
+    {{- include "fuzeinfra.labels" $root | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "-1"
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $name }}-registry
+  namespace: {{ $regNs }}
+  labels:
+    {{- include "fuzeinfra.labels" $root | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "-1"
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ $name }}-registry
+subjects:
+  - kind: ServiceAccount
+    name: {{ $sa }}
+    namespace: {{ $ns }}
+{{- end }}
+---
+# TokenReview only. Nothing else belongs at cluster scope for this service.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "fuzeinfra.labels" $root | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+rules:
+  - apiGroups: ["authentication.k8s.io"]
+    resources: ["tokenreviews"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "fuzeinfra.labels" $root | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ $name }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ $sa }}
+    namespace: {{ $ns }}
+{{- end }}
