@@ -1,0 +1,176 @@
+# ===========================================================================
+# traefik-helm-recover
+# ===========================================================================
+# Diagnose — and, on a separate explicit call, clear — a wedged
+# `helm-install-traefik` Job so k3s's helm-controller re-runs the chart.
+#
+# WHY THIS EXISTS. k3s installs its bundled charts via a `helm-install-<chart>`
+# Job. When that Job reaches a terminal Failed state the helm-controller leaves
+# the PREVIOUS release running and stops reconciling: the cluster serves old
+# config indefinitely while Git says otherwise, and nothing ever retries.
+#
+# Measured 2026-09-28, and worth restating because the numbers were misread once
+# already: the Job was created 2026-09-24T07:25:16Z (53s after apply-cluster-config
+# landed #1191's HA values, so that half worked), retried under `backoffLimit: 1000`
+# for three and a half days, and only reached `BackoffLimitExceeded` at
+# 2026-09-27T21:20:13Z. `get jobs` showed `Failed 4d3h` — that column is AGE, not
+# the failure time. Meanwhile `get deploy traefik -o wide` was `1/1` on image
+# 3.6.13 against a chart targeting traefik-40.1.3+up40.1.0 (app 3.7.4), so BOTH
+# the HA change and the version bump were stranded.
+#
+# WHY TWO MODES AND NOT ONE BUTTON. Deleting the Job is not a safe no-op. The
+# HelmChart carries `failurePolicy: reinstall`, and klipper-helm's `entry` runs
+#
+#     helm uninstall ${NAME} --namespace ${TARGET_NAMESPACE} --wait
+#
+# before reinstalling whenever the RELEASE status matches
+# `^(deleted|failed|null|unknown)$`. For traefik that is a window with no ingress
+# controller in the cluster at all — every *.prod.fuzefront.com host and every
+# consumer app's ingress — and if the following install also fails, it stays down.
+# A release in `deployed` status upgrades in place and carries no such window.
+#
+# So the blast radius turns entirely on the release status, and no read-only
+# session can see it: `helm history` reads the `sh.helm.release.v1.*` Secrets, and
+# cluster-query refuses Secret reads because this repo's job logs are public.
+# `diagnose` is what closes that gap. It prints helm history/status, which are
+# release METADATA (revision, status, chart, appVersion, description) — not the
+# release Secret's packed manifest, and not a credential.
+#
+# Read `diagnose` first. Only run `recover` once you know which case you are in,
+# and for the reinstall case only when an ingress outage is acceptable right now.
+#
+# An ingress outage does NOT cost you kubectl: the host firewall allows SSH and
+# the k3s API directly, so cluster-query and this workflow keep working.
+#
+# Guard is executable in tests/test_traefik_helm_recover_guard.py.
+#
+# Secret: KUBE_CONFIG (base64 kubeconfig) — the same one cluster-query and
+# apply-cluster-config use.
+
+name: traefik-helm-recover
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'diagnose = read-only, safe, start here. recover = delete the failed Job so helm-controller re-runs.'
+        required: true
+        default: diagnose
+        type: choice
+        options:
+          - diagnose
+          - recover
+      confirm:
+        description: 'recover only: type RECOVER. Deleting the Job can make klipper-helm UNINSTALL Traefik first (failurePolicy=reinstall), dropping ALL cluster ingress until the reinstall completes.'
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+# Serialize rather than cancel. Two concurrent runs could both observe and delete
+# the same Job and race the helm-controller's recreate. This is a rare, deliberate
+# operation, so queueing is right and cancel-in-progress would be actively wrong —
+# a cancelled run could land its delete and lose its own diagnostics.
+concurrency:
+  group: traefik-helm-recover
+  cancel-in-progress: false
+
+jobs:
+  recover:
+    # HOSTED, for the same reason as cluster-query and apply-cluster-config: this
+    # is recovery tooling for the ingress path, so it must not run inside the
+    # cluster whose ingress it recovers. tests/test_cluster_recovery_runners.py
+    # enforces that for the other four; this one is in the same class.
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: azure/setup-kubectl@829323503d1be3d00ca8346e5391ca0b07a9ab0d # v5.1.0
+        with:
+          version: 'v1.31.4'
+
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: 'v3.16.3'
+
+      - name: Configure kubectl
+        env:
+          KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
+        run: |
+          if [ -z "$KUBE_CONFIG" ]; then echo "::error::KUBE_CONFIG unset"; exit 1; fi
+          mkdir -p "$HOME/.kube"
+          printf '%s' "$KUBE_CONFIG" | base64 -d > "$HOME/.kube/config"
+          chmod 600 "$HOME/.kube/config"
+          echo "KUBECONFIG=$HOME/.kube/config" >> "$GITHUB_ENV"
+
+      # Runs in BOTH modes, and before any delete. The Job's pod is GC'd within
+      # days, so by the time anyone looks the Helm error is usually already gone —
+      # this step is the last chance to capture what the cluster still knows, and
+      # running it on the recover path too means a recovery is never performed
+      # without its own before-picture in the same log.
+      - name: Diagnose
+        run: |
+          set -u
+          echo "### Job status — authoritative failure TIME. The AGE column in"
+          echo "### 'get jobs' is the Job's age and is NOT when it failed."
+          kubectl -n kube-system get job helm-install-traefik -o jsonpath='{.status}' 2>&1 || true
+          echo
+          echo "### HelmChart"
+          kubectl -n kube-system get helmchart traefik \
+            -o jsonpath='chart={.spec.chart}{"\n"}failurePolicy={.spec.failurePolicy}{"\n"}status={.status}{"\n"}' 2>&1 || true
+          echo "### Live Deployment — is the upgrade actually in effect?"
+          kubectl -n kube-system get deploy traefik -o wide 2>&1 || true
+          echo
+          echo "### Release history — THE decision input."
+          echo "###   status 'deployed'              -> recover UPGRADES in place. No outage window."
+          echo "###   status failed/unknown/deleted  -> recover UNINSTALLS Traefik first: ALL ingress drops."
+          helm history traefik -n kube-system --max 10 2>&1 || true
+          # Parsed rather than eyeballed so the notice below cannot disagree with
+          # the history above. `helm status -o json` prints release metadata only.
+          STATUS=$(helm status traefik -n kube-system -o json 2>/dev/null \
+                     | python3 -c 'import json,sys; print(json.load(sys.stdin)["info"]["status"])' 2>/dev/null \
+                   || true)
+          STATUS=${STATUS:-unknown}
+          echo "### resolved release status: ${STATUS}"
+          case "$STATUS" in
+            deployed)
+              echo "::notice title=traefik-helm-recover::Release is 'deployed' — recover would upgrade in place, no uninstall window.";;
+            *)
+              echo "::warning title=traefik-helm-recover::Release status is '${STATUS}' — klipper-helm failurePolicy=reinstall will UNINSTALL Traefik before reinstalling. Expect a cluster-wide ingress outage for the duration, and a sustained one if the reinstall also fails.";;
+          esac
+
+      # Fail-closed, and a SEPARATE step from the delete on purpose: the
+      # diagnostics above are produced even when the confirmation is wrong, so a
+      # mistyped run is still a useful read instead of a wasted one.
+      - name: Gate recover
+        if: ${{ inputs.mode == 'recover' }}
+        env:
+          CONFIRM: ${{ inputs.confirm }}
+        run: |
+          set -u
+          if [ "$CONFIRM" != "RECOVER" ]; then
+            echo "::error::mode=recover requires confirm=RECOVER (got '${CONFIRM}'). Read the Diagnose output above first: if the release status is not 'deployed', this deletes Traefik before reinstalling it and every ingress host goes down until it returns."
+            exit 1
+          fi
+          echo "confirmed"
+
+      - name: Recover — delete the failed Job
+        if: ${{ inputs.mode == 'recover' }}
+        run: |
+          set -u
+          # Only ever touch a Job in a terminal Failed state. Deleting a RUNNING
+          # install Job would abort an upgrade mid-flight — which is itself a way
+          # to leave the release in the `failed` status that turns the NEXT
+          # attempt into an uninstall. The precondition is therefore part of the
+          # outage guard, not a politeness check.
+          FAILED=$(kubectl -n kube-system get job helm-install-traefik \
+                     -o jsonpath='{.status.conditions[?(@.type=="Failed")].status}' 2>/dev/null || true)
+          if [ "$FAILED" != "True" ]; then
+            echo "::notice title=traefik-helm-recover::helm-install-traefik is not in a terminal Failed state (Failed='${FAILED:-<none>}'). The helm-controller is either mid-run or already converged. No action taken."
+            exit 0
+          fi
+          echo "deleting Failed Job helm-install-traefik so the helm-controller recreates it"
+          kubectl -n kube-system delete job helm-install-traefik
+          echo "### helm-controller reconciles within ~15s; the new Job:"
+          kubectl -n kube-system get jobs -l helmcharts.helm.cattle.io/chart=traefik 2>&1 || true
+          echo "::notice title=traefik-helm-recover::Job deleted. Verify with cluster-query '-n kube-system get deploy traefik -o wide' — expect 2/2 on the chart's target image. If it does not converge, read the NEW Job's pod logs PROMPTLY: they are GC'd within days, which is why the original failure reason is no longer recoverable."
