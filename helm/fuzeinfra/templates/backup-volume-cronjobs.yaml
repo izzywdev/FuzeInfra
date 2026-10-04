@@ -135,7 +135,23 @@ spec:
                   # blocks that retention has already dropped and silently grows
                   # the TSDB volume. Confined to the snapshots subPath.
                   rm -rf /snapshots/* 2>/dev/null || true
-                  resp="$(curl -sS -XPOST "$PROM_URL/api/v1/admin/tsdb/snapshot")"
+                  # RETRY, do not call once. Prometheus is opted into the admin-plane
+                  # NetworkPolicy (networkpolicy-admin.yaml), which admits this pod by
+                  # its namespace rule — but the CNI adds a NEW pod's IP to a policy's
+                  # allowed-source set asynchronously. A container that connects in its
+                  # first milliseconds is refused before that lands. This one did, on
+                  # every run from 2026-09-29 (the night after M1b, #1253, put the
+                  # policy on Prometheus): `curl: (7) Failed to connect to
+                  # fuzeinfra-prometheus port 9090 after 3 ms`, three pods per night,
+                  # no Prometheus backup for days. Same race #1283 fixed for the egress
+                  # probe. A genuine block still fails here, loudly, after the window.
+                  GRACE={{ $v.prometheus.connectGraceSeconds | default 90 }}
+                  waited=0
+                  until resp="$(curl -sS --max-time 30 -XPOST "$PROM_URL/api/v1/admin/tsdb/snapshot")"; do
+                    [ "$waited" -ge "$GRACE" ] && { echo "Prometheus unreachable after ${GRACE}s — not a startup race; check networkpolicy-admin.yaml and the Prometheus pod" >&2; exit 1; }
+                    echo "t=${waited}s Prometheus not reachable yet; retrying"
+                    sleep 5; waited=$((waited + 5))
+                  done
                   echo "$resp"
                   case "$resp" in
                     *'"status":"success"'*) : ;;
