@@ -5,7 +5,7 @@ import pytest
 import requests
 import time
 import json
-from datetime import datetime, timedelta
+from datetime import datetime
 
 
 class TestAirflowWorkflowExecution:
