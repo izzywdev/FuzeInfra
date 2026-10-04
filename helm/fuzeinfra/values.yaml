@@ -959,6 +959,10 @@ backups:
       # rather than being on unconditionally because the admin API also exposes
       # delete_series to anything that can reach port 9090 in-cluster.
       snapshotImage: curlimages/curl:8.10.1   # sh + curl + sed, ~10MB
+      # How long the snapshot call retries a refused connection. Prometheus sits
+      # behind the admin-plane NetworkPolicy, and a new pod's first connections
+      # are refused until the CNI has added its IP to the allowed sources.
+      connectGraceSeconds: 90
       host: fuzeinfra-prometheus
       port: 9090
       # The standalone PVC declared in templates/monitoring.yaml.
