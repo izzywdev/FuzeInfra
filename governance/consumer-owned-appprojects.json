@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "$comment": [
+    "AppProjects that a PRODUCT repo owns (#639) and FuzeInfra therefore must NOT also hold",
+    "in argocd/projects/. tests/test_consumer_appproject_policy.py fails if any name listed",
+    "here reappears there.",
+    "",
+    "WHY. deploy-prod.yml re-applies every file in argocd/projects/ on each deploy (#1147),",
+    "and argocd-register.yml applies the product's own copy. Two writers for one object is",
+    "last-write-wins: whichever ran most recently is what the cluster enforces. For FuzeFront",
+    "that meant deploys that flapped and then froze from 2026-10-02 (#1278), visible only by",
+    "reading the Argo Application directly.",
+    "",
+    "The registration gate (scripts/validate_consumer_appproject.py, rule R2) also refuses a",
+    "consumer project FuzeInfra holds - but only when that consumer next registers. This file",
+    "catches the re-addition in the FuzeInfra PR that would cause it.",
+    "",
+    "Moving a project to its product: delete argocd/projects/<name>.yaml AND add it here in",
+    "the same change. The live object is not pruned (deploy-prod uses kubectl apply), so the",
+    "product's copy takes over at its next argocd-register run, after passing the gate."
+  ],
+  "projects": {
+    "fuzefront": {
+      "repo": "izzywdev/FuzeFront",
+      "path": "deploy/argocd/project.yaml",
+      "moved": "#1278, following the #639 decision"
+    }
+  }
+}

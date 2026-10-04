@@ -1,6 +1,6 @@
 # Argo CD AppProject for the FuzePlan consumer — OWNED BY FuzeInfra.
 #
-# ISOLATION BOUNDARY (FuzeInfra#99, mirrors argocd/projects/fuzefront.yaml):
+# ISOLATION BOUNDARY (FuzeInfra#99, same rule as every consumer project):
 # consumer apps must NOT be able to deploy into FuzeInfra's own `fuzeinfra`
 # namespace. A consumer that self-granted the `fuzeinfra` namespace could
 # redeploy a *duplicate* FuzeInfra (split-brain datastores, control-plane
