@@ -356,6 +356,15 @@ def test_no_payload_interpolation_inside_run_scripts():
             assert "${{ toJSON(github.event" not in run
 
 
+def test_every_action_is_pinned_by_sha():
+    """Mutable tags can be silently repointed (Semgrep: mutable-action-tag)."""
+    import re
+    for job in _workflow()["jobs"].values():
+        for step in job["steps"]:
+            if "uses" in step:
+                assert re.search(r"@[0-9a-f]{40}$", step["uses"]), step["uses"]
+
+
 def test_telegram_alert_is_never_suppressed():
     notify = _workflow()["jobs"]["notify"]
     assert "if" not in notify, "each trigger is oncePer a revision/state — every alert is new information"
