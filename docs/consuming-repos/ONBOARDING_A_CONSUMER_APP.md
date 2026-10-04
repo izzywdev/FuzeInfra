@@ -18,10 +18,42 @@ its Helm chart and nothing else in the deploy path.**
 | `Application` | FuzeInfra `argocd/applications/<app>.yaml` | Points at the consumer's chart; registered by `deploy-prod.yml` |
 | Helm chart | Consumer repo | The product's own concern |
 | Cross-namespace RBAC | FuzeInfra `helm/fuzeinfra` | Access to another namespace is the platform's to grant |
+| Cluster-scoped RBAC (ClusterRole/Binding) | FuzeInfra `helm/fuzeinfra` | Your project may not whitelist it (see below); e.g. `templates/workload-identity-rbac.yaml` |
 
 Both FuzeInfra files are applied automatically on merge by
 `.github/workflows/deploy-prod.yml` — projects first, then a glob over
 `argocd/applications/*.yaml`. No manual `kubectl apply` step.
+
+### Owning your own AppProject (#639) — exactly one copy, never two
+
+A product MAY own its AppProject instead, at `deploy/argocd/project.yaml`
+(FuzeFront does). It is applied by `argocd-register.yml`, which runs a policy
+gate first (`scripts/validate_consumer_appproject.py`) and applies **nothing** if
+the gate rejects:
+
+| Rule | Requirement | Decided in |
+|---|---|---|
+| R1 | Not named `fuzeinfra` or `default` | — |
+| R2 | Not also held in FuzeInfra `argocd/projects/` | #1278 |
+| R3 | `clusterResourceWhitelist` is `core/Namespace` only | #629, kept by #639 |
+| R4 | No `fuzeinfra`/`kube-system`/wildcard destination; in-cluster server only | #99 |
+| R5 | No wildcard `sourceRepos` | — |
+| R6 | An Application FuzeInfra also holds must have an identical spec | #1278 |
+
+**Why R3 is not negotiable.** Argo whitelists cluster kinds by *kind*, not name.
+A project that may create ClusterRoleBindings may bind itself `cluster-admin`, and
+with the `argocd` destination an app-of-apps needs, it may rewrite AppProjects —
+its own included. If your service needs a cluster-scoped grant, FuzeInfra
+provisions it.
+
+**Why "never two" (R2).** `deploy-prod` re-applies every file in
+`argocd/projects/`; `argocd-register` applies yours. Two writers is
+last-write-wins. FuzeFront's project existed in both places, with different
+whitelists: its deploys flapped, then froze from 2026-10-02, and the only visible
+symptom was `one or more synchronization tasks are not valid` on its Argo
+Application (#1278). Moving a project to its product means deleting FuzeInfra's
+copy and listing it in `governance/consumer-owned-appprojects.json` in the same
+change — a test fails if both exist.
 
 ## Do not self-register from the consumer repo
 

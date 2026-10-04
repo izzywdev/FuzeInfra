@@ -10,9 +10,16 @@
 # ever registered, so Argo had no Application syncing the actual FuzeFront
 # product (deploy/helm/fuzefront) at all.
 #
-# The `fuzefront` AppProject (argocd/projects/fuzefront.yaml) already exists
-# and correctly restricts destinations to fuzefront/fuzequality/argocd (see
-# that file's header re: FuzeInfra#99 — never widen it back to `fuzeinfra`).
+# The `fuzefront` AppProject is owned by FuzeFront (#639) at
+# izzywdev/FuzeFront deploy/argocd/project.yaml and registered through
+# argocd-register.yml, whose policy gate (scripts/validate_consumer_appproject.py)
+# enforces FuzeInfra#99 (never a `fuzeinfra` destination) and #629 (Namespace is
+# the only cluster-scoped kind). FuzeInfra no longer holds a copy: two writers
+# for one project froze FuzeFront deploys (#1278).
+#
+# FuzeFront's deploy/argocd/app-of-apps.yaml defines this same Application.
+# That is safe only while the two specs are IDENTICAL; the gate's rule R6
+# rejects a registration whose copy diverges from this one.
 # The three child Applications this recurses into all target the `fuzefront`
 # namespace under the `fuzefront` project, so they fit that boundary as-is.
 #
