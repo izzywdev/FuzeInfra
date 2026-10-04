@@ -20,8 +20,19 @@
 #          FuzeInfra never edits a consumer's chart — that's the delegation boundary.
 #      Either way the LLM call runs inside the @fuze handler, never here.
 #
-# Dedup: concurrency per app + a preflight that exits if an argo-autofix PR/issue
-# is already open for the app (a trigger can fire repeatedly).
+# Dedup: concurrency per app, plus one open issue per app per audience. A NEW
+# failing revision on an app that already has an open issue is posted as a
+# COMMENT on it; the same revision/state is posted once (an HTML marker). The
+# earlier design exited silently whenever any matching issue was open — and
+# matched `"$APP in:title"`, so an open `fuzefront-sealed` issue also silenced
+# `fuzefront`. FuzeFront then failed every sync for six days with no new signal
+# (#1278). The Telegram alert is never suppressed: triggers are already oncePer
+# a revision or state, so each one is new information.
+#
+# Content and routing live in scripts/argo_alert.py (tested in
+# tests/test_argo_alert.py). The payload reaches it ONLY through an env var —
+# never `${{ }}` inside a run: script, which previously let any `'` in an Argo
+# message break the step and let a crafted dispatch run shell on this runner.
 #
 # Secrets: TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID,
 #          GH_TOKEN (PAT owned by a repo OWNER/MEMBER/COLLABORATOR — REQUIRED so the
@@ -48,7 +59,6 @@ jobs:
     runs-on: staging
     timeout-minutes: 120
     outputs:
-      skip: ${{ steps.gate.outputs.skip }}
       owner_repo: ${{ steps.route.outputs.owner_repo }}
       is_self: ${{ steps.route.outputs.is_self }}
     steps:
@@ -75,62 +85,59 @@ jobs:
           fi
           echo "owner_repo=$slug" >> "$GITHUB_OUTPUT"
           if [ "$slug" = "${{ github.repository }}" ]; then echo "is_self=true"; else echo "is_self=false"; fi >> "$GITHUB_OUTPUT"
-      - name: Skip if an argo-autofix PR/issue is already open for this app
-        id: gate
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          APP: ${{ github.event.client_payload.app }}
-        run: |
-          open=$(gh pr list --repo "${{ github.repository }}" --state open --label argo-autofix --search "$APP in:title" --json number --jq 'length' 2>/dev/null || echo 0)
-          iss=$(gh issue list --repo "${{ github.repository }}" --state open --label argo-autofix --search "$APP in:title" --json number --jq 'length' 2>/dev/null || echo 0)
-          if [ "${open:-0}" -gt 0 ] || [ "${iss:-0}" -gt 0 ]; then
-            echo "skip=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "skip=false" >> "$GITHUB_OUTPUT"
-          fi
 
   notify:
     needs: preflight
-    if: needs.preflight.outputs.skip != 'true'
     runs-on: staging
     timeout-minutes: 120
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          sparse-checkout: scripts/argo_alert.py
+          sparse-checkout-cone-mode: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with: { python-version: '3.12' }
       - name: Telegram 🔴 alert
         env:
           TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           CHAT: ${{ secrets.TELEGRAM_CHAT_ID }}
-          APP: ${{ github.event.client_payload.app }}
-          SYNC: ${{ github.event.client_payload.sync }}
-          HEALTH: ${{ github.event.client_payload.health }}
+          PAYLOAD: ${{ toJSON(github.event.client_payload) }}
           OWNER_REPO: ${{ needs.preflight.outputs.owner_repo }}
         run: |
           [ -z "$TOKEN" ] && { echo "::warning::TELEGRAM_BOT_TOKEN unset — skipping alert"; exit 0; }
-          TEXT=$(printf '🔴 ArgoCD app unhealthy\nApp: %s\nsync=%s health=%s\nrepo=%s\nReview: https://argocd.prod.fuzefront.com/applications/%s\nAuto-fix starting.' "$APP" "$SYNC" "$HEALTH" "$OWNER_REPO" "$APP")
+          TEXT=$(python3 scripts/argo_alert.py telegram --owner-repo "$OWNER_REPO")
           curl -s -X POST "https://api.telegram.org/bot${TOKEN}/sendMessage" \
             --data-urlencode "chat_id=${CHAT}" \
             --data-urlencode "text=${TEXT}" \
             --data "disable_web_page_preview=true" >/dev/null && echo "telegram sent" || echo "::warning::telegram send failed"
 
   # ---- Delegate to the OWNING repo's @fuze handler (self OR consumer) --------
-  # One path for both: open an idempotent `@fuze` issue in owner_repo. For a
-  # FuzeInfra-owned app owner_repo is this repo, and the cluster-capable handler
-  # (fuze-cluster.yml) answers it with prod kubeconfig + kubectl/helm/terraform and
-  # reconciles the chart via a PR. For a consumer app it lands in their repo. The
-  # LLM diagnosis/fix happens inside that handler (fuze-code-action's multi-provider
+  # One path for both: an `@fuze` issue in owner_repo. For a FuzeInfra-owned app
+  # owner_repo is this repo, and the cluster-capable handler (fuze-cluster.yml)
+  # answers it with prod kubeconfig + kubectl/helm/terraform and reconciles the
+  # chart via a PR. For a consumer app it lands in their repo. The LLM
+  # diagnosis/fix happens inside that handler (fuze-code-action's multi-provider
   # cascade) — never a single-vendor CLI here.
+  #
+  # An AppProject denial on a CONSUMER app is ALSO raised here, in FuzeInfra: the
+  # project boundary is FuzeInfra's policy (#99, #629) and the consumer cannot fix
+  # it by widening its project — argocd-register rejects that.
   delegate:
     needs: preflight
-    if: needs.preflight.outputs.skip != 'true'
     runs-on: staging
     timeout-minutes: 120
     env:
-      APP: ${{ github.event.client_payload.app }}
+      PAYLOAD: ${{ toJSON(github.event.client_payload) }}
       OWNER_REPO: ${{ needs.preflight.outputs.owner_repo }}
       IS_SELF: ${{ needs.preflight.outputs.is_self }}
-      SYNC: ${{ github.event.client_payload.sync }}
-      HEALTH: ${{ github.event.client_payload.health }}
     steps:
-      - name: Open an idempotent @fuze issue in the owning repo
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          sparse-checkout: scripts/argo_alert.py
+          sparse-checkout-cone-mode: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with: { python-version: '3.12' }
+      - name: Open or update the @fuze issue
         env:
           # PAT REQUIRED: the opened issue must be authored by a trusted
           # OWNER/MEMBER/COLLABORATOR for the @fuze handler's author gate to fire.
@@ -138,28 +145,36 @@ jobs:
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
         run: |
           [ -z "$GH_TOKEN" ] && { echo "::warning::GH_TOKEN unset — cannot open @fuze issue for $OWNER_REPO"; exit 0; }
-          # idempotent: one open issue per app in the owning repo
-          existing=$(gh issue list --repo "$OWNER_REPO" --state open --label argo-autofix --search "$APP in:title" --json number --jq 'length' 2>/dev/null || echo 0)
-          if [ "${existing:-0}" -gt 0 ]; then echo "issue already open for $APP in $OWNER_REPO"; exit 0; fi
-          gh label create argo-autofix --repo "$OWNER_REPO" --color B60205 --description "ArgoCD self-heal" 2>/dev/null || true
-          COND=$(printf '%s' '${{ toJSON(github.event.client_payload.conditions) }}')
-          if [ "$IS_SELF" = "true" ]; then
-            ASK="@fuze please diagnose the root cause with prod cluster reads (kubectl get application \`$APP\` -n argocd -o json; compare live vs the Helm-rendered desired) and FIX the chart under \`helm/fuzeinfra/\` so it converges, then open a PR. If the state is transient (a hook or rollout still settling), say so and make no change. GitOps guardrails: never kubectl-patch chart-managed resources — reconcile via chart+PR."
-          else
-            ASK="FuzeInfra runs the Argo instance but does not edit consumer charts. @fuze please diagnose from this repo's deploy manifests (Helm/kustomize/Argo Application) and open a fix PR. Common causes: a values/kustomize render error (\`Unknown\`/ComparisonError), an image pull secret / tag issue (\`Degraded\` ImagePullBackOff), or drift (\`OutOfSync\`)."
+          alert() { python3 scripts/argo_alert.py "$@"; }
+          MARKER=$(alert marker)
+
+          # post <repo> <audience>: comment on the open issue for this app and
+          # audience if there is one (unless this exact state was already posted),
+          # otherwise open one. Matching is by exact title prefix.
+          post() {
+            repo=$1; audience=$2
+            prefix=$(alert title-prefix --audience "$audience")
+            body=$(alert body --audience "$audience" --owner-repo "$OWNER_REPO" --is-self "$IS_SELF")
+            num=$(PREFIX="$prefix" gh issue list --repo "$repo" --state open --label argo-autofix \
+                    --limit 200 --json number,title \
+                    --jq '[.[] | select(.title | startswith(env.PREFIX))][0].number // empty')
+            if [ -n "$num" ]; then
+              seen=$(gh issue view "$num" --repo "$repo" --json body,comments \
+                       --jq '([.body] + [.comments[].body]) | join("\n")')
+              if printf '%s' "$seen" | grep -qF -- "$MARKER"; then
+                echo "$repo#$num already carries this state — nothing to add"
+              else
+                gh issue comment "$num" --repo "$repo" --body "$body"
+                echo "commented on $repo#$num"
+              fi
+            else
+              gh label create argo-autofix --repo "$repo" --color B60205 --description "ArgoCD self-heal" 2>/dev/null || true
+              gh issue create --repo "$repo" --label argo-autofix \
+                --title "$(alert title --audience "$audience")" --body "$body"
+            fi
+          }
+
+          post "$OWNER_REPO" owner
+          if [ "$(alert classify)" = project-permission ] && [ "$IS_SELF" != true ]; then
+            post "${{ github.repository }}" boundary
           fi
-          BODY=$(cat <<BODY
-          ArgoCD reports app **\`$APP\`** unhealthy on the shared FuzeInfra cluster.
-
-          - sync: \`$SYNC\`
-          - health: \`$HEALTH\`
-          - conditions (the actual error):
-          \`\`\`json
-          $COND
-          \`\`\`
-
-          $ASK
-          BODY
-          )
-          gh issue create --repo "$OWNER_REPO" --label argo-autofix \
-            --title "ArgoCD unhealthy: $APP ($HEALTH/$SYNC)" --body "$BODY"

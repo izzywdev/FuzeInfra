@@ -51,11 +51,24 @@ data:
       - name: User-Agent
         value: argocd-notifications
 
-  # ---- template: the dispatch body (app/sync/health/repo/conditions) -------
+  # ---- template: the dispatch body ------------------------------------------
   # app name is validated to a k8s-name charset by the workflow before use.
   # All interpolations use toJson so status messages containing quotes or
   # newlines cannot corrupt the JSON body. `repo` + `conditions` let the
   # workflow route to the owning repo and hand the real error to the fixer.
+  #
+  # `phase`/`message`/`revision`/`failed_resources` (#1278): FuzeFront could not
+  # deploy for six days and every alert said only "unhealthy". The operation
+  # message was the generic "one or more synchronization tasks are not valid";
+  # the line naming the cause ("ClusterRole ... is not permitted in project
+  # fuzefront") exists ONLY in operationState.syncResult.resources[].message.
+  # failed_resources carries just the non-Synced entries, so the payload stays
+  # small on an 80-resource app. An app that has never synced renders
+  # `null`/`[]`: Go's text/template yields nil for a missing map key (the old
+  # unguarded `.app.status.conditions` already relied on that). The `with`
+  # blocks only make it explicit — they are not load-bearing.
+  # GitHub caps client_payload at 10 top-level keys; this uses 9.
+  # tests/test_argo_alert.py renders this template with Go's text/template.
   template.app-unhealthy: |
     webhook:
       github-dispatch:
@@ -68,7 +81,11 @@ data:
               "sync": {{.app.status.sync.status | toJson}},
               "health": {{.app.status.health.status | toJson}},
               "repo": {{.app.spec.source.repoURL | toJson}},
-              "conditions": {{.app.status.conditions | toJson}}
+              "conditions": {{.app.status.conditions | toJson}},
+              "phase": {{with .app.status.operationState}}{{.phase | toJson}}{{else}}null{{end}},
+              "message": {{with .app.status.operationState}}{{.message | toJson}}{{else}}null{{end}},
+              "revision": {{with .app.status.operationState}}{{with .syncResult}}{{.revision | toJson}}{{else}}null{{end}}{{else}}null{{end}},
+              "failed_resources": [{{with .app.status.operationState}}{{with .syncResult}}{{$n := 0}}{{range .resources}}{{if ne .status "Synced"}}{{if $n}},{{end}}{{$n = 1}}{"kind": {{.kind | toJson}}, "namespace": {{.namespace | toJson}}, "name": {{.name | toJson}}, "status": {{.status | toJson}}, "message": {{.message | toJson}}}{{end}}{{end}}{{end}}{{end}}]
             }
           }
 
