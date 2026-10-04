@@ -1,7 +1,6 @@
 """
 Tests for database services: PostgreSQL, MongoDB, Redis, Neo4j, Elasticsearch
 """
-import pytest
 import time
 
 
