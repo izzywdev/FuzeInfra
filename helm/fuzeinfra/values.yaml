@@ -1760,6 +1760,21 @@ customHostnameApi:
 # healthy (provisioner driver.longhorn.io must exist). See
 # docs/design/longhorn-storage.md.
 # -----------------------------------------------------------------------------
+# Cluster-scoped RBAC for services that VERIFY Kubernetes workload identities
+# (TokenReview + a per-namespace identity registry). Provisioned here because a
+# consumer AppProject may not whitelist ClusterRole/ClusterRoleBinding (#629).
+# Empty = nothing rendered. See templates/workload-identity-rbac.yaml.
+#
+#   - name: <ClusterRole/ClusterRoleBinding name>
+#     serviceAccount: <SA of the authenticating service>
+#     namespace: <namespace of that SA>
+#     registryNamespaces: [<namespaces holding identity ConfigMaps>]
+#
+# Every registryNamespaces entry MUST be a destination of the `fuzeinfra`
+# AppProject, or the whole fuzeinfra-prod sync fails (FuzeInfra#668).
+workloadIdentity:
+  authenticators: []
+
 longhorn:
   # Umbrella-level marker (documentation/consistency). The actual controller is
   # the separate Argo Application; this chart never installs Longhorn itself.
