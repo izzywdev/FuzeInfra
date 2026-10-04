@@ -232,7 +232,7 @@ def test_gate_uses_fuzeinfras_files_not_the_consumers():
     sparse = checkout["with"]["sparse-checkout"]
     for needed in ("scripts/validate_consumer_appproject.py", "argocd/projects", "argocd/applications"):
         assert needed in sparse
-    assert "repository" not in checkout["with"], "must check out THIS repo, not a consumer"
+    assert checkout["with"].get("repository") == "izzywdev/FuzeInfra", "must pin repository: to FuzeInfra so workflow_call callers cannot shadow the validator"
     script = step["run"]
     assert "infra/scripts/validate_consumer_appproject.py" in script
     assert "--infra-projects infra/argocd/projects" in script

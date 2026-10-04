@@ -133,6 +133,8 @@ jobs:
       - name: Check out FuzeInfra policy (validator + infra-held projects)
         uses: actions/checkout@v7.0.1
         with:
+          repository: izzywdev/FuzeInfra
+          ref: main
           path: infra
           sparse-checkout: |
             scripts/validate_consumer_appproject.py
