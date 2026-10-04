@@ -26,3 +26,11 @@ deploy/sealed-secrets/
 # suppression is path-scoped here. The file is a 15-line apk-install; no other
 # rule surface is meaningfully lost. See docs/runbooks/api-floating-vip.md.
 images/keepalived/Dockerfile
+
+# Offline test harness that renders Argo CD notification templates exactly as
+# the notifications engine does, which is with text/template. Its output is a
+# JSON webhook body compared in tests/test_argo_alert.py, never served as HTML;
+# html/template would escape the JSON and break the parity the harness proves.
+# go.lang.security.audit.xss.import-text-template is a false positive here, and
+# inline `nosemgrep` is not honored by this setup (see the keepalived entry).
+tests/support/render_notification_template.go

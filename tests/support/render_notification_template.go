@@ -12,7 +12,7 @@ import (
 	"os"
 	// Must match Argo CD notifications, which renders with text/template; the output
 	// is a JSON webhook body, not HTML, and html/template would escape it.
-	"text/template" // nosemgrep: go.lang.security.audit.xss.import-text-template.import-text-template
+	"text/template"
 )
 
 func toJson(v interface{}) string {
