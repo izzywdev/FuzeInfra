@@ -130,9 +130,18 @@ jobs:
       # FuzeInfra's own policy files, for the gate in the register step. Sparse
       # and separate from `consumer/` so nothing from the consumer repo can
       # shadow the validator or the list of projects FuzeInfra holds.
+      #
+      # repository/ref are EXPLICIT on purpose. Today's triggers (dispatch only)
+      # would default to this repo anyway, but if this workflow ever gains
+      # `workflow_call`, the default becomes the CALLER's repo — a consumer could
+      # then ship a no-op validator and an empty project list and pass every
+      # rule. The gate's source must not depend on how the workflow was invoked.
+      # `main`, not the triggering ref: policy is what has been reviewed and merged.
       - name: Check out FuzeInfra policy (validator + infra-held projects)
-        uses: actions/checkout@v7.0.1
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
+          repository: izzywdev/FuzeInfra
+          ref: main
           path: infra
           sparse-checkout: |
             scripts/validate_consumer_appproject.py

@@ -232,7 +232,12 @@ def test_gate_uses_fuzeinfras_files_not_the_consumers():
     sparse = checkout["with"]["sparse-checkout"]
     for needed in ("scripts/validate_consumer_appproject.py", "argocd/projects", "argocd/applications"):
         assert needed in sparse
-    assert "repository" not in checkout["with"], "must check out THIS repo, not a consumer"
+    # Explicit, not defaulted: under a future `workflow_call` the default
+    # checkout is the CALLER's repo, which would let a consumer ship its own
+    # validator. (fuze-code-review on #1308 caught the earlier, inverted assert.)
+    assert checkout["with"].get("repository") == "izzywdev/FuzeInfra"
+    assert checkout["with"].get("ref") == "main"
+    assert re.search(r"@[0-9a-f]{40}$", checkout["uses"]), "pin the policy checkout by SHA"
     script = step["run"]
     assert "infra/scripts/validate_consumer_appproject.py" in script
     assert "--infra-projects infra/argocd/projects" in script
