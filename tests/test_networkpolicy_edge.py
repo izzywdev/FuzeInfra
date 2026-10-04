@@ -231,11 +231,14 @@ def test_probe_job_is_replaced_not_patched():
     opts = (jobs[0]["metadata"].get("annotations") or {}).get(
         "argocd.argoproj.io/sync-options", ""
     )
-    assert "Replace=true" in opts, (
-        "the probe Job must carry argocd.argoproj.io/sync-options: Replace=true. "
-        "A Job's spec.template is immutable, so without it Argo patches instead of "
-        "recreating, hits 'field is immutable', and stops syncing the ENTIRE "
-        "fuzeinfra-prod Application"
+    parsed = {o.strip() for o in opts.split(",") if o.strip()}
+    assert {"Replace=true", "Force=true"} <= parsed, (
+        "the probe Job must carry argocd.argoproj.io/sync-options: "
+        "Force=true,Replace=true. A Job's spec.template is immutable, so without "
+        "Replace Argo patches it and hits 'field is immutable'. Replace=true ALONE "
+        "is not enough: it is a PUT of the rendered object, which lacks the "
+        "server-generated spec.selector and is rejected (live 2026-10-04). Only "
+        "Force=true turns it into delete-then-create. Got: %r" % opts
     )
 
 
