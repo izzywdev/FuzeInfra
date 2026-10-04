@@ -1499,3 +1499,16 @@ selfHealMetrics:
   # `latest` + IfNotPresent = a node that already cached the tag never pulls a
   # rebuild. Drop this once the tag is pinned to an immutable sha-<commit>.
   imagePullPolicy: Always
+
+# FuzeFront's security service verifies workload tokens for services in its
+# namespace. Name matches the objects FuzeFront#1198 created, so this ADOPTS and
+# narrows them (cluster-wide ConfigMap read -> TokenReview only + a namespaced
+# registry Role). Measured 2026-10-04: identity ConfigMaps exist only in
+# `fuzefront`. Add a namespace here only when it starts hosting declarations,
+# and only if argocd/projects/fuzeinfra.yaml already lists it as a destination.
+workloadIdentity:
+  authenticators:
+    - name: fuzefront-workload-authenticator
+      serviceAccount: fuzefront-security
+      namespace: fuzefront
+      registryNamespaces: [fuzefront]
