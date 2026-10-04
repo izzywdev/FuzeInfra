@@ -4,7 +4,6 @@ Tests for Airflow workflow execution and Celery task processing
 import pytest
 import requests
 import time
-import json
 from datetime import datetime, timedelta
 
 
