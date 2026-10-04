@@ -106,12 +106,21 @@ metadata:
     # A Job's spec.template is IMMUTABLE. Without this, ANY edit to the probe —
     # the script, the image, the targets — makes Argo try to PATCH the existing
     # Job, which the API server rejects with "field is immutable". Argo retries,
-    # fails, and the WHOLE fuzeinfra-prod Application stops syncing: not just this
-    # Job, everything. That happened on 2026-09-28 (revision 423f7d8) and wedged
-    # prod deploys until it was fixed. Replace=true makes Argo delete and recreate
-    # the Job instead of patching it, which is the supported way to ship a mutable
-    # Job through GitOps.
-    argocd.argoproj.io/sync-options: Replace=true
+    # fails, and the WHOLE fuzeinfra-prod sync operation reports Failed. That
+    # happened on 2026-09-28 (revision 423f7d8).
+    #
+    # BOTH options are required. #1286 shipped `Replace=true` alone, believing it
+    # deletes and recreates. It does not: Replace=true makes Argo run
+    # `kubectl replace`, a PUT of the rendered object. The rendered Job carries no
+    # `spec.selector` and no controller-uid labels (the API server generates both
+    # on create), so the PUT is rejected — measured live on 2026-10-04:
+    #   Job.batch "fuzeinfra-edge-egress-probe" is invalid: [spec.selector:
+    #   Required value, ... spec.template: ... field is immutable]
+    # and every fuzeinfra-prod sync since has ended Failed. `Force=true` is what
+    # turns the replace into delete-then-create, so the server mints a fresh
+    # selector. Side effect, accepted: the probe re-runs on every sync of this
+    # app, which is exactly when a policy change would need re-verifying.
+    argocd.argoproj.io/sync-options: Force=true,Replace=true
     # Re-run the probe whenever anything about it changes — not just the CIDR set.
     # The old checksum covered only clusterCidrs, so a script change did not roll
     # the Job; combined with the immutability above, that is exactly how an edited

@@ -89,7 +89,8 @@ jobs:
           tests/test_arc_selfheal_dns_reachability.py \
           tests/test_helm_chart_config_has_chart.py \
           tests/test_headlamp_readonly.py \
-          tests/test_argo_alert.py
+          tests/test_argo_alert.py \
+          tests/test_networkpolicy_edge.py
 
     - name: Install Docker Compose
       run: |
