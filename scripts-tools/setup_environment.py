@@ -6,7 +6,6 @@ This script helps users create and configure their .env file
 from the environment.template file and sets up required databases.
 """
 
-import os
 import shutil
 import secrets
 import string
