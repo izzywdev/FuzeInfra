@@ -3,7 +3,6 @@ Tests for Airflow workflow orchestration services
 """
 import pytest
 import requests
-import time
 
 
 class TestAirflow:
