@@ -5,7 +5,6 @@ Non-interactive Environment Setup Script for CI/CD
 This script creates a .env file with secure passwords for CI/CD environments.
 """
 
-import os
 import shutil
 import secrets
 import string
