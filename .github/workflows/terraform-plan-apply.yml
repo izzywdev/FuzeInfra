@@ -312,7 +312,7 @@ jobs:
           echo "Resolved PR #$PR, reviewed plan keyed by head SHA $HEAD_SHA"
 
       - name: Download the reviewed plan
-        uses: dawidd6/action-download-artifact@634d83b91986fcec9be314054943fa5c976aeb0e # v25
+        uses: dawidd6/action-download-artifact@eab87c9830c39eff17e5a6eadb20bfb4bc880477 # v27
         with:
           name: tfplan-${{ steps.pr.outputs.head_sha }}
           # The plan was produced by a different workflow run (the PR check).
