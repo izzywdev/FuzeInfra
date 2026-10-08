@@ -4,19 +4,23 @@ FuzeX uses the shared PostgreSQL engine. It needs no MongoDB allocation and no
 dedicated database StatefulSet. Its migrations create the `design_frames`
 schema inside database `fuzex_design_frames`, owned by login `fuzex_svc`.
 
-The allocation and `fuzex-postgres` credential handoff start disabled. Dispatch
-the fixed bootstrap workflow after this change lands on FuzeInfra `main`:
+The allocation and `fuzex-postgres` credential handoff start disabled. FuzeX
+owns the runtime declaration and dispatches the generic FuzeInfra capability
+from its `request-postgres-provision.yml` workflow after this change lands on
+both default branches:
 
 ```sh
-gh workflow run provision-fuzex.yml --repo izzywdev/FuzeInfra --ref main
+gh workflow run request-postgres-provision.yml --repo izzywdev/FuzeX --ref master
 ```
 
-There are no workflow inputs. The runner generates an alphanumeric random
-password, seals it strictly for `fuzeinfra/fuzex-db-credentials:password`, and
-opens one PR containing ciphertext, allocation enablement and handoff
-enablement. The script validates the exact consumer and database contract before
-enabling either gate. A repeated dispatch reuses the pending provisioning branch
-or exits if provider ciphertext is already committed; it never silently rotates.
+There are no workflow inputs. FuzeX sends its bounded declaration through the
+family dispatch token; FuzeInfra's generic workflow validates it against the
+already-declared allocation and credential-handoff data, generates an
+alphanumeric random password, seals it strictly for
+`fuzeinfra/fuzex-db-credentials:password`, and opens one PR containing
+ciphertext, allocation enablement and handoff enablement. A repeated dispatch
+reuses the pending provisioning branch or exits if provider ciphertext is
+already committed; it never silently rotates.
 
 After merging the provisioning PR, confirm that Argo has synced its actual
 commit and that `fuzeinfra-service-db-provision` succeeded using `cluster-query`.
