@@ -1,0 +1,116 @@
+name: Provision service PostgreSQL
+
+# A generic, reviewed runtime capability. Consumer/product identity appears only
+# in the event payload and the resulting reviewed configuration PR, never in
+# this workflow's code. The payload is parsed by a strict schema helper and may
+# only enable a matching predeclared allocation + credential handoff.
+on:
+  repository_dispatch:
+    types: [provision-service-postgres]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: provision-service-postgres
+  cancel-in-progress: false
+
+jobs:
+  provision:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          persist-credentials: false
+
+      - name: Install request validator dependency
+        run: python3 -m pip install 'PyYAML==6.0.2'
+
+      - name: Validate bounded runtime request
+        id: request
+        env:
+          POSTGRES_PROVISION_REQUEST: ${{ toJson(github.event.client_payload) }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import importlib.util
+          import os
+          spec = importlib.util.spec_from_file_location(
+              'service_provisioning', 'scripts/enable-service-postgres-provisioning.py')
+          module = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(module)
+          request = module.request_from_env()
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write(f"service={request['service']}\n")
+              output.write(f"provider_secret={request['service']}-db-credentials\n")
+          PY
+
+      - name: Check for an existing provider secret or provisioning branch
+        id: state
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN || secrets.GITHUB_TOKEN }}
+          SERVICE: ${{ steps.request.outputs.service }}
+          PROVIDER_SECRET: ${{ steps.request.outputs.provider_secret }}
+        run: |
+          set -euo pipefail
+          if [ -f "deploy/sealed-secrets/${PROVIDER_SECRET}.yaml" ]; then
+            echo 'Provider ciphertext already exists; this request may only enable it once.'
+            echo 'exists=true' >> "$GITHUB_OUTPUT"
+          elif git ls-remote --exit-code --heads origin "provision/postgres-${SERVICE}" >/dev/null 2>&1; then
+            echo 'The provisioning branch already exists; reuse its reviewed PR instead of rotating.'
+            echo 'exists=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'exists=false' >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install sealing tools
+        if: steps.state.outputs.exists == 'false'
+        run: |
+          set -euo pipefail
+          version=0.27.1
+          archive="kubeseal-${version}-linux-amd64.tar.gz"
+          work=$(mktemp -d)
+          trap 'rm -f "$work/$archive" "$work/checksums.txt" "$work/kubeseal"; rmdir "$work"' EXIT
+          curl -fsSL "https://github.com/bitnami-labs/sealed-secrets/releases/download/v${version}/${archive}" -o "$work/$archive"
+          curl -fsSL "https://github.com/bitnami-labs/sealed-secrets/releases/download/v${version}/sealed-secrets_${version}_checksums.txt" -o "$work/checksums.txt"
+          (cd "$work" && grep " ${archive}$" checksums.txt | sha256sum -c -)
+          tar -xzf "$work/$archive" -C "$work" kubeseal
+          sudo install -m0755 "$work/kubeseal" /usr/local/bin/kubeseal
+
+      - name: Seal provider input and enable the matching declaration
+        if: steps.state.outputs.exists == 'false'
+        env:
+          POSTGRES_PROVISION_REQUEST: ${{ toJson(github.event.client_payload) }}
+          PROVIDER_SECRET: ${{ steps.request.outputs.provider_secret }}
+        run: |
+          set -euo pipefail
+          umask 077
+          password_file=$(mktemp)
+          trap 'rm -f "$password_file"' EXIT
+          openssl rand -hex 32 | tr -d '\n' > "$password_file"
+          bash scripts/seal-secret.sh "fuzeinfra/${PROVIDER_SECRET}" \
+            "password=@$password_file" --out "deploy/sealed-secrets/${PROVIDER_SECRET}.yaml"
+          python3 scripts/enable-service-postgres-provisioning.py
+
+      - name: Open reviewed provisioning PR
+        if: steps.state.outputs.exists == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN || secrets.GITHUB_TOKEN }}
+          SERVICE: ${{ steps.request.outputs.service }}
+          PROVIDER_SECRET: ${{ steps.request.outputs.provider_secret }}
+        run: |
+          set -euo pipefail
+          gh auth setup-git
+          git config user.name 'FuzeInfra Provisioning'
+          git config user.email 'provisioning@fuzeinfra'
+          git checkout -b "provision/postgres-${SERVICE}"
+          git add "deploy/sealed-secrets/${PROVIDER_SECRET}.yaml" \
+            helm/fuzeinfra/values-contabo.yaml governance/credential-handoff.json
+          git commit -m "feat(postgres): provision ${SERVICE} allocation"
+          git push origin "provision/postgres-${SERVICE}"
+          gh pr create --repo izzywdev/FuzeInfra --base main --head "provision/postgres-${SERVICE}" \
+            --title "feat(postgres): provision ${SERVICE} allocation" \
+            --body 'Generated from a schema-validated service Postgres request. The PR contains strict-scoped provider ciphertext plus matching allocation and handoff enablement; no plaintext credentials or direct cluster mutation.'
