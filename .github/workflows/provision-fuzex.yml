@@ -4,6 +4,12 @@ name: Provision FuzeX PostgreSQL
 # as inputs, no cluster credentials, and no direct cluster writes.
 on:
   workflow_dispatch:
+  # The FuzeX consumer can request this fixed, input-free operation using its
+  # existing Contents-scoped FUZEINFRA_DISPATCH_TOKEN.  This is deliberately a
+  # named capability, not a generic workflow-dispatch relay: no caller payload
+  # selects a workflow, ref, command, credential, database, or namespace.
+  repository_dispatch:
+    types: [provision-fuzex-postgres]
 
 permissions:
   contents: write
