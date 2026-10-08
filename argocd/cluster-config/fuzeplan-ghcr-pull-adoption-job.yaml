@@ -1,0 +1,69 @@
+# One-time GitOps migration for the pre-existing registry Secret. Kubernetes
+# requires dockerconfig data when applying a Secret manifest, so ownership cannot
+# be adopted safely with a data-free Secret YAML. This Job patches only the
+# controller-managed annotation; it never reads or logs Secret data.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: fuzeplan-ghcr-pull-adopter
+  namespace: fuzeplan
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: fuzeplan-ghcr-pull-adopter
+  namespace: fuzeplan
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: ["ghcr-pull"]
+    verbs: ["get", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: fuzeplan-ghcr-pull-adopter
+  namespace: fuzeplan
+subjects:
+  - kind: ServiceAccount
+    name: fuzeplan-ghcr-pull-adopter
+    namespace: fuzeplan
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: fuzeplan-ghcr-pull-adopter
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: fuzeplan-ghcr-pull-adoption
+  namespace: fuzeplan
+  labels:
+    app.kubernetes.io/name: fuzeplan-ghcr-pull-adoption
+    app.kubernetes.io/part-of: fuzeplan
+spec:
+  backoffLimit: 2
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: fuzeplan-ghcr-pull-adoption
+    spec:
+      serviceAccountName: fuzeplan-ghcr-pull-adopter
+      restartPolicy: OnFailure
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: adopt
+          image: bitnami/kubectl:1.31.4
+          command: ["/bin/sh", "-ec"]
+          args:
+            - >-
+              kubectl -n fuzeplan annotate secret ghcr-pull
+              sealedsecrets.bitnami.com/managed=true --overwrite
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            readOnlyRootFilesystem: true
