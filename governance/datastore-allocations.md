@@ -8,6 +8,7 @@ PR (or provisioning run) that creates an allocation. See
 
 | App | Role | Database | Consumer repo | Status |
 |---|---|---|---|---|
+| fuzex | `fuzex_svc` | `fuzex_design_frames` | izzywdev/FuzeX | declared; `provision-fuzex.yml` seals and enables atomically, then `fuzex-postgres` handoff delivers the consumer URL |
 | fuzekeys | `fuzekeys_user` | `fuzekeys` | izzywdev/FuzeKeys | active (FuzeInfra#136) |
 | fuzesales | `fuzesales_svc` | `fuzesales` | izzywdev/FuzeSales | declared (FuzeInfra#153) |
 | fuzecontact | `fuzecontact_svc` | `fuzecontact` | izzywdev/FuzeContact | declared (FuzeInfra#153) |

@@ -1060,6 +1060,14 @@ overprovisioning:
 #   - fuzecontact -> Secret `fuzecontact-db-credentials` key `password`  (present)
 #   - fuzeservice -> Secret `fuzeservice-db-credentials` key `password`  (present)
 serviceDatabases:
+  # provision-fuzex commits the ciphertext and this gate together.
+  - name: fuzex
+    enabled: false
+    role: fuzex_svc
+    database: fuzex_design_frames
+    passwordSecret:
+      name: fuzex-db-credentials
+      key: password
   - name: fuzesales
     enabled: true
     role: fuzesales_svc
