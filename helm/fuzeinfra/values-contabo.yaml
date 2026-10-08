@@ -1060,7 +1060,8 @@ overprovisioning:
 #   - fuzecontact -> Secret `fuzecontact-db-credentials` key `password`  (present)
 #   - fuzeservice -> Secret `fuzeservice-db-credentials` key `password`  (present)
 serviceDatabases:
-  # provision-fuzex commits the ciphertext and this gate together.
+  # The generic service-Postgres provisioner commits provider ciphertext and
+  # this gate together; consumer identity is runtime configuration.
   - name: fuzex
     enabled: false
     role: fuzex_svc

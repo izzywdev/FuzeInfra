@@ -140,7 +140,8 @@ serviceDbProvisioning:
 # Defaults are OFF; prod overlay flips `enabled: true` once the SealedSecrets
 # are present in the `fuzeinfra` namespace.
 serviceDatabases:
-  # Enabled by provision-fuzex only alongside its provider SealedSecret.
+  # Enabled by the generic service-Postgres provisioner only alongside its
+  # provider SealedSecret. Consumer identity is runtime configuration, not code.
   - name: fuzex
     enabled: false
     role: fuzex_svc
