@@ -140,6 +140,14 @@ serviceDbProvisioning:
 # Defaults are OFF; prod overlay flips `enabled: true` once the SealedSecrets
 # are present in the `fuzeinfra` namespace.
 serviceDatabases:
+  # Enabled by provision-fuzex only alongside its provider SealedSecret.
+  - name: fuzex
+    enabled: false
+    role: fuzex_svc
+    database: fuzex_design_frames
+    passwordSecret:
+      name: fuzex-db-credentials
+      key: password
   - name: fuzesales
     enabled: false
     role: fuzesales_svc
