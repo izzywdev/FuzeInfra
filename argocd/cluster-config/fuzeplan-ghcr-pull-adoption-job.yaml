@@ -36,17 +36,19 @@ roleRef:
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: fuzeplan-ghcr-pull-adoption
+  # Jobs cannot update pod templates in place. Keep the failed v1 Job for
+  # incident audit and create this v2 Job so the corrected helper image runs.
+  name: fuzeplan-ghcr-pull-adoption-v2
   namespace: fuzeplan
   labels:
-    app.kubernetes.io/name: fuzeplan-ghcr-pull-adoption
+    app.kubernetes.io/name: fuzeplan-ghcr-pull-adoption-v2
     app.kubernetes.io/part-of: fuzeplan
 spec:
   backoffLimit: 2
   template:
     metadata:
       labels:
-        app.kubernetes.io/name: fuzeplan-ghcr-pull-adoption
+        app.kubernetes.io/name: fuzeplan-ghcr-pull-adoption-v2
     spec:
       serviceAccountName: fuzeplan-ghcr-pull-adopter
       restartPolicy: OnFailure
