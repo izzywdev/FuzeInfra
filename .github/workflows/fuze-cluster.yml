@@ -167,15 +167,6 @@ jobs:
         continue-on-error: true
         uses: ./.github/actions/fuze-code-action
         with:
-          # Claude's event-derived mention mode recognizes its own `@claude`
-          # trigger, not this repository's `@fuze` alias. Give every provider
-          # the trusted request explicitly so a valid @fuze mention performs
-          # work instead of silently declining with an empty prompt.
-          task-prompt: >-
-            You were invoked through this repository's trusted @fuze handler.
-            Work on the current GitHub issue or pull request using its full
-            repository context. The user's request is:
-            ${{ github.event.comment.body || github.event.review.body || github.event.issue.body || github.event.issue.title }}
           github-token: ${{ secrets.GH_TOKEN || secrets.GITHUB_TOKEN }}
           litellm-key: ${{ secrets.LITELLM_FUZE_KEY }}
           litellm-ci-key: ${{ secrets.LITELLM_CI_KEY }}
