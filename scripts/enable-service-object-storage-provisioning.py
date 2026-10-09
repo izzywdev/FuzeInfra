@@ -8,6 +8,31 @@ from pathlib import Path
 NAME = re.compile(r"^[a-z][a-z0-9-]{0,62}$")
 REPO = re.compile(r"^izzywdev/[A-Za-z0-9_.-]+$")
 
+
+def assert_sealed_source(path: Path, source: dict):
+    """Reject a placeholder or plaintext manifest before enabling a handoff.
+
+    This stays deliberately stdlib-only because it runs in the dispatch action.
+    It does not decrypt or otherwise inspect credentials; it verifies only the
+    SealedSecret envelope and its strict source scope.
+    """
+    text = path.read_text()
+    name = re.escape(source["secretName"])
+    namespace = re.escape(source["namespace"])
+    key = re.escape(source["secretKey"])
+    if not re.search(r"(?m)^apiVersion:\s*bitnami\.com/v1alpha1\s*$", text):
+        raise ValueError("object-storage source must be a SealedSecret")
+    if not re.search(r"(?m)^kind:\s*SealedSecret\s*$", text):
+        raise ValueError("object-storage source must be a SealedSecret")
+    if not re.search(rf"(?ms)^metadata:\s*\n(?:^[ \t].*\n)*?^\s*name:\s*{name}\s*$", text):
+        raise ValueError("object-storage source SealedSecret name does not match allocation")
+    if not re.search(rf"(?ms)^metadata:\s*\n(?:^[ \t].*\n)*?^\s*namespace:\s*{namespace}\s*$", text):
+        raise ValueError("object-storage source SealedSecret namespace does not match allocation")
+    if not re.search(rf"(?ms)^\s*encryptedData:\s*\n(?:^[ \t].*\n)*?^\s*{key}:\s*\S+", text):
+        raise ValueError("object-storage source SealedSecret is missing encrypted config")
+    if re.search(r"(?m)^\s*(?:data|stringData):", text):
+        raise ValueError("object-storage source must not contain plaintext data")
+
 def request_from_env():
     try:
         request = json.loads(os.environ["OBJECT_STORAGE_PROVISION_REQUEST"])
@@ -30,8 +55,10 @@ def enable(root: Path, request: dict):
     # The workflow never receives a provider credential. A reviewed, strictly
     # scoped SealedSecret source must already be present before a handoff can
     # become deliverable; otherwise enabling would create a broken allocation.
-    if not (root / allocation["sourceManifest"]).is_file():
+    source_manifest = root / allocation["sourceManifest"]
+    if not source_manifest.is_file():
         raise ValueError("object-storage source credential has not been sealed by FuzeInfra")
+    assert_sealed_source(source_manifest, allocation["source"])
     handoff_path = root / "governance/credential-handoff.json"
     handoff_text = handoff_path.read_text()
     registry = json.loads(handoff_text)

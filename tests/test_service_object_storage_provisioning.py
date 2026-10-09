@@ -21,11 +21,23 @@ def request():
     return {"allocationId": "fuzex-artifact-storage", "consumerRepo": "izzywdev/FuzeX"}
 
 
-def test_enables_only_matching_disabled_allocation_and_handoff(tmp_path):
-    root = copied_root(tmp_path)
+def write_sealed_source(root):
     source = root / "deploy/sealed-secrets"
     source.mkdir(parents=True)
-    (source / "fuzex-object-storage.yaml").write_text("apiVersion: bitnami.com/v1alpha1\nkind: SealedSecret\n")
+    (source / "fuzex-object-storage.yaml").write_text("""apiVersion: bitnami.com/v1alpha1
+kind: SealedSecret
+metadata:
+  name: fuzex-object-storage
+  namespace: fuzeinfra
+spec:
+  encryptedData:
+    config: AgNotPlaintext
+""")
+
+
+def test_enables_only_matching_disabled_allocation_and_handoff(tmp_path):
+    root = copied_root(tmp_path)
+    write_sealed_source(root)
     MODULE.enable(root, request())
     allocations = json.loads((root / "governance/object-storage-allocations.json").read_text())
     handoffs = json.loads((root / "governance/credential-handoff.json").read_text())
@@ -35,9 +47,7 @@ def test_enables_only_matching_disabled_allocation_and_handoff(tmp_path):
 
 def test_rejects_a_consumer_that_does_not_match_the_runtime_declaration(tmp_path):
     root = copied_root(tmp_path)
-    source = root / "deploy/sealed-secrets"
-    source.mkdir(parents=True)
-    (source / "fuzex-object-storage.yaml").write_text("apiVersion: bitnami.com/v1alpha1\nkind: SealedSecret\n")
+    write_sealed_source(root)
     with pytest.raises(ValueError, match="do not match"):
         MODULE.enable(root, {"allocationId": "fuzex-artifact-storage", "consumerRepo": "izzywdev/Other"})
 
@@ -45,6 +55,23 @@ def test_rejects_a_consumer_that_does_not_match_the_runtime_declaration(tmp_path
 def test_refuses_to_enable_before_fuzeinfra_has_sealed_the_provider_source(tmp_path):
     root = copied_root(tmp_path)
     with pytest.raises(ValueError, match="has not been sealed"):
+        MODULE.enable(root, request())
+
+
+def test_refuses_a_placeholder_or_plaintext_source_manifest(tmp_path):
+    root = copied_root(tmp_path)
+    source = root / "deploy/sealed-secrets"
+    source.mkdir(parents=True)
+    (source / "fuzex-object-storage.yaml").write_text("""apiVersion: bitnami.com/v1alpha1
+kind: SealedSecret
+metadata:
+  name: fuzex-object-storage
+  namespace: fuzeinfra
+spec:
+  stringData:
+    config: unsafe
+""")
+    with pytest.raises(ValueError, match="plaintext|encrypted config"):
         MODULE.enable(root, request())
 
 
