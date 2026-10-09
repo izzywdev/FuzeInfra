@@ -1,0 +1,17 @@
+{
+  "$schema": "./object-storage-allocations.schema.json",
+  "version": 1,
+  "allocations": [
+    {
+      "id": "fuzex-artifact-storage",
+      "enabled": false,
+      "service": "fuzex",
+      "provider": "s3-compatible",
+      "bucket": "fuzex-artifacts",
+      "sourceManifest": "deploy/sealed-secrets/fuzex-object-storage.yaml",
+      "source": { "namespace": "fuzeinfra", "secretName": "fuzex-object-storage", "secretKey": "config" },
+      "handoffId": "fuzex-artifact-storage",
+      "notes": "Runtime allocation only. The provider must mint a dedicated workload principal restricted to this bucket and seal the source manifest before this entry can be enabled; never hand out the FuzeInfra/Contabo account credential or the shared fuzeinfra-blobs bucket."
+    }
+  ]
+}
