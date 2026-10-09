@@ -1,0 +1,52 @@
+name: ARC Mail Egress Probe
+
+on:
+  schedule:
+    # Run before FuzeSDLC's 02:37 UTC threat-intelligence delivery.
+    - cron: '50 1 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: arc-mail-egress-probe
+  cancel-in-progress: false
+
+jobs:
+  probe:
+    # This is the same repo-scoped ARC scale-set name used by FuzeSDLC.
+    runs-on: fuze-runner
+    timeout-minutes: 5
+    steps:
+      - name: Verify ZeptoMail STARTTLS and implicit-TLS egress
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import smtplib
+          import ssl
+
+          host = "smtp.zeptomail.com"
+          context = ssl.create_default_context()
+          failures = []
+
+          try:
+              with smtplib.SMTP(host, 587, timeout=20) as client:
+                  client.ehlo()
+                  client.starttls(context=context)
+                  client.ehlo()
+              print("PASS ZeptoMail STARTTLS egress: smtp.zeptomail.com:587")
+          except (OSError, smtplib.SMTPException) as error:
+              failures.append(f"STARTTLS 587: {type(error).__name__}: {error}")
+
+          try:
+              with smtplib.SMTP_SSL(host, 465, timeout=20, context=context):
+                  pass
+              print("PASS ZeptoMail implicit-TLS fallback egress: smtp.zeptomail.com:465")
+          except (OSError, smtplib.SMTPException) as error:
+              failures.append(f"implicit TLS 465: {type(error).__name__}: {error}")
+
+          if failures:
+              raise SystemExit("FAIL ARC mail egress: " + "; ".join(failures))
+          PY
