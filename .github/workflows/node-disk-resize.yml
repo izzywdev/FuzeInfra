@@ -374,11 +374,15 @@ jobs:
             exit 1
           fi
 
-          echo "Pod: $POD — waiting for completion..."
-          # Wait for pod to complete (not just running)
-          kubectl wait pod/"$POD" -n kube-system \
-            --for=condition=ready=false \
-            --timeout=600s 2>/dev/null || true
+          echo "Pod: $POD — waiting for Job completion..."
+          # Wait for job to complete or fail (pod ready=false fires immediately for Pending)
+          kubectl wait job/"${JOB_NAME}" -n kube-system \
+            --for=condition=complete \
+            --timeout=600s 2>/dev/null \
+          || kubectl wait job/"${JOB_NAME}" -n kube-system \
+            --for=condition=failed \
+            --timeout=600s 2>/dev/null \
+          || true
 
           echo ""
           echo "====== Job logs from ${NODE_NAME} ======"
