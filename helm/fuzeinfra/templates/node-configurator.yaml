@@ -107,7 +107,7 @@ spec:
       annotations:
         # Includes the rollout set: changing WHICH nodes are in it must restart the
         # DaemonSet, or the change reaches nothing.
-        checksum/config: {{ printf "%v-%v-%v-%v-%v" .Values.nodeConfigurator.preferIPv4.enabled .Values.nodeConfigurator.multipathBlacklist.enabled (join "," .Values.nodeConfigurator.multipathBlacklist.rolloutNodes) .Values.nodeConfigurator.corednsHA.enabled .Values.nodeConfigurator.corednsHA.replicas | sha256sum }}
+        checksum/config: {{ printf "%v-%v-%v-%v-%v-%v" .Values.nodeConfigurator.preferIPv4.enabled .Values.nodeConfigurator.multipathBlacklist.enabled (join "," .Values.nodeConfigurator.multipathBlacklist.rolloutNodes) (join "," .Values.nodeConfigurator.multipathBlacklist.excludeNodes) .Values.nodeConfigurator.corednsHA.enabled .Values.nodeConfigurator.corednsHA.replicas | sha256sum }}
     spec:
       # hostPID lets the multipath init container nsenter PID 1 and restart multipathd
       # on the host. Harmless when that feature is gated off.
@@ -471,6 +471,10 @@ spec:
               # node before it goes near the node running etcd. The DaemonSet itself
               # stays fleet-wide so preferIPv4 is unaffected by the staging.
               ROLLOUT="{{ join "," .Values.nodeConfigurator.multipathBlacklist.rolloutNodes }}"
+              EXCLUDE="{{ join "," .Values.nodeConfigurator.multipathBlacklist.excludeNodes }}"
+              case ",$EXCLUDE," in
+                *",$NODE_NAME,"*) echo "node $NODE_NAME is in multipath excludeNodes [$EXCLUDE]; skipping"; exit 0 ;;
+              esac
               if [ -n "$ROLLOUT" ]; then
                 case ",$ROLLOUT," in
                   *",$NODE_NAME,"*) : ;;
