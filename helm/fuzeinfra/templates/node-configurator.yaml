@@ -107,7 +107,7 @@ spec:
       annotations:
         # Includes the rollout set: changing WHICH nodes are in it must restart the
         # DaemonSet, or the change reaches nothing.
-        checksum/config: {{ printf "%v-%v-%v-%v-%v" .Values.nodeConfigurator.preferIPv4.enabled .Values.nodeConfigurator.multipathBlacklist.enabled (join "," .Values.nodeConfigurator.multipathBlacklist.rolloutNodes) .Values.nodeConfigurator.corednsHA.enabled .Values.nodeConfigurator.corednsHA.replicas | sha256sum }}
+        checksum/config: {{ printf "%v-%v-%v-%v-%v-%v" .Values.nodeConfigurator.preferIPv4.enabled .Values.nodeConfigurator.multipathBlacklist.enabled (join "," .Values.nodeConfigurator.multipathBlacklist.rolloutNodes) (join "," .Values.nodeConfigurator.multipathBlacklist.rolloutNodePrefixes) .Values.nodeConfigurator.corednsHA.enabled .Values.nodeConfigurator.corednsHA.replicas | sha256sum }}
     spec:
       # hostPID lets the multipath init container nsenter PID 1 and restart multipathd
       # on the host. Harmless when that feature is gated off.
@@ -471,11 +471,24 @@ spec:
               # node before it goes near the node running etcd. The DaemonSet itself
               # stays fleet-wide so preferIPv4 is unaffected by the staging.
               ROLLOUT="{{ join "," .Values.nodeConfigurator.multipathBlacklist.rolloutNodes }}"
-              if [ -n "$ROLLOUT" ]; then
+              PREFIXES="{{ join "," .Values.nodeConfigurator.multipathBlacklist.rolloutNodePrefixes }}"
+              if [ -n "$ROLLOUT" ] || [ -n "$PREFIXES" ]; then
+                IN_SET=0
                 case ",$ROLLOUT," in
-                  *",$NODE_NAME,"*) : ;;
-                  *) echo "node $NODE_NAME not in multipath rollout set [$ROLLOUT]; skipping"; exit 0 ;;
+                  *",$NODE_NAME,"*) IN_SET=1 ;;
                 esac
+                # Prefix match covers generated names (autoscaler elastic nodes).
+                OLDIFS=$IFS; IFS=,
+                for P in $PREFIXES; do
+                  case "$NODE_NAME" in
+                    "$P"*) IN_SET=1 ;;
+                  esac
+                done
+                IFS=$OLDIFS
+                if [ "$IN_SET" -ne 1 ]; then
+                  echo "node $NODE_NAME not in multipath rollout set [nodes=$ROLLOUT prefixes=$PREFIXES]; skipping"
+                  exit 0
+                fi
               fi
               # VERSIONED marker. The old guard matched a bare "Managed by FuzeInfra",
               # so once ANY version was written the init container exited 0 forever and

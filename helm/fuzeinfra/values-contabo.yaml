@@ -1400,6 +1400,12 @@ nodeConfigurator:
       - fuzeinfra-ci-runner-1
       - fuze-core-2
       - fuze-core-3
+    # ELASTIC POOL. The autoscaler's fuzeinfra-prod-elastic-v2-* nodes are Longhorn
+    # nodes (Ready, schedulable, can hold replicas) but their names are generated
+    # and recycled, so rolloutNodes can never list them -- they ran with no
+    # blacklist. Match them by prefix. Safe first target: no etcd, no apiserver.
+    rolloutNodePrefixes:
+      - fuzeinfra-prod-elastic-
   # ENABLED. Gives etcd a 10:1 disk share over all pod I/O, via the cgroup-v2
   # iocost controller. Direct fix for the 2026-09-06 outage: pod I/O (Prometheus
   # TSDB compaction, Loki chunk flushes, Longhorn replica traffic) starved etcd on
