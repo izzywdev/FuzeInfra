@@ -50,8 +50,13 @@ The backup **target** itself is set in `argocd/applications/longhorn.yaml`
 ## Enable sequence (human-gated, GitOps)
 
 1. Longhorn controller installed + healthy (sync `argocd/applications/longhorn.yaml`).
-2. Seal the credential offline per `longhorn-s3-credentials.yaml.template`;
-   commit the encrypted `longhorn-s3-credentials.yaml`.
+2. Seal the credential. Either **hands-off** — run the
+   `seal-longhorn-s3.yml` workflow (`gh workflow run seal-longhorn-s3.yml`),
+   which fetches the Contabo Object Storage key pair via the API using the
+   repo's existing Contabo API secrets, seals it offline, and opens an
+   auto-merging PR (no human handles plaintext) — or **manually** offline per
+   `longhorn-s3-credentials.yaml.template`. Either way, commit the encrypted
+   `longhorn-s3-credentials.yaml`.
 3. Merge the `defaultBackupStore` change in `argocd/applications/longhorn.yaml`
    and sync the Longhorn app.
 4. `kubectl apply -f argocd/applications/longhorn-backup.yaml` and sync it.
