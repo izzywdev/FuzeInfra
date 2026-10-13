@@ -1,0 +1,116 @@
+name: provision-registry-bot-ghcr-pull
+
+# GitOps entrypoint for the dedicated, least-privilege GHCR pull identity.
+# The token exists only in the protected `registry-credentials` Environment.
+# It is turned into a SealedSecret and proposed as a PR; plaintext never enters git.
+on:
+  workflow_dispatch:
+    inputs:
+      verify_image:
+        description: "Exact private GHCR image to probe"
+        required: true
+        type: string
+      verify_only:
+        description: "Probe credentials only; do not create a GitOps PR"
+        required: true
+        default: true
+        type: boolean
+      namespace:
+        description: "Target Kubernetes namespace"
+        required: true
+        default: fuzeplan
+        type: string
+      secret_name:
+        description: "Target imagePullSecret name"
+        required: true
+        default: ghcr-pull
+        type: string
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: provision-registry-bot-ghcr-pull-${{ inputs.namespace }}-${{ inputs.secret_name }}
+  cancel-in-progress: false
+
+jobs:
+  provision:
+    # This environment has reviewer and branch-policy protection. Do not weaken it.
+    environment: registry-credentials
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Validate request and credential shape
+        env:
+          GHCR_PULL_USERNAME: ${{ secrets.GHCR_PULL_USERNAME }}
+          GHCR_PULL_TOKEN: ${{ secrets.GHCR_PULL_TOKEN }}
+          IMAGE: ${{ inputs.verify_image }}
+          NAMESPACE: ${{ inputs.namespace }}
+          SECRET_NAME: ${{ inputs.secret_name }}
+        run: |
+          set -euo pipefail
+          test -n "$GHCR_PULL_USERNAME" || { echo '::error::GHCR_PULL_USERNAME is not configured'; exit 1; }
+          test -n "$GHCR_PULL_TOKEN" || { echo '::error::GHCR_PULL_TOKEN is not configured'; exit 1; }
+          test "$GHCR_PULL_USERNAME" = 'fuze-registry-bot' || { echo '::error::GHCR_PULL_USERNAME must be fuze-registry-bot'; exit 1; }
+          [[ "$NAMESPACE" =~ ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$ ]] || { echo '::error::invalid namespace'; exit 1; }
+          [[ "$SECRET_NAME" =~ ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$ ]] || { echo '::error::invalid secret name'; exit 1; }
+          [[ "$IMAGE" =~ ^ghcr\.io/izzywdev/[a-z0-9][a-z0-9._-]*:[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || { echo '::error::image must be an exact ghcr.io/izzywdev package tag'; exit 1; }
+          umask 077
+          jq -n --arg username "$GHCR_PULL_USERNAME" --arg token "$GHCR_PULL_TOKEN" \
+            '{auths:{"ghcr.io":{username:$username,password:$token,auth:(($username + ":" + $token)|@base64)}}}' \
+            > "$RUNNER_TEMP/dockerconfigjson"
+          echo "DOCKER_CONFIG_JSON=$RUNNER_TEMP/dockerconfigjson" >> "$GITHUB_ENV"
+
+      - name: Verify exact GHCR manifest
+        env:
+          DOCKER_CONFIG_JSON: ${{ env.DOCKER_CONFIG_JSON }}
+          IMAGE: ${{ inputs.verify_image }}
+        run: python3 scripts/verify_ghcr_pull.py "$DOCKER_CONFIG_JSON" "$IMAGE"
+
+      - name: Stop after verification
+        if: inputs.verify_only
+        run: echo 'Credential verified; no GitOps change requested.'
+
+      - name: Install kubeseal
+        if: ${{ !inputs.verify_only }}
+        run: |
+          set -euo pipefail
+          curl -fsSL -o /tmp/kubeseal.tar.gz https://github.com/bitnami-labs/sealed-secrets/releases/download/v0.30.0/kubeseal-0.30.0-linux-amd64.tar.gz
+          tar -xzf /tmp/kubeseal.tar.gz -C /tmp kubeseal
+
+      - name: Seal credential for GitOps
+        if: ${{ !inputs.verify_only }}
+        env:
+          NAMESPACE: ${{ inputs.namespace }}
+          SECRET_NAME: ${{ inputs.secret_name }}
+          OUTPUT: argocd/cluster-config/ghcr-pull-secret-${{ inputs.namespace }}.yaml
+        run: |
+          set -euo pipefail
+          curl -fsSL https://sealed-secrets.prod.fuzefront.com/v1/cert.pem -o /tmp/sealed-secrets-cert.pem
+          kubectl create secret docker-registry "$SECRET_NAME" --namespace "$NAMESPACE" --docker-server=ghcr.io \
+            --docker-username="$(jq -r '.auths[\"ghcr.io\"].username' "$DOCKER_CONFIG_JSON")" \
+            --docker-password="$(jq -r '.auths[\"ghcr.io\"].password' "$DOCKER_CONFIG_JSON")" --dry-run=client -o json \
+            | /tmp/kubeseal --format yaml --cert /tmp/sealed-secrets-cert.pem --namespace "$NAMESPACE" --name "$SECRET_NAME" > "$OUTPUT"
+          test -s "$OUTPUT" && grep -q 'kind: SealedSecret' "$OUTPUT"
+
+      - name: Open GitOps pull request
+        if: ${{ !inputs.verify_only }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NAMESPACE: ${{ inputs.namespace }}
+          SECRET_NAME: ${{ inputs.secret_name }}
+        run: |
+          set -euo pipefail
+          branch="automation/ghcr-pull-${NAMESPACE}-${SECRET_NAME}-${GITHUB_RUN_ID}"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git checkout -b "$branch"
+          git add "argocd/cluster-config/ghcr-pull-secret-${NAMESPACE}.yaml"
+          git commit -m "chore(registry): rotate ${NAMESPACE} GHCR pull credential"
+          git push origin "$branch"
+          gh pr create --base main --head "$branch" --title "chore(registry): reconcile ${NAMESPACE} GHCR pull credential" --body "Generated by the protected registry-credentials environment. This PR contains SealedSecret ciphertext only."

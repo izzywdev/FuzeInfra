@@ -2,7 +2,6 @@
 # This file contains settings for the FuzeInfra ChromaDB instance
 
 import os
-import chromadb
 from chromadb.config import Settings
 
 # Database configuration

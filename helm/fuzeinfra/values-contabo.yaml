@@ -1387,11 +1387,19 @@ nodeConfigurator:
     # being up; it never inspects multipath.conf. Verify by observing a volume
     # attach + format cleanly, not by that condition.
     #
-    # Widen to fuze-core-3, then fuze-core-1 (apiserver endpoint) LAST, only after
-    # that.
+    # STAGE THREE: + fuze-core-3, the node that hosts fuzeinfra-postgres-0. On
+    # 2026-10-12 a host crash left its Longhorn volume with a damaged ext4 inode
+    # (EIO on pgdata) because multipathd was holding the /dev/longhorn/pvc-* device
+    # and the journal did not flush cleanly. MERGE ORDER MATTERS: restarting
+    # multipathd on a node mid-repair can disturb the iSCSI session of the volume
+    # being fsck'd, so merge this only AFTER the offline e2fsck/restore of the
+    # postgres volume is finished and the volume is attached normally again.
+    #
+    # fuze-core-1 (apiserver endpoint) goes LAST, only after that.
     rolloutNodes:
       - fuzeinfra-ci-runner-1
       - fuze-core-2
+      - fuze-core-3
   # ENABLED. Gives etcd a 10:1 disk share over all pod I/O, via the cgroup-v2
   # iocost controller. Direct fix for the 2026-09-06 outage: pod I/O (Prometheus
   # TSDB compaction, Loki chunk flushes, Longhorn replica traffic) starved etcd on
