@@ -42,6 +42,12 @@ on:
         description: 'For mode=resize ONLY: type RESIZE-DISK to proceed'
         default: ''
         required: false
+      snapshot:
+        description: 'For mode=resize: create = take a fresh pre-resize snapshot; skip = use an existing snapshot (must already exist; listed in the log)'
+        type: choice
+        options: [create, skip]
+        default: create
+        required: true
 
 permissions:
   contents: read
@@ -99,12 +105,13 @@ jobs:
           kubectl version --client=true -o yaml >/dev/null
           echo "kubectl configured."
 
-      - name: Create Contabo snapshot (resize mode only)
+      - name: Pre-resize Contabo snapshot (resize mode only)
         if: inputs.mode == 'resize'
         id: snapshot
         env:
           NODE_NAME: ${{ matrix.node }}
           RUN_ID: ${{ github.run_id }}
+          SNAPSHOT_MODE: ${{ inputs.snapshot }}
           CID:   ${{ secrets.CONTABO_CLIENT_ID }}
           CSEC:  ${{ secrets.CONTABO_CLIENT_SECRET }}
           CUSER: ${{ secrets.CONTABO_API_USER }}
@@ -151,6 +158,18 @@ jobs:
           done
           [ -n "$INSTANCE_ID" ] || { echo "::error::No Contabo instance found with IP ${EXT_IP}"; exit 1; }
           echo "Contabo instanceId: ${INSTANCE_ID}"
+
+          # The plan allows a single snapshot per instance, so a manually taken
+          # one blocks creation; skip mode requires it to exist and logs it.
+          if [ "$SNAPSHOT_MODE" = "skip" ]; then
+            SNAPS=$(req "https://api.contabo.com/v1/compute/instances/${INSTANCE_ID}/snapshots")
+            echo "Existing snapshots for ${NODE_NAME}:"
+            printf '%s' "$SNAPS" | jq -r '.data[] | "  \(.snapshotId)  name=\(.name)  created=\(.createdDate)  status=\(.status // "n/a")"'
+            n=$(printf '%s' "$SNAPS" | jq '.data | length')
+            [ "$n" -gt 0 ] || { echo "::error::snapshot=skip but ${NODE_NAME} has no existing snapshot — refusing to resize without a backup."; exit 1; }
+            echo "snapshot=skip: using existing snapshot as the pre-resize backup."
+            exit 0
+          fi
 
           # Create pre-resize snapshot.
           # Contabo rejects snapshot names longer than 30 chars (HTTP 400).
