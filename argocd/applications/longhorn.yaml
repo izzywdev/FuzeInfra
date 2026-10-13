@@ -115,6 +115,18 @@ spec:
           # Longhorn additionally requires that no volume be attached when this
           # setting changes, so apply it during the same window as the taint.
           taintToleration: "fuzeinfra.io/durable=true:NoSchedule"
+          # Gradually rebalance existing replicas toward under-utilised nodes
+          # (including newly-added durable storage nodes) using the least-
+          # disruptive strategy — one replica at a time, only when a healthier
+          # node has meaningfully more free capacity. Prevents the overcommit on
+          # fuze-core-3 (201 GiB scheduled / 154.9 GiB disk) from compounding as
+          # new volumes are created, and slowly drains excess replicas off it once
+          # fuze-durable-storage-1 joins the pool.
+          #
+          # !! SAME FIRST-INSTALL CAVEAT as above: must also be applied live:
+          #   kubectl -n longhorn-system patch settings.longhorn.io \
+          #     replica-auto-balance --type=merge -p '{"value":"least-effort"}'
+          replicaAutoBalance: least-effort
         # LONGHORN IS NOW THE CLUSTER DEFAULT. This was `false`, with local-path
         # left as the default — and that default was silently destroying data.
         #
