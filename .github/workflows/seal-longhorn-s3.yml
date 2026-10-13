@@ -1,0 +1,184 @@
+# =============================================================================
+# seal-longhorn-s3 — produce the longhorn-system/longhorn-s3 SealedSecret from
+# the Contabo Object Storage credentials, with no plaintext anywhere outside the
+# runner.
+#
+# Longhorn's S3 backupstore (argocd/applications/longhorn.yaml -> defaultBackupStore
+# + deploy/longhorn-system/) needs the Contabo Object Storage access-key/secret
+# in-cluster, under Longhorn's hardcoded AWS_* key names, in the longhorn-system
+# namespace. That is the SAME account key pair behind the loki-s3 and
+# fuzeinfra-backups-s3 SealedSecrets — only the key NAMES and the namespace differ.
+#
+# The key pair is NOT a repo secret directly: it is fetched from the Contabo API
+# using the four Contabo API creds that ALREADY exist as repo secrets (the
+# autoscaler + seal-contabo-api-credentials.yml use them). This workflow does the
+# OAuth2 password grant, reads the object-storage credential, seals it OFFLINE
+# against the committed public cert via scripts/seal-secret.sh (encrypt-only; only
+# the in-cluster controller can decrypt), and opens a PR with the ciphertext. The
+# plaintext is written only to a mode-0700 temp dir on the runner, shredded after,
+# and NEVER printed, logged, or committed.
+#
+# Fetch path (same as deploy/sealed-secrets/loki-s3-credentials.yaml.template):
+#   POST auth.contabo.com/.../openid-connect/token  (grant_type=password)
+#   GET  api.contabo.com/v1/users                    -> userId
+#   GET  api.contabo.com/v1/users/<userId>/object-storages/credentials
+#        -> [{ objectStorageId, accessKey, secretKey }]
+# Every api.contabo.com call needs an x-request-id header that is a valid UUID.
+#
+# AFTER MERGE: the longhorn-s3 SealedSecret is owned by the `longhorn-backup` Argo
+# app (project: default, longhorn-system), which is MANUAL-sync by design — so a
+# human still runs `argocd app sync longhorn-backup` to land it. This workflow
+# only produces the committed ciphertext; it performs NO prod write.
+#
+# Re-running rotates nothing on its own — it re-reads the SAME account pair and
+# re-seals it; the output only changes if the Contabo key pair itself changed.
+# =============================================================================
+name: seal-longhorn-s3
+
+on:
+  workflow_dispatch:
+    inputs:
+      s3_endpoint:
+        description: "Contabo S3 endpoint for AWS_ENDPOINTS (region host)."
+        required: false
+        default: "https://eu2.contabostorage.com"
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: seal-longhorn-s3
+  cancel-in-progress: false
+
+jobs:
+  seal:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install kubeseal
+        run: |
+          set -euo pipefail
+          VER="0.27.1"
+          curl -fsSL -o /tmp/ks.tgz \
+            "https://github.com/bitnami-labs/sealed-secrets/releases/download/v${VER}/kubeseal-${VER}-linux-amd64.tar.gz"
+          tar -xzf /tmp/ks.tgz -C /tmp kubeseal
+          sudo install -m0755 /tmp/kubeseal /usr/local/bin/kubeseal
+          kubeseal --version
+
+      - name: Fetch Contabo Object Storage creds + seal (plaintext never leaves the runner)
+        env:
+          CONTABO_CLIENT_ID: ${{ secrets.CONTABO_CLIENT_ID }}
+          CONTABO_CLIENT_SECRET: ${{ secrets.CONTABO_CLIENT_SECRET }}
+          CONTABO_API_USER: ${{ secrets.CONTABO_API_USER }}
+          CONTABO_API_PASSWORD: ${{ secrets.CONTABO_API_PASSWORD }}
+          S3_ENDPOINT: ${{ inputs.s3_endpoint }}
+          # seal-secret.sh fetches this, falling back to the committed cert if the
+          # CF-Access-gated URL is unreachable from CI.
+          FUZEINFRA_SEALED_CERT_URL: https://sealed-secrets.prod.fuzefront.com/v1/cert.pem
+        run: |
+          set -euo pipefail
+          for v in CONTABO_CLIENT_ID CONTABO_CLIENT_SECRET CONTABO_API_USER CONTABO_API_PASSWORD; do
+            if [ -z "${!v:-}" ]; then echo "::error::secret $v is unset"; exit 1; fi
+          done
+          printf '%s' "$S3_ENDPOINT" | grep -qE '^https://[A-Za-z0-9.-]+$' \
+            || { echo "::error::s3_endpoint must be an https host URL"; exit 1; }
+
+          umask 077
+          d="$(mktemp -d)"
+          # Everything sensitive (API creds, OAuth token, API responses, the S3 key
+          # pair) stays inside $d as mode-0600 files. Nothing is echoed; curl writes
+          # to files, jq reads/writes files. $d is shredded in the trap.
+          cleanup() { find "$d" -type f -exec shred -u {} + 2>/dev/null || rm -rf "$d"; rmdir "$d" 2>/dev/null || true; }
+          trap cleanup EXIT
+
+          printf '%s' "$CONTABO_CLIENT_ID"     > "$d/cid"
+          printf '%s' "$CONTABO_CLIENT_SECRET" > "$d/csec"
+          printf '%s' "$CONTABO_API_USER"      > "$d/cuser"
+          printf '%s' "$CONTABO_API_PASSWORD"  > "$d/cpass"
+
+          uuid() { cat /proc/sys/kernel/random/uuid; }
+
+          # 1) OAuth2 password grant. Values passed via --data-urlencode name@file
+          #    so no secret appears in argv. Response (contains access_token) -> file.
+          http=$(curl -sS -o "$d/token.json" -w '%{http_code}' \
+            -X POST "https://auth.contabo.com/auth/realms/contabo/protocol/openid-connect/token" \
+            --data-urlencode "grant_type=password" \
+            --data-urlencode "client_id@$d/cid" \
+            --data-urlencode "client_secret@$d/csec" \
+            --data-urlencode "username@$d/cuser" \
+            --data-urlencode "password@$d/cpass")
+          if [ "$http" != "200" ]; then echo "::error::Contabo OAuth token request failed (HTTP $http)"; exit 1; fi
+          jq -er '.access_token' < "$d/token.json" > "$d/access_token" \
+            || { echo "::error::no access_token in OAuth response"; exit 1; }
+
+          auth_hdr="Authorization: Bearer $(cat "$d/access_token")"
+
+          # 2) userId
+          http=$(curl -sS -o "$d/users.json" -w '%{http_code}' \
+            -H "$auth_hdr" -H "x-request-id: $(uuid)" -H "Accept: application/json" \
+            "https://api.contabo.com/v1/users")
+          if [ "$http" != "200" ]; then echo "::error::GET /v1/users failed (HTTP $http)"; exit 1; fi
+          jq -er '.data[0].userId' < "$d/users.json" > "$d/user_id" \
+            || { echo "::error::could not resolve userId"; exit 1; }
+
+          # 3) object-storage credential pair (same account pair as loki-s3 / backups-s3)
+          http=$(curl -sS -o "$d/creds.json" -w '%{http_code}' \
+            -H "$auth_hdr" -H "x-request-id: $(uuid)" -H "Accept: application/json" \
+            "https://api.contabo.com/v1/users/$(cat "$d/user_id")/object-storages/credentials")
+          if [ "$http" != "200" ]; then echo "::error::GET object-storages/credentials failed (HTTP $http)"; exit 1; fi
+          if [ "$(jq -r '.data | length' < "$d/creds.json")" = "0" ]; then
+            echo "::error::no object-storage credentials returned for this account"; exit 1
+          fi
+          jq -er '.data[0].accessKey' < "$d/creds.json" > "$d/access_key" \
+            || { echo "::error::no accessKey in credentials response"; exit 1; }
+          jq -er '.data[0].secretKey' < "$d/creds.json" > "$d/secret_key" \
+            || { echo "::error::no secretKey in credentials response"; exit 1; }
+
+          # 4) Seal into longhorn-system/longhorn-s3 with Longhorn's hardcoded key
+          #    names. AWS_ENDPOINTS (not secret, but Longhorn reads it only from this
+          #    Secret) + VIRTUAL_HOSTED_STYLE=false (Contabo needs path-style).
+          printf '%s' "$S3_ENDPOINT" > "$d/endpoint"
+          printf '%s' "false"        > "$d/vhs"
+          bash scripts/seal-secret.sh longhorn-system/longhorn-s3 \
+            AWS_ACCESS_KEY_ID=@"$d/access_key" \
+            AWS_SECRET_ACCESS_KEY=@"$d/secret_key" \
+            AWS_ENDPOINTS=@"$d/endpoint" \
+            VIRTUAL_HOSTED_STYLE=@"$d/vhs" \
+            --out deploy/longhorn-system/longhorn-s3-credentials.yaml
+
+          # Sanity: refuse to commit if any plaintext leaked into the sealed output.
+          leak=0
+          for f in access_key secret_key; do
+            frag="$(head -c 6 "$d/$f")"
+            [ -n "$frag" ] && grep -qF "$frag" deploy/longhorn-system/longhorn-s3-credentials.yaml && leak=1
+          done
+          if [ "$leak" = 1 ]; then echo "::error::plaintext detected in sealed output — refusing to commit"; exit 1; fi
+          echo "sealed deploy/longhorn-system/longhorn-s3-credentials.yaml"
+
+      - name: Open PR with the sealed manifest
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          # Stage first: `git diff --quiet` ignores NEW untracked files, so a
+          # first-time seal (no prior committed manifest) looks like "no change".
+          git add deploy/longhorn-system/longhorn-s3-credentials.yaml
+          if git diff --cached --quiet; then
+            echo "no change to the sealed manifest; nothing to do"; exit 0
+          fi
+          BR="chore/seal-longhorn-s3-${GITHUB_RUN_ID}"
+          git checkout -b "$BR"
+          git commit -m "chore(secrets): seal longhorn-s3 for the Longhorn S3 backupstore"
+          git push -u origin "$BR"
+          gh pr create --base main --head "$BR" \
+            --title "chore(secrets): seal longhorn-s3 (Longhorn S3 backupstore)" \
+            --body "$(printf '%s\n' \
+              "Sealed \`longhorn-system/longhorn-s3\` (Contabo Object Storage key pair fetched from the Contabo API using the repo's existing API creds, plus AWS_ENDPOINTS + VIRTUAL_HOSTED_STYLE), produced offline by seal-longhorn-s3.yml. Ciphertext only; the plaintext was written to a shredded temp dir on the runner and never logged." \
+              "" \
+              "On merge, the \`longhorn-backup\` Argo app (MANUAL sync) can be synced to land it. Pairs with argocd/applications/longhorn.yaml \`defaultBackupStore\` and deploy/longhorn-system/." \
+              "" \
+              "_Generated by [Claude Code](https://claude.ai/code)_")"
