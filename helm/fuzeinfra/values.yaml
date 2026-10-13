@@ -1135,6 +1135,11 @@ nodeConfigurator:
     # before it goes near the node running etcd. The DaemonSet stays fleet-wide
     # regardless, so preferIPv4 is unaffected by staging this.
     rolloutNodes: []
+    # Nodes to SKIP even when rolloutNodes is empty (= every node). This is the
+    # steady-state control: new core-N / runner-N / elastic-* nodes are covered the
+    # moment they join, with no PR, because the DaemonSet runs on every node and the
+    # default is "all". Only deliberate exceptions are listed here.
+    excludeNodes: []
   # Give etcd priority on the disk over pod I/O, via the cgroup-v2 iocost controller.
   #
   # Fixes the 2026-09-06 outage mode: Prometheus TSDB compaction, Loki chunk flushes

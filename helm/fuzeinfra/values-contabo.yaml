@@ -1396,10 +1396,17 @@ nodeConfigurator:
     # postgres volume is finished and the volume is attached normally again.
     #
     # fuze-core-1 (apiserver endpoint) goes LAST, only after that.
-    rolloutNodes:
-      - fuzeinfra-ci-runner-1
-      - fuze-core-2
-      - fuze-core-3
+    # STEADY STATE: rolloutNodes is EMPTY, i.e. every node. The DaemonSet runs on
+    # each node as it joins, so new core-N / runner-N / elastic-* nodes (whatever
+    # their generated names) get the blacklist automatically -- no PR per node. The
+    # staged list (ci-runner-1, core-2, core-3) was proven; staging is over.
+    rolloutNodes: []
+    # The one deliberate exception, TEMPORARY: fuze-core-1 is the apiserver endpoint
+    # and an etcd member. Remove this entry (one-line PR) once the postgres volume
+    # repair is done and a clean attach/format is seen on fuze-core-3. NOTE: matched
+    # by name, so if core-1 is ever renamed this silently stops excluding it.
+    excludeNodes:
+      - fuze-core-1
   # ENABLED. Gives etcd a 10:1 disk share over all pod I/O, via the cgroup-v2
   # iocost controller. Direct fix for the 2026-09-06 outage: pod I/O (Prometheus
   # TSDB compaction, Loki chunk flushes, Longhorn replica traffic) starved etcd on
