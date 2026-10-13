@@ -1,0 +1,68 @@
+# =============================================================================
+# ArgoCD Application — Longhorn S3 backup wiring (credential + RecurringJobs).
+#
+# GATED OFF BY DESIGN, exactly like argocd/applications/longhorn.yaml: NO
+# `automated` block (MANUAL sync), and this Application object is not created by
+# any automation — a human runs `kubectl apply -f argocd/applications/longhorn-backup.yaml`
+# and then `argocd app sync longhorn-backup` (or clicks Sync). Merging this file
+# into main therefore deploys NOTHING on its own.
+#
+# WHY SEPARATE from both fuzeinfra-prod and fuzeinfra-sealed-secrets:
+#   These objects live in `longhorn-system`, which is NOT an allowed destination
+#   of the `fuzeinfra` AppProject (argocd/projects/fuzeinfra.yaml). Routing them
+#   through either fuzeinfra-project app would fail the WHOLE app with
+#   InvalidSpecError and freeze prod. Like the Longhorn controller app, this one
+#   runs under `project: default`, which permits any destination.
+#
+# WHAT IT SYNCS (deploy/longhorn-system/):
+#   * longhorn-s3-credentials.yaml  — the SealedSecret `longhorn-s3` (produced
+#     OFFLINE by a human from the *.template; absent until then — see the README).
+#   * recurringjob-daily-backup.yaml — nightly backup of every Longhorn volume.
+#   (`*.template` files are ignored by Argo's directory reader.)
+#
+# PREREQUISITES — do in this order:
+#   1. Longhorn controller installed + healthy (argocd/applications/longhorn.yaml
+#      synced). The longhorn.io CRDs must exist or the RecurringJob apply fails.
+#   2. Seal the credential: follow deploy/longhorn-system/longhorn-s3-credentials.yaml.template
+#      and commit the resulting encrypted longhorn-s3-credentials.yaml.
+#   3. Set `defaultBackupStore` in argocd/applications/longhorn.yaml (same PR) and
+#      sync the Longhorn app so the `default` BackupTarget points at
+#      s3://fuzeinfra-backups@default/longhorn with credentialSecret `longhorn-s3`.
+#   4. Apply + sync THIS app. Verify the BackupTarget is AVAILABLE and a backup
+#      lands (see README verification).
+# =============================================================================
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: longhorn-backup
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+  annotations:
+    platform.izzywdev/gate: >
+      MANUAL SYNC ONLY. Requires the Longhorn controller installed and the
+      longhorn-s3 SealedSecret sealed + committed first. See
+      deploy/longhorn-system/README.md.
+spec:
+  # project: default so it may write into longhorn-system (the restrictive
+  # `fuzeinfra` AppProject does not allow that namespace).
+  project: default
+  source:
+    repoURL: https://github.com/izzywdev/FuzeInfra.git
+    targetRevision: main
+    path: deploy/longhorn-system
+    directory:
+      recurse: true
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: longhorn-system
+  syncPolicy:
+    # NO `automated:` block on purpose — MANUAL sync is the default-OFF gate.
+    syncOptions:
+      - ServerSideApply=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 15s
+        factor: 2
+        maxDuration: 5m
