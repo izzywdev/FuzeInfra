@@ -4,7 +4,6 @@ Service Discovery CLI for FuzeInfra
 Command-line interface for Consul-based service registration and discovery.
 """
 
-import os
 import sys
 import json
 import argparse
