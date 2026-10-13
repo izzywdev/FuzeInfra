@@ -40,9 +40,9 @@ jobs:
         uses: actions/setup-go@v7
         with:
           # Matches the `go` directive in
-          # cluster-autoscaler/contabo-externalgrpc/go.mod and the golang:1.25
+          # cluster-autoscaler/contabo-externalgrpc/go.mod and the golang:1.26
           # builder in that module's Dockerfile.
-          go-version: '1.25'
+          go-version: '1.26'
           cache-dependency-path: cluster-autoscaler/contabo-externalgrpc/go.sum
 
       - name: go vet
