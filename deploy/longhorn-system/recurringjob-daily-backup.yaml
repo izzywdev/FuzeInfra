@@ -1,0 +1,39 @@
+---
+# Longhorn RecurringJob — nightly backup of every volume to the Contabo S3
+# backupstore configured on the `default` BackupTarget
+# (argocd/applications/longhorn.yaml -> defaultBackupStore).
+#
+# `groups: [default]` is the whole point: Longhorn automatically adds the
+# `default` recurring-job group to EVERY volume it creates unless that volume
+# opts out, so this one CR backs up all current and future Longhorn volumes with
+# no per-volume annotation. This is the gap replication cannot cover — an
+# off-cluster, point-in-time copy that survives volume corruption or an
+# all-replicas-lost event (the 2026-09-07 class), not just single-node loss.
+#
+# Scheduling: 04:40 UTC, deliberately clear of the logical DB-dump window
+# (02:00–03:00) and the Prometheus TSDB snapshot (03:20) in
+# helm/fuzeinfra/values-contabo.yaml, so backup I/O does not pile onto the
+# durable nodes' disks all at once (those three nodes also serve etcd + the
+# monitoring stack; disk starvation there has caused cluster-wide outages —
+# see docs/runbooks/api-floating-vip.md and the Longhorn over-provisioning note
+# in argocd/applications/longhorn.yaml).
+#
+# retain: 14 matches the intent of the existing S3 volume-backup lifecycle
+# (values-contabo.yaml backups.volumes = 14 days); Longhorn prunes older backups
+# itself, so no bucket lifecycle rule is required for this prefix.
+# concurrency: 1 keeps backup throughput gentle on the shared disks; raise only
+# after observing headroom.
+apiVersion: longhorn.io/v1beta2
+kind: RecurringJob
+metadata:
+  name: daily-backup
+  namespace: longhorn-system
+spec:
+  cron: "40 4 * * *"
+  task: backup
+  groups:
+    - default
+  retain: 14
+  concurrency: 1
+  labels:
+    fuzeinfra.io/managed-by: longhorn-backup
