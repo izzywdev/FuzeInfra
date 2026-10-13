@@ -1,4 +1,4 @@
-# fuze:managed template=mcp-maintain.yml baseline=v1 digest=sha256:1eb9ed65b819760f0b606bc8b8f3e687dfb78bc8ae1685631f7eac498c13291c
+# fuze:managed template=mcp-maintain.yml baseline=v1 digest=sha256:dc7e0d57bce17872775e0f6379bc22255a5bb84c6c412862794d0a1a8390951d
 name: MCP Maintain
 
 # Keeps this repo's Model Context Protocol (MCP) surface current, as part of CI. The
@@ -213,6 +213,19 @@ jobs:
         if: steps.marker.outputs.run == 'true'
         uses: ./.github/actions/fuze-code-action
         with:
+          # GitHub token for claude-code-action's git/PR work AND rung 1a's token
+          # setup. Reuse the collaborator-backed identity resolved above
+          # (fuze-agent App -> GH_RELEASE_PAT -> GITHUB_TOKEN) — the SAME token this
+          # job's checkout already persists so the commit-back triggers CI. Without
+          # it, fuze-code-action forwards an empty github_token and claude-code-action
+          # falls back to minting its OWN token via the Claude GitHub App, whose
+          # exchange fails `401 Unauthorized - User does not have write access on this
+          # repository` and sinks rung 1a (the Anthropic SUBSCRIPTION OAuth path) as an
+          # availability failure — the chain then needlessly drops to the metered rungs
+          # (LiteLLM / API key / Codex / Gemini), so a subscription-billed run both
+          # costs per token and goes red whenever those providers are out of credit.
+          # Measured 2026-10-13 on izzywdev/FuzeInfra PR #1363 (run 38418608308).
+          github-token: ${{ steps.identity.outputs.token }}
           # Same shape as gate-code-review in harden-gate.yml: the CLI reads
           # ANTHROPIC_AUTH_TOKEN, some SDK paths still read ANTHROPIC_API_KEY, so
           # both carry the resolved credential — whichever endpoint won the probe.
