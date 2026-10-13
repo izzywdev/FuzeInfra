@@ -16,8 +16,12 @@
 # no drain, no reboot, no unmount required.  Running workloads are not
 # interrupted.
 #
-# Required secrets (same as apply-cluster-config):
-#   KUBE_CONFIG  — base64-encoded kubeconfig for the k3s server
+# Required secrets:
+#   KUBE_CONFIG           — base64-encoded kubeconfig for the k3s server
+#   CONTABO_CLIENT_ID     — Contabo OAuth2 client id (for snapshot API)
+#   CONTABO_CLIENT_SECRET — Contabo OAuth2 client secret
+#   CONTABO_API_USER      — Contabo account email
+#   CONTABO_API_PASSWORD  — Contabo account password
 
 name: node-disk-resize
 
@@ -68,7 +72,7 @@ jobs:
   resize:
     needs: gate
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -92,6 +96,97 @@ jobs:
           chmod 600 "$HOME/.kube/config"
           kubectl version --client=true -o yaml >/dev/null
           echo "kubectl configured."
+
+      - name: Create Contabo snapshot (resize mode only)
+        if: inputs.mode == 'resize'
+        id: snapshot
+        env:
+          NODE_NAME: ${{ matrix.node }}
+          RUN_ID: ${{ github.run_id }}
+          CID:   ${{ secrets.CONTABO_CLIENT_ID }}
+          CSEC:  ${{ secrets.CONTABO_CLIENT_SECRET }}
+          CUSER: ${{ secrets.CONTABO_API_USER }}
+          CPASS: ${{ secrets.CONTABO_API_PASSWORD }}
+        run: |
+          set -euo pipefail
+          for v in CID CSEC CUSER CPASS; do eval "x=\${$v}"; [ -n "$x" ] || { echo "::error::${v} secret is empty — cannot create pre-resize snapshot"; exit 1; }; done
+
+          # Obtain Contabo OAuth2 token.
+          TOK=$(curl -sS -X POST -H "Content-Type: application/x-www-form-urlencoded" \
+            "https://auth.contabo.com/auth/realms/contabo/protocol/openid-connect/token" \
+            --data-urlencode "client_id=${CID}" --data-urlencode "client_secret=${CSEC}" \
+            --data-urlencode "username=${CUSER}" --data-urlencode "password=${CPASS}" \
+            --data-urlencode "grant_type=password" | jq -r .access_token)
+          [ -n "$TOK" ] && [ "$TOK" != "null" ] || { echo "::error::Contabo auth failed"; exit 1; }
+          echo "::add-mask::$TOK"
+          req() { curl -sS -H "Authorization: Bearer $TOK" \
+            -H "x-request-id: $(cat /proc/sys/kernel/random/uuid)" \
+            -H "Content-Type: application/json" "$@"; }
+
+          # Resolve the node's public IP from k8s (ExternalIP, then InternalIP fallback).
+          EXT_IP=$(kubectl get node "${NODE_NAME}" \
+            -o jsonpath='{.status.addresses[?(@.type=="ExternalIP")].address}' 2>/dev/null || true)
+          if [ -z "$EXT_IP" ]; then
+            EXT_IP=$(kubectl get node "${NODE_NAME}" \
+              -o jsonpath='{.status.addresses[?(@.type=="InternalIP")].address}' 2>/dev/null || true)
+          fi
+          [ -n "$EXT_IP" ] || { echo "::error::Could not resolve IP for node ${NODE_NAME} from kubectl"; exit 1; }
+          echo "Node ${NODE_NAME} → IP ${EXT_IP}"
+
+          # Resolve Contabo instanceId by matching ipConfig.v4.ip.
+          # Mirrors the same pattern used in contabo-instance-reboot.yml.
+          INSTANCE_ID=""
+          page=1
+          while :; do
+            RESP=$(req "https://api.contabo.com/v1/compute/instances?size=100&page=${page}")
+            n=$(printf '%s' "$RESP" | jq '.data | length')
+            [ "$n" -gt 0 ] || break
+            INSTANCE_ID=$(printf '%s' "$RESP" | jq -r --arg ip "$EXT_IP" \
+              '.data[] | select(.ipConfig.v4.ip == $ip) | .instanceId' | head -1)
+            [ -n "$INSTANCE_ID" ] && break
+            page=$((page + 1))
+            [ "$page" -gt 30 ] && break
+          done
+          [ -n "$INSTANCE_ID" ] || { echo "::error::No Contabo instance found with IP ${EXT_IP}"; exit 1; }
+          echo "Contabo instanceId: ${INSTANCE_ID}"
+
+          # Create pre-resize snapshot.
+          SNAP_NAME="pre-disk-resize-${NODE_NAME}-run${RUN_ID}"
+          SNAP_DESC="Pre-resize snapshot (growpart+resize2fs Storage Extension) $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          SNAP_RESP=$(req -X POST \
+            -d "$(jq -n --arg n "$SNAP_NAME" --arg d "$SNAP_DESC" '{name:$n,description:$d}')" \
+            "https://api.contabo.com/v1/compute/instances/${INSTANCE_ID}/snapshots")
+          SNAP_ID=$(printf '%s' "$SNAP_RESP" | jq -r '.data[0].snapshotId // empty')
+          if [ -z "$SNAP_ID" ]; then
+            echo "::error::Snapshot creation failed. Response: ${SNAP_RESP}"
+            exit 1
+          fi
+          echo "Snapshot created: ${SNAP_ID} (name: ${SNAP_NAME})"
+          echo "snapshot_id=${SNAP_ID}" >> "$GITHUB_OUTPUT"
+          echo "instance_id=${INSTANCE_ID}" >> "$GITHUB_OUTPUT"
+
+          # Poll for ready — snapshot data is captured at request time, but we wait
+          # for the API to confirm it is fully committed before proceeding (up to 20 min).
+          echo "Waiting for snapshot ${SNAP_ID} to become ready (up to 20 minutes)..."
+          deadline=$((SECONDS + 1200))
+          STATUS="pending"
+          while [ $SECONDS -lt $deadline ]; do
+            STATUS=$(req "https://api.contabo.com/v1/compute/instances/${INSTANCE_ID}/snapshots/${SNAP_ID}" \
+              | jq -r '.data[0].status // "unknown"')
+            echo "  snapshot status: ${STATUS}"
+            [ "$STATUS" = "ready" ] && break
+            if [ "$STATUS" = "error" ]; then
+              echo "::error::Snapshot ${SNAP_ID} reached error state — aborting resize."
+              exit 1
+            fi
+            sleep 30
+          done
+
+          if [ "$STATUS" != "ready" ]; then
+            echo "::warning::Snapshot ${SNAP_ID} not ready after 20 minutes (status=${STATUS}). Proceeding with resize."
+          else
+            echo "Snapshot ${SNAP_ID} is ready. Safe to resize."
+          fi
 
       - name: Write resize script
         run: |
