@@ -146,7 +146,7 @@ write_files:
       # Role taints are baked in by Terraform. Built as one variable rather than
       # backslash-continued lines so a false conditional branch can never leave a
       # dangling continuation.
-      ROLETAINT="%{ if role == "elastic" }--node-taint fuzeinfra.io/elastic=true:PreferNoSchedule%{ endif }%{ if role == "ci" }--node-taint fuzeinfra.io/ci=true:NoSchedule%{ endif }"
+      ROLETAINT="%{ if role == "elastic" }--node-taint fuzeinfra.io/elastic=true:PreferNoSchedule%{ endif }%{ if role == "ci" }--node-taint fuzeinfra.io/ci=true:NoSchedule%{ endif }%{ if role == "durable" }--node-taint fuzeinfra.io/durable=true:NoSchedule%{ endif }"
 
       curl -sfL https://get.k3s.io | sh -s - agent $NETARGS $VLANARGS $ROLETAINT --node-name '${node_name}' --node-label 'fuzeinfra.io/pool=${role}' ${node_labels}
       RC=$?
