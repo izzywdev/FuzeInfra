@@ -1,0 +1,414 @@
+# node-disk-resize — grow the root partition and ext4 filesystem to fill
+# the expanded block device on one or more control-plane nodes, after
+# Contabo delivers a Storage Extension add-on (panel purchase, block device
+# is enlarged at the hypervisor; the OS partition/filesystem still needs to
+# be told to use the new space).
+#
+# WHY A PRIVILEGED JOB INSTEAD OF SSH.  No NODE_SSH_PRIVATE_KEY secret
+# exists in GitHub Actions for Contabo instances; cloud-init break-glass SSH
+# is one-way (public key only, via NODE_SSH_PUBLIC_KEY).  A privileged
+# Kubernetes Job with hostPID:true + nsenter reaches the host OS without a
+# separate credential — KUBE_CONFIG (same secret as apply-cluster-config and
+# cluster-query) is sufficient.
+#
+# SAFETY.  growpart (partition table update) and resize2fs on ext4 (online
+# filesystem expansion) are safe to run on a live, mounted, serving node —
+# no drain, no reboot, no unmount required.  Running workloads are not
+# interrupted.
+#
+# Required secrets:
+#   KUBE_CONFIG           — base64-encoded kubeconfig for the k3s server
+#   CONTABO_CLIENT_ID     — Contabo OAuth2 client id (for snapshot API)
+#   CONTABO_CLIENT_SECRET — Contabo OAuth2 client secret
+#   CONTABO_API_USER      — Contabo account email
+#   CONTABO_API_PASSWORD  — Contabo account password
+
+name: node-disk-resize
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'dry-run = show disk layout only (safe); resize = growpart + resize2fs'
+        type: choice
+        options: [dry-run, resize]
+        default: dry-run
+        required: true
+      nodes:
+        description: 'JSON array of k8s node names to target, e.g. ["fuze-core-2","fuze-core-3"]'
+        default: '["fuze-core-2","fuze-core-3"]'
+        required: true
+      confirm:
+        description: 'For mode=resize ONLY: type RESIZE-DISK to proceed'
+        default: ''
+        required: false
+
+permissions:
+  contents: read
+
+# Serialize all resize runs — never run two resize jobs on the same cluster
+# simultaneously (growpart is idempotent but parallel runs on the same node
+# could race).
+concurrency:
+  group: node-disk-resize
+  cancel-in-progress: false
+
+jobs:
+  # ── Gate ──────────────────────────────────────────────────────────────────
+  gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Check confirm token (resize mode only)
+        if: inputs.mode == 'resize'
+        env:
+          CONFIRM: ${{ inputs.confirm }}
+        run: |
+          if [ "$CONFIRM" != "RESIZE-DISK" ]; then
+            echo "::error::mode=resize requires confirm=RESIZE-DISK. Got: '$CONFIRM'"
+            exit 1
+          fi
+          echo "Confirm token accepted."
+
+  # ── Resize ────────────────────────────────────────────────────────────────
+  resize:
+    needs: gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ${{ fromJson(inputs.nodes) }}
+
+    steps:
+      - uses: azure/setup-kubectl@829323503d1be3d00ca8346e5391ca0b07a9ab0d # v5.1.0
+        with:
+          version: 'v1.31.4'
+
+      - name: Configure kubectl
+        env:
+          KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
+        run: |
+          if [ -z "$KUBE_CONFIG" ]; then
+            echo "::error::KUBE_CONFIG secret is empty or unset"
+            exit 1
+          fi
+          mkdir -p "$HOME/.kube"
+          printf '%s' "$KUBE_CONFIG" | base64 -d > "$HOME/.kube/config"
+          chmod 600 "$HOME/.kube/config"
+          kubectl version --client=true -o yaml >/dev/null
+          echo "kubectl configured."
+
+      - name: Create Contabo snapshot (resize mode only)
+        if: inputs.mode == 'resize'
+        id: snapshot
+        env:
+          NODE_NAME: ${{ matrix.node }}
+          RUN_ID: ${{ github.run_id }}
+          CID:   ${{ secrets.CONTABO_CLIENT_ID }}
+          CSEC:  ${{ secrets.CONTABO_CLIENT_SECRET }}
+          CUSER: ${{ secrets.CONTABO_API_USER }}
+          CPASS: ${{ secrets.CONTABO_API_PASSWORD }}
+        run: |
+          set -euo pipefail
+          for v in CID CSEC CUSER CPASS; do eval "x=\${$v}"; [ -n "$x" ] || { echo "::error::${v} secret is empty — cannot create pre-resize snapshot"; exit 1; }; done
+
+          # Obtain Contabo OAuth2 token.
+          TOK=$(curl -sS -X POST -H "Content-Type: application/x-www-form-urlencoded" \
+            "https://auth.contabo.com/auth/realms/contabo/protocol/openid-connect/token" \
+            --data-urlencode "client_id=${CID}" --data-urlencode "client_secret=${CSEC}" \
+            --data-urlencode "username=${CUSER}" --data-urlencode "password=${CPASS}" \
+            --data-urlencode "grant_type=password" | jq -r .access_token)
+          [ -n "$TOK" ] && [ "$TOK" != "null" ] || { echo "::error::Contabo auth failed"; exit 1; }
+          echo "::add-mask::$TOK"
+          req() { curl -sS -H "Authorization: Bearer $TOK" \
+            -H "x-request-id: $(cat /proc/sys/kernel/random/uuid)" \
+            -H "Content-Type: application/json" "$@"; }
+
+          # Resolve the node's public IP from k8s (ExternalIP, then InternalIP fallback).
+          EXT_IP=$(kubectl get node "${NODE_NAME}" \
+            -o jsonpath='{.status.addresses[?(@.type=="ExternalIP")].address}' 2>/dev/null || true)
+          if [ -z "$EXT_IP" ]; then
+            EXT_IP=$(kubectl get node "${NODE_NAME}" \
+              -o jsonpath='{.status.addresses[?(@.type=="InternalIP")].address}' 2>/dev/null || true)
+          fi
+          [ -n "$EXT_IP" ] || { echo "::error::Could not resolve IP for node ${NODE_NAME} from kubectl"; exit 1; }
+          echo "Node ${NODE_NAME} → IP ${EXT_IP}"
+
+          # Resolve Contabo instanceId by matching ipConfig.v4.ip.
+          # Mirrors the same pattern used in contabo-instance-reboot.yml.
+          INSTANCE_ID=""
+          page=1
+          while :; do
+            RESP=$(req "https://api.contabo.com/v1/compute/instances?size=100&page=${page}")
+            n=$(printf '%s' "$RESP" | jq '.data | length')
+            [ "$n" -gt 0 ] || break
+            INSTANCE_ID=$(printf '%s' "$RESP" | jq -r --arg ip "$EXT_IP" \
+              '.data[] | select(.ipConfig.v4.ip == $ip) | .instanceId' | head -1)
+            [ -n "$INSTANCE_ID" ] && break
+            page=$((page + 1))
+            [ "$page" -gt 30 ] && break
+          done
+          [ -n "$INSTANCE_ID" ] || { echo "::error::No Contabo instance found with IP ${EXT_IP}"; exit 1; }
+          echo "Contabo instanceId: ${INSTANCE_ID}"
+
+          # Create pre-resize snapshot.
+          SNAP_NAME="pre-disk-resize-${NODE_NAME}-run${RUN_ID}"
+          SNAP_DESC="Pre-resize snapshot (growpart+resize2fs Storage Extension) $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          SNAP_RESP=$(req -X POST \
+            -d "$(jq -n --arg n "$SNAP_NAME" --arg d "$SNAP_DESC" '{name:$n,description:$d}')" \
+            "https://api.contabo.com/v1/compute/instances/${INSTANCE_ID}/snapshots")
+          SNAP_ID=$(printf '%s' "$SNAP_RESP" | jq -r '.data[0].snapshotId // empty')
+          if [ -z "$SNAP_ID" ]; then
+            echo "::error::Snapshot creation failed. Response: ${SNAP_RESP}"
+            exit 1
+          fi
+          echo "Snapshot created: ${SNAP_ID} (name: ${SNAP_NAME})"
+          echo "snapshot_id=${SNAP_ID}" >> "$GITHUB_OUTPUT"
+          echo "instance_id=${INSTANCE_ID}" >> "$GITHUB_OUTPUT"
+
+          # Poll for ready — snapshot data is captured at request time, but we wait
+          # for the API to confirm it is fully committed before proceeding (up to 20 min).
+          echo "Waiting for snapshot ${SNAP_ID} to become ready (up to 20 minutes)..."
+          deadline=$((SECONDS + 1200))
+          STATUS="pending"
+          while [ $SECONDS -lt $deadline ]; do
+            STATUS=$(req "https://api.contabo.com/v1/compute/instances/${INSTANCE_ID}/snapshots/${SNAP_ID}" \
+              | jq -r '.data[0].status // "unknown"')
+            echo "  snapshot status: ${STATUS}"
+            [ "$STATUS" = "ready" ] && break
+            if [ "$STATUS" = "error" ]; then
+              echo "::error::Snapshot ${SNAP_ID} reached error state — aborting resize."
+              exit 1
+            fi
+            sleep 30
+          done
+
+          if [ "$STATUS" != "ready" ]; then
+            echo "::warning::Snapshot ${SNAP_ID} not ready after 20 minutes (status=${STATUS}). Proceeding with resize."
+          else
+            echo "Snapshot ${SNAP_ID} is ready. Safe to resize."
+          fi
+
+      - name: Write resize script
+        run: |
+          cat > /tmp/resize.sh <<'RESIZE_SCRIPT'
+          #!/bin/bash
+          # Runs inside a privileged container with hostPID:true.
+          # All disk operations are forwarded to the HOST via nsenter -m -t 1,
+          # which enters PID 1's (host init) mount namespace so the host's
+          # filesystem, tools, and block devices are visible.
+          set -euo pipefail
+
+          echo "======================================================"
+          echo "Node disk resize — $(date -u)"
+          echo "Target node: $(nsenter -m -t 1 -- hostname 2>/dev/null || echo '<unknown>')"
+          echo "Mode: ${MODE}"
+          echo "======================================================"
+          echo ""
+
+          echo "=== Host block devices ==="
+          nsenter -m -t 1 -- lsblk
+          echo ""
+
+          echo "=== Host root filesystem usage ==="
+          nsenter -m -t 1 -- df -h /
+          echo ""
+
+          # Detect root partition in the host's mount namespace.
+          # df --output=source is supported on util-linux >= 2.22 (Ubuntu 22.04+).
+          ROOT_DEV=$(nsenter -m -t 1 -- df --output=source / 2>/dev/null | tail -1)
+          # Resolve any symlinks (e.g. /dev/disk/by-uuid/... → /dev/sda1)
+          ROOT_DEV=$(nsenter -m -t 1 -- readlink -f "$ROOT_DEV" 2>/dev/null || echo "$ROOT_DEV")
+          echo "Root partition (resolved): $ROOT_DEV"
+
+          # Split device path into disk + partition number.
+          # Handles /dev/sda1, /dev/vda3, /dev/nvme0n1p3, /dev/mmcblk0p2, etc.
+          if echo "$ROOT_DEV" | grep -qE '(nvme|mmcblk)'; then
+            DISK="${ROOT_DEV%p[0-9]*}"
+            PART_NUM="${ROOT_DEV##*p}"
+          else
+            DISK=$(echo "$ROOT_DEV" | sed 's/[0-9]*$//')
+            PART_NUM=$(echo "$ROOT_DEV" | grep -oE '[0-9]+$')
+          fi
+
+          if [ -z "$PART_NUM" ]; then
+            echo "::error:: could not detect partition number from $ROOT_DEV"
+            exit 1
+          fi
+
+          echo "Disk device:      $DISK"
+          echo "Partition number: $PART_NUM"
+          echo ""
+
+          if [ "${MODE}" = "dry-run" ]; then
+            echo "=== DRY-RUN: no changes made ==="
+            echo "Would run:"
+            echo "  growpart $DISK $PART_NUM"
+            echo "  resize2fs $ROOT_DEV"
+            echo ""
+            # Show how much space the block device actually has vs the partition
+            echo "=== Block device vs partition (fdisk) ==="
+            nsenter -m -t 1 -- fdisk -l "$DISK" 2>/dev/null | tail -20 || true
+            exit 0
+          fi
+
+          # Check growpart is available on the host; install if missing.
+          if ! nsenter -m -t 1 -- which growpart >/dev/null 2>&1; then
+            echo "growpart not found on host — installing cloud-guest-utils..."
+            nsenter -m -t 1 -- apt-get update -qq
+            nsenter -m -t 1 -- apt-get install -y cloud-guest-utils
+          fi
+
+          echo "=== growpart $DISK $PART_NUM ==="
+          # growpart exits 0 on success, 1 on NOCHANGE (already at max), 2+ on error.
+          GROWPART_RC=0
+          nsenter -m -t 1 -- growpart "$DISK" "$PART_NUM" || GROWPART_RC=$?
+          if [ "$GROWPART_RC" -eq 0 ]; then
+            echo "growpart: partition extended successfully."
+          elif [ "$GROWPART_RC" -eq 1 ]; then
+            echo "growpart: NOCHANGE — partition is already at maximum size."
+          else
+            echo "::error::growpart failed (rc=${GROWPART_RC})"
+            exit "$GROWPART_RC"
+          fi
+          echo ""
+
+          echo "=== resize2fs $ROOT_DEV ==="
+          nsenter -m -t 1 -- resize2fs "$ROOT_DEV"
+          echo ""
+
+          echo "=== After resize — host root filesystem ==="
+          nsenter -m -t 1 -- df -h /
+          echo ""
+          echo "=== After resize — block devices ==="
+          nsenter -m -t 1 -- lsblk "$DISK"
+          echo ""
+          echo "Done. Filesystem on $ROOT_DEV reflects the full block device."
+          RESIZE_SCRIPT
+
+          chmod +x /tmp/resize.sh
+          echo "Resize script written."
+
+      - name: Deploy Job on ${{ matrix.node }}
+        id: deploy
+        env:
+          NODE_NAME: ${{ matrix.node }}
+          MODE: ${{ inputs.mode }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          # k8s names must be <= 63 chars, lowercase alphanumeric + hyphens.
+          SHORT_NODE=$(echo "${NODE_NAME}" | tr -d '.' | tr '[:upper:]' '[:lower:]')
+          JOB_NAME="disk-resize-${SHORT_NODE}-${RUN_ID}"
+          CM_NAME="disk-resize-${SHORT_NODE}-${RUN_ID}"
+          echo "job_name=${JOB_NAME}" >> "$GITHUB_OUTPUT"
+          echo "cm_name=${CM_NAME}"   >> "$GITHUB_OUTPUT"
+
+          # ConfigMap holds the script; Job mounts it read-only.
+          kubectl create configmap "${CM_NAME}" \
+            -n kube-system \
+            --from-file=resize.sh=/tmp/resize.sh \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+          kubectl apply -f - <<EOF
+          apiVersion: batch/v1
+          kind: Job
+          metadata:
+            name: ${JOB_NAME}
+            namespace: kube-system
+            labels:
+              app: disk-resize
+              node: ${NODE_NAME}
+              run-id: "${RUN_ID}"
+          spec:
+            ttlSecondsAfterFinished: 3600
+            backoffLimit: 0
+            template:
+              spec:
+                restartPolicy: Never
+                nodeSelector:
+                  kubernetes.io/hostname: "${NODE_NAME}"
+                tolerations:
+                  - operator: Exists
+                hostPID: true
+                containers:
+                  - name: resize
+                    image: ubuntu:24.04
+                    imagePullPolicy: IfNotPresent
+                    securityContext:
+                      privileged: true
+                    env:
+                      - name: MODE
+                        value: "${MODE}"
+                    command: [/bin/bash, /scripts/resize.sh]
+                    volumeMounts:
+                      - name: scripts
+                        mountPath: /scripts
+                volumes:
+                  - name: scripts
+                    configMap:
+                      name: ${CM_NAME}
+                      defaultMode: 0755
+          EOF
+
+          echo "Job ${JOB_NAME} created on ${NODE_NAME}."
+
+      - name: Wait for Job and stream logs
+        env:
+          NODE_NAME: ${{ matrix.node }}
+          JOB_NAME: ${{ steps.deploy.outputs.job_name }}
+        run: |
+          echo "Waiting up to 10 minutes for Job ${JOB_NAME} to start running..."
+          # Wait for pod to exist
+          for i in $(seq 1 60); do
+            POD=$(kubectl get pods -n kube-system \
+              -l "job-name=${JOB_NAME}" \
+              -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+            if [ -n "$POD" ]; then break; fi
+            sleep 5
+          done
+
+          if [ -z "${POD:-}" ]; then
+            echo "::error::Pod never appeared for Job ${JOB_NAME} on ${NODE_NAME}"
+            kubectl describe job "${JOB_NAME}" -n kube-system || true
+            exit 1
+          fi
+
+          echo "Pod: $POD — waiting for completion..."
+          # Wait for pod to complete (not just running)
+          kubectl wait pod/"$POD" -n kube-system \
+            --for=condition=ready=false \
+            --timeout=600s 2>/dev/null || true
+
+          echo ""
+          echo "====== Job logs from ${NODE_NAME} ======"
+          kubectl logs job/"${JOB_NAME}" -n kube-system --all-containers || \
+            kubectl logs pod/"$POD" -n kube-system || true
+          echo "====== End logs ======"
+          echo ""
+
+          # Determine success/failure
+          SUCCEEDED=$(kubectl get job "${JOB_NAME}" -n kube-system \
+            -o jsonpath='{.status.succeeded}' 2>/dev/null || echo "0")
+          FAILED=$(kubectl get job "${JOB_NAME}" -n kube-system \
+            -o jsonpath='{.status.failed}' 2>/dev/null || echo "0")
+
+          echo "Job status: succeeded=${SUCCEEDED:-0} failed=${FAILED:-0}"
+
+          if [ "${SUCCEEDED:-0}" != "1" ]; then
+            echo "::error::Job ${JOB_NAME} on ${NODE_NAME} did not succeed (failed=${FAILED:-0})"
+            kubectl describe job "${JOB_NAME}" -n kube-system || true
+            exit 1
+          fi
+
+          echo "Job ${JOB_NAME} on ${NODE_NAME} completed successfully."
+
+      - name: Cleanup Job and ConfigMap
+        if: always()
+        env:
+          JOB_NAME: ${{ steps.deploy.outputs.job_name }}
+          CM_NAME: ${{ steps.deploy.outputs.cm_name }}
+        run: |
+          kubectl delete job "${JOB_NAME}" -n kube-system --ignore-not-found || true
+          kubectl delete configmap "${CM_NAME}" -n kube-system --ignore-not-found || true
+          echo "Cleaned up ${JOB_NAME} and ${CM_NAME}."
