@@ -64,6 +64,7 @@ this file with the documented env vars to have it write GITHUB_OUTPUT directly (
 """
 from __future__ import annotations
 
+import base64
 import json
 import os
 import re
@@ -455,7 +456,14 @@ def _write_github_output(decision: dict, body: str) -> None:
 
 def main() -> int:
     action_conclusion = os.environ.get("FUZE_ACTION_CONCLUSION", "")
-    result_text = os.environ.get("FUZE_RESULT_TEXT", "")
+    # The workflow base64-encodes the review text for cross-job transfer because GitHub's
+    # secret masker can suppress raw JSON output when CODEX_AUTH_JSON is registered.
+    # Decode here; fall back to FUZE_RESULT_TEXT for local/test use without the workflow.
+    result_text_b64 = os.environ.get("FUZE_RESULT_TEXT_B64", "")
+    if result_text_b64:
+        result_text = base64.b64decode(result_text_b64).decode("utf-8", errors="replace")
+    else:
+        result_text = os.environ.get("FUZE_RESULT_TEXT", "")
     nonce = os.environ.get("FUZE_VERDICT_NONCE", "")
     mode = os.environ.get("FUZE_ACTION_MODE", "")
     vendor = os.environ.get("FUZE_ACTION_VENDOR", "")
