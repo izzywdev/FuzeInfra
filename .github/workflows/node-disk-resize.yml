@@ -61,9 +61,11 @@ jobs:
     steps:
       - name: Check confirm token (resize mode only)
         if: inputs.mode == 'resize'
+        env:
+          CONFIRM: ${{ inputs.confirm }}
         run: |
-          if [ "${{ inputs.confirm }}" != "RESIZE-DISK" ]; then
-            echo "::error::mode=resize requires confirm=RESIZE-DISK. Got: '${{ inputs.confirm }}'"
+          if [ "$CONFIRM" != "RESIZE-DISK" ]; then
+            echo "::error::mode=resize requires confirm=RESIZE-DISK. Got: '$CONFIRM'"
             exit 1
           fi
           echo "Confirm token accepted."
