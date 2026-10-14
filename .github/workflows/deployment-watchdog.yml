@@ -93,7 +93,11 @@ jobs:
 
       - name: Run watchdog
         env:
-          GH_TOKEN: ${{ secrets.GH_TOKEN || secrets.GITHUB_TOKEN }}
+          # PAT owned by a repo OWNER/MEMBER/COLLABORATOR — REQUIRED (no fallback).
+          # GITHUB_TOKEN authors as a bot (author_association: NONE), which the
+          # @fuze handler's Gate 2 rejects — issues filed with it would never wake
+          # the handler. Matches argo-outofsync-autofix.yml §Secrets.
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
           REPO: ${{ github.repository }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           # On `schedule` this is the empty string, so scheduled runs are always
@@ -101,6 +105,10 @@ jobs:
           DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
         run: |
           set -euo pipefail
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "::error::GH_TOKEN unset — watchdog issues would be authored by github-actions[bot] (author_association: NONE), which the @fuze handler's Gate 2 rejects. Provision secrets.GH_TOKEN with a PAT owned by a repo OWNER/MEMBER/COLLABORATOR."
+            exit 1
+          fi
           ARGS=(--repo "$REPO" --run-url "$RUN_URL")
           if [ "$DRY_RUN" = "true" ]; then
             ARGS+=(--dry-run)
