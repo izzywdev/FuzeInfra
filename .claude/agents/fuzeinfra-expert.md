@@ -138,6 +138,8 @@ Each of these reported healthy while the thing it watches was broken. Assume the
 
 **Do not expect terminate-op to fix it:** the watchdog's own comment says a re-wedge on the same resource "can never become healthy — terminating again will not help". Until Prometheus can mount its volume, a fresh sync wedges at the same wave.
 
+**Fix (PR #1403, pending owner approval):** Prometheus moves to a fresh claim via `prometheus.pvcName` (contabo: `fuzeinfra-prometheus-data-v2`); the corrupt claim stays declared under `prometheus.retiredPvcs` (Prune=false, Retain, never mounted) so it is neither pruned nor left as an unmanaged OutOfSync resource. The backup CronJob reads `prometheus.pvcName` too (the old `backups.volumes.prometheus.pvcName` key is gone). Why not e2fsck: CSI fsck runs at NodeStage, so no pod can mount the volume to repair it. Longhorn has no backup target (`AVAILABLE=false`); the S3 TSDB snapshot is the only history source. Guard: `tests/test_prometheus_pvc_migration.py`.
+
 **Also seen, not diagnosed:** ~20 pods across other namespaces `PodInitializing` for 9–28 days (a2a-*, fuzemerchandize, fuzepicker, fuzeplan, mendys-*), and Longhorn lists 7 `detached` volumes (one `faulted`). Same family of storage trouble; unconfirmed whether the same cause.
 
 ## API VIP — keepalived active-active, and why "Ready" proves nothing
