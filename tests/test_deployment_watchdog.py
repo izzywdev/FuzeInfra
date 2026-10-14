@@ -1555,7 +1555,7 @@ def test_state_carrying_comments_are_still_strict(monkeypatch):
     """The argo-terminated marker is read back to stop a terminate re-dispatch loop.
     If posting it fails the run must abort, not shrug: a lost marker would re-dispatch
     a terminate against the same operation every run."""
-    calls = _wire(monkeypatch, WEDGED, [_stale_argo_issue()])
+    _wire(monkeypatch, WEDGED, [_stale_argo_issue()])
 
     def comment(repo, number, body):
         raise wd.GitHubError(CAP_MESSAGE)
