@@ -111,6 +111,29 @@ gh run view  "$RUN" --repo izzywdev/FuzeInfra --log
 > step 2 comes back with an older run, wait a few seconds and re-list. The `concurrency`
 > group serializes runs, so they queue rather than interleave.
 
+### If `gh run view --log` returns 403, read the ANNOTATIONS instead
+
+Step 2 above is the normal route, but it is not available everywhere. Job logs are served
+from `results-receiver.actions.githubusercontent.com` and from **sharded**
+`productionresultssa*.blob.core.windows.net` hosts (`sa6`, `sa10` and `sa15` were all
+observed serving one batch of three jobs). An agent session behind a restrictive egress
+policy gets `403` on CONNECT to those and cannot fetch a log at all — so for a while the
+session that dispatched a query could not read its own answer. "FuzeInfra is public, so
+the logs are world-readable" is true about *permissions* and says nothing about whether
+your environment can reach the host.
+
+The workflow therefore also mirrors the kubectl output into **check-run annotations**,
+which come back from `api.github.com`:
+
+```bash
+gh api "repos/izzywdev/FuzeInfra/actions/runs/$RUN/jobs" --jq '.jobs[].check_run_url' \
+  | while read u; do gh api "${u#https://api.github.com/}/annotations" --jq '.[].message'; done
+```
+
+Same content, same visibility, different transport. The mirror is capped (200 lines,
+20 per annotation — `CQ_ANNOTATE_MAX_LINES` / `CQ_ANNOTATE_CHUNK`); the job log stays
+complete and authoritative, so prefer it when you can reach it.
+
 If you hold an **Actions: write** token instead, the `workflow_dispatch` form is
 equivalent — same guard, same output — and both inputs are optional there, so
 dispatching with neither runs the `get nodes` default:
