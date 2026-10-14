@@ -181,6 +181,11 @@ kafka:
   nodeSelector:
     node.longhorn.io/create-default-disk: "true"
   storage: 10Gi
+  # SASL/SCRAM listener :9094 + authorizer alongside PLAINTEXT :9092 (migration
+  # window). No ACL group is enforced yet; see docs/KAFKA_SASL_ACLS.md for the
+  # per-group cut-over. Credentials: deploy/sealed-secrets/fuzeinfra-kafka-sasl.yaml.
+  sasl:
+    enabled: true
 prometheus:
   # Pin to durable Longhorn-disk nodes. longhorn-manager only runs on the 3
   # durable nodes, so Longhorn registers node.longhorn.io objects only there;

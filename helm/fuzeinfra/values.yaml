@@ -491,6 +491,53 @@ kafka:
     enabled: false
     port: 29092
     advertisedHost: localhost
+  # SASL/SCRAM-SHA-512 + ACLs (FuzeFront request, corr 7c1f3a52). OFF here; an
+  # overlay turns it on only once the credentials Secret below exists.
+  # Design + cut-over runbook: docs/KAFKA_SASL_ACLS.md.
+  sasl:
+    enabled: false
+    # Second listener. PLAINTEXT :9092 stays up for the whole migration window.
+    port: 9094
+    # SealedSecret in the fuzeinfra namespace (deploy/sealed-secrets/). One key
+    # per principal in `users`, value = that principal's password (alphanumeric).
+    credentialsSecret: fuzeinfra-kafka-sasl
+    # Flip to "false" ONLY at the announced cut-over, and only after inter-broker
+    # and controller traffic no longer rides PLAINTEXT as ANONYMOUS (see runbook).
+    allowEveryoneIfNoAclFound: "true"
+    # SCRAM principals. `admin` is the only super user and is required.
+    users:
+      - admin
+      - selection-list-service
+      - identity-producer
+      - kafka-topics-job
+    # Each ACL group is applied only when its `enforce` is true. An ACL on a
+    # resource makes allow.everyone.if.no.acl.found stop applying to it, so
+    # enforcing a group is what closes it to unauthenticated PLAINTEXT clients.
+    acls:
+      selectionLists:
+        enforce: false
+        owner: selection-list-service
+        # Authenticated principals granted READ on selection-lists.*
+        readers: [selection-list-service]
+        # Extra principals allowed to WRITE selection-lists.seed.requested.
+        seedRequestedWriters: []
+        # Keep PLAINTEXT readers working while consumers migrate.
+        anonymousRead: false
+        # Group prefix the owner may use (default KAFKA_GROUP_ID).
+        groupPrefix: selection-list-service-group
+      identity:
+        enforce: false
+        producer: identity-producer
+        readers: [selection-list-service]
+        # Existing PLAINTEXT consumers of identity.* keep READ until they migrate.
+        anonymousRead: true
+      topicJob:
+        enforce: false
+        principal: kafka-topics-job
+        # notify./billing. are in FuzeFront's request, but an ACL there closes
+        # those prefixes to every PLAINTEXT client. Enable per prefix only at
+        # their own cut-over.
+        includeNotifyBilling: false
   resources:
     requests: { cpu: 250m, memory: 512Mi }
     limits:   { cpu: "1",  memory: 1Gi }

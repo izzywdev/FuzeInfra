@@ -1,0 +1,177 @@
+{{- /*
+Kafka SASL/SCRAM principals + ACLs. Renders only when kafka.sasl.enabled.
+Design, migration window and cut-over runbook: docs/KAFKA_SASL_ACLS.md.
+
+PostSync hook Job (same shape as service-chroma-provisioning.yaml): idempotent,
+re-run on every sync, so a rotated SealedSecret value is picked up by the next sync.
+
+  1. Wait for the broker on PLAINTEXT.
+  2. Make sure `admin` exists. If admin cannot authenticate over SASL yet, create it
+     over PLAINTEXT. That works only while no ACL protects the Cluster resource,
+     which this chart never creates (an ACL on Cluster would also break existing
+     PLAINTEXT producers/kafka-ui). Once admin exists every later step uses SASL.
+  3. Upsert every SCRAM principal in kafka.sasl.users.
+  4. Apply the ACL groups whose `enforce` is true.
+
+Passwords come from the SealedSecret named by kafka.sasl.credentialsSecret and are
+never printed. They are alphanumeric by contract (a `,` or `]` would break the
+kafka-configs `SCRAM-SHA-512=[password=...]` syntax); step 0 refuses anything else.
+*/ -}}
+{{- if and .Values.kafka.enabled (dig "sasl" "enabled" false .Values.kafka) }}
+{{- $sasl := .Values.kafka.sasl }}
+{{- $acl := $sasl.acls }}
+{{- if not (has "admin" $sasl.users) }}{{- fail "kafka.sasl.users must include \"admin\" (the only super user)" }}{{- end }}
+{{- range $u := $sasl.users }}
+{{- if not (regexMatch "^[a-z][a-z0-9-]{1,62}$" $u) }}{{- fail (printf "kafka.sasl.users: %q must match ^[a-z][a-z0-9-]{1,62}$" $u) }}{{- end }}
+{{- end }}
+{{- $named := list $acl.selectionLists.owner $acl.identity.producer $acl.topicJob.principal }}
+{{- $named = concat $named $acl.selectionLists.readers $acl.selectionLists.seedRequestedWriters $acl.identity.readers }}
+{{- range $p := $named }}
+{{- if not (has $p $sasl.users) }}{{- fail (printf "kafka.sasl.acls references principal %q which is not in kafka.sasl.users" $p) }}{{- end }}
+{{- end }}
+{{- $fqdn := include "fuzeinfra.serviceFqdn" (dict "root" $ "svc" "fuzeinfra-kafka") }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: fuzeinfra-kafka-sasl-provision
+  labels:
+    {{- include "fuzeinfra.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "2"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+    "argocd.argoproj.io/hook": PostSync
+    "argocd.argoproj.io/hook-delete-policy": BeforeHookCreation
+spec:
+  # Bounded so a bad credentials Secret fails visibly instead of wedging the sync.
+  backoffLimit: 4
+  activeDeadlineSeconds: 900
+  template:
+    metadata:
+      labels:
+        {{- include "fuzeinfra.labels" . | nindent 8 }}
+        {{- include "fuzeinfra.selectorLabels" (dict "component" "kafka-sasl-provision" "root" $) | nindent 8 }}
+    spec:
+      restartPolicy: Never
+      {{- include "fuzeinfra.durableToleration" $ | nindent 6 }}
+      containers:
+        - name: provision
+          image: {{ .Values.kafka.image }}
+          imagePullPolicy: {{ include "fuzeinfra.pullPolicy" . }}
+          env:
+            - name: PLAIN_BOOTSTRAP
+              value: "{{ $fqdn }}:{{ .Values.kafka.port }}"
+            - name: SASL_BOOTSTRAP
+              value: "{{ $fqdn }}:{{ $sasl.port }}"
+            {{- range $u := $sasl.users }}
+            - name: PW_{{ $u | upper | replace "-" "_" }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $sasl.credentialsSecret }}
+                  key: {{ $u }}
+            {{- end }}
+          command: [bash, -ec]
+          args:
+            - |
+              umask 077
+              W=$(mktemp -d); trap 'rm -rf "$W"' EXIT
+
+              # 0. refuse any password the SCRAM config syntax cannot carry
+              {{- range $u := $sasl.users }}
+              [[ "$PW_{{ $u | upper | replace "-" "_" }}" =~ ^[A-Za-z0-9]{24,}$ ]] || { echo "credential for {{ $u }} missing or not >=24 alphanumeric"; exit 1; }
+              {{- end }}
+
+              cat > "$W/admin.properties" <<EOF
+              security.protocol=SASL_PLAINTEXT
+              sasl.mechanism=SCRAM-SHA-512
+              sasl.jaas.config=org.apache.kafka.common.security.scram.ScramLoginModule required username="admin" password="$PW_ADMIN";
+              EOF
+
+              # 1. broker up (PLAINTEXT listener is the readiness signal)
+              for i in $(seq 1 60); do
+                kafka-broker-api-versions --bootstrap-server "$PLAIN_BOOTSTRAP" >/dev/null 2>&1 && break
+                echo "waiting for broker ($i/60)"; sleep 5
+              done
+              kafka-broker-api-versions --bootstrap-server "$PLAIN_BOOTSTRAP" >/dev/null
+
+              upsert() { # <user> <password> <bootstrap> [command-config]
+                local cfg=(); [ -n "${4:-}" ] && cfg=(--command-config "$4")
+                kafka-configs --bootstrap-server "$3" "${cfg[@]}" --alter \
+                  --add-config "SCRAM-SHA-512=[password=$2]" \
+                  --entity-type users --entity-name "$1" >/dev/null
+              }
+
+              # 2. admin: bootstrap over PLAINTEXT only if SASL auth fails
+              if kafka-configs --bootstrap-server "$SASL_BOOTSTRAP" --command-config "$W/admin.properties" \
+                   --describe --entity-type users --entity-name admin >/dev/null 2>&1; then
+                echo "admin SCRAM principal present"
+              else
+                echo "bootstrapping admin over PLAINTEXT"
+                upsert admin "$PW_ADMIN" "$PLAIN_BOOTSTRAP"
+                for i in $(seq 1 12); do
+                  kafka-configs --bootstrap-server "$SASL_BOOTSTRAP" --command-config "$W/admin.properties" \
+                    --describe --entity-type users --entity-name admin >/dev/null 2>&1 && break
+                  sleep 5
+                done
+              fi
+
+              # 3. every principal, through SASL as admin
+              {{- range $u := $sasl.users }}
+              upsert {{ $u | quote }} "$PW_{{ $u | upper | replace "-" "_" }}" "$SASL_BOOTSTRAP" "$W/admin.properties"
+              echo "upserted principal {{ $u }}"
+              {{- end }}
+
+              # 4. ACLs. Each helper is idempotent (kafka-acls --add of an existing ACL is a no-op).
+              acl() { kafka-acls --bootstrap-server "$SASL_BOOTSTRAP" --command-config "$W/admin.properties" --force "$@" >/dev/null; }
+              {{- with $acl.selectionLists }}
+              {{- if .enforce }}
+              # selection-lists.* : owner writes, listed principals read.
+              acl --add --allow-principal "User:{{ .owner }}" --operation Write --operation Describe --operation DescribeConfigs --operation AlterConfigs --operation Create --operation Alter \
+                  --topic selection-lists. --resource-pattern-type prefixed
+              # seed.requested is the exception: the owner may only READ it ...
+              acl --add --deny-principal "User:{{ .owner }}" --operation Write --topic selection-lists.seed.requested
+              acl --add --allow-principal "User:{{ .owner }}" --operation Read --topic selection-lists.seed.requested
+              # ... and only allowlisted principals may WRITE it.
+              {{- range .seedRequestedWriters }}
+              acl --add --allow-principal "User:{{ . }}" --operation Write --operation Describe --topic selection-lists.seed.requested
+              {{- end }}
+              {{- range .readers }}
+              acl --add --allow-principal "User:{{ . }}" --operation Read --operation Describe --topic selection-lists. --resource-pattern-type prefixed
+              {{- end }}
+              {{- if .anonymousRead }}
+              acl --add --allow-principal "User:ANONYMOUS" --operation Read --operation Describe --topic selection-lists. --resource-pattern-type prefixed
+              {{- end }}
+              # consumer groups of the owner (<KAFKA_GROUP_ID>, <KAFKA_GROUP_ID>-org-deleted, ...)
+              acl --add --allow-principal "User:{{ .owner }}" --operation Read --operation Describe --group {{ .groupPrefix | quote }} --resource-pattern-type prefixed
+              echo "selection-lists ACLs applied"
+              {{- end }}
+              {{- end }}
+              {{- with $acl.identity }}
+              {{- if .enforce }}
+              # identity.* : only the identity producer writes (closes forgeable identity.org.deleted).
+              acl --add --allow-principal "User:{{ .producer }}" --operation Write --operation Describe --topic identity. --resource-pattern-type prefixed
+              {{- range .readers }}
+              acl --add --allow-principal "User:{{ . }}" --operation Read --operation Describe --topic identity. --resource-pattern-type prefixed
+              {{- end }}
+              {{- if .anonymousRead }}
+              # migration window: existing PLAINTEXT consumers keep READ; WRITE is what closes.
+              acl --add --allow-principal "User:ANONYMOUS" --operation Read --operation Describe --topic identity. --resource-pattern-type prefixed
+              {{- end }}
+              echo "identity ACLs applied"
+              {{- end }}
+              {{- end }}
+              {{- with $acl.topicJob }}
+              {{- if .enforce }}
+              {{- $prefixes := list "selection-lists." "identity." }}
+              {{- if $acl.topicJob.includeNotifyBilling }}{{ $prefixes = concat $prefixes (list "notify." "billing.") }}{{ end }}
+              {{- range $prefixes }}
+              acl --add --allow-principal "User:{{ $acl.topicJob.principal }}" --operation Create --operation Describe --operation Alter --operation DescribeConfigs --operation AlterConfigs --topic {{ . }} --resource-pattern-type prefixed
+              {{- end }}
+              echo "topic-job ACLs applied"
+              {{- end }}
+              {{- end }}
+              echo "kafka SASL provisioning complete"
+          resources:
+            requests: { cpu: 50m, memory: 256Mi }
+            limits: { cpu: 500m, memory: 512Mi }
+{{- end }}
