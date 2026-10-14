@@ -114,6 +114,20 @@ spec:
      reclaimPolicy: Retain) so a human can mount it read-only to recover history, and
      remove it plus its Longhorn volume once the new one is confirmed healthy.
 
+     MIGRATION 2 (2026-10-14) — ext4 CORRUPTION ON `fuzeinfra-prometheus-data`:
+     after the unclean reboot of fuze-core-2/3 (~2026-10-13 14:00) kubelet's mount-time
+     fsck of pvc-88752815 failed ("extent block passes checks, but checksum does not
+     match extent", inode 1179654, "RUN fsck MANUALLY") on every one of ~400 attempts
+     over 16h, while Longhorn reported attached/healthy with 3 running replicas — all
+     three carry the same damaged filesystem, so a replica rebuild cannot help, and the
+     Longhorn backup target is unconfigured (AVAILABLE=false), so there is no Longhorn
+     backup to revert to. The wedged pod held Argo's sync operation in "waiting for
+     healthy state of Deployment/fuzeinfra-prometheus" since 2026-10-05, which blocked
+     every later deploy. Same cure as above: declare a fresh claim (`prometheus.pvcName`)
+     and list the damaged one under `prometheus.retiredPvcs` so it is kept, not pruned.
+     The cost is the TSDB history on the old volume (<=15d retention); the nightly S3
+     snapshot (docs/backups-and-blobs.md §4) is the restore source if history matters.
+
      Deletion protection: `helm.sh/resource-policy: keep` stops a Helm uninstall from
      removing this claim, and Argo's `Prune=false` stops an Argo prune from removing it.
      A chart change can disable Prometheus without destroying its volume. Shrinking
@@ -122,7 +136,7 @@ spec:
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  name: fuzeinfra-prometheus-data
+  name: {{ .Values.prometheus.pvcName }}
   labels:
     {{- include "fuzeinfra.labels" . | nindent 4 }}
     {{- include "fuzeinfra.selectorLabels" (dict "component" "prometheus" "root" $) | nindent 4 }}
@@ -135,6 +149,36 @@ spec:
   resources:
     requests:
       storage: {{ .Values.prometheus.storage }}
+{{- /*
+     RETIRED CLAIMS stay DECLARED (never mounted by any pod) instead of being dropped
+     from Git. Dropping one would leave Argo holding a live, Prune=false claim that
+     is in no manifest — a permanent "requires pruning" OutOfSync, which is exactly
+     what `deploy-prod`'s per-app Synced wait fails on. Declared + Prune=false +
+     Retain keeps the old Longhorn volume intact for e2fsck / forensics / S3 compare
+     until a human removes the entry (and then the claim and volume) on purpose.
+     The spec must match what the claim was created with (storageClassName and
+     accessModes are immutable), so these render through the same helper.
+*/}}
+{{- range .Values.prometheus.retiredPvcs }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ . }}
+  labels:
+    {{- include "fuzeinfra.labels" $ | nindent 4 }}
+    {{- include "fuzeinfra.selectorLabels" (dict "component" "prometheus" "root" $) | nindent 4 }}
+    fuzeinfra.io/retired: "true"
+  annotations:
+    helm.sh/resource-policy: keep
+    argocd.argoproj.io/sync-options: Prune=false
+spec:
+  accessModes: ["ReadWriteOnce"]
+  {{- include "fuzeinfra.storageClass" $ | nindent 2 }}
+  resources:
+    requests:
+      storage: {{ $.Values.prometheus.storage }}
+{{- end }}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -275,7 +319,7 @@ spec:
         {{- end }}
         - name: data
           persistentVolumeClaim:
-            claimName: fuzeinfra-prometheus-data
+            claimName: {{ .Values.prometheus.pvcName }}
 {{- end }}
 
 {{- /* ===================== Alertmanager ===================== */ -}}
