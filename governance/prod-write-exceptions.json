@@ -1,0 +1,27 @@
+{
+  "$comment": "Machine-readable twin of CLAUDE.md > 'GitOps + self-heal' > 'Guarded exceptions to the no-write rule'. The default rule is that no session writes to the prod cluster; each entry here is a standing grant for ONE named operation under stated conditions, executed by the session through the named workflow and never as a raw command. tests/test_prod_write_exceptions.py fails if an entry and its workflow drift apart. Adding an entry is a real grant: it needs the owner's confirmation and a PR, exactly like governance/secret-provision-targets.json.",
+  "exceptions": [
+    {
+      "id": "E1",
+      "workflow": ".github/workflows/traefik-helm-recover.yml",
+      "mode": "recover",
+      "operation": "Delete a terminally-Failed kube-system/helm-install-traefik Job so the k3s helm-controller re-runs the chart. Nothing else.",
+      "why_not_git": "The Job belongs to k3s's helm-controller, not Argo, and the HelmChartConfig change that created it is already applied. A terminal Job is never retried, so no commit can clear it.",
+      "granted": "2026-10-14",
+      "granted_by": "repo owner, in-session",
+      "evidence_required": "mode=diagnose shows the Helm release status is 'deployed' (in-place upgrade). Any other status makes klipper-helm run 'helm uninstall --wait' first, which removes the ingress controller.",
+      "outside_grant": [
+        "release status other than 'deployed' (failed, unknown, deleted, null)",
+        "any other Job, Deployment, Pod or resource",
+        "any invocation with accept_ingress_outage=true set by a session on its own initiative"
+      ],
+      "enforced_by": {
+        "test_file": "tests/test_traefik_helm_recover_guard.py",
+        "gates": ["Gate recover", "Gate release status"],
+        "never_set_by_session": ["accept_ingress_outage"]
+      },
+      "verify": "kubectl -n kube-system get deploy traefik -o wide reaches 2/2 on the chart's target image",
+      "rollback": "none needed: a deleted Failed Job holds no state, and a failed retry leaves the previous release serving"
+    }
+  ]
+}

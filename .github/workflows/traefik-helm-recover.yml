@@ -36,8 +36,11 @@
 # release METADATA (revision, status, chart, appVersion, description) — not the
 # release Secret's packed manifest, and not a credential.
 #
-# Read `diagnose` first. Only run `recover` once you know which case you are in,
-# and for the reinstall case only when an ingress outage is acceptable right now.
+# Read `diagnose` first. `recover` now ENFORCES the distinction: it refuses unless
+# the release is `deployed`, and only `accept_ingress_outage=true` overrides that —
+# an input a session never sets on its own (CLAUDE.md, "Guarded exceptions", E1,
+# which grants recovery for the `deployed` case only and is the reason this gate
+# exists; governance/prod-write-exceptions.json is its machine-readable twin).
 #
 # An ingress outage does NOT cost you kubectl: the host firewall allows SSH and
 # the k3s API directly, so cluster-query and this workflow keep working.
@@ -64,6 +67,11 @@ on:
         description: 'recover only: type RECOVER. Deleting the Job can make klipper-helm UNINSTALL Traefik first (failurePolicy=reinstall), dropping ALL cluster ingress until the reinstall completes.'
         required: false
         default: ''
+      accept_ingress_outage:
+        description: 'recover only. Default false. Proceed even when the Helm release is NOT in status deployed — klipper-helm then UNINSTALLS Traefik first and ALL cluster ingress is down until the reinstall completes. CLAUDE.md exception E1 covers only the deployed case; a session never sets this on its own.'
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -125,6 +133,20 @@ jobs:
           echo "###   status 'deployed'              -> recover UPGRADES in place. No outage window."
           echo "###   status failed/unknown/deleted  -> recover UNINSTALLS Traefik first: ALL ingress drops."
           helm history traefik -n kube-system --max 10 2>&1 || true
+          echo
+          echo "### The OTHER half: the CRD chart. Measured 2026-10-14, recreating the traefik Job"
+          echo "### failed within seconds with 'UPGRADE FAILED: ... validate-install-crd.yaml:43:7:"
+          echo "### Required CRDs are missing'. traefik >=40 will not render unless its CRDs are"
+          echo "### current, and those come from the SEPARATE traefik-crd release — whose install Job"
+          echo "### had completed 83 days earlier, so it was never moved to the version traefik wants."
+          echo "### Clearing the traefik Job therefore cannot converge Traefik on its own. And the CRD"
+          echo "### chart carries failurePolicy=reinstall too: a failed CRD install runs 'helm uninstall',"
+          echo "### which deletes the CRDs and every IngressRoute/Middleware with them. Read its status"
+          echo "### before anyone touches that Job."
+          kubectl -n kube-system get job helm-install-traefik-crd 2>&1 || true
+          helm history traefik-crd -n kube-system --max 10 2>&1 || true
+          echo "### all releases in kube-system (metadata only)"
+          helm list -n kube-system --all 2>&1 || true
           # Parsed rather than eyeballed so the notice below cannot disagree with
           # the history above. `helm status -o json` prints release metadata only.
           STATUS=$(helm status traefik -n kube-system -o json 2>/dev/null \
@@ -153,6 +175,41 @@ jobs:
             exit 1
           fi
           echo "confirmed"
+
+      # Makes the diagnose WARNING binding. Without this, `recover` on a release in
+      # status failed/unknown/deleted would proceed straight into the uninstall
+      # window and the only thing standing between a dispatch and a cluster-wide
+      # ingress outage would be a human reading a log line. CLAUDE.md exception E1
+      # grants recovery ONLY for a `deployed` release, so the workflow enforces
+      # exactly that: the policy is a test, not a promise.
+      #
+      # Re-reads the status rather than trusting the Diagnose step's: they are
+      # separate steps, and a gate that consumes another step's conclusion is a
+      # gate that silently passes when that step changes shape.
+      #
+      # Fail-closed on every way the read can go wrong. An empty or unparseable
+      # status becomes `unknown`, and `unknown` is one of the statuses that makes
+      # klipper-helm uninstall — so "could not tell" must never read as "safe".
+      - name: Gate release status
+        if: ${{ inputs.mode == 'recover' }}
+        env:
+          ACCEPT_OUTAGE: ${{ inputs.accept_ingress_outage }}
+        run: |
+          set -u
+          STATUS=$(helm status traefik -n kube-system -o json 2>/dev/null \
+                     | python3 -c 'import json,sys; print(json.load(sys.stdin)["info"]["status"])' 2>/dev/null \
+                   || true)
+          STATUS=${STATUS:-unknown}
+          if [ "$STATUS" = "deployed" ]; then
+            echo "release status is 'deployed' — recovery is an in-place upgrade, no uninstall window."
+            exit 0
+          fi
+          if [ "$ACCEPT_OUTAGE" = "true" ]; then
+            echo "::warning title=traefik-helm-recover::release status is '${STATUS}' and accept_ingress_outage=true — proceeding. klipper-helm will UNINSTALL Traefik first; expect all cluster ingress to be down until the reinstall completes."
+            exit 0
+          fi
+          echo "::error::release status is '${STATUS}', not 'deployed'. klipper-helm failurePolicy=reinstall would run 'helm uninstall --wait' on Traefik first: no ingress controller, every *.prod.fuzefront.com host down, and it stays down if the reinstall also fails. Refusing. This case is outside CLAUDE.md exception E1 — re-dispatch with accept_ingress_outage=true only once the owner has accepted that outage."
+          exit 1
 
       - name: Recover — delete the failed Job
         if: ${{ inputs.mode == 'recover' }}
