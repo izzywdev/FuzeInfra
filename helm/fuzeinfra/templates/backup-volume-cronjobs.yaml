@@ -115,7 +115,7 @@ spec:
             # subdirectory if Prometheus has not yet.
             - name: snapshots
               persistentVolumeClaim:
-                claimName: {{ $v.prometheus.pvcName | quote }}
+                claimName: {{ $.Values.prometheus.pvcName | quote }}
           initContainers:
             - name: snapshot
               image: {{ $v.prometheus.snapshotImage | quote }}
@@ -159,7 +159,7 @@ spec:
                   esac
                   name="$(printf '%s' "$resp" | sed -n 's/.*"name":"\([^"]*\)".*/\1/p')"
                   [ -n "$name" ] || { echo "could not parse a snapshot name out of the response" >&2; exit 1; }
-                  [ -d "/snapshots/$name" ] || { echo "/snapshots/$name is missing — is $PROM_URL really backed by PVC {{ $v.prometheus.pvcName }}?" >&2; exit 1; }
+                  [ -d "/snapshots/$name" ] || { echo "/snapshots/$name is missing — is $PROM_URL really backed by PVC {{ $.Values.prometheus.pvcName }}?" >&2; exit 1; }
                   printf '%s' "$name" > /scratch/snapshot-name
                   printf '%s/prometheus/%s' "$PREFIX" "$(date -u +%Y%m%dT%H%M%SZ)" > /scratch/remote-key
                   echo "Snapshot $name taken ($(du -sh "/snapshots/$name" | cut -f1)) -> $(cat /scratch/remote-key)"
@@ -196,7 +196,7 @@ spec:
                   # COMPLETE backup. A restore must refuse any prefix without it —
                   # a half-synced TSDB looks exactly like a whole one otherwise.
                   printf 'snapshot=%s\ncompleted=%s\nsource_pvc=%s\nlayout=tsdb/\n' \
-                    "$name" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "{{ $v.prometheus.pvcName }}" > /tmp/MANIFEST
+                    "$name" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "{{ $.Values.prometheus.pvcName }}" > /tmp/MANIFEST
                   aws --endpoint-url "$S3_ENDPOINT" s3 cp /tmp/MANIFEST "s3://$S3_BUCKET/$key/MANIFEST"
                   # Release the hard links so retention can actually free blocks.
                   rm -rf "/snapshots/$name"

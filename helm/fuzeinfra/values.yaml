@@ -664,6 +664,11 @@ prometheus:
   image: prom/prometheus:latest
   port: 9090
   storage: 20Gi
+  # TSDB claim. Bump the suffix to move to a fresh Longhorn volume (see the
+  # MIGRATION notes in templates/monitoring.yaml).
+  pvcName: fuzeinfra-prometheus-data
+  # Claims no pod mounts any more but that are kept (declared, Prune=false).
+  retiredPvcs: []
   retention:
     time: "15d"
     size: "15GB"
@@ -1021,8 +1026,8 @@ backups:
       connectGraceSeconds: 90
       host: fuzeinfra-prometheus
       port: 9090
-      # The standalone PVC declared in templates/monitoring.yaml.
-      pvcName: fuzeinfra-prometheus-data
+      # The PVC is `prometheus.pvcName` (templates/monitoring.yaml) — one source
+      # of truth, so a volume migration cannot leave the backup on the old claim.
       # Must match the fsGroup Prometheus runs with (monitoring.yaml: 65534), or
       # the Job cannot read — let alone remove — the snapshot tree.
       runAsUser: 65534

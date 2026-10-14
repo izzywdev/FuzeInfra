@@ -201,6 +201,11 @@ prometheus:
     node.longhorn.io/create-default-disk: "true"
     fuzeinfra.io/role: monitoring
   storage: 20Gi
+  # 2026-10-14: fuzeinfra-prometheus-data (pvc-88752815) has a corrupt ext4 that
+  # kubelet's mount-time fsck cannot repair. Fresh claim; the damaged one is kept.
+  pvcName: fuzeinfra-prometheus-data-v2
+  retiredPvcs:
+    - fuzeinfra-prometheus-data
   # Let downstream apps ship Prometheus alert/recording rules from their own
   # namespaces via ConfigMaps labeled `prometheus_rule: "1"`.
   ruleSidecar:
