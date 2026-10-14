@@ -377,7 +377,7 @@ def make_handler(dispatcher, inbound_token):
             results = dispatcher.handle_payload(payload)
             if results is None:
                 return self._send(400, {"error": "invalid payload"})
-            self._send(200, {"results": results})
+            return self._send(200, {"results": results})
 
         def log_message(self, *args):  # silence default access log (it would print paths only, but stay quiet)
             pass

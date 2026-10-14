@@ -18,6 +18,7 @@ import subprocess
 from contextlib import redirect_stdout
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from urllib.parse import urlparse
 
 import pytest
 import yaml
@@ -276,7 +277,7 @@ def test_audit_issue_uses_only_validated_fields(tmp_path):
     d, http = make_dispatcher(tmp_path, auditRepo="izzywdev/FuzeInfra")
     d.github_token = "fake-audit-token"
     d.handle_alert(alert(), T0)
-    audit = [c for c in http.calls if "api.github.com" in c[0]]
+    audit = [c for c in http.calls if urlparse(c[0]).hostname == "api.github.com"]
     assert len(audit) == 1
     assert "IGNORE" not in json.dumps(audit[0][1]) and "@fuze" not in json.dumps(audit[0][1])
 
