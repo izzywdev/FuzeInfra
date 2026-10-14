@@ -456,7 +456,7 @@ def close_resolved_argo_issues(
             still_open.append(issue)
             continue
         app = match.group(1)
-        comment_issue(
+        comment_best_effort(
             repo, issue["number"],
             f"✅ `{app}` no longer has an Argo operation stuck in `phase=Running` — "
             "closing so the next wedge of this app files and acts as a fresh "
@@ -488,7 +488,14 @@ def close_resolved_findings(
             still_open.append(issue)
             continue
         key = match.group(1)
-        comment_issue(
+        # The comment is a courtesy BEFORE the close; the close is what matters. On
+        # 2026-10-14 this was the call that killed every run: #1238 (the
+        # backup-neo4j thread, 2,500 comments) was resolved, so the watchdog tried to
+        # post "no longer detected — closing", GitHub refused ("Commenting is disabled
+        # on issues with more than 2500 comments"), the exception aborted the run
+        # BEFORE close_issue, and the issue stayed open to fail again 20 minutes later,
+        # forever. Losing the sentence must never cost the close.
+        comment_best_effort(
             repo, issue["number"],
             f"✅ `{key}` is no longer detected — closing so the next occurrence "
             "of this workload's condition files (or updates) a fresh incident "
@@ -1411,6 +1418,23 @@ def close_issue(repo: str, issue_number: str) -> None:
     gh(["issue", "close", str(issue_number), "--repo", repo])
 
 
+def comment_best_effort(repo: str, issue_number: str, body: str) -> bool:
+    """Post a COURTESY comment; if GitHub refuses it, warn and carry on.
+
+    Only for comments whose loss changes nothing: "closing, resolved" notes that
+    precede a close. NOT for comments that carry state the watchdog reads back
+    (the argo-terminated marker, the dark-node reboot counters): losing one of
+    those means re-dispatching a terminate or another reboot, so those stay strict
+    and still abort the run.
+    """
+    try:
+        comment_issue(repo, issue_number, body)
+    except GitHubError as error:
+        print(f"::warning::watchdog could not comment on #{issue_number}: {error}")
+        return False
+    return True
+
+
 _COMMENT_CAP_MARKER = "Commenting is disabled on issues with more than"
 
 
@@ -1639,7 +1663,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         node_name = _dark_node_name_from_issue(issue)
         if node_name is None or node_name in still_unknown:
             continue
-        comment_issue(
+        comment_best_effort(
             args.repo, issue["number"],
             f"✅ Node `{node_name}` is no longer reporting `Ready=Unknown` — closing.\n\n"
             "If this recovered on its own rather than via one of this watchdog's "
