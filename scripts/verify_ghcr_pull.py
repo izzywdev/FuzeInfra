@@ -23,7 +23,14 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
 
 def parse_image(image):
     match = re.fullmatch(
-        r"ghcr\.io/(izzywdev/[a-z0-9._-]+(?:/[a-z0-9._-]+)*):([A-Za-z0-9_][A-Za-z0-9_.-]{0,127})",
+        # Each path segment must START with an alphanumeric: an OCI/GHCR package name
+        # cannot begin with `.`, `_` or `-`. This used to be `[a-z0-9._-]+`, which
+        # accepted `izzywdev/-x` while the workflow gate that calls this script rejected
+        # it -- the two validators disagreeing is the defect class that stopped
+        # mendys-prod being provisioned at all (FuzeInfra#1415). Nested segments stay
+        # legal; MendysRobotics publishes ghcr.io/izzywdev/mendysrobotics/<service>.
+        r"ghcr\.io/(izzywdev/[a-z0-9][a-z0-9._-]*(?:/[a-z0-9][a-z0-9._-]*)*)"
+        r":([A-Za-z0-9_][A-Za-z0-9_.-]{0,127})",
         image,
     )
     if not match:
