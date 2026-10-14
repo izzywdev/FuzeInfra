@@ -214,6 +214,109 @@ def test_recover_does_not_delete_when_kubectl_read_fails(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# 2b. the release-status gate (CLAUDE.md exception E1 — `deployed` only)
+# ---------------------------------------------------------------------------
+
+def _helm_stub(tmp_path, stdout="", exit_code=0):
+    """A fake `helm` first on PATH; `helm status -o json` prints `stdout`."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir(exist_ok=True)
+    stub = bin_dir / "helm"
+    stub.write_text(
+        "#!/usr/bin/env bash\n"
+        f"printf '%s' {stdout!r}\n"
+        f"exit {exit_code}\n",
+        encoding="utf-8",
+    )
+    stub.chmod(0o755)
+    return bin_dir
+
+
+def _status_json(status):
+    return '{"info": {"status": "%s"}}' % status
+
+
+def _gate_status(tmp_path, helm_stdout, accept=None, helm_exit=0):
+    env = {} if accept is None else {"ACCEPT_OUTAGE": accept}
+    return _run(
+        _step("Gate release status")["run"],
+        env=env,
+        path_prepend=str(_helm_stub(tmp_path, helm_stdout, helm_exit)),
+    )
+
+
+def test_release_gate_passes_a_deployed_release(tmp_path):
+    result = _gate_status(tmp_path, _status_json("deployed"))
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "in-place upgrade" in result.stdout
+
+
+@pytest.mark.parametrize(
+    "status",
+    [
+        "failed",           # klipper-helm uninstalls first
+        "unknown",
+        "deleted",
+        "pending-upgrade",  # an upgrade in flight: deleting the Job now aborts it
+        "pending-install",
+        "uninstalling",
+        "superseded",
+        "Deployed",         # case matters: helm prints lowercase, so this is not it
+        "deployed ",
+    ],
+)
+def test_release_gate_refuses_anything_but_deployed(tmp_path, status):
+    result = _gate_status(tmp_path, _status_json(status), accept="false")
+    assert result.returncode != 0, (
+        f"release status {status!r} was ACCEPTED. For failed|unknown|deleted "
+        "klipper-helm runs `helm uninstall --wait` on Traefik first: no ingress "
+        "controller until the reinstall completes."
+    )
+    assert "outside CLAUDE.md exception E1" in result.stdout
+
+
+@pytest.mark.parametrize(
+    "helm_stdout, helm_exit",
+    [
+        ("", 1),                      # helm errored (release absent, no API, no perms)
+        ("", 0),                      # helm printed nothing
+        ("not json at all", 0),
+        ('{"info": {}}', 0),          # JSON without a status
+        ('{"nope": 1}', 0),
+        ("[]", 0),
+    ],
+)
+def test_release_gate_fails_closed_when_the_status_cannot_be_read(tmp_path, helm_stdout, helm_exit):
+    """"Could not tell" must never read as "safe".
+
+    An unreadable status resolves to `unknown`, which is itself one of the four
+    statuses that make klipper-helm uninstall. Every way the read can fail must
+    therefore refuse — a gate that passes on a broken `helm status` would be most
+    permissive exactly when the cluster is least understood.
+    """
+    result = _gate_status(tmp_path, helm_stdout, accept="false", helm_exit=helm_exit)
+    assert result.returncode != 0
+    assert "'unknown'" in result.stdout
+
+
+def test_release_gate_fails_closed_when_the_accept_input_is_unset(tmp_path):
+    result = _gate_status(tmp_path, _status_json("failed"))
+    assert result.returncode != 0
+
+
+@pytest.mark.parametrize("accept", ["", "false", "False", "TRUE", "True", "1", "yes", "true "])
+def test_only_the_exact_string_true_overrides_the_gate(tmp_path, accept):
+    result = _gate_status(tmp_path, _status_json("failed"), accept=accept)
+    assert result.returncode != 0, f"accept_ingress_outage={accept!r} overrode the gate"
+
+
+def test_exact_true_overrides_and_says_so_loudly(tmp_path):
+    result = _gate_status(tmp_path, _status_json("failed"), accept="true")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "UNINSTALL Traefik first" in result.stdout
+
+
+# ---------------------------------------------------------------------------
 # 3. structural properties
 # ---------------------------------------------------------------------------
 
@@ -239,14 +342,28 @@ def test_diagnose_runs_in_both_modes():
     assert "if" not in _step("Diagnose")
 
 
-@pytest.mark.parametrize("step_name", ["Gate recover", "Recover — delete the failed Job"])
+@pytest.mark.parametrize(
+    "step_name",
+    ["Gate recover", "Gate release status", "Recover — delete the failed Job"],
+)
 def test_acting_steps_are_gated_on_recover_mode(step_name):
     assert _step(step_name)["if"].strip() == "${{ inputs.mode == 'recover' }}"
 
 
-def test_gate_precedes_the_delete():
+def test_both_gates_precede_the_delete():
     names = [s.get("name") for s in _steps()]
-    assert names.index("Gate recover") < names.index("Recover — delete the failed Job")
+    delete = names.index("Recover — delete the failed Job")
+    assert names.index("Gate recover") < delete
+    assert names.index("Gate release status") < delete
+
+
+def test_the_outage_override_defaults_to_false_and_is_a_boolean():
+    spec = _spec()
+    triggers = spec.get("on", spec.get(True))
+    accept = triggers["workflow_dispatch"]["inputs"]["accept_ingress_outage"]
+    assert accept["default"] is False, "the outage override must never be preselected"
+    assert accept["type"] == "boolean"
+    assert accept["required"] is False
 
 
 def test_workflow_is_dispatch_only():
