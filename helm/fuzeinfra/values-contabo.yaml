@@ -1553,3 +1553,7 @@ workloadIdentity:
       serviceAccount: fuzefront-security
       namespace: fuzefront
       registryNamespaces: [fuzefront]
+
+# Alert -> agent-session dispatcher: OFF (see values.yaml and the design doc).
+alertSessionDispatcher:
+  enabled: false

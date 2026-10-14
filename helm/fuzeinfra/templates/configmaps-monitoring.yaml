@@ -529,6 +529,22 @@ data:
               authorizationScheme: Bearer
               authorizationCredentials: "${CRIT_BRIDGE_TOKEN}"
             disableResolveMessage: true
+      {{- if .Values.alertSessionDispatcher.enabled }}
+      # In-cluster dispatcher (docs/design/alert-to-agent-session.md). It applies its
+      # own allowlist, dedup and caps; resolved notifications are sent so it can close
+      # the per-fault record.
+      - orgId: 1
+        name: alert-session-dispatcher
+        receivers:
+          - uid: alert-session-dispatcher-webhook
+            type: webhook
+            settings:
+              url: "http://alert-session-dispatcher.{{ .Release.Namespace }}.svc:8080/alerts"
+              httpMethod: POST
+              authorizationScheme: Bearer
+              authorizationCredentials: "${ALERT_DISPATCH_INBOUND_TOKEN}"
+            disableResolveMessage: false
+      {{- end }}
 
   # ---------------------------------------------------------------------------
   # Notification policy — route severity=critical labels to the webhook.
@@ -545,6 +561,15 @@ data:
         group_interval: 5m
         repeat_interval: 4h
         routes:
+          {{- if .Values.alertSessionDispatcher.enabled }}
+          # Additive fan-out: `continue: true` keeps the existing @fuze issue path intact.
+          - receiver: alert-session-dispatcher
+            matchers:
+              - severity = critical
+            group_wait: 0s
+            repeat_interval: 4h
+            continue: true
+          {{- end }}
           - receiver: fuze-autofix
             matchers:
               - severity = critical

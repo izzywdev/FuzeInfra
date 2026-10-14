@@ -1,0 +1,255 @@
+{{- if .Values.alertSessionDispatcher.enabled }}
+{{- $root := . -}}
+{{- $d := .Values.alertSessionDispatcher -}}
+{{- /*
+  Alert -> agent-session dispatcher. Design: docs/design/alert-to-agent-session.md.
+
+  A critical Grafana alert whose title is on `allowlist` makes this pod ask FuzeAgent
+  for ONE responder session. Authentication is a FuzeFront workload token minted per
+  dispatch (POST /api/v1/security/tokens/workload) from this pod's PROJECTED
+  ServiceAccount token (audience fuzefront-security) -- there is no long-lived
+  FuzeFront credential in this chart. The only SealedSecret is the INBOUND bearer
+  (and an optional GitHub audit token): deploy/sealed-secrets/
+  alert-session-dispatcher-secret.yaml.template.
+
+  OFF by default in every overlay. Turning it on needs, in the SAME change:
+    * the sealed secret landed, agent.sessionUrl set, and the FuzeFront identity
+      declaration readable (workloadIdentity.authenticators[].registryNamespaces
+      must include this release namespace; tests/test_alert_session_dispatcher.py
+      fails if an overlay enables the dispatcher without it);
+    * dryRun flipped to false only after one dry-run firing was read in Loki.
+*/ -}}
+{{- $agentUrl := required "alertSessionDispatcher.agent.sessionUrl is required when enabled" $d.agent.sessionUrl -}}
+{{- $cfg := dict
+      "paused" $d.paused
+      "dryRun" $d.dryRun
+      "allowlist" $d.allowlist
+      "labelKeys" $d.labelKeys
+      "cooldownSeconds" $d.cooldownSeconds
+      "openTtlSeconds" $d.openTtlSeconds
+      "dailySpawnCap" $d.dailySpawnCap
+      "dailySpendCapUsd" $d.dailySpendCapUsd
+      "estimatedSessionCostUsd" $d.estimatedSessionCostUsd
+      "securityTokenUrl" $d.fuzefront.tokenUrl
+      "agentSessionUrl" $agentUrl
+      "auditRepo" $d.audit.repo
+      "stateFile" "/state/state.json" -}}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: alert-session-dispatcher
+  labels:
+    {{- include "fuzeinfra.labels" . | nindent 4 }}
+automountServiceAccountToken: false
+---
+# FuzeFront workload-identity declaration (read by fuzefront-security via
+# GET /api/v1/namespaces/<ns>/configmaps?labelSelector=security.fuze.dev/workload-identity=true).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: alert-session-dispatcher-identity
+  labels:
+    {{- include "fuzeinfra.labels" . | nindent 4 }}
+    security.fuze.dev/workload-identity: "true"
+data:
+  service: service:alert-session-dispatcher
+  serviceAccountName: alert-session-dispatcher
+  scopes: {{ $d.workloadScope | quote }}
+  tokenTtlSeconds: "300"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: alert-session-dispatcher-code
+  labels:
+    {{- include "fuzeinfra.labels" . | nindent 4 }}
+data:
+  dispatcher.py: |-
+{{ $root.Files.Get "files/alert-session-dispatcher/dispatcher.py" | indent 4 }}
+  responder-brief.md: |-
+{{ $root.Files.Get "files/alert-session-dispatcher/responder-brief.md" | indent 4 }}
+  config.json: |-
+    {{ toJson $cfg }}
+{{- if $d.persistence.enabled }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: alert-session-dispatcher-state
+  labels:
+    {{- include "fuzeinfra.labels" . | nindent 4 }}
+spec:
+  accessModes: [ReadWriteOnce]
+  {{- include "fuzeinfra.storageClass" . | nindent 2 }}
+  resources:
+    requests:
+      storage: {{ $d.persistence.size }}
+{{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: alert-session-dispatcher
+  labels:
+    {{- include "fuzeinfra.labels" . | nindent 4 }}
+spec:
+  selector:
+    {{- include "fuzeinfra.selectorLabels" (dict "component" "alert-session-dispatcher" "root" $) | nindent 4 }}
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: alert-session-dispatcher
+  labels:
+    {{- include "fuzeinfra.labels" . | nindent 4 }}
+spec:
+  # Single replica on purpose: the dedup/cap state is one file with one writer.
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "fuzeinfra.selectorLabels" (dict "component" "alert-session-dispatcher" "root" $) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "fuzeinfra.selectorLabels" (dict "component" "alert-session-dispatcher" "root" $) | nindent 8 }}
+      annotations:
+        checksum/code: {{ print ($root.Files.Get "files/alert-session-dispatcher/dispatcher.py") ($root.Files.Get "files/alert-session-dispatcher/responder-brief.md") (toJson $cfg) | sha256sum }}
+        checksum/secret: {{ $d.secretRotation | default "0" | toString | sha256sum }}
+    spec:
+      serviceAccountName: alert-session-dispatcher
+      automountServiceAccountToken: false
+      {{- include "fuzeinfra.durableToleration" $ | nindent 6 }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: dispatcher
+          image: {{ $d.image }}
+          imagePullPolicy: {{ $d.imagePullPolicy | default $root.Values.global.imagePullPolicy | default "IfNotPresent" }}
+          command: ["python3", "-I", "/app/dispatcher.py"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          ports:
+            - containerPort: 8080
+          env:
+            - name: PORT
+              value: "8080"
+            - name: CONFIG_DIR
+              value: /app
+            # Inbound bearer for Grafana. REQUIRED: the process refuses to start without it.
+            - name: ALERT_DISPATCH_INBOUND_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: alert-session-dispatcher-secret
+                  key: ALERT_DISPATCH_INBOUND_TOKEN
+            # Optional: audit issue creation. Absent -> audit is the structured log only.
+            - name: GITHUB_AUDIT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: alert-session-dispatcher-secret
+                  key: GITHUB_AUDIT_TOKEN
+                  optional: true
+          volumeMounts:
+            - name: code
+              mountPath: /app
+              readOnly: true
+            - name: state
+              mountPath: /state
+            - name: fuzefront-token
+              mountPath: /var/run/secrets/tokens
+              readOnly: true
+          readinessProbe:
+            httpGet: { path: /healthz, port: 8080 }
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          resources:
+            {{- toYaml ($d.resources | default dict) | nindent 12 }}
+      volumes:
+        - name: code
+          configMap:
+            name: alert-session-dispatcher-code
+        - name: state
+          {{- if $d.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: alert-session-dispatcher-state
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+        - name: fuzefront-token
+          projected:
+            sources:
+              - serviceAccountToken:
+                  audience: fuzefront-security
+                  expirationSeconds: 3600
+                  path: fuzefront-security
+---
+# Ingress only from the alert senders; egress only to DNS, FuzeFront security, the
+# FuzeAgent endpoint, and (audit only) GitHub over 443. Everything else is denied.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: alert-session-dispatcher
+  labels:
+    {{- include "fuzeinfra.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "fuzeinfra.selectorLabels" (dict "component" "alert-session-dispatcher" "root" $) | nindent 6 }}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: grafana
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: alertmanager
+      ports:
+        - protocol: TCP
+          port: 8080
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - { protocol: UDP, port: 53 }
+        - { protocol: TCP, port: 53 }
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ $d.fuzefront.namespace | quote }}
+      ports:
+        - protocol: TCP
+          port: {{ $d.fuzefront.port }}
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ required "alertSessionDispatcher.agent.namespace is required when enabled" $d.agent.namespace | quote }}
+      ports:
+        - protocol: TCP
+          port: {{ $d.agent.port }}
+    {{- if $d.audit.repo }}
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except: [10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16]
+      ports:
+        - protocol: TCP
+          port: 443
+    {{- end }}
+{{- end }}
