@@ -234,3 +234,25 @@ GitHub Actions: alertmanager-fuze.yml
 - **Owner resolution** is identical to the log path (namespace `fuzeinfra.io/owner-repo`
   annotation → owner repo; infra alerts with no namespace fall back to FuzeInfra).
 - Dedup is per `(owner repo, alertname)` via the `alertmanager-autofix` label.
+
+## Self-monitoring rules (Grafana-managed, independent of Prometheus)
+
+Prometheus rules cannot fire when Prometheus is the casualty, so two rules live in Grafana
+(`helm/fuzeinfra/templates/configmaps-monitoring.yaml`, `rules.yaml`) and use the same
+`severity=critical` → `fuze-autofix` route as above:
+
+- **Prometheus Unreachable** (`prometheusunreachable`, 1m eval, `for: 10m`): queries
+  `up{job="prometheus"}` on the `fuzeinfra-prometheus` datasource; `noDataState` and
+  `execErrState` are both `Alerting`, so a down or unreachable Prometheus fires it.
+- **Storage Mount Failure** (`storagemountfailure`, Loki): `longhorn-system` log lines matching
+  `fsck.*(found errors|could not correct)|MountVolume.*failed|FailedAttachVolume`.
+  The exact prod log text is unverified; check with `cluster-query.yml`, e.g.
+  `-n longhorn-system logs -l app=longhorn-csi-plugin --tail=200 -c longhorn-csi-plugin`.
+  Promtail only tails `/var/log/pods` (the journal job has no host mount), so kubelet-only
+  messages and Events never reach Loki; only pod logs do.
+
+Dedup: `grafana-crit-fix.yml` treats `CRIT Log Detected` as the catch-all (one open
+`crit-autofix` issue per repo). Any other alertname is deduplicated per `(namespace, alertname)`
+via the `grafana-autofix` label and a body marker, and its concurrency group is keyed on the
+alertname, so one open generic issue (or a queued generic run) can no longer suppress or evict
+an unrelated critical alert. See also `docs/design/alert-to-agent-session.md`.
