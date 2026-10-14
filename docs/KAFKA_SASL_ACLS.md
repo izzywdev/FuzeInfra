@@ -77,3 +77,31 @@ FuzeFront consumes the three service credentials via credential-handoff
 `selection-list-service`, `identity-producer`, `kafka-topics-job`. A
 `governance/credential-handoff.json` entry per credential is added once FuzeFront names
 the target Secret and manifest path (that entry is the grant).
+
+## Why it is off in prod (incident 2026-10-14)
+
+`kafka.sasl.enabled` was turned on in `values-contabo.yaml` by #1394 and the single
+prod broker went into `CrashLoopBackOff`:
+
+    ERROR [StandardAuthorizer 1] Failed to complete initial ACL load process.
+    java.util.concurrent.TimeoutException  (AclPublisher.close)
+
+Cause: the runbook above claimed `allow.everyone.if.no.acl.found=true` makes enabling
+the authorizer a no-op. That is wrong for KRaft. `StandardAuthorizer` denies every
+request from a non-super-user until it has loaded the ACL snapshot from the metadata
+log, and the broker's own registration with the (in-process) controller arrives over
+the CONTROLLER/PLAINTEXT listener as `User:ANONYMOUS`. With only `User:admin` as a
+super user the node deadlocks against itself. `allow.everyone.if.no.acl.found` is only
+consulted after the initial load.
+
+What would make it work (not done here; prove on a kind single-node KRaft first):
+1. Add `User:ANONYMOUS` to `super.users`. Boots, but then PLAINTEXT clients are
+   super users too, so no ACL can ever restrict them: the migration-window design
+   (ACL groups closing PLAINTEXT per prefix) does not work with this option.
+2. Authenticate the controller and inter-broker traffic (SASL or mTLS on the
+   CONTROLLER and inter-broker listeners, with that principal in `super.users`), then
+   ACLs genuinely close PLAINTEXT clients. This is the real prerequisite and it was
+   mislabelled as a late "flip" step.
+
+The earlier statement "no ACL group is enforced, so nothing is denied" was true of the
+ACL groups but not of enabling the authorizer itself.
