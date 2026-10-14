@@ -181,11 +181,18 @@ kafka:
   nodeSelector:
     node.longhorn.io/create-default-disk: "true"
   storage: 10Gi
-  # SASL/SCRAM listener :9094 + authorizer alongside PLAINTEXT :9092 (migration
-  # window). No ACL group is enforced yet; see docs/KAFKA_SASL_ACLS.md for the
-  # per-group cut-over. Credentials: deploy/sealed-secrets/fuzeinfra-kafka-sasl.yaml.
+  # SASL/SCRAM listener :9094 + authorizer alongside PLAINTEXT :9092.
+  # DISABLED 2026-10-14 after #1394 crash-looped the prod broker: with the
+  # StandardAuthorizer on, a combined KRaft node talks to ITSELF over PLAINTEXT
+  # as User:ANONYMOUS (broker<->controller), and ANONYMOUS was not a super user,
+  # so the initial ACL load never completed ("Failed to complete initial ACL load
+  # process", TimeoutException) and the broker shut down on every start. It was
+  # invisible offline. Do NOT re-enable until docs/KAFKA_SASL_ACLS.md section
+  # "Why it is off in prod" is resolved AND the change is proven on a single-node
+  # KRaft broker (kind) first. Credentials stay in
+  # deploy/sealed-secrets/fuzeinfra-kafka-sasl.yaml.
   sasl:
-    enabled: true
+    enabled: false
 prometheus:
   # Pin to durable Longhorn-disk nodes. longhorn-manager only runs on the 3
   # durable nodes, so Longhorn registers node.longhorn.io objects only there;
