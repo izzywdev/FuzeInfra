@@ -142,7 +142,59 @@ jobs:
           done
           echo "### kubectl $ARGS"
           # shellcheck disable=SC2086
-          kubectl $ARGS 2>&1 | head -c 200000
+          kubectl $ARGS 2>&1 | head -c 200000 | tee "$RUNNER_TEMP/cq-out.txt"
+
+          # ---- mirror the output into check-run ANNOTATIONS -----------------
+          # The job log above is unchanged and stays authoritative. This mirrors
+          # it somewhere an agent session can actually reach.
+          #
+          # cluster-query is the fleet's ONLY read path into prod, and until now
+          # its result existed solely in an Actions job log. Those are served
+          # from results-receiver.actions.githubusercontent.com and from SHARDED
+          # productionresultssa*.blob.core.windows.net hosts -- sa6, sa10 and
+          # sa15 all served a single batch of three jobs on 2026-09-23. A session
+          # behind a restrictive egress proxy gets 403 on CONNECT to every one of
+          # them, so the session that DISPATCHED a query could not read its own
+          # answer. Measured on two separate cloud environments that day; a
+          # delegated read from the second one failed identically (#1199).
+          # Allow-listing a single blob host does not fix it -- the shard varies
+          # per job -- which is why this exists rather than an egress tweak alone.
+          #
+          # Annotations come back from api.github.com, which those sessions CAN
+          # reach:  GET /repos/{owner}/{repo}/check-runs/{id}/annotations
+          # That channel has twice been the only way a failure could be diagnosed
+          # at all (#1199, and #1415 where it carried the one line that identified
+          # a push failure whose log was unreachable).
+          #
+          # This discloses NOTHING new. It runs after every guard above, so the
+          # Secret / --raw / mutating-verb filters still decide what is ever
+          # printed, and an annotation carries exactly the visibility of the log
+          # it mirrors. Capped because GitHub truncates long annotation messages
+          # and limits how many it keeps per check run; the log stays complete.
+          #
+          # tests/test_cluster_query_guard.py truncates this script at the
+          # `### kubectl` line above, so none of this sits on the tested path.
+          ANN_MAX_LINES="${CQ_ANNOTATE_MAX_LINES:-200}"
+          ANN_CHUNK="${CQ_ANNOTATE_CHUNK:-20}"
+          total="$(wc -l < "$RUNNER_TEMP/cq-out.txt")"
+          buf=""; n=0; part=1
+          while IFS= read -r line || [ -n "$line" ]; do
+            # Workflow-command escaping: % FIRST, or it re-escapes the % in the
+            # %0D/%0A sequences introduced after it.
+            esc="$(printf '%s' "$line" | sed -e 's/%/%25/g' -e 's/\r/%0D/g')"
+            buf="${buf}${esc}%0A"
+            n=$((n + 1))
+            if [ "$n" -ge "$ANN_CHUNK" ]; then
+              echo "::notice title=cluster-query output (part ${part})::${buf}"
+              buf=""; n=0; part=$((part + 1))
+            fi
+          done < <(head -n "$ANN_MAX_LINES" "$RUNNER_TEMP/cq-out.txt")
+          if [ -n "$buf" ]; then
+            echo "::notice title=cluster-query output (part ${part})::${buf}"
+          fi
+          if [ "$total" -gt "$ANN_MAX_LINES" ]; then
+            echo "::notice title=cluster-query output (truncated)::mirrored ${ANN_MAX_LINES} of ${total} lines; full output is in the job log."
+          fi
 
       - name: Probe public URL
         if: ${{ (github.event.inputs.curl_url || github.event.client_payload.curl_url) != '' }}

@@ -13,3 +13,5 @@ github.com
 *.cloudflare.com
 pkgs.k8s.io
 prod-cdn.packages.k8s.io
+results-receiver.actions.githubusercontent.com
+*.blob.core.windows.net
