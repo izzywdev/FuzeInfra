@@ -34,8 +34,18 @@ def provision_script(docs) -> str:
     return job["spec"]["template"]["spec"]["containers"][0]["args"][0]
 
 
+def test_sasl_is_disabled_in_prod_until_the_authorizer_boots():
+    # 2026-10-14: enabling the authorizer crash-looped the prod broker (admin was
+    # the only super user, so the combined KRaft node denied itself). Do not flip
+    # this back without proving it on a single-node KRaft broker and updating
+    # docs/KAFKA_SASL_ACLS.md.
+    docs = render()
+    assert "KAFKA_AUTHORIZER_CLASS_NAME" not in kafka_env(docs)
+    assert not any(d["metadata"]["name"] == "fuzeinfra-kafka-sasl-provision" for d in docs)
+
+
 def test_plaintext_listener_survives_and_admin_is_only_super_user():
-    env = kafka_env(render())
+    env = kafka_env(render("kafka.sasl.enabled=true"))
     assert "PLAINTEXT://0.0.0.0:9092" in env["KAFKA_LISTENERS"]
     assert "SASL://0.0.0.0:9094" in env["KAFKA_LISTENERS"]
     assert env["KAFKA_LISTENER_SECURITY_PROTOCOL_MAP"].count("PLAINTEXT:PLAINTEXT") == 1
@@ -51,13 +61,14 @@ def test_disabled_by_default_renders_nothing_new():
 
 
 def test_no_acl_group_enforced_by_default():
-    s = provision_script(render())
+    s = provision_script(render("kafka.sasl.enabled=true"))
     assert "kafka-acls" in s  # helper defined
     assert "acl --add" not in s
 
 
 def test_enforced_groups_render_the_requested_acls():
     s = provision_script(render(
+        "kafka.sasl.enabled=true",
         "kafka.sasl.acls.selectionLists.enforce=true",
         "kafka.sasl.acls.identity.enforce=true",
         "kafka.sasl.acls.topicJob.enforce=true",
@@ -72,6 +83,7 @@ def test_enforced_groups_render_the_requested_acls():
 
 def test_no_cluster_resource_acl_ever():
     s = provision_script(render(
+        "kafka.sasl.enabled=true",
         "kafka.sasl.acls.selectionLists.enforce=true",
         "kafka.sasl.acls.identity.enforce=true",
         "kafka.sasl.acls.topicJob.enforce=true",
@@ -82,7 +94,7 @@ def test_no_cluster_resource_acl_ever():
 
 def test_unknown_principal_fails_render():
     with pytest.raises(subprocess.CalledProcessError):
-        render("kafka.sasl.acls.identity.readers={ghost}")
+        render("kafka.sasl.enabled=true", "kafka.sasl.acls.identity.readers={ghost}")
 
 
 def test_sealed_secret_has_a_key_per_principal_and_no_plaintext():
