@@ -620,4 +620,134 @@ data:
               summary: "Error log message detected in FuzeInfra"
               description: "Found ERROR/CRIT/FATAL/PANIC log lines in the last 5 minutes. Claude is investigating."
             isPaused: false
+
+      # -----------------------------------------------------------------------
+      # Self-monitoring. Every Prometheus rule in helm/fuzeinfra/rules/*.yml is
+      # evaluated BY Prometheus, so none can fire when Prometheus itself is the
+      # casualty (2026-10-14: fuzeinfra-prometheus sat in ContainerCreating for
+      # 13h on a Longhorn fsck failure, blocking the Argo sync; PrometheusDown is
+      # absent(up{job="prometheus"}) evaluated by that same Prometheus, so it was
+      # silent too). Grafana is a separate Deployment: these rules still evaluate
+      # when Prometheus is down, and route through the same severity=critical ->
+      # fuze-autofix -> crit-alert-bridge -> @fuze issue path as the rule above.
+      #
+      # The `alertname` label (the rule title) is what grafana-crit-fix.yml keys
+      # its per-alert dedup on, so each title here must stay unique and stable.
+      # -----------------------------------------------------------------------
+      - orgId: 1
+        name: self-monitoring
+        folder: FuzeInfra Alerts
+        interval: 1m
+        rules:
+          - uid: prometheusunreachable
+            title: Prometheus Unreachable
+            condition: C
+            data:
+              - refId: A
+                queryType: ""
+                relativeTimeRange:
+                  from: 600
+                  to: 0
+                datasourceUid: fuzeinfra-prometheus
+                model:
+                  refId: A
+                  expr: 'up{job="prometheus"}'
+                  instant: true
+                  range: false
+                  intervalMs: 1000
+                  maxDataPoints: 43200
+              - refId: C
+                queryType: ""
+                relativeTimeRange:
+                  from: 600
+                  to: 0
+                datasourceUid: "-100"
+                model:
+                  type: classic_conditions
+                  refId: C
+                  datasource:
+                    type: __expr__
+                    uid: "-100"
+                  conditions:
+                    - evaluator:
+                        params: [1]
+                        type: lt
+                      operator:
+                        type: and
+                      query:
+                        params: [A]
+                      reducer:
+                        params: []
+                        type: last
+            # The whole point: if the query errors (datasource down, timeout) or
+            # returns nothing (series absent), Prometheus is unreachable -> alert.
+            noDataState: Alerting
+            execErrState: Alerting
+            for: 10m
+            labels:
+              severity: critical
+              namespace: fuzeinfra
+            annotations:
+              summary: "Prometheus is unreachable or not scraping itself"
+              description: "Grafana could not read up{job=\"prometheus\"} from the fuzeinfra-prometheus datasource for 10 minutes (query error, no data, or value < 1). Prometheus is down, so every Prometheus-evaluated alert (PodPendingTooLong, DeploymentNoReplicasAvailable, PrometheusDown, ...) is blind. Check the pod's phase and events first: a pod stuck in ContainerCreating on a volume mount failure (Longhorn fsck) also blocks the Argo sync of fuzeinfra-prod."
+            isPaused: false
+
+      - orgId: 1
+        name: storage-mount-log-alerts
+        folder: FuzeInfra Alerts
+        interval: 5m
+        rules:
+          - uid: storagemountfailure
+            title: Storage Mount Failure
+            condition: C
+            data:
+              - refId: A
+                queryType: range
+                relativeTimeRange:
+                  from: 600
+                  to: 0
+                datasourceUid: fuzeinfra-loki
+                model:
+                  refId: A
+                  expr: 'sum(count_over_time({namespace="longhorn-system"} |~ "fsck.*(found errors|could not correct)|MountVolume.*failed|FailedAttachVolume" [10m]))'
+                  queryType: range
+                  legendFormat: mount failures
+                  intervalMs: 2000
+                  maxDataPoints: 43200
+              - refId: C
+                queryType: ""
+                relativeTimeRange:
+                  from: 600
+                  to: 0
+                datasourceUid: "-100"
+                model:
+                  type: classic_conditions
+                  refId: C
+                  datasource:
+                    type: __expr__
+                    uid: "-100"
+                  conditions:
+                    - evaluator:
+                        params: [0]
+                        type: gt
+                      operator:
+                        type: and
+                      query:
+                        params: [A]
+                      reducer:
+                        params: []
+                        type: last
+            # Same convention as CRIT Log Detected: a quiet cluster (no matching
+            # lines) must not alert. Loki being down is covered by the Loki/
+            # promtail alerts, not here.
+            noDataState: OK
+            execErrState: OK
+            for: 0s
+            labels:
+              severity: critical
+              namespace: longhorn-system
+            annotations:
+              summary: "Longhorn volume mount/attach failure"
+              description: "longhorn-system logs show a volume mount or attach failure (fsck found errors it could not correct, MountVolume failed, or FailedAttachVolume) in the last 10 minutes. A pod needing that volume is stuck in ContainerCreating; if it is Prometheus, the Argo sync of fuzeinfra-prod is blocked and no Prometheus alert can fire. Read the longhorn-csi-plugin pod logs and the pod events."
+            isPaused: false
 {{- end }}
