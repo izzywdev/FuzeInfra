@@ -342,6 +342,22 @@ def test_diagnose_runs_in_both_modes():
     assert "if" not in _step("Diagnose")
 
 
+def test_diagnose_covers_the_crd_chart_release():
+    """Clearing the traefik Job cannot converge Traefik on its own.
+
+    Measured 2026-10-14: the recreated Job failed in seconds with 'Required CRDs are
+    missing' (traefik-40.x validate-install-crd.yaml). The CRDs belong to the separate
+    traefik-crd release, whose Job had completed 83 days earlier. Its failurePolicy is
+    `reinstall` as well, so a failed CRD install runs `helm uninstall` and deletes the
+    CRDs with every IngressRoute/Middleware. Diagnose must therefore show that
+    release's status, or a person would clear the wrong Job on the strength of a
+    diagnosis that never looked at the real cause.
+    """
+    body = _step("Diagnose")["run"]
+    assert "helm history traefik-crd -n kube-system" in body
+    assert "helm-install-traefik-crd" in body
+
+
 @pytest.mark.parametrize(
     "step_name",
     ["Gate recover", "Gate release status", "Recover — delete the failed Job"],

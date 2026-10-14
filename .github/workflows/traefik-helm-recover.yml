@@ -133,6 +133,20 @@ jobs:
           echo "###   status 'deployed'              -> recover UPGRADES in place. No outage window."
           echo "###   status failed/unknown/deleted  -> recover UNINSTALLS Traefik first: ALL ingress drops."
           helm history traefik -n kube-system --max 10 2>&1 || true
+          echo
+          echo "### The OTHER half: the CRD chart. Measured 2026-10-14, recreating the traefik Job"
+          echo "### failed within seconds with 'UPGRADE FAILED: ... validate-install-crd.yaml:43:7:"
+          echo "### Required CRDs are missing'. traefik >=40 will not render unless its CRDs are"
+          echo "### current, and those come from the SEPARATE traefik-crd release — whose install Job"
+          echo "### had completed 83 days earlier, so it was never moved to the version traefik wants."
+          echo "### Clearing the traefik Job therefore cannot converge Traefik on its own. And the CRD"
+          echo "### chart carries failurePolicy=reinstall too: a failed CRD install runs 'helm uninstall',"
+          echo "### which deletes the CRDs and every IngressRoute/Middleware with them. Read its status"
+          echo "### before anyone touches that Job."
+          kubectl -n kube-system get job helm-install-traefik-crd 2>&1 || true
+          helm history traefik-crd -n kube-system --max 10 2>&1 || true
+          echo "### all releases in kube-system (metadata only)"
+          helm list -n kube-system --all 2>&1 || true
           # Parsed rather than eyeballed so the notice below cannot disagree with
           # the history above. `helm status -o json` prints release metadata only.
           STATUS=$(helm status traefik -n kube-system -o json 2>/dev/null \
