@@ -8,12 +8,13 @@ PR (or provisioning run) that creates an allocation. See
 
 | App | Role | Database | Consumer repo | Status |
 |---|---|---|---|---|
+| fuzex | `fuzex_svc` | `fuzex_design_frames` | izzywdev/FuzeX | declared; generic `provision-service-postgres.yml` seals and enables the runtime declaration atomically, then `fuzex-postgres` handoff delivers the consumer URL |
 | fuzekeys | `fuzekeys_user` | `fuzekeys` | izzywdev/FuzeKeys | active (FuzeInfra#136) |
 | fuzesales | `fuzesales_svc` | `fuzesales` | izzywdev/FuzeSales | declared (FuzeInfra#153) |
 | fuzecontact | `fuzecontact_svc` | `fuzecontact` | izzywdev/FuzeContact | declared (FuzeInfra#153) |
 | fuzeservice | `fuzeservice_svc` | `fuzeservice` | izzywdev/FuzeService | declared (FuzeInfra#153) |
 | fuzesocial | `fuzesocial_app` | `fuzesocial` | izzywdev/FuzeSocial | active (FuzeInfra#150) — owner+grants verified; consumer-authoritative credential in `fuzesocial/fuzesocial-secrets:DB_PASSWORD` |
-| fuzequality | `fuzequality_user` | `fuzequality` | izzywdev/FuzeFront (`FuzeQuality`) | declared (FuzeInfra#316) |
+| fuzequality | `fuzequality_user` | `fuzequality` | izzywdev/FuzeFront (`FuzeQuality`) | enabled in prod GitOps; automated consumer hand-off declared |
 | authentik-mendys | `authentik_mendys_user` | `authentik_mendys` | izzywdev/FuzeFront (MendysRobotics IdP silo) | declared — gated off until FuzeFront seals `authentik-mendys-db-credentials` for the `fuzeinfra` namespace |
 | fuzehub | `fuzehub_svc` | `fuzehub` | izzywdev/FuzeHub | declared |
 

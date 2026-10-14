@@ -513,6 +513,53 @@ variable "object_storage_bucket_blobs" {
 }
 
 
+# ---------------------------------------------------------------------------
+# Durable storage nodes (durable-storage-nodes.tf)
+#
+# PAID. Each node is a billed Contabo VPS. Default OFF (count=0) so a
+# routine apply never purchases a node. Set durable_node_count ≥ 1 only
+# after verifying that durable_node_product_id names a SKU with ≥300 GiB
+# root disk — the whole point is additional Longhorn disk capacity.
+#
+# Motivation: fuze-core-3 was at 139% Longhorn overcommit (201 GiB
+# scheduled / 154.9 GiB raw disk) as of 2026-10-13.
+# ---------------------------------------------------------------------------
+variable "durable_node_count" {
+  description = "Number of dedicated durable storage nodes to provision (fuze-durable-storage-N). Default 0 = none. Set to ≥1 to relieve Longhorn disk overcommitment on the control-plane nodes. Each node is a billed Contabo VPS — confirm durable_node_product_id has ≥300 GiB disk first."
+  type        = number
+  default     = 0
+
+  validation {
+    condition     = var.durable_node_count >= 0
+    error_message = "durable_node_count must be >= 0."
+  }
+}
+
+variable "durable_node_product_id" {
+  description = <<-EOT
+    Contabo product/plan SKU for durable storage nodes. MUST be a SKU with
+    ≥300 GiB root disk to meaningfully expand Longhorn's capacity. Verify via
+    the Contabo panel or GET /v1/compute/instances/product-pricing before applying.
+
+    Approximate guidance for EU region (confirm against live catalog — Contabo
+    retires and re-IDs SKUs frequently):
+      V45  / V46  — older Cloud VPS M/L family, typically 200–400 GiB
+      V153        — Cloud VPS 4, 4 vCPU/8 GiB (used for CI + elastic nodes;
+                    verify disk size before using here)
+    A Contabo "Cloud VPS" with 400 GiB NVMe is the recommended floor.
+
+    Empty string is valid only when durable_node_count = 0.
+  EOT
+  type        = string
+  default     = ""
+}
+
+variable "durable_node_region" {
+  description = "Contabo region for durable storage nodes. Should match the control-plane region (EU = European Union 2 data-centre, co-located with VLAN 60932)."
+  type        = string
+  default     = "EU"
+}
+
 variable "manage_control_plane_config" {
   description = "Manage /etc/rancher/k3s/config.yaml on ALL control planes (control-planes.tf). DEFAULT FALSE: applying it rewrites the config and RESTARTS k3s on each control plane in turn — a live HA operation. Flip only for a deliberate, supervised run. Requires the SSH private key, so it runs from a workstation, not CD."
   type        = bool

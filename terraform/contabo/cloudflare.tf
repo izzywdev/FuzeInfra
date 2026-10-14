@@ -842,6 +842,10 @@ locals {
     # identity layer: every viewer acts as a read-only ServiceAccount
     # (unsafeUseServiceAccountToken), which is why that SA must stay read-only.
     "headlamp" = { name = "Headlamp", logo = "https://raw.githubusercontent.com/kubernetes-sigs/headlamp/v0.45.0/docs/images/icon.png", path = "" }
+    # In-cluster Harbor container registry UI (argocd/applications/harbor.yaml,
+    # Ingress → svc harbor-portal:80 in ns harbor). Under the *.prod wildcard,
+    # so this bookmark is all that is needed for the App Launcher tile.
+    "harbor"   = { name = "Harbor Registry", logo = "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/harbor.png", path = "" }
   }
 
   # Tiles whose target is NOT https://<key>.<prod_domain><path>.

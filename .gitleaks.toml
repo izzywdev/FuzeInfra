@@ -23,6 +23,13 @@ useDefault = true
     # App sealed secret. Listed because they were measured, not assumed.
     '''argocd/cluster-config/.*\.sealed\.yaml''',
     '''templates/autoscaler/sealed-secret-.*\.yaml''',
+    # deploy/longhorn-system/longhorn-s3-credentials.yaml — kubeseal ciphertext for
+    # the Longhorn S3 backupstore (Secret longhorn-system/longhorn-s3). Encrypted;
+    # only the in-cluster controller can decrypt. Same class as deploy/sealed-secrets/
+    # above — it lives under a different path only because longhorn-system is outside
+    # the fuzeinfra AppProject and is synced by the longhorn-backup app. The default
+    # generic-api-key rule matches the base64 blob on the AWS_SECRET_ACCESS_KEY line.
+    '''deploy/longhorn-system/longhorn-s3-credentials\.yaml''',
 
     # runners/arc/github-secret.yaml — triggers `private-key` rule on the PEM header.
     # Verified: every line in this file is commented out. The PEM block reads

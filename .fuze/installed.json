@@ -713,6 +713,18 @@
         "baselineRef": "main"
       }
     },
+    ".github/workflows/release-fuzefront.yml": {
+      "capability": "workflows",
+      "mode": "stamped",
+      "sourcePath": "workflow-templates/release-fuzefront.yml",
+      "sourceSha256": "5ce75d3683a56fac7cd935f623d1760ea10672b9ac2e86a07a3e63034c1a661e",
+      "renderedSha256": "aff0f6711a31d03e98c03474301812ea76da4eb884eaa3b29b9743cb3d60f643",
+      "renderVars": {
+        "defaultBranch": "main",
+        "baselineRef": "v1",
+        "repoName": "izzywdev/FuzeInfra"
+      }
+    },
     ".github/workflows/telegram-pr-merged.yml": {
       "capability": "workflows",
       "mode": "stamped",

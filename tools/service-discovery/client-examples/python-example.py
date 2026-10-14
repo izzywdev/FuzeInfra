@@ -10,7 +10,7 @@ import consul
 import atexit
 import signal
 import requests
-from typing import Dict, List, Optional, Union
+from typing import Dict, List
 from datetime import datetime
 
 

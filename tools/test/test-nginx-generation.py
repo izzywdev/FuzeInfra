@@ -3,7 +3,6 @@
 Test script to demonstrate nginx configuration generation with allocated ports.
 """
 
-import os
 import sys
 sys.path.append('../nginx-generator')
 

@@ -240,7 +240,7 @@ import os
 import subprocess
 import sys
 from dataclasses import dataclass, field, replace as _dc_replace
-from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
+from typing import Dict, Iterable, List, Optional, Sequence, Set
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 

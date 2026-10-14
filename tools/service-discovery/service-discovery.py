@@ -4,12 +4,10 @@ Service Discovery CLI for FuzeInfra
 Command-line interface for Consul-based service registration and discovery.
 """
 
-import os
 import sys
 import json
 import argparse
 from pathlib import Path
-from typing import List, Optional
 
 # Add the current directory to Python path for imports
 sys.path.insert(0, str(Path(__file__).parent))

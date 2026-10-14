@@ -1,0 +1,76 @@
+# =============================================================================
+# ArgoCD Application — Harbor (In-Cluster Container Registry), namespace `harbor`
+#
+# WHY IT EXISTS
+#   FuzeAgent runtime sandboxes built by users and agents require an in-cluster
+#   OCI compliant, enterprise container registry with fine-grained robot accounts,
+#   vulnerability scanning (Trivy), and an intuitive Web UI.
+#
+# ACCESS & INGRESS
+#   - Core host: harbor.prod.fuzefront.com
+#   - Cloudflare Access: Gated behind the *.prod.fuzefront.com wildcard Access application.
+#   - App Launcher Tile: Declared in local.launcher_services (terraform/contabo/cloudflare.tf).
+#   - In-cluster registry access: harbor-core.harbor.svc.cluster.local (HTTP / port 80).
+#
+# STORAGE
+#   - Persistence enabled on Longhorn distributed storageClass (or Contabo object storage).
+# =============================================================================
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: harbor
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: https://helm.goharbor.io
+    chart: harbor
+    targetRevision: 1.16.0
+    helm:
+      releaseName: harbor
+      values: |
+        expose:
+          type: ingress
+          tls:
+            enabled: false
+          ingress:
+            hosts:
+              core: harbor.prod.fuzefront.com
+            className: traefik
+            annotations:
+              traefik.ingress.kubernetes.io/router.entrypoints: web
+        externalURL: https://harbor.prod.fuzefront.com
+        persistence:
+          enabled: true
+          persistentVolumeClaim:
+            registry:
+              storageClass: longhorn
+              size: 50Gi
+            chartmuseum:
+              storageClass: longhorn
+              size: 5Gi
+            database:
+              storageClass: longhorn
+              size: 10Gi
+            redis:
+              storageClass: longhorn
+              size: 5Gi
+            trivy:
+              storageClass: longhorn
+              size: 10Gi
+        trivy:
+          enabled: true
+        metrics:
+          enabled: true
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: harbor
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true

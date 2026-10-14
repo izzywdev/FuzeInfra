@@ -393,6 +393,22 @@ workflow input. Both publish it — the first into a transcript, the second into
 
 ## Related docs
 
+### GHCR package-pull credentials
+
+Private GHCR pulls use the dedicated GitHub machine user `fuze-registry-bot`, not a
+repository collaborator and not a human personal token. The bot's classic PAT is limited
+to `read:packages` and is stored only as `GHCR_PULL_USERNAME` and `GHCR_PULL_TOKEN` in
+FuzeInfra's protected `registry-credentials` Environment.
+
+Run **provision-registry-bot-ghcr-pull** with `verify_only=true` and the exact deployed
+image before changing a namespace. A successful probe proves that the package grant and
+token work without reading a cluster Secret. Re-run with `verify_only=false` only after
+review; it opens a PR containing a SealedSecret, and `apply-cluster-config` delivers it
+after merge. Never place the token in a dispatch input, manifest, or chat.
+
+The environment must retain reviewer approval and its branch policy. The workflow does not
+need cluster credentials: it encrypts against the public Sealed Secrets certificate.
+
 - [`DEPLOYING_A_SERVICE_TO_K8S.md`](./DEPLOYING_A_SERVICE_TO_K8S.md) — how a service
   consumes the sealed secret in its Deployment.
 - [`CREDENTIAL_HANDOFF.md`](./CREDENTIAL_HANDOFF.md) — the automated, plaintext-free

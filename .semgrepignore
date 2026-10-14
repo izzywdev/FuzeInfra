@@ -18,6 +18,15 @@
 # where a real leak would actually land.
 deploy/sealed-secrets/
 
+# Longhorn S3 backupstore SealedSecret (longhorn-system/longhorn-s3). Same
+# CIPHERTEXT-not-plaintext case as deploy/sealed-secrets/ above — the
+# detected-aws-secret-access-key / generic-secret rules fire on the base64
+# kubeseal blob by construction. It lives under a separate path only because
+# longhorn-system is outside the fuzeinfra AppProject (synced by the
+# longhorn-backup app). Scoped to the single sealed file, not the directory, so
+# the RecurringJob/README/template beside it keep full detection.
+deploy/longhorn-system/longhorn-s3-credentials.yaml
+
 # fuzeinfra-keepalived image. keepalived manages network interfaces via netlink
 # (adds/removes the VIP, sends VRRP) and its DaemonSet runs privileged with
 # NET_ADMIN, so it MUST run as root — dockerfile.security.missing-user cannot be

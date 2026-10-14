@@ -1,0 +1,87 @@
+# fuze:managed template=release-fuzefront.yml baseline=v1 digest=sha256:5ce75d3683a56fac7cd935f623d1760ea10672b9ac2e86a07a3e63034c1a661e
+# FuzeFront production release dispatcher.
+#
+# This is installed only in FuzeInfra, the declared cluster owner.  It is an
+# intentionally narrow bridge for the case where a FuzeFront merge does not
+# start its push-triggered release (for example, a bot-authored merge whose
+# GITHUB_TOKEN event GitHub suppresses).  The target workflow already builds
+# images, commits the GitOps tag bump, and dispatches its post-deploy check.
+#
+# SECURITY BOUNDARY:
+#   * target repository, workflow and ref are constants below;
+#   * no input is ever used as a shell command, repository, workflow or ref;
+#   * repository_dispatch ignores every payload field except a display-only
+#     reason, so the widely-scoped FuzeInfra dispatch token cannot become a
+#     generic workflow relay.
+#
+# Secret sourcing: GH_RELEASE_PAT is fleet-sourced by FuzeSDLC's
+# provision-secrets workflow.  It must retain Actions:write access to FuzeFront.
+
+name: Release FuzeFront production
+
+on:
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: 'Why this FuzeFront production release is being requested'
+        required: false
+        default: 'operator requested release'
+        type: string
+  repository_dispatch:
+    types: [release-fuzefront]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-fuzefront-production
+  cancel-in-progress: false
+
+jobs:
+  dispatch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Resolve an audit-safe reason
+        id: request
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_REASON: ${{ inputs.reason }}
+          PAYLOAD_REASON: ${{ github.event.client_payload.reason }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" = 'workflow_dispatch' ]; then
+            raw="$INPUT_REASON"
+          else
+            raw="$PAYLOAD_REASON"
+          fi
+          # The reason is passed to FuzeFront only for its run audit trail. Keep
+          # it single-line and bounded so a dispatch caller cannot forge log lines
+          # or create an oversized workflow input.
+          reason=$(printf '%s' "$raw" | tr '\r\n' ' ' | tr -cd '[:print:]' | cut -c1-160)
+          if [ -z "$reason" ]; then
+            reason='FuzeInfra release dispatcher request'
+          fi
+          echo "reason=$reason" >> "$GITHUB_OUTPUT"
+
+      - name: Require the cross-repository release credential
+        env:
+          GH_TOKEN: ${{ secrets.GH_RELEASE_PAT }}
+        run: |
+          set -euo pipefail
+          if [ -z "$GH_TOKEN" ]; then
+            echo '::error title=release-fuzefront::GH_RELEASE_PAT is not configured. FuzeSDLC must provision the fleet-sourced release credential before this dispatcher can run.'
+            exit 1
+          fi
+
+      - name: Dispatch FuzeFront's GitOps release
+        env:
+          GH_TOKEN: ${{ secrets.GH_RELEASE_PAT }}
+          REASON: ${{ steps.request.outputs.reason }}
+        run: |
+          set -euo pipefail
+          gh api --method POST \
+            repos/izzywdev/FuzeFront/actions/workflows/release.yml/dispatches \
+            -f ref=master \
+            -f "inputs[reason]=FuzeInfra dispatcher: ${REASON}"
+          echo "Dispatched izzywdev/FuzeFront release.yml on master."

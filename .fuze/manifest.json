@@ -74,6 +74,8 @@
     "enabled": true,
     "transport": "streamable-http",
     "entryServer": "handoff-mcp",
+    "toolCount": 7,
+    "irreversibleTools": ["spawn_agent", "approve", "reach_human"],
     "servers": [
       {
         "name": "handoff-mcp",

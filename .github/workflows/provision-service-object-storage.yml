@@ -1,0 +1,41 @@
+name: Provision service object storage
+
+on:
+  repository_dispatch:
+    types: [provision-service-object-storage]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: provision-service-object-storage
+  cancel-in-progress: false
+
+jobs:
+  enable-reviewed-allocation:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with: { ref: main, persist-credentials: false }
+      - name: Validate and enable pre-provisioned allocation
+        env:
+          OBJECT_STORAGE_PROVISION_REQUEST: ${{ toJson(github.event.client_payload) }}
+        run: |
+          set -euo pipefail
+          python3 scripts/enable-service-object-storage-provisioning.py
+      - name: Open reviewed allocation PR
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN || secrets.GITHUB_TOKEN }}
+          OBJECT_STORAGE_PROVISION_REQUEST: ${{ toJson(github.event.client_payload) }}
+        run: |
+          set -euo pipefail
+          allocation="$(python3 -c 'import json,os; print(json.loads(os.environ["OBJECT_STORAGE_PROVISION_REQUEST"])["allocationId"])')"
+          git config user.name 'FuzeInfra Provisioning'
+          git config user.email 'provisioning@fuzeinfra'
+          git checkout -b "provision/object-storage-${allocation}"
+          git add governance/object-storage-allocations.json governance/credential-handoff.json
+          git commit -m "feat(storage): enable ${allocation} allocation"
+          git push origin "provision/object-storage-${allocation}"
+          gh pr create --repo izzywdev/FuzeInfra --base main --head "provision/object-storage-${allocation}" --title "feat(storage): enable ${allocation} allocation" --body 'Generated from a schema-validated object-storage request. It enables only a predeclared private allocation and sealed credential handoff; provider credentials are never generated, logged, or committed.'

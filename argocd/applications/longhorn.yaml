@@ -115,6 +115,46 @@ spec:
           # Longhorn additionally requires that no volume be attached when this
           # setting changes, so apply it during the same window as the taint.
           taintToleration: "fuzeinfra.io/durable=true:NoSchedule"
+          # Gradually rebalance existing replicas toward under-utilised nodes
+          # (including newly-added durable storage nodes) using the least-
+          # disruptive strategy — one replica at a time, only when a healthier
+          # node has meaningfully more free capacity. Prevents the overcommit on
+          # fuze-core-3 (201 GiB scheduled / 154.9 GiB disk) from compounding as
+          # new volumes are created, and slowly drains excess replicas off it once
+          # fuze-durable-storage-1 joins the pool.
+          #
+          # !! SAME FIRST-INSTALL CAVEAT as above: must also be applied live:
+          #   kubectl -n longhorn-system patch settings.longhorn.io \
+          #     replica-auto-balance --type=merge -p '{"value":"least-effort"}'
+          replicaAutoBalance: least-effort
+        # --- S3 backupstore (Contabo Object Storage) ------------------------
+        # Replication (defaultReplicaCount: 3 above) protects against NODE loss.
+        # It does NOT protect against volume corruption or an all-replicas-lost
+        # event (the 2026-09-07 class, when fuzeinfra-prometheus-data went
+        # faulted with zero recoverable replicas). `defaultBackupStore` wires the
+        # `default` BackupTarget to Contabo so RecurringJobs can take off-cluster,
+        # point-in-time backups. SAME Contabo bucket + account key pair the DB
+        # dumps use (docs/backups-and-blobs.md); only the credential Secret's key
+        # NAMES differ (Longhorn hardcodes AWS_*), hence a dedicated SealedSecret.
+        #
+        # Unlike `defaultSettings`, `defaultBackupStore` IS reconciled by the
+        # chart on upgrade/sync (it manages the backup-target settings), so this
+        # takes effect on the already-running cluster — confirm with
+        # `helm template` + a post-sync `kubectl -n longhorn-system get
+        # backuptarget default`.
+        #
+        # URL form s3://<bucket>@<region>/<path>: region is a required label only
+        # (`default`, matching the dumps' S3_REGION); the real endpoint comes from
+        # AWS_ENDPOINTS in the longhorn-s3 Secret. The credential + the backup
+        # RecurringJob are synced by argocd/applications/longhorn-backup.yaml
+        # (separate app — longhorn-system is outside the `fuzeinfra` AppProject).
+        # Until the longhorn-s3 SealedSecret is sealed + committed, the target is
+        # simply unavailable; nothing else is affected.
+        defaultBackupStore:
+          backupTarget: s3://fuzeinfra-backups@default/longhorn
+          backupTargetCredentialSecret: longhorn-s3
+          # How often Longhorn re-reads the backupstore (0 = disabled polling).
+          pollInterval: 300
         # LONGHORN IS NOW THE CLUSTER DEFAULT. This was `false`, with local-path
         # left as the default — and that default was silently destroying data.
         #
