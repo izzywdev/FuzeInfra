@@ -105,9 +105,18 @@ jobs:
             exit 0
           fi
 
-          echo "=== Step 3: patch status subresource directly ==="
+          echo "=== Step 3: patch the Application's status (no status subresource exists) ==="
+          # Argo CD's Application CRD declares NO `status` subresource
+          # (`kubectl get crd applications.argoproj.io -o jsonpath={.spec.versions[*].subresources}`
+          # prints `{}`), so `--subresource=status` can only ever return
+          # `applications.argoproj.io "<app>" not found`. That made this step dead code
+          # on exactly the wedge it exists for: a stale `status.operationState.phase:
+          # Running` with an empty `.operation`, where Step 1 says "No operation is in
+          # progress" and Step 2 has nothing to remove (2026-10-14, run 38537354426,
+          # fuzeinfra-prod stuck behind a crash-looping StatefulSet). `status` is an
+          # ordinary field of the main resource here, so patch it there. The patch
+          # touches only status.operationState.{phase,message}.
           kubectl -n argocd patch application "$APP" \
-            --subresource=status \
             --type=merge \
             -p '{"status":{"operationState":{"phase":"Failed","message":"Force-terminated by CI: stale operation at old revision was blocking new syncs"}}}'
 
