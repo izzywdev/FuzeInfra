@@ -1411,6 +1411,30 @@ def close_issue(repo: str, issue_number: str) -> None:
     gh(["issue", "close", str(issue_number), "--repo", repo])
 
 
+_COMMENT_CAP_MARKER = "Commenting is disabled on issues with more than"
+
+
+def is_comment_cap_error(error: Exception) -> bool:
+    """GitHub refuses new comments on an issue past 2,500 of them."""
+    return _COMMENT_CAP_MARKER in str(error)
+
+
+def rotate_capped_issue(repo: str, issue: dict) -> str:
+    """Close an issue that can no longer be commented on; return a summary line.
+
+    Closing posts no comment, so it still works on a capped issue. If even that
+    fails, say so and carry on: this is housekeeping, and the findings are still
+    reported by the run's own exit status and summary.
+    """
+    try:
+        close_issue(repo, issue["number"])
+    except GitHubError as error:
+        return (f"  - {issue.get('url')} is at GitHub's comment cap and could NOT be closed "
+                f"({error}); it needs closing by hand so findings can refile")
+    return (f"  - {issue.get('url')} reached GitHub's comment cap; closed so the next run "
+            "files a fresh issue for this finding")
+
+
 # --------------------------------------------------------------------------
 # main
 # --------------------------------------------------------------------------
@@ -1540,14 +1564,35 @@ def main(argv: Sequence[str] | None = None) -> int:
         seen_text = (issue.get("body") or "") + "\n".join(c.get("body") or "" for c in comments)
         if latest_instance_marker(seen_text) == pod_name:
             continue  # same instance already reflected on this issue
-        comment_issue(
-            args.repo, issue["number"],
-            "🔁 Still occurring on a new pod instance:\n\n"
-            "```json\n"
-            f"{json.dumps(finding.facts, indent=2, sort_keys=True, default=str)}\n"
-            "```\n\n"
-            f"<!-- watchdog-instance: {pod_name} -->",
-        )
+        try:
+            comment_issue(
+                args.repo, issue["number"],
+                "🔁 Still occurring on a new pod instance:\n\n"
+                "```json\n"
+                f"{json.dumps(finding.facts, indent=2, sort_keys=True, default=str)}\n"
+                "```\n\n"
+                f"<!-- watchdog-instance: {pod_name} -->",
+            )
+        except GitHubError as error:
+            # INFORMATIONAL comment: failing to post it must never abort the run.
+            # It used to. On 2026-10-14 tracking issue #1238 reached GitHub's
+            # 2,500-comment cap ("Commenting is disabled on issues with more than
+            # 2500 comments"), every run died here with exit 2 on the first such
+            # comment, and EVERYTHING BELOW was skipped — the auto-terminate of a
+            # stuck Argo operation and the whole dark-node reboot ladder. A fuzeinfra-
+            # prod sync sat Running for nine days, detected every ~20 minutes and acted
+            # on zero times, and nothing alerted because the alerting path is the
+            # thing that crashed. (The same shape as the 2026-09-15..20 freeze: 42
+            # runs, 0 actions, different cause.)
+            lines.append(f"- `{finding.key}` — could not update {issue.get('url')}: {error}")
+            print(f"::warning::watchdog could not comment on #{issue['number']}: {error}")
+            if is_comment_cap_error(error):
+                # A capped issue can never be commented on again, and it dedupes every
+                # future occurrence of this finding against itself — so it would stay
+                # open, silent and permanent. Close it: the next run sees the finding
+                # as new and files a fresh issue with an empty thread.
+                lines.append(rotate_capped_issue(args.repo, issue))
+            continue
         lines.append(f"- `{finding.key}` — updated {issue.get('url')} (instance `{pod_name}`)")
 
     # --- stuck Argo op that is ALREADY tracked: still act on it. ---

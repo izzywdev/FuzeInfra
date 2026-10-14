@@ -1362,3 +1362,118 @@ def test_stuck_creating_issue_closes_when_the_workload_recovers(monkeypatch):
                         lambda cfg: ({"items": []}, {"items": []}, {"items": []}))
     wd.main(["--repo", "izzywdev/FuzeInfra"])
     assert calls["closed"] == [1062]
+
+
+# ---------------------------------------------------------------------------
+# 12. the 2026-10-14 freeze: a comment-capped tracking issue silenced EVERYTHING
+# ---------------------------------------------------------------------------
+#
+# Tracking issue #1238 reached GitHub's 2,500-comment cap. The "still occurring on
+# a new pod instance" comment then raised GitHubError, run() returned 2, and every
+# statement after it was skipped: the auto-terminate of a stuck Argo operation and
+# the dark-node reboot ladder. fuzeinfra-prod sat Running for NINE DAYS, detected
+# every ~20 minutes and acted on zero times. The alerting path was the thing that
+# crashed, so nothing alerted. Same outcome as 2026-09-15..20 (42 runs, 0 actions),
+# a different cause — which is why this is pinned here beside it.
+
+CAP_MESSAGE = ("gh issue comment 1062 --repo izzywdev/FuzeInfra --body-file x.md exited 1: "
+               "GraphQL: Commenting is disabled on issues with more than 2500 comments "
+               "(addComment)")
+
+
+def _wire_capped(monkeypatch, capped_numbers, close_fails=False):
+    """Argo wedge ALREADY tracked (#776) + a churned backup pod tracked by #1062,
+    where commenting on `capped_numbers` raises exactly what GitHub raises."""
+    new_pod = _stuck_creating_pod("fuzeinfra-backup-mongodb-30015550-p4x9z",
+                                  "fuzeinfra-backup-mongodb-30015550")
+    calls = _wire(monkeypatch, WEDGED, [_stale_argo_issue(), _churned_backup_issue()])
+    monkeypatch.setattr(wd, "collect_cluster_state",
+                        lambda cfg: (WEDGED, {"items": [new_pod]}, {"items": []}))
+
+    def comment(repo, number, body):
+        if number in capped_numbers:
+            raise wd.GitHubError(CAP_MESSAGE)
+        calls["commented"].append((number, body))
+
+    def close(repo, number):
+        if close_fails:
+            raise wd.GitHubError("gh issue close exited 1: boom")
+        calls["closed"].append(number)
+
+    monkeypatch.setattr(wd, "comment_issue", comment)
+    monkeypatch.setattr(wd, "close_issue", close)
+    return calls
+
+
+def test_a_comment_capped_issue_does_not_abort_the_run(monkeypatch):
+    _wire_capped(monkeypatch, {1062})
+    # Findings are present, so the run is red by design (1) — but NOT the
+    # "could not complete" exit (2) that meant it had gone blind.
+    assert wd.run(["--repo", "izzywdev/FuzeInfra"]) == 1
+
+
+def test_a_stuck_argo_operation_is_still_terminated_after_a_capped_comment(monkeypatch):
+    """The point of the whole fix: the code AFTER the failing comment must still run."""
+    calls = _wire_capped(monkeypatch, {1062})
+    wd.main(["--repo", "izzywdev/FuzeInfra"])
+    assert calls["dispatched"] == ["fuzeinfra-prod"]
+    (number, body), = calls["commented"]
+    assert number == 776
+    assert wd.argo_terminated_marker("fuzeinfra-prod", _ts(47 * 60)) in body
+
+
+def test_a_capped_issue_is_closed_so_the_finding_refiles_fresh(monkeypatch):
+    """Otherwise it dedupes every future occurrence against itself, forever."""
+    calls = _wire_capped(monkeypatch, {1062})
+    wd.main(["--repo", "izzywdev/FuzeInfra"])
+    assert calls["closed"] == [1062]
+
+
+def test_the_capped_issue_is_reported_in_the_summary(monkeypatch, capsys):
+    _wire_capped(monkeypatch, {1062})
+    wd.main(["--repo", "izzywdev/FuzeInfra"])
+    out = capsys.readouterr().out
+    assert "comment cap" in out
+    assert "::warning::" in out
+
+
+def test_failing_to_close_a_capped_issue_is_reported_not_fatal(monkeypatch, capsys):
+    calls = _wire_capped(monkeypatch, {1062}, close_fails=True)
+    assert wd.run(["--repo", "izzywdev/FuzeInfra"]) == 1
+    assert calls["dispatched"] == ["fuzeinfra-prod"]
+    assert "could NOT be closed" in capsys.readouterr().out
+
+
+def test_a_non_cap_comment_failure_is_also_non_fatal_but_does_not_close(monkeypatch):
+    """A rate limit or a 403 must not skip the Argo terminate either, and must not
+    close an issue that is perfectly healthy."""
+    calls = _wire(monkeypatch, WEDGED, [_stale_argo_issue(), _churned_backup_issue()])
+    new_pod = _stuck_creating_pod("fuzeinfra-backup-mongodb-30015550-p4x9z",
+                                  "fuzeinfra-backup-mongodb-30015550")
+    monkeypatch.setattr(wd, "collect_cluster_state",
+                        lambda cfg: (WEDGED, {"items": [new_pod]}, {"items": []}))
+
+    def comment(repo, number, body):
+        if number == 1062:
+            raise wd.GitHubError("gh issue comment exited 1: HTTP 403 rate limit exceeded")
+        calls["commented"].append((number, body))
+
+    monkeypatch.setattr(wd, "comment_issue", comment)
+    assert wd.run(["--repo", "izzywdev/FuzeInfra"]) == 1
+    assert calls["dispatched"] == ["fuzeinfra-prod"]
+    assert calls["closed"] == []
+
+
+def test_the_cap_detector_matches_githubs_real_message_and_nothing_looser():
+    assert wd.is_comment_cap_error(wd.GitHubError(CAP_MESSAGE))
+    assert not wd.is_comment_cap_error(wd.GitHubError("HTTP 403 rate limit exceeded"))
+    assert not wd.is_comment_cap_error(wd.GitHubError("Commenting failed"))
+
+
+def test_an_unreadable_cluster_is_still_fatal(monkeypatch):
+    """The blind-fails-loudly property must survive: only the INFORMATIONAL comment
+    became non-fatal, not 'could not look at the cluster'."""
+    def boom(cfg):
+        raise wd.ClusterUnreachable("kubectl failed")
+    monkeypatch.setattr(wd, "collect_cluster_state", boom)
+    assert wd.run(["--repo", "izzywdev/FuzeInfra"]) == 2
