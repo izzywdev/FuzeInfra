@@ -59,7 +59,23 @@ jobs:
           test "$GHCR_PULL_USERNAME" = 'fuze-registry-bot' || { echo '::error::GHCR_PULL_USERNAME must be fuze-registry-bot'; exit 1; }
           [[ "$NAMESPACE" =~ ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$ ]] || { echo '::error::invalid namespace'; exit 1; }
           [[ "$SECRET_NAME" =~ ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$ ]] || { echo '::error::invalid secret name'; exit 1; }
-          [[ "$IMAGE" =~ ^ghcr\.io/izzywdev/[a-z0-9][a-z0-9._-]*:[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || { echo '::error::image must be an exact ghcr.io/izzywdev package tag'; exit 1; }
+          # NESTED package paths are legal on GHCR and in use: MendysRobotics publishes
+          # ghcr.io/izzywdev/mendysrobotics/<service>, not a flat ghcr.io/izzywdev/<repo>.
+          # This gate used to allow a single path segment, so every nested image was
+          # rejected here before the probe ever ran -- which is why mendys-prod could not
+          # be provisioned through this workflow at all (FuzeInfra#1415 / MendysRobotics#903).
+          # scripts/verify_ghcr_pull.py's own parse_image has always accepted the nested
+          # form ((?:/[a-z0-9._-]+)*); the two validators simply disagreed, and the stricter
+          # one won. This brings the gate in line with the script it guards.
+          # Still anchored to ghcr.io/izzywdev/ and still an EXACT tag -- the point of the
+          # gate is that this credential is never pointed at another org or a floating ref.
+          # Tag grammar is OCI's, matching parse_image: a leading underscore and
+          # underscores inside are legal, and the whole tag is <=128 chars. The gate used
+          # to forbid both, so a legitimate `_`-prefixed tag would have been rejected here
+          # too. tests/test_provision_registry_bot_gate.py asserts the two layers accept
+          # exactly the same set, which is the invariant that actually matters -- whichever
+          # layer is stricter silently decides what can be provisioned.
+          [[ "$IMAGE" =~ ^ghcr\.io/izzywdev/[a-z0-9][a-z0-9._-]*(/[a-z0-9][a-z0-9._-]*)*:[A-Za-z0-9_][A-Za-z0-9._-]{0,127}$ ]] || { echo '::error::image must be an exact ghcr.io/izzywdev package tag (nested paths allowed)'; exit 1; }
           umask 077
           jq -n --arg username "$GHCR_PULL_USERNAME" --arg token "$GHCR_PULL_TOKEN" \
             '{auths:{"ghcr.io":{username:$username,password:$token,auth:(($username + ":" + $token)|@base64)}}}' \
