@@ -466,6 +466,10 @@ def _emit_github_output(result):
             f.write(f"needs-agent={'true' if result.needs_agent else 'false'}\n")
             f.write(f"ok={'true' if result.ok else 'false'}\n")
     except OSError:
+        # Best-effort: emitting GitHub step outputs must never crash the checker. The job's
+        # pass/fail is decided by the process exit code in main(), not by these outputs, so a
+        # transiently unwritable $GITHUB_OUTPUT is a tolerable degradation, not an error to
+        # propagate (which would turn a successful check into a spurious failure).
         pass
 
 
