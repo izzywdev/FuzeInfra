@@ -68,14 +68,53 @@ disk with the API-serving etcd starved it off the disk and refused connections
 cluster-wide. The `apiVip.nodes` priority table in `values-contabo.yaml` MUST keep
 that node last:
 
-| node | role | priority |
-|------|------|----------|
-| `vmi3383846` (fuze-core-1) | primary | 200 |
-| `mendys-worker-1` (fuze-core-3) | — | 150 |
-| `vmi3396106` (fuze-core-2) | **monitoring** | **100 (last)** |
+| k8s node | Contabo instance | role | base priority | own-VIP priority (+`ownVipBoost` 100) |
+|----------|------------------|------|---------------|---------------------------------------|
+| `fuze-core-1` | `203383846` | primary | 150 | 250 |
+| `fuze-core-3` | `203410214` | — | 140 | 240 |
+| `fuze-core-2` | `203396106` | **monitoring** | **100 (last)** | 200 |
+
+(Re-verified against `values-contabo.yaml` and the Contabo instances listing on
+2026-10-14. The runbook previously listed 200/150/100 under the Contabo hostnames
+`vmi…`/`mendys-worker-1`; the k8s names are what `render.sh` matches on.)
 
 If the monitoring node moves, update both `label-durable-nodes.sh`'s resolution and
 this table together.
+
+## Diagnosing "the pods are Ready but the VIP does not work"
+
+keepalived reporting MASTER proves nothing about the **provider** side. Two
+independent facts must agree for a VIP to be reachable: the node holding it
+**locally** (keepalived's MASTER, address bound on `eth0`) and the node Contabo
+**routes** it to. They can diverge silently, with every pod `Ready` and zero restarts.
+
+1. **Provider side** — run `contabo-check-failover-ip.yml` (READ mode, no inputs): it
+   lists each VIP's holder and each instance's `additionalIps`. For every VIP the
+   holder must be the instance of the node that is MASTER for it.
+2. **keepalived side** — `kubectl -n fuzeinfra logs -l app.kubernetes.io/name=api-vip-keepalived
+   -c keepalived --prefix --tail=60`. The namespace is `fuzeinfra`, **not**
+   `kube-system`; the DaemonSet renders into the release namespace.
+3. **Reconciler** — `-c reconciler` logs `DRIFT: <vip> is bound here … provider routes it
+   to instance <x>` when the two disagree and `reassigning` when it repairs it.
+
+**Observed 2026-10-14 (the incident behind the reconciler).** Contabo listed `.42`
+(fuze-core-2's VIP) under fuze-core-1's `additionalIps`, while core-2 had been MASTER
+for it since 14:08. At 00:14 core-1 briefly won `.42`, and its `notify_master` moved the
+provider IP; core-2 then re-won the election **without leaving MASTER**, so it never ran
+`notify_master` again. keepalived is edge-triggered on state transitions; the provider
+assignment needed a level-triggered check. A third of the `api.` round-robin silently
+failed. The `reconciler` container (`reconcile.sh`) now closes that gap: it acts only on
+a VIP bound locally, only on a provider read it trusts, and only after two consecutive
+mismatches.
+
+**Still open — host-level, not fixable from the chart.** Every node's `chk_apiserver`
+stalls for a few seconds at **minute 17** each hour (`:17` is Ubuntu's stock
+`/etc/cron.hourly` slot; no Kubernetes CronJob runs then). It used to dock priorities
+by 60 and reorder the election; the health check now needs ~15s of failures
+(`apiVip.healthCheck.fall × intervalSeconds`) so a stall no longer does. What the
+stall actually *is* has not been identified — it needs a look at the hosts, and the
+bursts of ~50 identical "Received advert … forcing new election" lines in one second on
+core-1 (00:15:06) say the keepalived process itself was paused, not just the check.
 
 ## Preconditions before enabling (`apiVip.enabled: true`)
 
@@ -156,10 +195,8 @@ destructive to one node's role, never to data, and never wipes a node.
 ```bash
 # 0. Baseline: which node holds the VIP, and API is reachable via it.
 kubectl --kubeconfig vip.kubeconfig get --raw /livez        # expect: ok
-for n in vmi3383846 mendys-worker-1 vmi3396106; do
-  kubectl -n kube-system logs ds/fuzeinfra-api-vip-keepalived --prefix \
-    --field-selector spec.nodeName=$n | tail -3
-done
+kubectl -n fuzeinfra logs -l app.kubernetes.io/name=api-vip-keepalived \
+  -c keepalived --prefix --tail=3 --max-log-requests=5
 # Identify the MASTER (its keepalived logs show "Entering MASTER STATE").
 
 # 1. Isolate the current MASTER's apiserver (health-check failure path — preferred,

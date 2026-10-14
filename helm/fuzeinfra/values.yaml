@@ -1085,6 +1085,22 @@ apiVip:
   healthCheck:
     port: 6443
     path: "/livez"
+    # Hysteresis: ~15s of consecutive failures (fall x interval) before a node's
+    # priority is docked. weight is -60, larger than the spread between the nodes'
+    # base priorities, so a SHORT blip used to reorder the election; a dead node is
+    # caught by VRRP advert loss regardless, so this can afford to be slow.
+    intervalSeconds: 3
+    timeoutSeconds: 5
+    fall: 5
+    rise: 2
+  # Level-triggered provider reconciliation (reconcile.sh): if a VIP is bound on this
+  # node (keepalived MASTER) but the provider routes it elsewhere for `strikes`
+  # consecutive checks, reassign it. notify.sh alone is edge-triggered and cannot
+  # repair drift that arises WITHOUT a state transition.
+  reconcile:
+    enabled: true
+    intervalSeconds: 30
+    strikes: 2
   # api.<domain> round-robin A records across the VIPs (Terraform api-floating-vip.tf).
   dns:
     enabled: false
