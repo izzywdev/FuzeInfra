@@ -23,6 +23,7 @@ import sys
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
 
@@ -210,6 +211,8 @@ class Http:
     """Thin urllib wrapper; swapped for a fake in tests."""
 
     def post_json(self, url, body, headers, timeout=15):
+        if urllib.parse.urlparse(url).scheme not in ("http", "https"):
+            raise ValueError("refusing non-http(s) URL")  # urllib would also open file:// and ftp://
         data = json.dumps(body).encode()
         req = urllib.request.Request(url, data=data, method="POST",
                                      headers={"Content-Type": "application/json", **headers})
