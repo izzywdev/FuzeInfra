@@ -26,17 +26,20 @@ across Argo/Longhorn/Prometheus, and coordinate a repair session).
 | `handoff-mcp` `spawn_agent` | yes | n/a | `MANAGED_AGENTS_API_KEY` / `HANDOFF_MCP_TOKEN` | API credit | credit-blocked; `handoff-state/*.json` are `{}` |
 | `a2a_gateway` (`gateway.mjs`, `claude -p --cloud <id>`) | **no** | yes (validated 2026-08-27) | Claude.ai **account** `.credentials.json` in `a2a-gateway-secret`; bearer `FUZE_A2A_GATEWAY_TOKEN` | account plan usage | deployed in contabo (`a2aGateway.enabled: true`) |
 | Routines API (`create_session`, `create_trigger`, `fire_trigger`) via the `claude-code-remote` MCP server | **yes** | yes | the *account session* of whoever runs it | account plan usage | works from a Claude Code session (CAPABILITY_DELEGATION.md §3, proven 2026-08-30) |
+| `activate-a2a-bridge.yml` (`POST https://api.claude.ai/code/api/v0/sessions`, `Bearer CLAUDE_CODE_OAUTH_TOKEN`) | **intended to; never succeeded** | n/a | `CLAUDE_CODE_OAUTH_TOKEN` (already an Actions secret) | account plan usage | **unproven**: the only dispatch run (2026-09-15, run 34946019639) failed at the curl step with `Could not resolve host: api.claude.ai`, so the endpoint, token scope and response shape were never exercised |
 | `@fuze` handler (`fuze-cluster.yml`) | no (Actions job) | n/a | `CLAUDE_CODE_OAUTH_TOKEN`, `KUBE_CONFIG` | plan usage | what handles alerts today |
 
 Findings that matter:
 
-1. **No workflow in this repo holds a credential that can create a cloud session.**
-   `CLAUDE_CODE_OAUTH_TOKEN` is used by `claude-code-action` jobs (run an agent *inside*
-   the Actions runner), not to create a claude.ai/code session. I found nothing in the
-   repo showing it can. It is not assumed to.
+1. **One workflow already attempts session creation, but it has never worked.**
+   `activate-a2a-bridge.yml` POSTs to `api.claude.ai/code/api/v0/sessions` with
+   `CLAUDE_CODE_OAUTH_TOKEN`. Its single dispatch run failed on DNS resolution before any
+   HTTP exchange, so whether that endpoint accepts this token (and what it returns) is
+   unknown. It is the cheapest thing to test first (see Option C.0), but it is not wired
+   to alerts here because "works" has not been shown.
 2. The Routines API is an MCP tool surface exposed *inside* a Claude Code session. I found
-   no documented HTTP endpoint for it, so a GitHub workflow or the Worker has nothing
-   to call. **No endpoint is invented here.**
+   no documented HTTP endpoint for it other than the unproven one above.
+   **No endpoint is invented here.**
 3. The gateway holds an account credential and works, but its only verb is "deliver a
    message to a session id I am given".
 
@@ -60,6 +63,11 @@ workflow `POST`s `/send {to: "alert-responder", text: <alert + issue link>}` to 
   archived session id silently drops alerts (the gateway wakes archived sessions, but the
   id must be maintained).
 
+**C.0 Prove the existing path first.** Re-run `activate-a2a-bridge.yml` with `dry_run=false`
+for one environment and read the result. If it returns a session id, a fresh-session-per-alert
+step can reuse the same call behind an `enabled` flag (default OFF) with a per-alert cooldown.
+If it fails on auth or shape, C needs one of the routes below.
+
 **C. Fresh session per alert (the real ask).** Needs a service that can call the Routines
 API on an account's behalf, which does not exist here. Two ways to get one, both needing the
 owner:
@@ -79,11 +87,13 @@ owner:
 
 ## Human decisions needed
 
+0. May I run `activate-a2a-bridge.yml` once to prove the session-creation call (it creates
+   one idle session in an environment and spends plan usage)?
 1. Is a standing responder session (B) acceptable, or is a fresh session per alert (C) required?
 2. For C: does a supported, credentialed session-creation API exist, and which credential
    and billing account should it use? Until answered, nothing can be wired without inventing it.
 3. Cooldown and spend cap per alert and per day.
 4. Who owns the responder session's lifecycle (id registration, rotation, archive handling).
 
-Nothing in `helm/` or `.github/` was added for this; no `enabled` flag exists because there is
-no credentialed creation path to gate.
+Nothing in `helm/` or `.github/` was added for this; no `enabled` flag exists because the one
+credentialed creation path in the repo has never been shown to work.
