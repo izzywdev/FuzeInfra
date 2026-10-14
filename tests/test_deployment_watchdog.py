@@ -1477,3 +1477,98 @@ def test_an_unreadable_cluster_is_still_fatal(monkeypatch):
         raise wd.ClusterUnreachable("kubectl failed")
     monkeypatch.setattr(wd, "collect_cluster_state", boom)
     assert wd.run(["--repo", "izzywdev/FuzeInfra"]) == 2
+
+
+# --- the call that ACTUALLY killed the runs (the first fix guarded the wrong one) --
+#
+# Reproduced from the failing log, not guessed: #1238 is the backup-neo4j thread, its
+# workload is no longer stuck, so the watchdog tries to CLOSE it as resolved. Closing
+# posts a courtesy "no longer detected" comment FIRST. At the cap that comment raised,
+# the run died before close_issue, and the issue stayed open to fail again every 20
+# minutes. The earlier fix (section 12) guarded the "still occurring" comment, a
+# different site that this incident never reached — which is why it did not help.
+
+def _capped_resolved_issue():
+    issue = _churned_backup_issue()
+    issue.update({"number": 1238,
+                  "url": "https://github.com/izzywdev/FuzeInfra/issues/1238",
+                  "title": "[watchdog] stuck-containercreating: fuzeinfra/fuzeinfra-backup-neo4j"})
+    issue["body"] = "<!-- watchdog-key: stuck-containercreating:fuzeinfra/fuzeinfra-backup-neo4j -->\n"
+    return issue
+
+
+def _wire_resolved_and_capped(monkeypatch):
+    # backup-neo4j is no longer detected; something else IS (so the run is not the
+    # early-return "no findings" path), and the Argo wedge is still tracked.
+    calls = _wire(monkeypatch, WEDGED, [_stale_argo_issue(), _capped_resolved_issue()])
+
+    def comment(repo, number, body):
+        if number == 1238:
+            raise wd.GitHubError(CAP_MESSAGE.replace("1062", "1238"))
+        calls["commented"].append((number, body))
+
+    monkeypatch.setattr(wd, "comment_issue", comment)
+    return calls
+
+
+def test_a_resolved_but_comment_capped_issue_is_still_closed(monkeypatch):
+    """The courtesy comment may be refused; the CLOSE must still happen."""
+    calls = _wire_resolved_and_capped(monkeypatch)
+    wd.main(["--repo", "izzywdev/FuzeInfra"])
+    assert 1238 in calls["closed"]
+
+
+def test_the_run_survives_and_still_terminates_the_argo_wedge(monkeypatch):
+    calls = _wire_resolved_and_capped(monkeypatch)
+    assert wd.run(["--repo", "izzywdev/FuzeInfra"]) == 1   # findings present, not blind
+    assert calls["dispatched"] == ["fuzeinfra-prod"]
+
+
+def test_the_same_holds_on_a_clean_run_with_no_findings(monkeypatch):
+    """The early-return path also closes resolved issues, and must survive the cap."""
+    calls = _wire(monkeypatch, {"items": []}, [_capped_resolved_issue()])
+
+    def comment(repo, number, body):
+        raise wd.GitHubError(CAP_MESSAGE)
+
+    monkeypatch.setattr(wd, "comment_issue", comment)
+    monkeypatch.setattr(wd, "collect_cluster_state",
+                        lambda cfg: ({"items": []}, {"items": []}, {"items": []}))
+    assert wd.run(["--repo", "izzywdev/FuzeInfra"]) == 0
+    assert calls["closed"] == [1238]
+
+
+def test_a_resolved_argo_issue_at_the_cap_is_still_closed(monkeypatch):
+    stale = _stale_argo_issue()
+
+    calls = _wire(monkeypatch, {"items": []}, [stale])
+
+    def comment(repo, number, body):
+        raise wd.GitHubError(CAP_MESSAGE)
+
+    monkeypatch.setattr(wd, "comment_issue", comment)
+    assert wd.run(["--repo", "izzywdev/FuzeInfra"]) == 0
+    assert calls["closed"] == [776]
+
+
+def test_state_carrying_comments_are_still_strict(monkeypatch):
+    """The argo-terminated marker is read back to stop a terminate re-dispatch loop.
+    If posting it fails the run must abort, not shrug: a lost marker would re-dispatch
+    a terminate against the same operation every run."""
+    _wire(monkeypatch, WEDGED, [_stale_argo_issue()])
+
+    def comment(repo, number, body):
+        raise wd.GitHubError(CAP_MESSAGE)
+
+    monkeypatch.setattr(wd, "comment_issue", comment)
+    assert wd.run(["--repo", "izzywdev/FuzeInfra"]) == 2
+
+
+def test_comment_best_effort_reports_success_and_failure(monkeypatch, capsys):
+    monkeypatch.setattr(wd, "comment_issue", lambda r, n, b: None)
+    assert wd.comment_best_effort("r", "1", "b") is True
+    def boom(r, n, b):
+        raise wd.GitHubError("nope")
+    monkeypatch.setattr(wd, "comment_issue", boom)
+    assert wd.comment_best_effort("r", "1", "b") is False
+    assert "::warning::" in capsys.readouterr().out
