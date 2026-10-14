@@ -18,6 +18,11 @@ spec:
     - name: controller
       port: 9093
       targetPort: 9093
+{{- if (dig "sasl" "enabled" false .Values.kafka) }}
+    - name: sasl
+      port: {{ .Values.kafka.sasl.port }}
+      targetPort: {{ .Values.kafka.sasl.port }}
+{{- end }}
 {{- if (dig "externalListener" "enabled" false .Values.kafka) }}
     - name: external
       port: {{ .Values.kafka.externalListener.port }}
@@ -88,7 +93,7 @@ spec:
             - name: KAFKA_CONTROLLER_QUORUM_VOTERS
               value: "1@localhost:9093"
             - name: KAFKA_LISTENERS
-              value: "PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093{{ if (dig "externalListener" "enabled" false .Values.kafka) }},EXTERNAL://0.0.0.0:{{ .Values.kafka.externalListener.port }}{{ end }}"
+              value: "PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093{{ if (dig "sasl" "enabled" false .Values.kafka) }},SASL://0.0.0.0:{{ .Values.kafka.sasl.port }}{{ end }}{{ if (dig "externalListener" "enabled" false .Values.kafka) }},EXTERNAL://0.0.0.0:{{ .Values.kafka.externalListener.port }}{{ end }}"
             # Advertise the cluster-wide FQDN so cross-namespace clients (e.g. the
             # `fuzefront` and `mendys-prod` namespaces) can resolve the broker
             # returned in metadata. A bare service name only resolves inside this
@@ -124,9 +129,9 @@ spec:
               every client an address pointing at its own pod.
             */}}
             - name: KAFKA_ADVERTISED_LISTENERS
-              value: "PLAINTEXT://{{ include "fuzeinfra.serviceFqdn" (dict "root" $ "svc" "fuzeinfra-kafka") }}:9092{{ if (dig "externalListener" "enabled" false .Values.kafka) }},EXTERNAL://{{ .Values.kafka.externalListener.advertisedHost }}:{{ .Values.kafka.externalListener.port }}{{ end }}"
+              value: "PLAINTEXT://{{ include "fuzeinfra.serviceFqdn" (dict "root" $ "svc" "fuzeinfra-kafka") }}:9092{{ if (dig "sasl" "enabled" false .Values.kafka) }},SASL://{{ include "fuzeinfra.serviceFqdn" (dict "root" $ "svc" "fuzeinfra-kafka") }}:{{ .Values.kafka.sasl.port }}{{ end }}{{ if (dig "externalListener" "enabled" false .Values.kafka) }},EXTERNAL://{{ .Values.kafka.externalListener.advertisedHost }}:{{ .Values.kafka.externalListener.port }}{{ end }}"
             - name: KAFKA_LISTENER_SECURITY_PROTOCOL_MAP
-              value: "CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT{{ if (dig "externalListener" "enabled" false .Values.kafka) }},EXTERNAL:PLAINTEXT{{ end }}"
+              value: "CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT{{ if (dig "sasl" "enabled" false .Values.kafka) }},SASL:SASL_PLAINTEXT{{ end }}{{ if (dig "externalListener" "enabled" false .Values.kafka) }},EXTERNAL:PLAINTEXT{{ end }}"
             - name: KAFKA_CONTROLLER_LISTENER_NAMES
               value: "CONTROLLER"
             - name: KAFKA_INTER_BROKER_LISTENER_NAME
@@ -140,6 +145,32 @@ spec:
               value: "1"
             - name: KAFKA_AUTO_CREATE_TOPICS_ENABLE
               value: "true"
+            {{- if (dig "sasl" "enabled" false .Values.kafka) }}
+            {{- /*
+              SASL/SCRAM-SHA-512 on a SECOND listener (name `SASL`, default 9094).
+              PLAINTEXT :9092 is deliberately kept for the migration window — every
+              existing client uses it, and inter-broker + controller traffic still
+              does too. Only the authorizer is new on 9092, and with
+              allow.everyone.if.no.acl.found=true it denies nothing until an ACL
+              exists on a resource (see kafka-sasl-provision.yaml, where every ACL
+              group is behind its own `enforce` flag).
+
+              ANONYMOUS (every PLAINTEXT client) is NOT a super user. Only `admin`
+              is. The provisioner connects as admin over SASL after bootstrapping it.
+            */}}
+            - name: KAFKA_SASL_ENABLED_MECHANISMS
+              value: "SCRAM-SHA-512"
+            - name: KAFKA_AUTHORIZER_CLASS_NAME
+              value: "org.apache.kafka.metadata.authorizer.StandardAuthorizer"
+            - name: KAFKA_SUPER_USERS
+              value: "User:admin"
+            - name: KAFKA_ALLOW_EVERYONE_IF_NO_ACL_FOUND
+              value: {{ .Values.kafka.sasl.allowEveryoneIfNoAclFound | quote }}
+            # cp-kafka env mapping: "__" -> "-", "_" -> "." so this is
+            # listener.name.sasl.scram-sha-512.sasl.jaas.config
+            - name: KAFKA_LISTENER_NAME_SASL_SCRAM__SHA__512_SASL_JAAS_CONFIG
+              value: "org.apache.kafka.common.security.scram.ScramLoginModule required;"
+            {{- end }}
             # cp-kafka auto-formats KRaft storage when CLUSTER_ID is provided.
             - name: CLUSTER_ID
               value: {{ .Values.kafka.clusterId | quote }}
