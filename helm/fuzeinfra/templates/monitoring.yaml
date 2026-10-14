@@ -544,6 +544,15 @@ spec:
                   name: fuzeinfra-tunnel-secrets
                   key: CRIT_BRIDGE_TOKEN
                   optional: true
+            {{- if .Values.alertSessionDispatcher.enabled }}
+            # Bearer for the in-cluster alert -> agent-session dispatcher webhook
+            # (contact point `alert-session-dispatcher`, configmaps-monitoring.yaml).
+            - name: ALERT_DISPATCH_INBOUND_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: alert-session-dispatcher-secret
+                  key: ALERT_DISPATCH_INBOUND_TOKEN
+            {{- end }}
             {{- if .Values.grafana.oidc.enabled }}
             # ---- Authentik SSO (generic OAuth) --------------------------------
             # GF_SECURITY_ADMIN_PASSWORD above is deliberately KEPT: /login still

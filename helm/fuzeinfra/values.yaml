@@ -1857,6 +1857,59 @@ customHostnameApi:
 workloadIdentity:
   authenticators: []
 
+# Alert -> agent-session dispatcher (docs/design/alert-to-agent-session.md).
+# A critical Grafana alert on `allowlist` makes the cluster ask FuzeAgent for ONE
+# responder session, authenticated by a per-dispatch FuzeFront workload token.
+# OFF everywhere. Enabling is a reviewed change that also lands the sealed secret
+# (deploy/sealed-secrets/alert-session-dispatcher-secret.yaml.template) and the
+# FuzeFront identity registry entry -- see the template header.
+alertSessionDispatcher:
+  enabled: false
+  # Runtime kill switch: true -> every alert is skipped (pod keeps running).
+  paused: false
+  # First enable runs dry: decisions are logged, nothing is spawned.
+  dryRun: true
+  image: python:3.12-slim
+  imagePullPolicy: ""
+  # Bump on every reseal of the sealed secret, in the same commit (#589).
+  secretRotation: "0"
+  # Alert TITLES (alertname label) that may spawn a session. Both are Grafana-evaluated
+  # on purpose: they still fire when Prometheus is the casualty. There is NO Argo
+  # "sync wedged" alert reachable by this webhook today (Argo alerts go through
+  # argocd-notifications -> repository_dispatch); add one here only once it exists.
+  allowlist:
+    - Prometheus Unreachable
+    - Storage Mount Failure
+  # Only these label keys are ever forwarded, and only if the value passes the strict
+  # charset check. Annotations (free text) are never forwarded.
+  labelKeys: [alertname, namespace, severity, pod, instance, job, node, container, deployment, statefulset, persistentvolumeclaim, grafana_folder]
+  cooldownSeconds: 14400
+  openTtlSeconds: 21600
+  dailySpawnCap: 3
+  # Estimated, not metered: dispatcher stops when (spawns+1) * estimatedSessionCostUsd
+  # would exceed the cap. FuzeAgent must enforce actual spend on its side.
+  dailySpendCapUsd: 15
+  estimatedSessionCostUsd: 5
+  fuzefront:
+    namespace: fuzefront
+    port: 3002
+    tokenUrl: http://fuzefront-security.fuzefront.svc.cluster.local:3002/api/v1/security/tokens/workload
+  # FuzeAgent create-session endpoint. DOES NOT EXIST YET (see design doc); required
+  # when enabled so the chart fails to render rather than guess a route.
+  agent:
+    sessionUrl: ""
+    namespace: ""
+    port: 8000
+  # Proposed scope, to be honoured by FuzeAgent (callee enforces which org the session lands in).
+  workloadScope: "fuzeagent:incident-session:create"
+  audit:
+    # Empty disables the GitHub audit issue (structured log only).
+    repo: izzywdev/FuzeInfra
+  persistence:
+    enabled: true
+    size: 256Mi
+  resources: {}
+
 longhorn:
   # Umbrella-level marker (documentation/consistency). The actual controller is
   # the separate Argo Application; this chart never installs Longhorn itself.

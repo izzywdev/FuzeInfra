@@ -75,3 +75,7 @@ customHostnameApi:
 # publish a duplicate copy of the same numbers under a different Prometheus.
 selfHealMetrics:
   enabled: false
+
+# Alert -> agent-session dispatcher: OFF (see values.yaml and the design doc).
+alertSessionDispatcher:
+  enabled: false

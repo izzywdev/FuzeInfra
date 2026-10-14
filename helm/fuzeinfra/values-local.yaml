@@ -130,3 +130,7 @@ customHostnameApi:
 # Base chart default is already false; stated so the overlay stays self-documenting.
 selfHealMetrics:
   enabled: false
+
+# Alert -> agent-session dispatcher: OFF (see values.yaml and the design doc).
+alertSessionDispatcher:
+  enabled: false
