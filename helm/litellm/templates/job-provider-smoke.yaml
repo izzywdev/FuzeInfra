@@ -1,0 +1,93 @@
+{{- if and .Values.enabled .Values.providerSmoke.enabled }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: litellm-provider-smoke
+  labels:
+    {{- include "litellm.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "20"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+    "argocd.argoproj.io/hook": PostSync
+    "argocd.argoproj.io/hook-delete-policy": BeforeHookCreation,HookSucceeded
+spec:
+  backoffLimit: 1
+  activeDeadlineSeconds: 300
+  ttlSecondsAfterFinished: 600
+  template:
+    metadata:
+      labels:
+        {{- include "litellm.labels" . | nindent 8 }}
+        app.kubernetes.io/component: provider-smoke
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: provider-smoke
+          image: {{ .Values.providerSmoke.image | quote }}
+          imagePullPolicy: {{ .Values.imagePullPolicy | default "IfNotPresent" }}
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -eu
+              umask 077
+              trap 'rm -f /tmp/anthropic.conf /tmp/litellm.conf /tmp/direct.json /tmp/gateway.json' EXIT
+
+              cat > /tmp/anthropic.conf <<EOF
+              header = "x-api-key: ${ANTHROPIC_API_KEY}"
+              header = "anthropic-version: 2023-06-01"
+              EOF
+              direct_code=$(curl --silent --show-error --output /tmp/direct.json \
+                --write-out '%{http_code}' --max-time 45 --config /tmp/anthropic.conf \
+                'https://api.anthropic.com/v1/models?limit=1')
+              test "$direct_code" = "200" || {
+                echo "Direct Anthropic credential probe failed (HTTP ${direct_code})." >&2
+                exit 1
+              }
+              echo "Direct Anthropic credential probe passed."
+
+              cat > /tmp/litellm.conf <<EOF
+              header = "Authorization: Bearer ${LITELLM_MASTER_KEY}"
+              header = "Content-Type: application/json"
+              EOF
+              gateway_code=$(curl --silent --show-error --output /tmp/gateway.json \
+                --write-out '%{http_code}' --max-time 90 --config /tmp/litellm.conf \
+                --request POST --data \
+                '{"model":"{{ .Values.providerSmoke.model }}","messages":[{"role":"user","content":"Reply OK"}],"max_tokens":1,"temperature":0}' \
+                'http://litellm:{{ .Values.port }}/v1/chat/completions')
+              test "$gateway_code" = "200" || {
+                echo "LiteLLM provider route probe failed (HTTP ${gateway_code})." >&2
+                exit 1
+              }
+              grep -q '"choices"' /tmp/gateway.json || {
+                echo "LiteLLM provider route returned no completion choices." >&2
+                exit 1
+              }
+              echo "LiteLLM {{ .Values.providerSmoke.model }} route probe passed."
+          env:
+            - name: ANTHROPIC_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secretName }}
+                  key: ANTHROPIC_API_KEY
+            - name: LITELLM_MASTER_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secretName }}
+                  key: LITELLM_MASTER_KEY
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+          volumeMounts:
+            - name: scratch
+              mountPath: /tmp
+          resources:
+            requests: { cpu: "10m", memory: "16Mi" }
+            limits: { cpu: "100m", memory: "64Mi" }
+      volumes:
+        - name: scratch
+          emptyDir: {}
+{{- end }}
