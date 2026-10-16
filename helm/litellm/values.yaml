@@ -158,6 +158,12 @@ models:
   - name: claude-sonnet-4-6
     provider: anthropic/claude-sonnet-4-6
     keyEnv: ANTHROPIC_API_KEY
+  # Stable consumer-facing alias for FuzeQuality repository analysis. Keeping
+  # this indirection in FuzeInfra lets the platform change the underlying
+  # reviewed model without shipping a new FuzeQuality image.
+  - name: quality-analysis
+    provider: anthropic/claude-sonnet-4-6
+    keyEnv: ANTHROPIC_API_KEY
   - name: claude-haiku-4-5
     provider: anthropic/claude-haiku-4-5
     keyEnv: ANTHROPIC_API_KEY
@@ -389,6 +395,7 @@ routerSettings:
     - claude-opus-5: ["gpt-4.1", "gemini-flash-latest"]
     - claude-sonnet-4-5: ["gpt-4.1", "gemini-flash-latest"]
     - claude-sonnet-4-6: ["gpt-4.1", "gemini-flash-latest"]
+    - quality-analysis: ["gpt-4.1", "gemini-flash-latest"]
     - claude-sonnet-5: ["gpt-4.1", "gemini-flash-latest"]
     - claude-fable-5: ["gpt-4.1", "gemini-flash-latest"]
     - claude-haiku-4-5: ["gpt-4.1-mini", "gemini-flash-lite-latest"]
@@ -399,6 +406,7 @@ routerSettings:
     - claude-opus-5: ["gpt-4.1", "gemini-flash-latest"]
     - claude-sonnet-4-5: ["gpt-4.1", "gemini-flash-latest"]
     - claude-sonnet-4-6: ["gpt-4.1", "gemini-flash-latest"]
+    - quality-analysis: ["gpt-4.1", "gemini-flash-latest"]
     - claude-sonnet-5: ["gpt-4.1", "gemini-flash-latest"]
     - claude-fable-5: ["gpt-4.1", "gemini-flash-latest"]
     - claude-haiku-4-5: ["gpt-4.1-mini", "gemini-flash-lite-latest"]
@@ -525,6 +533,16 @@ redis:
 # encrypted credentials unreadable.
 # -----------------------------------------------------------------------------
 storeModelInDB: false
+
+# Runtime provider verification. This is deliberately a Kubernetes PostSync
+# hook, not CI: it proves the production Secret can authenticate directly with
+# Anthropic and that the same provider is callable through the in-cluster
+# LiteLLM route FuzeQuality uses. Off in the reusable base chart; production
+# opts in explicitly.
+providerSmoke:
+  enabled: false
+  image: curlimages/curl:8.10.1
+  model: quality-analysis
 
 # -----------------------------------------------------------------------------
 # Model seeding — full OpenAI + Gemini catalogs added to the DB as a PostSync
