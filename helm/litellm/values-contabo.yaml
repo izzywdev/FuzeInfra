@@ -22,6 +22,11 @@ enabled: true
 
 replicas: 1
 
+# Run after each production LiteLLM sync. The Job reads provider and gateway
+# credentials from the in-cluster Secret and logs only HTTP/result status.
+providerSmoke:
+  enabled: true
+
 # The gateway is I/O-bound at runtime (it proxies, it does not infer) but the
 # LiteLLM image is NOT cheap to START: it imports the full provider SDK surface
 # before it serves anything.
