@@ -10,3 +10,10 @@ services:
   # cloudflare-tunnel needs a real CLOUDFLARE_TUNNEL_TOKEN; skip it in CI.
   cloudflare-tunnel:
     profiles: ["external-access"]
+
+  # dnsmasq binds host port 53/udp for *.dev.local resolution, which is
+  # already occupied by systemd-resolved on ubuntu-latest CI runners.
+  # DNS resolution is not exercised by any CI test, so park it in an inactive
+  # profile.
+  dnsmasq:
+    profiles: ["local-dns"]
