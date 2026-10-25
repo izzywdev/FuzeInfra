@@ -48,6 +48,24 @@ own Prometheus exporter (scraped like any other target). See
 `kubernetes-pods` scrape job). The otel-collector's metrics pipeline is for
 apps that only speak OTLP.
 
+## Browser / RUM telemetry
+
+Two supported paths; prefer the first.
+
+1. **Same-origin, app-side (default).** The browser posts RUM to your own
+   product's endpoint (FuzeFront: `POST /api/v1/rum`), which logs structured
+   JSON (`source:"rum"`) to stdout -> Promtail -> Loki. No FuzeInfra change, no
+   new public surface, no CORS.
+2. **Browser OTLP/HTTP to the collector (opt-in).** Set
+   `otelCollector.browserIngest.enabled: true` and `allowedOrigins` in the
+   environment overlay. The collector's OTLP/HTTP receiver then answers CORS
+   preflights for those origins and a dedicated Ingress publishes only
+   `/v1/traces`, `/v1/logs`, `/v1/metrics` on `otlp.<domain>` (body capped by
+   `maxRequestBodyBytes`). The chart does **not** open the path to the internet:
+   the Cloudflare tunnel route and a CF Access bypass app for that host
+   (`terraform/contabo`) are a separate, deliberate step, because the endpoint
+   is unauthenticated by nature.
+
 ## The three-pillar contract: link them, don't silo them
 
 > Prometheus tells you something is wrong. Loki tells you what happened.
