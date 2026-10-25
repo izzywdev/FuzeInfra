@@ -146,6 +146,24 @@ services:
       - FuzeInfra
     restart: unless-stopped
 
+  # MinIO S3 Object Storage (FuzeAgent Multimodal Storage & Org Buckets)
+  minio:
+    image: minio/minio:RELEASE.2024-05-10T01-41-38Z
+    container_name: fuzeinfra-minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin_secure_pass}
+    ports:
+      - "9000:9000"  # S3 API
+      - "9001:9001"  # MinIO Web Console
+    volumes:
+      - minio_data:/data
+    networks:
+      - FuzeInfra
+    restart: unless-stopped
+
+
   # Elasticsearch
   elasticsearch:
     image: docker.elastic.co/elasticsearch/elasticsearch:8.8.0
@@ -698,6 +716,9 @@ volumes:
     name: fuzeinfra_elasticsearch_data
   chromadb_data:
     name: fuzeinfra_chromadb_data
+  minio_data:
+    name: fuzeinfra_minio_data
+
   
   # Message queue volumes
   kafka_data:
