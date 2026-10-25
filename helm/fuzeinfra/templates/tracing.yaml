@@ -203,6 +203,15 @@ data:
             endpoint: 0.0.0.0:{{ .Values.otelCollector.otlpGrpcPort }}
           http:
             endpoint: 0.0.0.0:{{ .Values.otelCollector.otlpHttpPort }}
+            {{- if .Values.otelCollector.browserIngest.enabled }}
+            max_request_body_size: {{ printf "%.0f" .Values.otelCollector.browserIngest.maxRequestBodyBytes }}
+            cors:
+              allowed_origins:
+                {{- if not .Values.otelCollector.browserIngest.allowedOrigins }}{{ fail "otelCollector.browserIngest.allowedOrigins must list at least one origin when browserIngest.enabled" }}{{ end }}
+                {{- toYaml .Values.otelCollector.browserIngest.allowedOrigins | nindent 16 }}
+              allowed_headers: ["*"]
+              max_age: {{ .Values.otelCollector.browserIngest.corsMaxAge }}
+            {{- end }}
 
     processors:
       memory_limiter:
@@ -327,4 +336,36 @@ spec:
         - name: config
           configMap:
             name: fuzeinfra-otel-collector-config
+{{- if and .Values.otelCollector.browserIngest.enabled .Values.ingress.enabled }}
+---
+# Browser/RUM OTLP/HTTP ingest. Only the three signal paths are routed, so the
+# collector's other HTTP surface is never published.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: fuzeinfra-otel-collector-browser
+  labels:
+    {{- include "fuzeinfra.labels" . | nindent 4 }}
+spec:
+  ingressClassName: {{ .Values.ingress.className }}
+  {{- if .Values.ingress.tls.enabled }}
+  tls:
+    - hosts:
+        - {{ include "fuzeinfra.host" (dict "root" $ "sub" .Values.otelCollector.browserIngest.subdomain) }}
+      secretName: fuzeinfra-tls
+  {{- end }}
+  rules:
+    - host: {{ include "fuzeinfra.host" (dict "root" $ "sub" .Values.otelCollector.browserIngest.subdomain) }}
+      http:
+        paths:
+          {{- range list "/v1/traces" "/v1/logs" "/v1/metrics" }}
+          - path: {{ . }}
+            pathType: Exact
+            backend:
+              service:
+                name: fuzeinfra-otel-collector
+                port:
+                  number: {{ $.Values.otelCollector.otlpHttpPort }}
+          {{- end }}
+{{- end }}
 {{- end }}

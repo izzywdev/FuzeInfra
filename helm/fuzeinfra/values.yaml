@@ -1072,6 +1072,24 @@ otelCollector:
   metricsPort: 8889
   healthCheckPort: 13133
   replicas: 1
+  # Browser / RUM OTLP ingest (policy P37). Off by default: when enabled, the
+  # collector's OTLP/HTTP receiver answers CORS preflights for `allowedOrigins`
+  # and a dedicated Ingress publishes ONLY /v1/{traces,logs,metrics} on
+  # `<subdomain>.<global.domain>`. Nothing is reachable from the internet until
+  # the Cloudflare tunnel route + a CF Access bypass app for that host exist
+  # (terraform/contabo) — the chart alone does not open the path.
+  # The alternative that needs none of this: browsers POST to the product's own
+  # same-origin RUM endpoint (e.g. FuzeFront /api/v1/rum), which logs to stdout
+  # -> Promtail -> Loki.
+  browserIngest:
+    enabled: false
+    subdomain: otlp
+    # Exact origins, e.g. ["https://app.fuzefront.com"]. Required when enabled.
+    allowedOrigins: []
+    # Preflight cache lifetime in seconds.
+    corsMaxAge: 7200
+    # Reject larger request bodies (bytes) — the endpoint is unauthenticated.
+    maxRequestBodyBytes: 1048576
   resources: {}
   nodeSelector: {}
   tolerations: []
