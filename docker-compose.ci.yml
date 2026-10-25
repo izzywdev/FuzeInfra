@@ -10,3 +10,9 @@ services:
   # cloudflare-tunnel needs a real CLOUDFLARE_TUNNEL_TOKEN; skip it in CI.
   cloudflare-tunnel:
     profiles: ["external-access"]
+
+  # minio is not exercised by any CI test and minio/minio on Docker Hub now
+  # requires authentication, causing the pull to fail with "access denied" and
+  # aborting the entire docker-compose up.  Skip it in CI.
+  minio:
+    profiles: ["object-storage"]
