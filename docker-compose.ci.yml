@@ -10,3 +10,9 @@ services:
   # cloudflare-tunnel needs a real CLOUDFLARE_TUNNEL_TOKEN; skip it in CI.
   cloudflare-tunnel:
     profiles: ["external-access"]
+
+  # dnsmasq binds host port 53/udp for *.dev.local DNS; GitHub Actions runners
+  # have systemd-resolved on port 53, so the bind fails and the whole stack
+  # never starts. dnsmasq is not needed for any CI test assertion.
+  dnsmasq:
+    profiles: ["local-dns"]
