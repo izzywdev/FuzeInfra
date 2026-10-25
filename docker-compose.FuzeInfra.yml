@@ -148,7 +148,7 @@ services:
 
   # MinIO S3 Object Storage (FuzeAgent Multimodal Storage & Org Buckets)
   minio:
-    image: minio/minio:RELEASE.2024-05-10T01-41-38Z
+    image: quay.io/minio/minio:RELEASE.2024-05-10T01-41-38Z
     container_name: fuzeinfra-minio
     command: server /data --console-address ":9001"
     environment:
