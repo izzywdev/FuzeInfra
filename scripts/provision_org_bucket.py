@@ -13,7 +13,7 @@ import os
 import sys
 import json
 import logging
-from typing import Dict, Any, Optional
+from typing import Dict, Any
 
 try:
     import boto3
